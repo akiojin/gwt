@@ -69,7 +69,7 @@ jobs:
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: actions/setup-node@v7
         if: ${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}

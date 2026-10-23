@@ -188,7 +188,7 @@ jobs:
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - name: Build gwt bundle binaries
         run: cargo build --release -p gwt --target ${{ matrix.target }} --bin gwt --bin gwtd

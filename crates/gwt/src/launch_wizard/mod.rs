@@ -6,6 +6,7 @@ use std::{
 use crate::BranchListEntry;
 
 mod launch_request;
+mod memory_cache;
 mod options;
 mod profiles;
 mod quick_start;
@@ -15,6 +16,8 @@ mod test_support;
 mod view_model;
 
 use options::*;
+
+pub use memory_cache::LaunchWizardMemoryCache;
 
 pub use options::{
     agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,

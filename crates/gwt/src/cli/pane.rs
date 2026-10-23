@@ -944,8 +944,15 @@ async fn request_window_list_with_timeout(
         response_timeout,
     )
     .await;
-    if listed.is_ok() {
-        return listed;
+    match listed {
+        Ok(windows) => return Ok(windows),
+        Err(error)
+            if !error.starts_with("pane list: pane_backend_unresponsive")
+                && !error.starts_with("pane list: pane_backend_state_missing") =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
     }
 
     // `gwtd` runs from the installed bundle while the GUI keeps running the
@@ -997,7 +1004,7 @@ async fn read_pane_snapshot_with_timeout(
         loop {
             let value = next_backend_json_unbounded(&mut socket).await?;
             received += 1;
-            if let Some(mut parsed) = parse_workspace_windows(&value, project_root) {
+            if let Some(mut parsed) = parse_workspace_windows(&value, project_root)? {
                 windows.append(&mut parsed);
             }
             if let Some((id, snapshot)) = parse_terminal_snapshot(&value)? {
@@ -1563,7 +1570,7 @@ async fn next_workspace_windows_with_timeout(
             Err(_) => return Err(pane_backend_silence(context, received, response_timeout)),
         };
         received += 1;
-        if let Some(windows) = parse_workspace_windows(&value, project_root) {
+        if let Some(windows) = parse_workspace_windows(&value, project_root)? {
             return Ok(windows);
         }
     }
@@ -1969,7 +1976,10 @@ fn project_root_for_pane(default: &Path) -> String {
         .unwrap_or_else(|| default.to_string_lossy().into_owned())
 }
 
-fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
+fn parse_workspace_windows(
+    value: &Value,
+    project_root: &str,
+) -> Result<Option<Vec<PersistedWindowState>>, String> {
     parse_workspace_windows_scoped(value, project_root, |root| {
         gwt_core::paths::project_scope_hash(Path::new(root))
             .as_str()
@@ -2011,41 +2021,38 @@ fn parse_workspace_windows_scoped(
     value: &Value,
     project_root: &str,
     scope_key: impl Fn(&str) -> String,
-) -> Option<Vec<PersistedWindowState>> {
-    if value.get("kind")?.as_str()? != "workspace_state" {
-        return None;
+) -> Result<Option<Vec<PersistedWindowState>>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("workspace_state") {
+        return Ok(None);
     }
-    let tabs = value.get("workspace")?.get("tabs")?.as_array()?;
-    let mut matching_windows = Vec::new();
-    let mut fallback_windows = Vec::new();
-    let mut matched_project = false;
-    for tab in tabs {
-        let Some(tab_windows) = tab
+    let tabs = value
+        .get("workspace")
+        .and_then(|workspace| workspace.get("tabs"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "invalid pane inventory: workspace_state missing tabs".to_string())?;
+    let owns_caller = |tab: &&Value| {
+        tab.get("project_root")
+            .and_then(Value::as_str)
+            .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key))
+    };
+    let matching_tabs: Vec<_> = tabs.iter().filter(owns_caller).collect();
+    let selected_tabs: Vec<_> = if matching_tabs.is_empty() {
+        tabs.iter().collect()
+    } else {
+        matching_tabs
+    };
+    let mut windows = Vec::new();
+    for tab in selected_tabs {
+        let tab_windows = tab
             .get("workspace")
             .and_then(|workspace| workspace.get("windows"))
-        else {
-            continue;
-        };
-        if let Ok(mut parsed) =
+            .ok_or_else(|| "invalid pane inventory: tab missing windows".to_string())?;
+        windows.extend(
             parse_wire_windows(tab_windows, tab.get("project_root").and_then(Value::as_str))
-        {
-            let owns_caller = tab
-                .get("project_root")
-                .and_then(Value::as_str)
-                .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key));
-            if owns_caller {
-                matched_project = true;
-                matching_windows.append(&mut parsed);
-            } else {
-                fallback_windows.append(&mut parsed);
-            }
-        }
+                .map_err(|error| format!("invalid pane inventory: {error}"))?,
+        );
     }
-    if matched_project {
-        Some(matching_windows)
-    } else {
-        Some(fallback_windows)
-    }
+    Ok(Some(windows))
 }
 
 fn parse_terminal_snapshot(value: &Value) -> Result<Option<(String, String)>, String> {
@@ -3198,7 +3205,7 @@ mod tests {
             "disk restoration must not trust a stored role"
         );
 
-        let windows = parse_workspace_windows(&value, "/repo").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo").unwrap().unwrap();
         assert!(
             windows[0].is_pm,
             "the wire PM role must survive CLI parsing"
@@ -3244,7 +3251,9 @@ mod tests {
             "the GUI marker identifies only the resident registration"
         );
         let value = workspace_state_for_test(repo.to_str().unwrap(), vec![pm]);
-        let windows = parse_workspace_windows(&value, repo.to_str().unwrap()).unwrap();
+        let windows = parse_workspace_windows(&value, repo.to_str().unwrap())
+            .unwrap()
+            .unwrap();
         assert!(render_pane_list(&windows).trim_end().ends_with("role=pm"));
     }
 
@@ -3366,7 +3375,9 @@ mod tests {
             },
         });
 
-        let windows = parse_workspace_windows(&value, "/repo/two").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo/two")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].id, "two::agent-1");
@@ -3392,7 +3403,9 @@ mod tests {
             },
         });
 
-        let windows = parse_workspace_windows(&value, "/repo/empty").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo/empty")
+            .unwrap()
+            .unwrap();
 
         assert!(windows.is_empty());
     }
@@ -3414,8 +3427,9 @@ mod tests {
         let value = two_project_workspace_state();
 
         // gwt materializes work/intake worktrees inside the project container.
-        let windows =
-            parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key).unwrap();
+        let windows = parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key)
+            .unwrap()
+            .unwrap();
         assert_eq!(windows.len(), 1, "only the owning project's windows");
         assert_eq!(windows[0].id, "two::agent-1");
 
@@ -3424,6 +3438,7 @@ mod tests {
             crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/repo/two"));
         let windows =
             parse_workspace_windows_scoped(&value, &pm_worktree.to_string_lossy(), scope_key)
+                .unwrap()
                 .unwrap();
         assert_eq!(windows.len(), 1, "the PM sees only its own project");
         assert_eq!(windows[0].id, "two::agent-1");
@@ -3443,6 +3458,7 @@ mod tests {
             "/elsewhere/wt",
             scope_key,
         )
+        .unwrap()
         .unwrap();
 
         assert_eq!(windows.len(), 1);
@@ -3890,6 +3906,18 @@ mod tests {
     async fn spawn_window_list_mock(
         project_root: &'static str,
     ) -> (String, tokio::task::JoinHandle<String>) {
+        spawn_window_list_response(workspace_state_for_test(
+            project_root,
+            vec![window(
+                "tab-project::agent-project",
+                WindowPreset::Agent,
+                Some("codex"),
+            )],
+        ))
+        .await
+    }
+
+    async fn spawn_window_list_response(state: Value) -> (String, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind pane list mock");
@@ -3903,14 +3931,6 @@ mod tests {
                 .await
                 .expect("accept pane list websocket");
             let request_kind = next_frontend_kind(&mut socket).await;
-            let state = workspace_state_for_test(
-                project_root,
-                vec![window(
-                    "tab-project::agent-project",
-                    WindowPreset::Agent,
-                    Some("codex"),
-                )],
-            );
             socket
                 .send(Message::Text(state.to_string().into()))
                 .await
@@ -3919,6 +3939,40 @@ mod tests {
         });
 
         (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    #[test]
+    fn issue_4193_pane_list_rejects_invalid_inventory_and_accepts_empty() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pane-list-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("pane test runtime");
+        runtime.block_on(async {
+            let mut invalid = workspace_state_for_test(
+                "/repo/project",
+                vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+            );
+            invalid["workspace"]["tabs"][0]["workspace"]["windows"][0]["status"] =
+                json!("future_state");
+            let (url, server) = spawn_window_list_response(invalid).await;
+            let error = request_window_list(&url, "/repo/project")
+                .await
+                .expect_err("an unreadable inventory must not become an empty pane list");
+            assert!(error.contains("invalid pane inventory"), "{error}");
+            server.await.expect("pane mock");
+
+            let (url, server) =
+                spawn_window_list_response(workspace_state_for_test("/repo/project", vec![])).await;
+            assert!(request_window_list(&url, "/repo/project")
+                .await
+                .unwrap()
+                .is_empty());
+            server.await.expect("empty pane mock");
+        });
     }
 
     #[test]

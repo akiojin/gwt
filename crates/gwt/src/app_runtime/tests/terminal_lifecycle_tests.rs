@@ -2314,7 +2314,7 @@ fn spawn_work_merge_status_scan_preserves_historical_merged_pr_cleanup_path() {
         &["update-ref", "refs/remotes/origin/develop", "develop"],
     );
 
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Pr,
             "work-historical-merged-row",
@@ -2487,7 +2487,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
         ],
     );
     fs::write(repo.join("ignored-user-change.txt"), "uncommitted\n").unwrap();
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-reuse",
@@ -2626,7 +2626,7 @@ fn work_merge_scan_unchanged_inputs_spawn_no_git() {
 
     run_git(&repo, &["branch", "work/absent"]);
     let absent = temp.path().join("absent");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-absent",
@@ -2792,7 +2792,7 @@ fn apply_work_merge_status_caches_no_changes_cleanup_readiness() {
     init_repo(&repo);
     let worktree = repo.join("work/no-changes");
     fs::create_dir_all(&worktree).expect("create worktree");
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, {
+    record_legacy_workspace_work_event_for_test(&repo, {
         let mut event = gwt_core::workspace_projection::WorkEvent::new(
             gwt_core::workspace_projection::WorkEventKind::Update,
             "work-no-changes-row",

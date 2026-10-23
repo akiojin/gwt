@@ -384,8 +384,7 @@ pub fn remove_restored_stopped_view(
     }
 }
 
-/// How long a pane close keeps waiting for its PTY child to exit before it
-/// stops trying to record the terminal status (Issue #4643 AC-1).
+/// Diagnose a slow exit without abandoning its terminal persistence.
 const PANE_CLOSE_EXIT_PROOF_WAIT: Duration = Duration::from_secs(30);
 
 /// Issue #3705 AC-3: name the pane whose teardown stalled so a hung
@@ -394,7 +393,103 @@ pub fn pane_teardown_stall_message(window_id: &str, stage: &str, elapsed_ms: u64
     format!("PTY teardown stalled: window_id={window_id} stage={stage} elapsed_ms={elapsed_ms}")
 }
 
-/// Persist exact terminal status immediately or after background child exit proof.
+struct TerminalPersistence {
+    sessions_dir: PathBuf,
+    identity: gwt_agent::SessionExecutionIdentity,
+    incarnation: u64,
+    window_id: String,
+}
+
+impl TerminalPersistence {
+    fn persist(&self) -> std::io::Result<bool> {
+        // Reacquire owner before Session even on the detached thread. Holding
+        // only the Session lease cannot fence a new owner generation.
+        crate::cli::execution_state::with_current_runtime_cleanup_session_execution_identity_lease(
+            &self.sessions_dir,
+            &self.identity,
+            || {
+                let runtime = match gwt_agent::SessionRuntimeState::load(
+                    &gwt_agent::runtime_state_path(&self.sessions_dir, &self.identity.session_id),
+                ) {
+                    Ok(runtime) => runtime,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => return Err(error),
+                };
+                if runtime.execution_identity.as_ref() != Some(&self.identity)
+                    || runtime.runtime_incarnation != Some(self.incarnation)
+                {
+                    return Ok(false);
+                }
+                gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
+                    &self.sessions_dir,
+                    &self.identity,
+                    self.incarnation,
+                    gwt_agent::AgentStatus::Stopped,
+                )
+            },
+        )?
+        .transpose()
+        .map(|result| result.unwrap_or(false))
+    }
+
+    fn record_failure(
+        &self,
+        exit_confirmed: bool,
+        reason: String,
+        last_failure: &mut Option<(bool, String)>,
+    ) {
+        if last_failure
+            .as_ref()
+            .is_some_and(|(exited, previous)| *exited == exit_confirmed && previous == &reason)
+        {
+            return;
+        }
+        // This diagnostic is independent of Session/owner mutation. It must
+        // remain writable when acquiring either of their leases timed out.
+        let result = (|| -> std::io::Result<()> {
+            gwt_agent::validate_session_id_path_component(&self.identity.session_id)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+            let dir = self
+                .sessions_dir
+                .join("teardown-failures")
+                .join(&self.identity.session_id);
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join(format!("{}-{}.json", std::process::id(), self.incarnation));
+            let mut scratch = tempfile::NamedTempFile::new_in(&dir)?;
+            serde_json::to_writer(
+                scratch.as_file_mut(),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "identity": self.identity,
+                    "host_pid": std::process::id(),
+                    "runtime_incarnation": self.incarnation,
+                    "window_id": self.window_id,
+                    "exit_confirmed": exit_confirmed,
+                    "reason": reason,
+                    "recorded_at": chrono::Utc::now(),
+                }),
+            )?;
+            scratch.as_file().sync_all()?;
+            scratch.persist(&path).map_err(|error| error.error)?;
+            #[cfg(unix)]
+            std::fs::File::open(&dir)?.sync_all()?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                tracing::warn!(target: "gwt.pane.teardown", window_id = %self.window_id,
+                    exit_confirmed, %reason, "terminal persistence failure recorded");
+                *last_failure = Some((exit_confirmed, reason));
+            }
+            Err(error) => tracing::error!(target: "gwt.pane.teardown", window_id = %self.window_id,
+                exit_confirmed, %reason, %error, "terminal persistence failure marker could not be saved"),
+        }
+    }
+}
+
+/// Finalize on a background thread, including an already-exited child: acquiring
+/// owner/Session leases and syncing a diagnostic must never block the GUI.
+/// Returns `false` because persistence is never completed synchronously.
 pub fn persist_terminal_after_exit(
     pty: Arc<PtyHandle>,
     sessions_dir: PathBuf,
@@ -402,65 +497,65 @@ pub fn persist_terminal_after_exit(
     incarnation: u64,
     window_id: String,
 ) -> bool {
-    let exited = pty.try_wait().ok().flatten().is_some();
-    if exited {
-        return gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
-            &sessions_dir,
-            &identity,
-            incarnation,
-            gwt_agent::AgentStatus::Stopped,
-        )
-        .unwrap_or(false);
-    } else {
-        thread::spawn(move || {
-            // Issue #4643: an agent routinely needs more than the
-            // stall threshold to exit after SIGHUP. Giving up at
-            // the threshold left the closed pane's sidecar live
-            // forever, so keep waiting for the exit proof and
-            // only report the stall once.
-            let started = Instant::now();
-            let stall_after = Duration::from_secs(2);
-            let deadline = started + PANE_CLOSE_EXIT_PROOF_WAIT;
-            let mut stall_reported = false;
-            let mut exited = false;
-            while Instant::now() < deadline {
-                if pty.try_wait().ok().flatten().is_some() {
-                    exited = true;
-                    break;
+    let target = TerminalPersistence {
+        sessions_dir,
+        identity,
+        incarnation,
+        window_id,
+    };
+    thread::spawn(move || {
+        let started = Instant::now();
+        let mut last_failure = None;
+        let mut exited = false;
+        let mut stall_reported = false;
+        let mut deadline_reported = false;
+        loop {
+            if !exited {
+                match pty.try_wait() {
+                    Ok(status) => exited = status.is_some(),
+                    Err(error) => target.record_failure(
+                        false,
+                        format!("PTY exit proof failed: {error}"),
+                        &mut last_failure,
+                    ),
                 }
-                if !stall_reported && started.elapsed() >= stall_after {
-                    stall_reported = true;
-                    let elapsed_ms =
-                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    tracing::warn!(
-                        target: "gwt.pane.teardown",
-                        window_id = %window_id,
-                        elapsed_ms,
-                        "{}",
-                        pane_teardown_stall_message(&window_id, "process_exit", elapsed_ms)
-                    );
-                }
-                thread::sleep(Duration::from_millis(10));
             }
             if exited {
-                let _ = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
-                    &sessions_dir,
-                    &identity,
-                    incarnation,
-                    gwt_agent::AgentStatus::Stopped,
-                );
+                match target.persist() {
+                    Ok(true) => return,
+                    Ok(false) => {
+                        target.record_failure(
+                            true,
+                            "exact terminal persistence was rejected".into(),
+                            &mut last_failure,
+                        );
+                        return;
+                    }
+                    Err(error) => target.record_failure(true, error.to_string(), &mut last_failure),
+                }
+                // A lease timeout is not lost exit proof. Retry in this same
+                // finalizer; a replacement identity stops the next attempt.
+                thread::sleep(Duration::from_secs(1));
             } else {
-                // The sidecar keeps its PTY child identity, so the
-                // worktree sweep still sees this launch end the
-                // moment the child does (Issue #4643 AC-2).
-                tracing::warn!(
-                    target: "gwt.pane.teardown",
-                    window_id = %window_id,
-                    "closed pane's PTY child did not exit; its runtime sidecar was not terminalized"
-                );
+                let elapsed = started.elapsed();
+                if !stall_reported && elapsed >= Duration::from_secs(2) {
+                    stall_reported = true;
+                    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+                    tracing::warn!(target: "gwt.pane.teardown", window_id = %target.window_id,
+                        "{}", pane_teardown_stall_message(&target.window_id, "process_exit", elapsed_ms));
+                }
+                if !deadline_reported && elapsed >= PANE_CLOSE_EXIT_PROOF_WAIT {
+                    deadline_reported = true;
+                    target.record_failure(
+                        false,
+                        "PTY exit proof exceeded the diagnostic deadline".into(),
+                        &mut last_failure,
+                    );
+                }
+                thread::sleep(Duration::from_millis(100));
             }
-        });
-    }
+        }
+    });
     false
 }
 

@@ -1931,7 +1931,7 @@ fn transact_workspace_state_for_work_event_root_with_commit_policy<T>(
                 phase: ExternalWorkspaceCommitPhase::Prepared,
                 reconciliation_work_items_path: None,
             });
-            write_workspace_state_transaction_markers(&transaction, true)?;
+            write_new_workspace_state_transaction_markers(&transaction)?;
             Ok(result)
         },
     )?;
@@ -2321,7 +2321,7 @@ pub fn transact_workspace_state_at_with_commit<T>(
             phase: ExternalWorkspaceCommitPhase::Prepared,
             reconciliation_work_items_path: None,
         });
-        write_workspace_state_transaction_markers(&transaction, true)?;
+        write_new_workspace_state_transaction_markers(&transaction)?;
         Ok(result)
     })?;
 
@@ -5085,8 +5085,23 @@ fn persist_workspace_state_transaction_locked(
                 .to_string(),
         ));
     }
-    write_workspace_state_transaction_markers(transaction, true)?;
+    write_new_workspace_state_transaction_markers(transaction)?;
     apply_workspace_state_transaction_locked(current_path, transaction, false)
+}
+
+fn write_new_workspace_state_transaction_markers(
+    transaction: &PendingWorkspaceStateTransaction,
+) -> Result<()> {
+    if let Some(events_dir) = transaction
+        .events_path
+        .as_deref()
+        .filter(|path| is_workspace_work_event_store_dir(path))
+    {
+        // A rejected new event must not become a recoverable legacy marker.
+        // Reuse the writer's read-only checks, including exact old-shard replay.
+        prepare_workspace_work_event_shards(events_dir, &transaction.events, false)?;
+    }
+    write_workspace_state_transaction_markers(transaction, true)
 }
 
 fn write_workspace_state_transaction_markers(
@@ -5623,10 +5638,14 @@ fn apply_workspace_state_transaction_locked(
     }
     if let Some(events_path) = transaction.events_path.as_deref() {
         if is_workspace_work_event_store_dir(events_path) {
-            // New v4 markers store the canonical shard directory. Immutable
-            // create is idempotent for both the first publication and crash
-            // recovery, so no separate recovering branch is needed.
-            write_workspace_work_event_shards_to_dir(events_path, &transaction.events)?;
+            // v4 predates portable container paths. Recover already-staged
+            // events under that contract, even when no shard was published.
+            // New markers pass the strict writer checks before being staged.
+            write_workspace_work_event_shards_to_dir_inner(
+                events_path,
+                &transaction.events,
+                recovering && transaction.version == 4,
+            )?;
         } else if recovering {
             // Compatibility: v1-v3 markers written before W-33 name a JSONL
             // file. Recover those exact markers with their historical
@@ -7577,6 +7596,23 @@ pub fn rebuild_work_items_from_events_for_repo(
             &events_dir,
         )?);
     }
+    let source_root = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
+    let source_branch = crate::repo_hash::resolve_git_dir(repo_path)
+        .and_then(|git_dir| fs::read_to_string(git_dir.join("HEAD")).ok())
+        .and_then(|head| {
+            head.trim()
+                .strip_prefix("ref: refs/heads/")
+                .map(str::to_owned)
+        });
+    for record in &mut records {
+        if let WorkEventLogRecord::Known { event, .. } = record {
+            resolve_workspace_work_event_container(
+                event,
+                Some(&source_root),
+                source_branch.as_deref(),
+            );
+        }
+    }
     if records.is_empty() {
         // An existing but empty store is still an empty input. In particular,
         // never replace an already useful projection or advance its migration
@@ -7913,7 +7949,7 @@ pub fn preserve_workspace_work_event_log_as_shards(
         validate_work_event_preservation_store(events_dir)?;
         validate_work_event_preservation_node(path.parent().expect("shard bucket"), true, true)?;
         validate_work_event_preservation_node(path, false, true)?;
-        write_workspace_work_event_shard_bytes(event_id, events_dir, path, bytes)?;
+        write_workspace_work_event_shard_bytes(event_id, events_dir, path, bytes, None)?;
     }
     for (event_id, path, bytes) in &prepared {
         validate_work_event_preservation_store(events_dir)?;
@@ -8015,6 +8051,30 @@ const WORK_EVENT_CORRECTION_WRITER_ENABLED: bool = false;
 pub enum DecodedWorkspaceWorkEvent {
     Known(Box<WorkEvent>),
     Opaque,
+}
+
+/// A portable owning-root marker has meaning only in its explicit source
+/// worktree. Preserve historical absolute paths without normalization.
+pub(crate) fn resolve_workspace_work_event_container(
+    event: &mut WorkEvent,
+    source_root: Option<&Path>,
+    source_branch: Option<&str>,
+) {
+    let Some(container) = event.execution_container.as_mut() else {
+        return;
+    };
+    if container.worktree_path.as_deref() != Some(Path::new(".")) {
+        return;
+    }
+    let branch_matches =
+        source_branch
+            .zip(container.branch.as_deref())
+            .is_none_or(|(source, event)| {
+                canonical_work_branch_identity(source) == canonical_work_branch_identity(event)
+            });
+    container.worktree_path = source_root
+        .filter(|_| branch_matches)
+        .map(Path::to_path_buf);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8416,11 +8476,37 @@ fn append_workspace_work_events_to_path(path: &Path, events: &[WorkEvent]) -> Re
     append_workspace_work_event_records_to_path(path, &records)
 }
 
-fn canonical_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
+fn serialized_workspace_work_event_bytes(event: &WorkEvent) -> Result<Vec<u8>> {
     let mut canonical = serde_json::to_vec(event)
         .map_err(|error| GwtError::Other(format!("workspace work event json: {error}")))?;
     canonical.push(b'\n');
     Ok(canonical)
+}
+
+/// Canonical tracked-shard bytes, also used by delivery certificates. Runtime
+/// events keep local paths; their portable wire identity is serialized here.
+pub fn canonical_workspace_work_event_bytes(
+    event: &WorkEvent,
+    repo_path: &Path,
+) -> Result<Vec<u8>> {
+    let mut portable = event.clone();
+    if let Some(container) = portable.execution_container.as_mut() {
+        if let Some(path) = container.worktree_path.as_deref() {
+            if path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+                || (path != Path::new(".")
+                    && canonical_worktree_identity(path) != canonical_worktree_identity(repo_path))
+            {
+                return Err(GwtError::Other(format!(
+                    "workspace Work event worktree path is outside its owning root: {}",
+                    path.display()
+                )));
+            }
+            container.worktree_path = Some(PathBuf::from("."));
+        }
+    }
+    serialized_workspace_work_event_bytes(&portable)
 }
 
 /// Read-only proof of an exact immutable source event. Refuse redirected
@@ -8439,7 +8525,9 @@ pub fn workspace_work_event_shard_matches(repo_path: &Path, event: &WorkEvent) -
     }
     match fs::symlink_metadata(&shard) {
         Ok(metadata) if metadata.file_type().is_file() => {
-            Ok(fs::read(shard)? == canonical_workspace_work_event_bytes(event)?)
+            let bytes = fs::read(shard)?;
+            Ok(bytes == serialized_workspace_work_event_bytes(event)?
+                || bytes == canonical_workspace_work_event_bytes(event, repo_path)?)
         }
         Ok(_) => Ok(false),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -8533,14 +8621,30 @@ fn validate_workspace_work_event_bucket_path(events_dir: &Path, bucket_dir: &Pat
 }
 
 fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEvent]) -> Result<()> {
+    write_workspace_work_event_shards_to_dir_inner(events_dir, events, false)
+}
+
+struct PreparedWorkspaceWorkEventShard<'a> {
+    event_id: &'a str,
+    path: PathBuf,
+    canonical: Vec<u8>,
+    original: Vec<u8>,
+}
+
+fn prepare_workspace_work_event_shards<'a>(
+    events_dir: &Path,
+    events: &'a [WorkEvent],
+    recover_legacy_transaction: bool,
+) -> Result<Vec<PreparedWorkspaceWorkEventShard<'a>>> {
     validate_workspace_work_event_store_path(events_dir)?;
-    let mut prepared = Vec::with_capacity(events.len());
-    let mut canonical_by_id = HashMap::with_capacity(events.len());
+    let mut candidates = Vec::with_capacity(events.len());
+    let mut originals_by_id = HashMap::with_capacity(events.len());
+    let repo_path = events_dir.ancestors().nth(3).unwrap_or(events_dir);
     for event in events {
-        let canonical = canonical_workspace_work_event_bytes(event)?;
+        let original = serialized_workspace_work_event_bytes(event)?;
         let shard_path = gwt_work_event_shard_path(events_dir, &event.id);
-        if let Some(existing) = canonical_by_id.get(&event.id) {
-            if existing != &canonical {
+        if let Some(existing) = originals_by_id.get(&event.id) {
+            if existing != &original {
                 return Err(divergent_workspace_work_event_shard_error(
                     &event.id,
                     &shard_path,
@@ -8548,39 +8652,73 @@ fn write_workspace_work_event_shards_to_dir(events_dir: &Path, events: &[WorkEve
             }
             continue;
         }
-        canonical_by_id.insert(event.id.clone(), canonical.clone());
-        prepared.push((event, shard_path, canonical));
+        originals_by_id.insert(event.id.clone(), original.clone());
+        candidates.push((event, shard_path, original));
     }
 
     // Refuse a known divergent identity before publishing any member of this
     // transaction batch. A concurrent create is checked again below.
-    for (event, shard_path, canonical) in &prepared {
+    let mut prepared = Vec::with_capacity(candidates.len());
+    for (event, shard_path, original) in candidates {
         let bucket_dir = shard_path.parent().ok_or_else(|| {
             GwtError::Other("Work event shard path has no bucket directory".to_string())
         })?;
         validate_workspace_work_event_bucket_path(events_dir, bucket_dir)?;
-        match fs::symlink_metadata(shard_path) {
+        let existing = match fs::symlink_metadata(&shard_path) {
             Ok(metadata) if !metadata.file_type().is_file() => {
                 return Err(GwtError::Other(format!(
                     "workspace Work event shard is not a regular file: {}",
                     shard_path.display()
                 )))
             }
-            Ok(_) => match fs::read(shard_path) {
-                Ok(existing) if existing != *canonical => {
-                    return Err(divergent_workspace_work_event_shard_error(
-                        &event.id, shard_path,
-                    ))
-                }
-                Ok(_) => {}
-                Err(error) => return Err(error.into()),
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Ok(_) => Some(fs::read(&shard_path)?),
+            Err(error) if error.kind() == ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
+        };
+        // Old absolute-path shards remain immutable, readable, and replayable.
+        // Only publication of a new shard requires the portable writer contract.
+        if existing.as_ref() == Some(&original) {
+            continue;
         }
+        let canonical = match canonical_workspace_work_event_bytes(event, repo_path) {
+            Ok(canonical) => canonical,
+            Err(_) if recover_legacy_transaction => original.clone(),
+            Err(error) => return Err(error),
+        };
+        if existing
+            .as_ref()
+            .is_some_and(|existing| *existing != canonical)
+        {
+            return Err(divergent_workspace_work_event_shard_error(
+                &event.id,
+                &shard_path,
+            ));
+        }
+        prepared.push(PreparedWorkspaceWorkEventShard {
+            event_id: &event.id,
+            path: shard_path,
+            canonical,
+            original,
+        });
     }
-    for (event, shard_path, canonical) in prepared {
-        write_workspace_work_event_shard_bytes(&event.id, events_dir, &shard_path, &canonical)?;
+    Ok(prepared)
+}
+
+fn write_workspace_work_event_shards_to_dir_inner(
+    events_dir: &Path,
+    events: &[WorkEvent],
+    recover_legacy_transaction: bool,
+) -> Result<()> {
+    for shard in
+        prepare_workspace_work_event_shards(events_dir, events, recover_legacy_transaction)?
+    {
+        write_workspace_work_event_shard_bytes(
+            shard.event_id,
+            events_dir,
+            &shard.path,
+            &shard.canonical,
+            Some(&shard.original),
+        )?;
     }
     Ok(())
 }
@@ -8591,6 +8729,7 @@ fn write_workspace_work_event_shard_bytes(
     events_dir: &Path,
     shard_path: &Path,
     canonical: &[u8],
+    legacy: Option<&[u8]>,
 ) -> Result<()> {
     let parent = shard_path.parent().ok_or_else(|| {
         GwtError::Other("Work event shard path has no parent directory".to_string())
@@ -8633,7 +8772,7 @@ fn write_workspace_work_event_shard_bytes(
                 )));
             }
             let existing = fs::read(shard_path)?;
-            if existing == canonical {
+            if existing == canonical || legacy.is_some_and(|bytes| existing == bytes) {
                 Ok(())
             } else {
                 Err(divergent_workspace_work_event_shard_error(
