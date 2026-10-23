@@ -88,7 +88,7 @@ try {
         $savedEnvironment[$key] = [Environment]::GetEnvironmentVariable($key)
         [Environment]::SetEnvironmentVariable($key, $testVariables[$key])
     }
-    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 issue-queue-kanban.spec.ts --grep "Issue #6141" @PlaywrightArguments
+    & node "$deps/node_modules/@playwright/test/cli.js" test --config crates/gwt/playwright/playwright.config.ts --workers=1 issue-queue-kanban.spec.ts kanban.spec.ts --grep "Issue #6141|projects monitor state and controls" @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed with exit $LASTEXITCODE" }
 } finally {
     if ($keeper) { $keeper.Dispose() }
