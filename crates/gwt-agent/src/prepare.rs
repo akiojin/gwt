@@ -926,6 +926,13 @@ fn check_codex_config_with_probe(
     if outcome.success {
         return Ok(());
     }
+    if outcome.timed_out || outcome.error.is_some() {
+        tracing::warn!(
+            timed_out = outcome.timed_out,
+            "Codex configuration preflight was inconclusive; continuing launch"
+        );
+        return Ok(());
+    }
     let version = version.map(str::to_owned).or_else(|| {
         let outcome = probe(
             HostRunnerProbeKind::Direct,
@@ -3537,6 +3544,31 @@ fi
             &mut { fixture_probe },
         )
         .expect("repaired configuration must be readmitted");
+    }
+
+    #[test]
+    fn codex_config_preflight_does_not_reject_inconclusive_probes() {
+        let temp = tempdir().unwrap();
+        let config = sample_direct_codex_launch_config(temp.path());
+        for outcome in [
+            HostRunnerProbeOutcome {
+                timed_out: true,
+                exit_code: None,
+                ..HostRunnerProbeOutcome::failure_with_stderr("")
+            },
+            HostRunnerProbeOutcome::unresolved("process could not start"),
+        ] {
+            let result = check_codex_config_with_probe(
+                &config,
+                &config.command,
+                Some("0.148.0"),
+                &mut |_, _, _, _, _, _| outcome.clone(),
+            );
+            assert!(
+                result.is_ok(),
+                "inconclusive probe rejected launch: {result:?}"
+            );
+        }
     }
 
     #[test]

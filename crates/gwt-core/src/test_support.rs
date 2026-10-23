@@ -869,6 +869,8 @@ const childProcess = require('child_process');\n\
 const version = {version:?};\n\
 const packageName = {package:?};\n\
 if (process.argv.includes('--version')) {{ console.log(version); process.exit(0); }}\n\
+// Configuration probes do not start a Session or run its hooks.\n\
+if (packageName === '@openai/codex' && process.argv.at(-2) === 'features' && process.argv.at(-1) === 'list') {{ process.exit(0); }}\n\
 const capture = process.env.GWT_PHASE75_CAPTURE;\n\
 if (!capture) {{ console.error('GWT_PHASE75_CAPTURE is required'); process.exit(2); }}\n\
 const hookPath = packageName === '@openai/codex'\n\
