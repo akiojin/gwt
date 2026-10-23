@@ -687,7 +687,13 @@ decision once it has been idle for twice the stuck timeout.
 `issue.monitor.release_idle` runs the same release by hand for one Issue or
 every idle row, and `dry_run: true` reports the targets without touching
 anything. `issue.monitor.profiles` reads the launch
-candidate pool and `issue.monitor.profiles.set` replaces it; with two or more
+candidate pool and `issue.monitor.profiles.set` replaces it. Both replies include
+an opaque `profiles_token`. Pass a fresh read's token as `expected_profiles_token`
+when updating the pool; a conflict leaves preferences unchanged. Re-read profiles,
+reconsider the change, and read back the successful result. The token covers the
+saved pool and its inheritance head, excluding other configuration, runtime state,
+and ABA history. Omitting the guard preserves existing callers.
+With two or more
 candidates the Monitor launches each Issue with the first eligible candidate
 (rate-limit holds and `prefer_for` routing decide eligibility; a provider
 leaves the pool when it refuses a launch, not when a usage reading predicts it

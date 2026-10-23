@@ -536,11 +536,13 @@ pub(super) fn run<E: CliEnv>(
         }
         IssueCommand::MonitorProfilesSet {
             project_root,
+            expected_profiles_token,
             profiles,
             usage_threshold_percent,
         } => run_monitor_profiles_set(
             env,
             project_root.as_deref(),
+            expected_profiles_token.as_deref(),
             profiles,
             usage_threshold_percent,
             out,
@@ -4714,10 +4716,19 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
         })
         .collect::<Vec<_>>();
     serde_json::json!({
+        "profiles_token": monitor_profiles_token(prefs),
         "launch_profiles": launch_profiles,
         "launch_profile_summary": status.launch_profile_summary,
         "provider_quota_holds": status.provider_quota_holds,
     })
+}
+
+/// Exactly the read set compared by IssueMonitorProfilesSetRequest::resolve.
+fn monitor_profiles_token(prefs: &crate::IssueMonitorPrefs) -> String {
+    use sha2::Digest;
+    let observed = serde_json::to_vec(&(prefs.launch_profile_pool(), &prefs.launch_profile))
+        .expect("saved launch profiles serialize");
+    format!("profiles-v1:{:x}", sha2::Sha256::digest(observed))
 }
 
 fn run_monitor_profiles<E: CliEnv>(
@@ -4816,6 +4827,7 @@ fn apply_monitor_profiles_set(
 fn run_monitor_profiles_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
+    expected_profiles_token: Option<&str>,
     profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
     usage_threshold_percent: Option<u8>,
     out: &mut String,
@@ -4823,6 +4835,7 @@ fn run_monitor_profiles_set<E: CliEnv>(
     let project_root = issue_monitor_project_root(env, project_root)?;
     set_monitor_profiles(
         &project_root,
+        expected_profiles_token,
         profiles,
         usage_threshold_percent,
         out,
@@ -4832,6 +4845,7 @@ fn run_monitor_profiles_set<E: CliEnv>(
 
 fn set_monitor_profiles(
     project_root: &std::path::Path,
+    expected_profiles_token: Option<&str>,
     profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
     usage_threshold_percent: Option<u8>,
     out: &mut String,
@@ -4843,6 +4857,15 @@ fn set_monitor_profiles(
 ) -> Result<i32, SpecOpsError> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
     let saved = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
+    if expected_profiles_token.is_some_and(|expected| expected != monitor_profiles_token(&saved)) {
+        return Err(io_as_api_error(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Issue Monitor profiles changed since observation; re-read issue.monitor.profiles and reconsider the pool before retrying",
+        )));
+    }
+    // Capture exactly the token's pool/head. The unchanged daemon/fallback
+    // read-set comparison fences this observation under the writer lock;
+    // no new precondition is sent for an older daemon to silently ignore.
     let request = crate::issue_monitor::IssueMonitorProfilesSetRequest::capture(&saved, profiles)
         .map_err(io_as_api_error)?;
 
@@ -13847,6 +13870,7 @@ mod tests {
             &mut env,
             IssueCommand::MonitorProfilesSet {
                 project_root: Some(repo.clone()),
+                expected_profiles_token: None,
                 profiles: vec![codex, pool_patch("claude", &["kind:spec"])],
                 usage_threshold_percent: Some(70),
             },
@@ -13934,6 +13958,7 @@ command = "my-agent-cli"
         run_monitor_profiles_set(
             &env,
             Some(&repo),
+            None,
             vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
             None,
             &mut String::new(),
@@ -13983,6 +14008,7 @@ command = "my-agent-cli"
             &mut env,
             IssueCommand::MonitorProfilesSet {
                 project_root: Some(repo.clone()),
+                expected_profiles_token: None,
                 profiles,
                 usage_threshold_percent: None,
             },
@@ -14043,27 +14069,41 @@ command = "my-agent-cli"
         let mut initial = crate::IssueMonitorPrefs::default();
         initial.set_launch_profile_pool(vec![pool_profile("codex", &[])]);
         crate::save_issue_monitor_prefs(&path, &initial).unwrap();
-        let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
-        let result = set_monitor_profiles(&repo, patches, None, &mut String::new(), |_, _| {
-            // A second writer commits after the first request captured its base,
-            // before the transport fails and the first enters local fallback.
-            let path = path.clone();
-            std::thread::spawn(move || {
-                crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
-                    let mut pool = prefs.launch_profile_pool();
-                    pool[0].model = Some("competing-model".into());
-                    apply_monitor_profiles_set(prefs, &pool, None)
+        let patches: Vec<crate::IssueMonitorLaunchProfilePatch> =
+            serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
+        let before = fs::read(&path).unwrap();
+        let error = set_monitor_profiles(
+            &repo,
+            Some("stale-pool"),
+            patches.clone(),
+            None,
+            &mut String::new(),
+            |_, _| panic!("stale observation must refuse before publishing"),
+        )
+        .expect_err("stale pool");
+        assert!(error.to_string().contains("reconsider"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let result =
+            set_monitor_profiles(&repo, None, patches, None, &mut String::new(), |_, _| {
+                // A second writer commits after the first request captured its base,
+                // before the transport fails and the first enters local fallback.
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
+                        let mut pool = prefs.launch_profile_pool();
+                        pool[0].model = Some("competing-model".into());
+                        apply_monitor_profiles_set(prefs, &pool, None)
+                    })
+                    .unwrap();
                 })
+                .join()
                 .unwrap();
-            })
-            .join()
-            .unwrap();
-            Err(
+                Err(
                 crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
                     "offline".into(),
                 ),
             )
-        });
+            });
         assert!(
             result.is_err(),
             "stale fallback must explicitly refuse the competing write"
@@ -14092,7 +14132,7 @@ command = "my-agent-cli"
         crate::save_issue_monitor_prefs(&path, &initial).unwrap();
         let patches = serde_json::from_value(serde_json::json!([{"agent_id":"codex"}])).unwrap();
         let mut out = String::new();
-        set_monitor_profiles(&repo, patches, None, &mut out, |_, _| {
+        set_monitor_profiles(&repo, None, patches, None, &mut out, |_, _| {
             // Emulate the durable ACK, followed by a later independent commit
             // before the original caller resumes to render its response.
             crate::try_mutate_issue_monitor_prefs_without_authority_fence(&path, |prefs| {
@@ -14110,6 +14150,18 @@ command = "my-agent-cli"
         })
         .unwrap();
         let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert!(response["profiles_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty()));
+        assert_eq!(
+            response["profiles_token"],
+            monitor_profiles_projection(&initial)["profiles_token"]
+        );
+        assert_ne!(
+            response["profiles_token"],
+            monitor_profiles_projection(&crate::load_issue_monitor_prefs(&path).unwrap())
+                ["profiles_token"]
+        );
         let model_change = response["changes"]
             .as_array()
             .unwrap()
@@ -14180,6 +14232,7 @@ command = "my-agent-cli"
             let mut out = String::new();
             let result = set_monitor_profiles(
                 &repo,
+                None,
                 profiles,
                 usage_threshold_percent,
                 &mut out,
