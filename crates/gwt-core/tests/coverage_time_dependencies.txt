@@ -183,7 +183,6 @@ crates/gwt/src/app_runtime/tests/board_tests.rs|app_runtime_knowledge_search_rep
 crates/gwt/src/app_runtime/tests/board_tests.rs|app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/app_runtime/tests/continuation_completion_tests.rs|launch_complete_worker_finishes_when_session_metadata_lock_is_busy|letresult=completion.recv_timeout(Duration::from_secs(10))|1
 crates/gwt/src/app_runtime/tests/continuation_completion_tests.rs|managed_hook_health_for_one_hundred_forty_rows_reuses_session_json_within_one_second|assert!(elapsed<=std::time::Duration::from_secs(1),)|1
-crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|automatic_resume_successor_created_installs_active_authority_before_pty_spawn|wait_for_recorded_event(,&launch_events,|events||1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|assert!(Instant::now()<deadline,)|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|letclient=reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().unwrap()|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|letdeadline=Instant::now()+Duration::from_secs(30)|1
@@ -437,7 +436,6 @@ crates/gwt/src/cli/json_envelope.rs|pane_name_waits_for_its_exact_assigned_resul
 crates/gwt/src/cli/pane.rs|read_pane_snapshot_uses_one_absolute_completion_deadline|assert!(started.elapsed()<Duration::from_millis(500),)|1
 crates/gwt/src/cli/pane.rs|request_window_list_outlasts_a_multi_second_backend_stall|matchtokio::time::timeout(Duration::from_millis(200),socket.next()).await|1
 crates/gwt/src/cli/pane.rs|self_pane_close_absolute_deadline_is_not_extended_by_unrelated_frames|assert!(started.elapsed()<Duration::from_millis(500),,started.elapsed())|1
-crates/gwt/src/cli/pane.rs|spawn_close_pane_mock|received_kinds.push(tokio::time::timeout(Duration::from_secs(5),next_frontend_kind(&mutsocket),).await.expect(),)|1
 crates/gwt/src/cli/pr/mod.rs|issue_4850_pr_edit_returns_with_a_warning_when_the_work_items_lock_is_held|assert!(elapsed<std::time::Duration::from_secs(5),)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|assert!(std::time::Instant::now()<deadline,)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(20)|1

@@ -249,6 +249,9 @@ pub(super) fn dispatch_input<E: CliEnv>(
                 "exit_code": 1,
                 "error": message,
             });
+            if matches!(failure.error, gwt_github::SpecOpsError::CacheConflict(_)) {
+                payload["error_code"] = "ISSUE_CACHE_CONFLICT".into();
+            }
             if operation == "verify.run" {
                 attach_verification_error(&mut payload, &message);
             }
@@ -930,6 +933,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.auto_refill" => {
             CliCommand::Issue(IssueCommand::MonitorQueueAutoRefill {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 enabled: optional_bool(params, "enabled")?
                     .ok_or(CliParseError::MissingFlag("enabled"))?,
                 limit: required_usize(params, "limit")?,
@@ -938,11 +944,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
         "issue.monitor.queue.urgent_limit" => {
             CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 limit: required_usize(params, "limit")?,
             })
         }
         "issue.monitor.queue.demote" => CliCommand::Issue(IssueCommand::MonitorQueueDemote {
             project_root: optional_path(params, "project_root")?,
+            expected_urgent_queue_token: lookup(params, "expected_urgent_queue_token")
+                .map(|_| required_string(params, "expected_urgent_queue_token"))
+                .transpose()?,
             number: required_u64(params, "number")?,
         }),
         "discussion.create"
@@ -1054,6 +1066,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 })?;
             CliCommand::Issue(IssueCommand::MonitorTiersSet {
                 project_root: optional_path(params, "project_root")?,
+                expected_config_token: lookup(params, "expected_config_token")
+                    .map(|_| required_string(params, "expected_config_token"))
+                    .transpose()?,
                 auto,
                 tiers,
             })
@@ -1242,6 +1257,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             CliCommand::Pr(PrCommand::ReviewThreadsReplyAndResolveBody {
                 number: required_u64(params, "number")?,
                 body: required_string(params, "body")?,
+                thread_id: lookup(params, "thread_id")
+                    .map(|_| required_string(params, "thread_id"))
+                    .transpose()?,
             })
         }
         "actions.dispatch" => {
@@ -1481,13 +1499,9 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             // diagnosis; `issue` or `spec` asks about any owner in this
             // repository, which is how an operator finds out who holds a
             // generation that keeps refusing the queue.
+            reject_unknown_params(params, &["issue", "spec"], "execution.status")?;
             let issue = optional_u64(params, "issue")?;
             let spec = optional_u64(params, "spec")?;
-            if params.len() > usize::from(issue.is_some()) + usize::from(spec.is_some()) {
-                return Err(CliParseError::InvalidJson(
-                    "execution.status accepts only issue or spec".to_string(),
-                ));
-            }
             match (issue, spec) {
                 (Some(_), Some(_)) => {
                     return Err(CliParseError::InvalidJson(
@@ -1653,7 +1667,42 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 min_reset_wait_secs: optional_u64(params, "min_reset_wait_secs")?.unwrap_or(86400),
             })
         }
+        "fleet.inventory" | "fleet.orphans" => {
+            reject_unknown_params(params, &[], &envelope.operation)?;
+            CliCommand::Fleet(if envelope.operation == "fleet.orphans" {
+                super::fleet_disposition::FleetCommand::Orphans
+            } else {
+                super::fleet_disposition::FleetCommand::Inventory
+            })
+        }
+        "fleet.disposition" | "fleet.orphan.terminate" => {
+            reject_unknown_params(params, &["targets", "allow_unknown"], &envelope.operation)?;
+            let targets =
+                super::fleet_disposition::parse_targets(lookup(params, "targets").ok_or_else(
+                    || CliParseError::InvalidJson("fleet targets are required".into()),
+                )?)?;
+            if envelope.operation == "fleet.orphan.terminate"
+                && targets
+                    .iter()
+                    .any(|target| !target.id.starts_with("process:"))
+            {
+                return Err(CliParseError::InvalidJson(
+                    "orphan termination accepts only explicit process targets".into(),
+                ));
+            }
+            CliCommand::Fleet(super::fleet_disposition::FleetCommand::Disposition {
+                targets,
+                allow_unknown: optional_bool(params, "allow_unknown")?.unwrap_or(false),
+                orphan_only: envelope.operation == "fleet.orphan.terminate",
+            })
+        }
         "pane.list" => CliCommand::Pane(PaneCommand::List),
+        "pane.health" => {
+            reject_unknown_params(params, &["id"], "pane.health")?;
+            CliCommand::Pane(PaneCommand::Health {
+                id: optional_string(params, "id")?,
+            })
+        }
         "pane.name" => {
             reject_unknown_params(params, &["candidate"], "pane.name")?;
             CliCommand::Pane(PaneCommand::Name {
@@ -1687,11 +1736,29 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             id: optional_string(params, "id")?,
             text: required_string(params, "text")?,
         }),
-        "pm.message.send" | "pm.pane.send" => CliCommand::Pane(PaneCommand::PmSend {
-            project_root: optional_string(params, "project_root")?,
-            id: required_string(params, "id")?,
-            text: required_string(params, "text")?,
-        }),
+        "pm.message.send" | "pm.pane.send" => {
+            // An explicitly supplied identity must never become a fresh delivery.
+            let operation_id = match lookup(params, "operation_id") {
+                None => None,
+                Some(Value::String(value))
+                    if uuid::Uuid::parse_str(value)
+                        .is_ok_and(|id| id.hyphenated().to_string() == value.as_str()) =>
+                {
+                    Some(value.clone())
+                }
+                Some(_) => return Err(CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    reason:
+                        "must be a canonical hyphenated UUID exactly as reported by pm.message.send",
+                }),
+            };
+            CliCommand::Pane(PaneCommand::PmSend {
+                project_root: optional_string(params, "project_root")?,
+                id: required_string(params, "id")?,
+                text: required_string(params, "text")?,
+                operation_id,
+            })
+        }
         "pm.capabilities" => CliCommand::Pm(crate::cli::pm::PmCommand::Capabilities),
         "pm.plan.status" => {
             reject_unknown_params(params, &[], "pm.plan.status")?;
@@ -3874,6 +3941,45 @@ mod tests {
     }
 
     #[test]
+    fn issue_cache_conflict_has_a_machine_readable_error_code() {
+        fn replace_after_fetch(
+            client: gwt_github::client::fake::FakeIssueClient,
+            root: std::path::PathBuf,
+            snapshot: gwt_github::IssueSnapshot,
+            remaining: usize,
+        ) {
+            if remaining == 0 {
+                return;
+            }
+            let next = client.clone();
+            client.after_next_fetch(move || {
+                gwt_github::Cache::new(root.clone())
+                    .write_snapshot(&snapshot)
+                    .unwrap();
+                replace_after_fetch(next, root, snapshot, remaining - 1);
+            });
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new(temp.path().to_path_buf());
+        // The fake's create supplies a complete, ordinary Issue fixture.
+        let snapshot =
+            gwt_github::IssueClient::create_issue(&env.client, "title", "body", &[]).unwrap();
+        replace_after_fetch(
+            env.client.clone(),
+            env.cache_root.clone(),
+            snapshot.clone(),
+            3,
+        );
+        env.stdin = envelope("issue.view", json!({"number": snapshot.number.0}));
+        assert_eq!(super::dispatch(&mut env, "gwtd"), 1);
+        let payload: Value = serde_json::from_slice(&env.stdout).unwrap();
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["error_code"], "ISSUE_CACHE_CONFLICT", "{payload}");
+        assert!(!payload["error"].as_str().unwrap().contains("network error"));
+    }
+
+    #[test]
     fn verify_run_operation_error_has_actionable_diagnostic() {
         let _lock = crate::env_test_lock()
             .lock()
@@ -4889,12 +4995,106 @@ mod tests {
             "issue.monitor.tiers.set",
             json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
         );
+        ok(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "expected_config_token": "observed-config"}),
+        );
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.tiers.set",
+                json!({"auto": true, "expected_config_token": invalid}),
+            );
+        }
         ok("issue.monitor.tier.set", json!({"number":4774, "tier":1}));
         assert!(
             !err("issue.monitor.tier.set", json!({"number":4774, "tier":256}))
                 .to_string()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn issue_monitor_tiers_set_refuses_stale_config_and_returns_saved_observation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let mut env = TestEnv::new(repo);
+        let mut invoke = |operation, params| {
+            let CliCommand::Issue(command) = ok(operation, params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let observed: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let initial = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(observed["saved_config"], initial.config_observation());
+        assert_eq!(observed["config_token"], initial.config_token());
+        invoke("issue.monitor.tiers.set", json!({"auto": true})).unwrap();
+        let auto_token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        assert_ne!(auto_token, initial.config_token());
+        invoke(
+            "issue.monitor.tiers.set",
+            json!({"auto": true, "tiers": [[{"agent_id":"codex"}]]}),
+        )
+        .unwrap();
+        let changed = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_ne!(changed.config_token(), auto_token);
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(
+            "issue.monitor.tiers.set",
+            json!({
+                "auto": false, "expected_config_token": observed["config_token"]
+            }),
+        )
+        .expect_err("stale tier configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let fresh: Value =
+            serde_json::from_str(&invoke("issue.monitor.tiers", json!({})).unwrap()).unwrap();
+        let reply: Value = serde_json::from_str(
+            &invoke(
+                "issue.monitor.tiers.set",
+                json!({
+                    "auto": false, "expected_config_token": fresh["config_token"]
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.launch_auto);
+        assert!(
+            saved.launch_tiers.is_empty(),
+            "omitted tiers restore defaults"
+        );
+        assert_eq!(
+            saved.effect_authority_epoch,
+            changed.effect_authority_epoch + 1
+        );
+        assert_eq!(reply["auto"], false);
+        assert_eq!(reply["configured_tiers"], json!([]));
+        assert_eq!(reply["tiers"], json!(saved.effective_launch_tiers()));
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], fresh["config_token"]);
     }
 
     #[test]
@@ -5270,6 +5470,52 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_queue_demote_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueDemote { .. }) = ok(
+            "issue.monitor.queue.demote",
+            json!({"number": 2, "expected_urgent_queue_token": "observed-urgent"}),
+        ) else {
+            panic!("demote command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.demote",
+                json!({"number": 2, "expected_urgent_queue_token": invalid}),
+            );
+        }
+    }
+
+    #[test]
+    fn issue_monitor_queue_urgent_limit_config_guard_parses() {
+        let CliCommand::Issue(IssueCommand::MonitorQueueUrgentLimit { .. }) = ok(
+            "issue.monitor.queue.urgent_limit",
+            json!({"limit": 0, "expected_config_token": "observed-config"}),
+        ) else {
+            panic!("urgent limit command")
+        };
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.urgent_limit",
+                json!({"limit": 0, "expected_config_token": invalid}),
+            );
+        }
+    }
+
+    #[test]
     fn issue_monitor_queue_auto_refill_persists_without_changing_other_preferences() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
@@ -5300,6 +5546,65 @@ mod tests {
         assert_eq!(prefs.terminal_queue_auto_refill_limit, 3);
         assert!(prefs.enabled);
         assert_eq!(prefs.priority_order, vec![7, 42]);
+
+        let mut invoke = |params| {
+            let CliCommand::Issue(command) = ok("issue.monitor.queue.auto_refill", params) else {
+                panic!("issue command")
+            };
+            let mut out = String::new();
+            crate::cli::issue::run(&mut env, command, &mut out).map(|_| out)
+        };
+        let token = prefs.config_token();
+        // An intervening writer changes only the observed refill limit.
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.terminal_queue_auto_refill_limit = 4;
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = invoke(json!({
+            "enabled": false, "limit": 0, "expected_config_token": token
+        }))
+        .expect_err("stale refill configuration must be refused");
+        assert!(error.to_string().contains("config changed"), "{error}");
+        assert!(
+            error.to_string().contains("issue.monitor.status"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let token = crate::load_issue_monitor_prefs(&path)
+            .unwrap()
+            .config_token();
+        let reply: Value = serde_json::from_str(
+            &invoke(json!({
+                "enabled": false, "limit": 0, "expected_config_token": token
+            }))
+            .expect("fresh observation must succeed"),
+        )
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert!(!saved.terminal_queue_auto_refill);
+        assert_eq!(saved.terminal_queue_auto_refill_limit, 0);
+        assert!(saved.enabled);
+        assert_eq!(saved.priority_order, vec![7, 42]);
+        assert_eq!(reply["enabled"], false);
+        assert_eq!(reply["limit"], 0);
+        assert_eq!(reply["saved_config"], saved.config_observation());
+        assert_eq!(reply["config_token"], saved.config_token());
+        assert_ne!(reply["config_token"], token);
+        for invalid in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!([]),
+            json!(""),
+            json!(" "),
+        ] {
+            err(
+                "issue.monitor.queue.auto_refill",
+                json!({"enabled": true, "limit": 3, "expected_config_token": invalid}),
+            );
+        }
         let _ = err("issue.monitor.queue.auto_refill", json!({"enabled": true}));
         let _ = err("issue.monitor.queue.auto_refill", json!({"limit": 3}));
     }
@@ -5627,8 +5932,63 @@ mod tests {
                 project_root: None,
                 id: "tab-1::agent-1".to_string(),
                 text: "please report status".to_string(),
+                operation_id: None,
             })
         );
+        assert_ne!(
+            ok(
+                "pm.message.send",
+                json!({
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                })
+            ),
+            ok(
+                "pm.message.send",
+                json!({"id": "tab-1::agent-1", "text": "please report status"})
+            ),
+            "same-operation recovery must preserve the caller's operation identity"
+        );
+        ok(
+            "pm.operation.execute",
+            json!({
+                "operation": "pm.message.send",
+                "params": {
+                    "id": "tab-1::agent-1",
+                    "text": "please report status",
+                    "operation_id": "72fc3cd4-ad49-43e3-bf3d-d791357643c2"
+                },
+                "approval_id": "scoped-authority"
+            }),
+        );
+        for operation_id in [
+            json!(""),
+            json!("not-a-uuid"),
+            json!("72FC3CD4-AD49-43E3-BF3D-D791357643C2"),
+            json!("72fc3cd4ad4943e3bf3dd791357643c2"),
+            Value::Null,
+        ] {
+            assert!(matches!(
+                err(
+                    "pm.message.send",
+                    json!({"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id})
+                ),
+                CliParseError::InvalidValue {
+                    flag: "operation_id",
+                    ..
+                }
+            ));
+            assert!(parse(&envelope(
+                "pm.operation.execute",
+                json!({
+                    "operation": "pm.message.send",
+                    "params": {"id": "tab-1::agent-1", "text": "status", "operation_id": operation_id},
+                    "approval_id": "scoped-authority"
+                })
+            ))
+            .is_err());
+        }
         assert!(matches!(
             err("pm.message.send", json!({"text": "hello"})),
             CliParseError::MissingFlag("id")
@@ -6266,6 +6626,22 @@ mod tests {
             ok("issue.comment", json!({"number": 1, "body": "b"})),
             CliCommand::Issue(IssueCommand::CommentBody { .. })
         ));
+    }
+
+    #[test]
+    fn fleet_operations_accept_only_explicit_generation_targets() {
+        let inventory = ok("fleet.inventory", json!({}));
+        assert!(!format!("{inventory:?}").is_empty());
+        let target = json!({"id":"pane:agent-1","session_id":"session-1",
+            "child_pid":123,"child_started_at":456});
+        let disposition = ok("fleet.disposition", json!({"targets":[target]}));
+        assert!(!format!("{disposition:?}").is_empty());
+        assert!(err("fleet.disposition", json!({"state":"delivered"}))
+            .to_string()
+            .contains("state"));
+        assert!(err("fleet.disposition", json!({"targets":[]}))
+            .to_string()
+            .contains("target"));
     }
 
     #[test]
@@ -7237,14 +7613,18 @@ mod tests {
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
         ));
         assert!(matches!(
-            err("execution.status", json!({"unexpected": true})),
+            ok("execution.status", json!({"issue": null, "spec": null})),
+            CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::Status)
+        ));
+        assert!(matches!(
+            err("execution.status", json!({"unexpected": null})),
             CliParseError::InvalidJson(message)
-                if message.contains("accepts only issue or spec")
+                if message.contains("unexpected")
         ));
         // Issue #3934: an operator must be able to ask who holds any owner's
         // generation, not only the one their own session is bound to.
         assert!(matches!(
-            ok("execution.status", json!({"issue": 3934})),
+            ok("execution.status", json!({"issue": 3934, "spec": null})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner
@@ -7254,7 +7634,7 @@ mod tests {
                 }
         ));
         assert!(matches!(
-            ok("execution.status", json!({"spec": 3885})),
+            ok("execution.status", json!({"issue": null, "spec": 3885})),
             CliCommand::Execution(crate::cli::execution_state::ExecutionCommand::OwnerStatus {
                 owner,
             }) if owner
@@ -7764,6 +8144,29 @@ mod tests {
                 "pr.head_check"
             )
         );
+    }
+
+    #[test]
+    fn issue_3789_review_reply_preserves_thread_id() {
+        let command = ok(
+            "pr.review_threads.reply_and_resolve",
+            json!({"number": 1, "thread_id": "PRRT_target", "body": "Fixed"}),
+        );
+        assert!(format!("{command:?}").contains("PRRT_target"));
+    }
+
+    #[test]
+    fn issue_3789_review_reply_rejects_invalid_thread_selector() {
+        for thread_id in [json!(""), json!("  "), Value::Null, json!(42)] {
+            assert!(
+                super::parse_operation(
+                    "pr.review_threads.reply_and_resolve",
+                    &json!({"number": 1, "thread_id": thread_id, "body": "Fixed"}),
+                )
+                .is_err(),
+                "invalid selector must never fall back to bulk mode"
+            );
+        }
     }
 
     #[test]

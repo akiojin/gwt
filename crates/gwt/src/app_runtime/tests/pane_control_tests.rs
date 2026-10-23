@@ -187,13 +187,9 @@ fn issue_3713_agent_peer_close_requires_reading_recent_target_session_evidence()
             responder: None,
         },
     );
-    assert!(matches!(
-        events.first(),
-        Some(OutboundEvent {
-            event: BackendEvent::PaneCloseResult { ok: true, .. },
-            ..
-        })
-    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
     assert!(!runtime.window_lookup.contains_key("tab::peer"));
 }
 
@@ -420,6 +416,367 @@ fn agent_pane_close_replies_with_pane_close_result() {
 }
 
 #[test]
+fn fleet_pane_inventory_scopes_actual_runtime_generations() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let worktree = temp.path().join("worktree");
+    fs::create_dir_all(&project).unwrap();
+    let mut tab = sample_project_tab_with_window_at(
+        "owned",
+        "agent",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("agent", Some("target-session".into()));
+    let foreign = sample_project_tab_with_window_at(
+        "foreign",
+        "agent",
+        temp.path().join("foreign"),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let (mut runtime, _) =
+        sample_runtime_with_events(temp.path(), vec![tab, foreign], Some("owned"));
+    let window_id = "owned::agent";
+    let mut session = sample_active_agent_session("owned", window_id);
+    session.session_id = "target-session".into();
+    session.worktree_path = worktree.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.into(), session);
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pid = runtime.runtimes[window_id].pty.process_id().unwrap();
+    let started_at = gwt::process::host_process_start_time(pid).unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "inventory-client".into(),
+        AgentSessionPrincipal::for_test(&project, "observer").unwrap(),
+        AgentFrontendRequest::ListFleetPanes,
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "inventory-client"));
+    let response = serde_json::to_value(&events[0].event).unwrap();
+    assert_eq!(response["kind"], "fleet_pane_list");
+    let panes = response["panes"].as_array().unwrap();
+    assert_eq!(panes.len(), 1, "foreign project panes must not leak");
+    assert_eq!(panes[0]["window_id"], window_id);
+    assert_eq!(panes[0]["project_root"], project.to_string_lossy().as_ref());
+    assert_eq!(panes[0]["session_id"], "target-session");
+    assert_eq!(panes[0]["runtime_present"], true);
+    assert_eq!(panes[0]["child_pid"], pid);
+    assert_eq!(panes[0]["child_started_at"], started_at);
+    assert_eq!(
+        panes[0]["worktree_path"],
+        worktree.to_string_lossy().as_ref()
+    );
+}
+
+fn fleet_target_session(project: &Path, runtime: &mut AppRuntime) -> gwt_agent::Session {
+    let mut session = gwt_agent::Session::new(project, "work/target", gwt_agent::AgentId::Codex);
+    session.id = "other-session".into();
+    session.save(&runtime.sessions_dir).unwrap();
+    runtime
+        .active_agent_sessions
+        .get_mut("tab-1::other-window")
+        .unwrap()
+        .worktree_path = project.into();
+    session
+}
+
+#[test]
+fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    let window_id = "tab-1::other-window";
+    insert_test_pane_runtime(&mut runtime, window_id);
+    let pid = runtime.runtimes[window_id].pty.process_id().unwrap();
+    let started_at = gwt::process::host_process_start_time(pid).unwrap();
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let request =
+        |session: &str, child_pid, child_started_at| AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: session.into(),
+            child_pid,
+            child_started_at,
+        };
+    let assert_refused = |events: Vec<OutboundEvent>, reason_part: &str| {
+        assert!(
+            matches!(events.as_slice(), [OutboundEvent {
+            target: DispatchTarget::Client(client),
+            event: BackendEvent::FleetPaneCloseResult {
+                request_id, ok: false, reason: Some(reason), ..
+            }, ..
+        }] if client == "close-client"
+            && request_id == "84ef22cc-44ef-415d-b4c4-06a6d4cc7416"
+            && reason.contains(reason_part)),
+            "{events:?}"
+        );
+    };
+    assert_refused(
+        runtime.handle_frontend_event(
+            "close-client".into(),
+            FrontendEvent::CloseFleetPane {
+                request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+                id: window_id.into(),
+                session_id: "other-session".into(),
+                child_pid: Some(pid),
+                child_started_at: Some(started_at),
+            },
+        ),
+        "authenticated agent",
+    );
+    assert_refused(
+        runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            AgentSessionPrincipal::for_test(&project, "observer").unwrap(),
+            request("other-session", Some(pid), Some(started_at)),
+        ),
+        "registered PM",
+    );
+    assert_refused(
+        runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            principal.clone(),
+            request("predecessor-session", Some(pid), Some(started_at)),
+        ),
+        "session changed",
+    );
+    assert_refused(
+        runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            principal.clone(),
+            request("other-session", Some(pid), Some(started_at + 1)),
+        ),
+        "runtime changed",
+    );
+    assert_refused(
+        runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            principal.clone(),
+            request("other-session", None, None),
+        ),
+        "runtime changed",
+    );
+    assert!(runtime.window_lookup.contains_key(window_id));
+    assert_eq!(runtime.runtimes[window_id].pty.process_id(), Some(pid));
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        request("other-session", Some(pid), Some(started_at)),
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+        request_id, ok: true, reason: None, ..
+    } if request_id == "84ef22cc-44ef-415d-b4c4-06a6d4cc7416"),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_protects_authority_acquired_after_inventory() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    let window_id = "tab-1::other-window";
+    let session = fleet_target_session(&project, &mut runtime);
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let selected = runtime
+        .agent_fleet_pane_inventory(&principal)
+        .into_iter()
+        .find(|pane| pane.window_id == window_id)
+        .unwrap();
+    gwt::cli::execution_state::materialize_at_launch(
+        &project,
+        gwt::cli::execution_state::ExecutionOwnerKind::Spec,
+        4179,
+        &session.id,
+        "gwt-execute",
+        false,
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: selected.session_id.unwrap(),
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+        ok: false, reason: Some(reason), ..
+    } if reason.contains("execution holder")),
+        "{events:?}"
+    );
+    assert!(runtime.window_lookup.contains_key(window_id));
+    gwt::cli::execution_state::settle(
+        &project,
+        &session.id,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: session.id,
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(
+            &events[0].event,
+            BackendEvent::FleetPaneCloseResult { ok: true, .. }
+        ),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_protects_claim_acquired_after_inventory() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    let window_id = "tab-1::other-window";
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let selected = runtime
+        .agent_fleet_pane_inventory(&principal)
+        .into_iter()
+        .find(|pane| pane.window_id == window_id)
+        .unwrap();
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        |prefs| {
+            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+                issue_number: 4179,
+                window_id: window_id.into(),
+            });
+        },
+    )
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: selected.session_id.unwrap(),
+            child_pid: selected.child_pid,
+            child_started_at: selected.child_started_at,
+        },
+    );
+    assert!(
+        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+        ok: false, reason: Some(reason), ..
+    } if reason.contains("claim holder")),
+        "{events:?}"
+    );
+    assert!(runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_refuses_busy_lifecycle_fence_and_recovers() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    let window_id = "tab-1::other-window";
+    let request = || AgentFrontendRequest::CloseFleetPane {
+        request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+        id: window_id.into(),
+        session_id: "other-session".into(),
+        child_pid: None,
+        child_started_at: None,
+    };
+    gwt::cli::trusted_store::with_write_lease(&project, || {
+        let events = runtime.handle_agent_frontend_event(
+            "close-client".into(),
+            AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+            request(),
+        );
+        assert!(
+            matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
+            ok: false, reason: Some(reason), ..
+        } if reason.contains("lease") && reason.contains("retry")),
+            "{events:?}"
+        );
+        assert!(runtime.window_lookup.contains_key(window_id));
+        Ok(())
+    })
+    .unwrap();
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
+        request(),
+    );
+    assert!(
+        matches!(
+            &events[0].event,
+            BackendEvent::FleetPaneCloseResult { ok: true, .. }
+        ),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
+fn fleet_pane_close_matches_absent_runtime_without_wildcards() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, mut runtime, _) = pm_wake_fixture(&temp);
+    fleet_target_session(&project, &mut runtime);
+    runtime
+        .tab_mut("tab-1")
+        .unwrap()
+        .workspace
+        .set_status("other-window", WindowProcessStatus::Stopped);
+    let window_id = "tab-1::other-window";
+    assert!(!runtime.runtimes.contains_key(window_id));
+    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
+    let inventory = runtime.agent_fleet_pane_inventory(&principal);
+    assert!(
+        !inventory
+            .iter()
+            .find(|pane| pane.window_id == window_id)
+            .unwrap()
+            .runtime_present
+    );
+    let events = runtime.handle_agent_frontend_event(
+        "close-client".into(),
+        principal,
+        AgentFrontendRequest::CloseFleetPane {
+            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+            id: window_id.into(),
+            session_id: "other-session".into(),
+            child_pid: None,
+            child_started_at: None,
+        },
+    );
+    assert!(
+        matches!(
+            &events[0].event,
+            BackendEvent::FleetPaneCloseResult { ok: true, .. }
+        ),
+        "{events:?}"
+    );
+    assert!(!runtime.window_lookup.contains_key(window_id));
+}
+
+#[test]
 fn recover_restored_window_protects_replacement_and_normal_launches() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -435,7 +792,9 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
     let mut session = gwt_agent::Session::new(&project, "work/test", gwt_agent::AgentId::Codex);
     tab.workspace
         .set_session_id("agent-1", Some(session.id.clone()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     session.save(&runtime.sessions_dir).expect("save session");
     let principal = AgentSessionPrincipal::for_test(&project, "pm-session").expect("principal");
     let window_id = "tab-1::agent-1";
@@ -549,20 +908,43 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
         request(&session.id),
     );
     assert!(
-        matches!(
-            events.first(),
-            Some(OutboundEvent {
-                event: BackendEvent::PaneCloseResult {
-                    ok: true,
-                    reason: None,
-                    ..
-                },
-                ..
-            })
-        ),
-        "{events:?}"
+        !events
+            .iter()
+            .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })),
+        "recovery must wait for process exit: {events:?}"
     );
     assert!(!runtime.window_lookup.contains_key(window_id));
+    let queued = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect::<Vec<_>>();
+    assert_eq!(queued.len(), 1, "only the proven restore queues teardown");
+    for finalizer in queued {
+        finalizer();
+    }
+    let recorded = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let replies = recorded
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => Some(events),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| {
+            matches!(event, OutboundEvent {
+        target: DispatchTarget::Client(client_id),
+        event: BackendEvent::PaneCloseResult { ok: true, window_id: closed, reason: None },
+        ..
+    } if client_id == "pane-client" && closed == window_id)
+        })
+        .count();
+    assert_eq!(
+        replies, 1,
+        "the completed restore close replies once to its requesting client"
+    );
 }
 
 /// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
@@ -803,7 +1185,8 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
         .map(|window| combined_window_id("tab-project", &window.id))
         .collect();
     assert_eq!(window_ids.len(), 4, "AC-1 requires four live panes");
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     let mut children = Vec::new();
     let mut worker_releases = Vec::new();
     let (worker_done, workers_done) = mpsc::channel();
@@ -842,14 +1225,11 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
             },
         );
         assert!(
-            matches!(
-                closed.first(),
-                Some(OutboundEvent {
-                    event: BackendEvent::PaneCloseResult { ok: true, .. },
-                    ..
-                })
-            ),
-            "live PTY close must answer ok, got: {closed:?}"
+            closed.iter().all(|event| !matches!(
+                event.event,
+                BackendEvent::PaneCloseResult { ok: true, .. }
+            )),
+            "live PTY close must defer success until teardown: {closed:?}"
         );
         assert!(
             !runtime.window_lookup.contains_key(window_id),
@@ -876,6 +1256,19 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
             .recv_timeout(Duration::from_secs(20))
             .expect("close fixture worker exited");
     }
+    // test-hygiene: allow-wall-clock-deadline Observe the asynchronous close-completion events after releasing the real PTY finalizers.
+    wait_for_recorded_event("deferred peer close results", &recorded, |events| {
+        events
+            .iter()
+            .filter_map(|event| match recorded_project_payload(event) {
+                UserEvent::Dispatch(events) => Some(events),
+                _ => None,
+            })
+            .flatten()
+            .filter(|event| matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. }))
+            .count()
+            == window_ids.len()
+    });
     drop(children);
 }
 
@@ -904,12 +1297,44 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
         .iter()
         .map(|window| combined_window_id("tab-project", &window.id))
         .collect::<Vec<_>>();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let mut ptys = Vec::new();
+    let child_file = project.join("close-child.pid");
+    let mut child_guard = None;
     for (index, window_id) in window_ids.iter().enumerate() {
-        insert_test_pane_runtime(&mut runtime, window_id);
+        if index == 0 {
+            let (command, args) = if cfg!(windows) {
+                ("powershell", vec!["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process ping -ArgumentList '-n','61','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $env:GWT_TEST_CHILD_PID -Value $child.Id; Wait-Process -Id $child.Id"])
+            } else {
+                (
+                    "/bin/sh",
+                    vec![
+                        "-c",
+                        "sleep 60 & printf '%s' \"$!\" > \"$GWT_TEST_CHILD_PID\"; wait",
+                    ],
+                )
+            };
+            let pane = Pane::new(
+                window_id.clone(),
+                command.into(),
+                args.into_iter().map(str::to_owned).collect(),
+                80,
+                24,
+                HashMap::from([(
+                    "GWT_TEST_CHILD_PID".into(),
+                    child_file.display().to_string(),
+                )]),
+                Some(project.clone()),
+            )
+            .unwrap();
+            child_guard = Some(TestPaneGuard::new(&pane));
+            insert_test_pane_runtime_with_pane(&mut runtime, window_id, pane);
+        } else {
+            insert_test_pane_runtime(&mut runtime, window_id);
+        }
         ptys.push(
             runtime
                 .runtimes
@@ -933,6 +1358,28 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
             },
         );
     }
+    // test-hygiene: allow-wall-clock-deadline Bound the real descendant's startup; the PID file establishes ordering.
+    let child_deadline = Instant::now() + Duration::from_secs(15);
+    let child_pid = loop {
+        if let Some(pid) = fs::read_to_string(&child_file)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bound actual OS PID publication, not relative scheduling.
+            Instant::now() < child_deadline,
+            "descendant PID not published"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    #[cfg(windows)]
+    assert_eq!(
+        gwt::process::host_process_liveness(child_pid),
+        Some(true),
+        "the descendant must be running before close"
+    );
     let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
     // Issue #3777 AC-3: `active_work_projection_for_tab` no longer decodes the
     // projection inline — it schedules the background prepare and returns
@@ -969,13 +1416,13 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
                 responder: None,
             },
         );
-        assert!(matches!(
-            events.first(),
-            Some(OutboundEvent {
-                event: BackendEvent::PaneCloseResult { ok: true, .. },
-                ..
-            })
-        ));
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event,
+                BackendEvent::PaneCloseResult { ok: true, .. }
+            )),
+            "queued teardown cannot report a completed close"
+        );
         final_projection = events.iter().find_map(|event| match &event.event {
             BackendEvent::ActiveWorkProjectionPatch { projection } => Some(projection.clone()),
             _ => None,
@@ -1035,6 +1482,52 @@ fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() 
             .all(|pty| pty.try_wait().expect("probe reaped child").is_some()),
         "every finalizer must terminate and reap its detached PTY"
     );
+    let recorded = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let replies = recorded
+        .iter()
+        .filter_map(|event| match recorded_project_payload(event) {
+            UserEvent::Dispatch(events) => Some(events),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| {
+            matches!(&event.target, DispatchTarget::Client(id) if id == "pane-client")
+                && matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. })
+        })
+        .count();
+    assert_eq!(
+        replies,
+        window_ids.len(),
+        "each reaped peer close receives one final result"
+    );
+    drop(recorded);
+    // Windows snapshots can retain a terminated process object with status Run.
+    // Observe the native process signal immediately, without waiting after success.
+    #[cfg(windows)]
+    assert_eq!(
+        gwt::process::host_process_liveness(child_pid),
+        Some(false),
+        "a successful peer close must leave descendant {child_pid} terminated"
+    );
+    #[cfg(unix)]
+    {
+        let mut system = sysinfo::System::new();
+        let child = sysinfo::Pid::from_u32(child_pid);
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[child]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        assert!(
+            system
+                .process(child)
+                .is_none_or(|process| process.status() == sysinfo::ProcessStatus::Zombie),
+            "a successful peer close must leave no running descendant"
+        );
+    }
+    drop(child_guard);
 }
 
 /// Issue #3783: closing a whole project tab is the same accepted lifecycle
@@ -2010,7 +2503,8 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
         .workspace
         .set_session_id("agent-project", Some("session-holder".to_string())));
     let window_id = "tab-project::agent-project".to_string();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     let holder_identity = install_manual_launch_holder(
@@ -2079,13 +2573,13 @@ fn agent_pane_close_bypasses_a_contended_pane_lock() {
     let terminal_proof = gwt_agent::SessionRuntimeState::load(&runtime_path)
         .expect("completed finalizer must persist terminal proof");
     assert_eq!(terminal_proof.status, gwt_agent::AgentStatus::Stopped);
-    assert!(matches!(
-        events.first(),
-        Some(OutboundEvent {
-            event: BackendEvent::PaneCloseResult { ok: true, .. },
-            ..
-        })
-    ));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
+    assert!(recorded.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|event| match recorded_project_payload(event) {
+        UserEvent::Dispatch(events) => events.iter().any(|event| matches!(&event.event, BackendEvent::PaneCloseResult { ok: true, window_id: closed, .. } if closed == &window_id)),
+        _ => false,
+    }));
     assert!(!runtime.runtimes.contains_key(&window_id));
     assert!(!runtime.window_lookup.contains_key(&window_id));
     let kill_log = logs
@@ -2292,6 +2786,72 @@ fn agent_pane_close_removes_husk_window_missing_from_lookup() {
 }
 
 #[test]
+fn agent_pane_close_removes_restored_session_husk_without_claiming_tree_exit() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("project");
+    let mut tab = sample_project_tab_with_window_at(
+        "tab-project",
+        "agent-husk",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
+    );
+    assert!(tab
+        .workspace
+        .set_session_id("agent-husk", Some("restored-session".to_string())));
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    runtime.window_lookup.remove("tab-project::agent-husk");
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
+
+    let events = runtime.handle_agent_frontend_event(
+        "pane-client".to_string(),
+        principal,
+        AgentFrontendRequest::CloseWindow {
+            id: "tab-project::agent-husk".to_string(),
+            request_id: None,
+            responder: None,
+        },
+    );
+
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
+    assert!(runtime
+        .tab("tab-project")
+        .expect("project tab")
+        .workspace
+        .window("agent-husk")
+        .is_none());
+    let queued = finalizers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain(..)
+        .collect::<Vec<_>>();
+    assert_eq!(queued.len(), 1);
+    for finalizer in queued {
+        finalizer();
+    }
+    let recorded = recorded
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(recorded.iter().any(|event| match recorded_project_payload(event) {
+        UserEvent::Dispatch(events) => events.iter().any(|event| matches!(event,
+            OutboundEvent {
+                target: DispatchTarget::Client(client_id),
+                event: BackendEvent::PaneCloseResult { ok: false, window_id, reason: Some(reason) },
+                ..
+            } if client_id == "pane-client" && window_id == "tab-project::agent-husk" && reason.contains("not confirmed")
+        )),
+        _ => false,
+    }));
+}
+
+#[test]
 fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -2477,13 +3037,7 @@ fn current_peer_pane_close_releases_caller_grant_lock_before_target_handoff() {
     assert!(matches!(
         close,
         super::super::AgentFrontendDispatchOutcome::Dispatched(ref events)
-            if matches!(
-                events.first(),
-                Some(OutboundEvent {
-                    event: BackendEvent::PaneCloseResult { ok: true, .. },
-                    ..
-                })
-            )
+            if !events.is_empty() && !events.iter().any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. }))
     ));
     assert!(matches!(
         reclose,
@@ -2678,6 +3232,12 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
     for window_id in [&caller_window_id, &target_window_id] {
         insert_test_pane_runtime(&mut app, window_id);
     }
+    let target_pty = Arc::clone(
+        &app.runtimes
+            .get(&target_window_id)
+            .expect("target runtime")
+            .pty,
+    );
     let caller_pane = app
         .runtimes
         .get(&caller_window_id)
@@ -2767,24 +3327,36 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
                     .position(|event| {
                         matches!(
                             recorded_project_payload(event),
-                            UserEvent::AgentFrontend { .. }
+                            UserEvent::AgentFrontend { .. } | UserEvent::Dispatch(_)
                         )
                     })
                     .map(|position| events.remove(position))
             };
-            let Some(UserEvent::AgentFrontend {
-                client_id,
-                grant,
-                request,
-            }) = event
-            else {
+            let Some(event) = event.and_then(|event| app.accept_project_completion(event)) else {
                 // test-hygiene: allow-short-duration bounded event-driver and OS process-exit polling; observed event/state establishes ordering, not this interval
                 thread::sleep(Duration::from_millis(1));
                 continue;
             };
-            let outcome =
-                app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
-            crate::apply_agent_frontend_dispatch_outcome(&driver_clients, &client_id, outcome);
+            match event {
+                UserEvent::AgentFrontend {
+                    client_id,
+                    grant,
+                    request,
+                } => {
+                    let outcome = app.handle_agent_frontend_event_if_current(
+                        client_id.clone(),
+                        grant,
+                        request,
+                    );
+                    crate::apply_agent_frontend_dispatch_outcome(
+                        &driver_clients,
+                        &client_id,
+                        outcome,
+                    );
+                }
+                UserEvent::Dispatch(events) => driver_clients.dispatch(events),
+                _ => unreachable!("selected agent or completion dispatch"),
+            }
         }
         app
     });
@@ -2824,19 +3396,8 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
             ))
             .await
             .expect("send peer close");
-        let close = next_test_agent_websocket_event(
-            &mut socket,
-            "pane_close_result",
-            Duration::from_millis(400),
-        )
-        .await;
-        assert_eq!(close["ok"], true);
-        assert_eq!(close["window_id"], target_window_id);
-        assert!(
-            close_started.elapsed() < Duration::from_millis(400),
-            "real WebSocket peer close exceeded the bridge budget"
-        );
-
+        // Agent sockets receive client replies, not project broadcasts. Keep
+        // the seeded scope until re-close has exercised the removed target.
         let reclose_started = Instant::now();
         socket
             .send(WebSocketMessage::Text(
@@ -2853,6 +3414,11 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         )
         .await;
         assert_eq!(reclose["ok"], false);
+        assert_eq!(reclose["window_id"], target_window_id);
+        assert!(
+            close_started.elapsed() < Duration::from_millis(400),
+            "real WebSocket close and re-close exceeded the bridge budget"
+        );
         assert!(
             reclose_started.elapsed() < Duration::from_millis(400),
             "real WebSocket failed peer re-close exceeded the bridge budget"
@@ -2876,6 +3442,36 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
         assert!(listed_windows
             .iter()
             .all(|window| window["id"] != target_window_id));
+
+        let queued = finalizers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            queued.len(),
+            1,
+            "the accepted peer close owns one background finalizer"
+        );
+        tokio::task::spawn_blocking(move || {
+            for finalizer in queued {
+                finalizer();
+            }
+        })
+        .await
+        .expect("join peer close finalizer");
+        let close = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            Duration::from_secs(15),
+        )
+        .await;
+        assert_eq!(close["ok"], true);
+        assert_eq!(close["window_id"], target_window_id);
+        assert!(target_pty
+            .try_wait()
+            .expect("peer PTY exit confirmed")
+            .is_some());
 
         socket
             .send(WebSocketMessage::Text(
@@ -2927,18 +3523,9 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len(),
-        1,
-        "the accepted peer close owns one background finalizer"
+        0,
+        "the peer close finalizer already completed before success"
     );
-    let queued = {
-        let mut finalizers = finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        finalizers.drain(..).collect::<Vec<_>>()
-    };
-    for finalizer in queued {
-        finalizer();
-    }
     app.stop_window_runtime_without_session_projection(&caller_window_id);
     let cleanup_deadline = Instant::now() + Duration::from_secs(5);
     while gwt::process::exact_pty_process_tree_is_alive(caller_child_pid, caller_child_started_at) {

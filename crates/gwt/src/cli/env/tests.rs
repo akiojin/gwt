@@ -1059,13 +1059,13 @@ fn test_env_records_io_and_pr_side_effects() {
     );
     assert_eq!(env.fetch_pr_review_threads(7).expect("threads").len(), 3);
     assert_eq!(
-        env.reply_and_resolve_pr_review_threads(7, "done")
+        env.reply_and_resolve_pr_review_threads(7, "done", None)
             .expect("reply"),
         2
     );
     assert_eq!(
         env.pr_reply_and_resolve_call_log,
-        vec![(7, "done".to_string())]
+        vec![(7, "done".to_string(), None)]
     );
 
     env.seed_pr_checks(
@@ -1950,7 +1950,7 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
         assert_eq!(threads[0].path, "src/lib.rs");
 
         assert_eq!(
-            env.reply_and_resolve_pr_review_threads(12, "done")
+            env.reply_and_resolve_pr_review_threads(12, "done", None)
                 .expect("reply and resolve"),
             1
         );

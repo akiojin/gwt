@@ -2451,13 +2451,11 @@ impl ProjectTabRuntime {
     }
 }
 
-/// Whether a GUI-local Issue Monitor pass may refresh the read-only cache.
-/// Successful daemon controls do not run a local pass at all: the daemon is the
-/// sole writer and broadcasts the committed projection. When publication is
-/// unavailable, `Scan` preserves the GUI's read model without granting Unix
-/// GUI code authority to execute remote effects.
+/// GUI-local controls project cached state; background workers own scans.
+/// Tests retain the legacy full pass to exercise scan/commit reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IssueMonitorScanPolicy {
+    #[cfg(test)]
     Scan,
     CacheOnly,
 }
@@ -4466,6 +4464,9 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                 .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
         );
         latest.refresh_agent_capacity(project_root);
+        // The disk-authoritative rebase precedes this background preparation.
+        // Observe here so recovery uses the sample that will actually persist.
+        gwt::issue_monitor_worker::refresh_issue_monitor_child_activity(latest, project_root, now);
         latest.expire_stale_unbound_launches(now);
         // Retire exact dead terminal holders before duplicate-binding repair
         // can mistake their displaced projections for unfinished work.
@@ -6874,7 +6875,8 @@ impl AppRuntime {
                     // agent must be running to be refused), and the daemon
                     // rejects it, so nothing committed.
                     Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => false,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                    | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                     | Some(gwt::IssueMonitorFailure::Termination { .. }) => false,
                     None => delivery_id.is_none_or(|delivery_id| {
                         project_root.is_some_and(|project_root| {
@@ -6915,7 +6917,8 @@ impl AppRuntime {
                         Some(gwt::IssueMonitorFailure::ProviderUsageLimit { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
-                        Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                        Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                         | Some(gwt::IssueMonitorFailure::Termination { .. }) => {
                             IssueMonitorFailureCommit::Rejected
                         }
@@ -7996,6 +7999,16 @@ impl AppRuntime {
                                     }
                                 }
                             }
+                            Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { provider }) => {
+                                let Some(issue_number) = issue_number else {
+                                    return IssueMonitorFailureCommit::Rejected;
+                                };
+                                if monitor.try_escalate_provider_auth_notice(issue_number, window_id, provider) {
+                                    IssueMonitorFailureCommit::Committed(Some(issue_number))
+                                } else {
+                                    IssueMonitorFailureCommit::Rejected
+                                }
+                            }
                             Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt) => {
                                 let Some(issue_number) = issue_number else {
                                     return IssueMonitorFailureCommit::Rejected;
@@ -8052,7 +8065,8 @@ impl AppRuntime {
             Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_))
                 if matches!(
                     failure,
-                    Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
+                    Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired { .. })
+                        | Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt)
                 ) =>
             {
                 PreparedIssueMonitorAgentFailure::Rejected
@@ -8800,12 +8814,38 @@ impl AppRuntime {
         client_id: Option<&str>,
         apply: impl FnOnce(&mut gwt::IssueMonitorState),
     ) -> Vec<OutboundEvent> {
-        let policy = if cfg!(unix) {
-            IssueMonitorScanPolicy::CacheOnly
-        } else {
-            IssueMonitorScanPolicy::Scan
-        };
-        self.local_issue_monitor_events_with_policy(context, client_id, policy, apply)
+        let mut events = self.local_issue_monitor_events_with_policy(
+            context,
+            client_id,
+            IssueMonitorScanPolicy::CacheOnly,
+            apply,
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root);
+        let window_snapshot = self.issue_monitor_window_snapshot_for_tab(&context.tab_id, &now);
+        match self.enqueue_issue_monitor_scan_worker(
+            &context.project_root,
+            &prefs_path,
+            &context.tab_id,
+            &now,
+            Vec::new(),
+            window_snapshot,
+        ) {
+            Ok(()) | Err(IssueMonitorScanEnqueueError::AlreadyInFlight) => {}
+            Err(IssueMonitorScanEnqueueError::WorkerUnavailable(error)) => {
+                events.extend(self.issue_monitor_project_notification(
+                    Some(&context.project_root),
+                    BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
+                        notification_transition_id: None,
+                        level: "error".to_string(),
+                        message: format!("Issue Monitor scheduled worker could not start: {error}"),
+                        issue_number: None,
+                    },
+                ));
+            }
+        }
+        events
     }
 
     fn enqueue_issue_monitor_max_active(
@@ -9564,7 +9604,7 @@ impl AppRuntime {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project_root);
         let source_repository = {
             let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                std::time::Instant::now() + local_issue_monitor_fallback_projection_timeout(),
             );
             Self::local_issue_monitor_source_repository(&project_root)
         };
@@ -12149,6 +12189,7 @@ impl AppRuntime {
             | FrontendEvent::UpdateTerminalGrid { id, .. }
             | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
+            | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
@@ -12503,6 +12544,7 @@ impl AppRuntime {
             | FrontendEvent::UpdateTerminalGrid { id, .. }
             | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
+            | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
             | FrontendEvent::StopWindow { id, .. }
             | FrontendEvent::RestartWindow { id, .. }
@@ -12578,6 +12620,7 @@ impl AppRuntime {
             FrontendEvent::SetIssueMonitorEnabled { .. }
                 | FrontendEvent::SetIssueMonitorAutonomousMode { .. }
                 | FrontendEvent::IssueMonitorProfilesSet { .. }
+                | FrontendEvent::GetIssueMonitorProfiles
                 | FrontendEvent::SetIssueMonitorMaxActiveAgents { .. }
                 | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
                 | FrontendEvent::ReorderIssueMonitorIssues { .. }
@@ -12618,7 +12661,9 @@ impl AppRuntime {
                     return Vec::new();
                 }
             }
-            self.invalidate_issue_monitor_list(&context.project_root);
+            if !matches!(event, FrontendEvent::GetIssueMonitorProfiles) {
+                self.invalidate_issue_monitor_list(&context.project_root);
+            }
         }
         match event {
             FrontendEvent::ProjectAggregateAck {
@@ -12795,6 +12840,7 @@ impl AppRuntime {
                     self.list_windows_event_for_project(context),
                 )]
             }
+            FrontendEvent::ListFleetPanes => Vec::new(),
             FrontendEvent::UpdateWindowGeometry {
                 id,
                 geometry,
@@ -12809,6 +12855,18 @@ impl AppRuntime {
                 base_geometry_revision,
             ),
             FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
+            FrontendEvent::CloseFleetPane { request_id, id, .. } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::FleetPaneCloseResult {
+                    request_id,
+                    ok: false,
+                    window_id: id,
+                    reason: Some(
+                        "fleet close requires an authenticated agent WebSocket principal"
+                            .to_string(),
+                    ),
+                },
+            )],
             FrontendEvent::RecoverRestoredWindow { id, .. } => vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneCloseResult {
@@ -13785,7 +13843,8 @@ impl AppRuntime {
                     },
                 ))
             }
-            request @ AgentFrontendRequest::RecoverRestoredWindow { .. } => {
+            request @ (AgentFrontendRequest::RecoverRestoredWindow { .. }
+            | AgentFrontendRequest::CloseFleetPane { .. }) => {
                 // Recovery uses peer teardown too: release the capability
                 // registry read lock before closing the target window.
                 let Some(principal) = issuer.accept_current_grant(&grant) else {
@@ -13839,6 +13898,13 @@ impl AppRuntime {
                     WorktreeFormProjection::Persisted,
                 )]
             }
+            AgentFrontendRequest::ListFleetPanes => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::FleetPaneList {
+                    project_root: principal.canonical_project_root().display().to_string(),
+                    panes: self.agent_fleet_pane_inventory(&principal),
+                },
+            )],
             AgentFrontendRequest::CloseWork {
                 work_id,
                 close_kind,
@@ -13913,15 +13979,152 @@ impl AppRuntime {
                 if let Some(reason) = self.agent_close_board_check(&principal, &id) {
                     return refusal(&reason);
                 }
-                let outcome = self.close_window_outcome(&id);
+                let outcome = self.close_peer_window_outcome(&id, client_id.clone());
                 let reason = (!outcome.closed)
                     .then(|| "the backend did not remove the window record".to_string());
+                let mut events = Vec::new();
+                if !outcome.reply_deferred {
+                    events.push(OutboundEvent::reply(
+                        client_id,
+                        BackendEvent::PaneCloseResult {
+                            ok: outcome.closed,
+                            window_id: id,
+                            reason,
+                        },
+                    ));
+                }
+                events.extend(outcome.events);
+                events
+            }
+            AgentFrontendRequest::CloseFleetPane {
+                request_id,
+                id,
+                session_id,
+                child_pid,
+                child_started_at,
+            } => {
+                let refusal = |reason: &str| {
+                    vec![OutboundEvent::reply(
+                        client_id.clone(),
+                        BackendEvent::FleetPaneCloseResult {
+                            request_id: request_id.clone(),
+                            ok: false,
+                            window_id: id.clone(),
+                            reason: Some(reason.to_string()),
+                        },
+                    )]
+                };
+                if !self.agent_principal_authorizes_window(&principal, &id) {
+                    return refusal("window is outside the authenticated project scope");
+                }
+                let prefs = gwt::pm_registry::load_pm_prefs(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(
+                        principal.canonical_project_root(),
+                    ),
+                );
+                let registered_pm = prefs.is_ok_and(|prefs| {
+                    prefs.registration.is_some_and(|registration| {
+                        registration.session_id == principal.session_id()
+                            && self.live_pm_window_id(principal.session_id()).is_some()
+                    })
+                });
+                if !registered_pm {
+                    return refusal("fleet close requires the live registered PM");
+                }
+                let actual_session = self
+                    .window_lookup
+                    .get(&id)
+                    .and_then(|address| self.tab(&address.tab_id).map(|tab| (tab, address)))
+                    .and_then(|(tab, address)| tab.workspace.window(&address.raw_id))
+                    .and_then(|window| window.session_id.as_deref());
+                if session_id.is_empty() || actual_session != Some(session_id.as_str()) {
+                    return refusal("window session changed since fleet planning");
+                }
+                let runtime_matches = match (self.runtimes.get(&id), child_pid, child_started_at) {
+                    (None, None, None) => true,
+                    (Some(runtime), Some(pid), Some(started_at)) => {
+                        runtime.pty.process_id() == Some(pid)
+                            && gwt::process::host_process_start_time(pid) == Some(started_at)
+                    }
+                    _ => false,
+                };
+                if !runtime_matches {
+                    return refusal(
+                        "window runtime changed or is unavailable; refresh fleet inventory",
+                    );
+                }
+                if session_id == principal.session_id() {
+                    return refusal("fleet close cannot close the calling PM session");
+                }
+                if let Some(reason) = self.agent_close_board_check(&principal, &id) {
+                    return refusal(&reason);
+                }
+                let worktree = self
+                    .active_agent_sessions
+                    .get(&id)
+                    .filter(|active| active.session_id == session_id)
+                    .map(|active| active.worktree_path.clone())
+                    .or_else(|| {
+                        gwt_agent::Session::load(
+                            &self.sessions_dir.join(format!("{session_id}.toml")),
+                        )
+                        .ok()
+                        .map(|session| session.worktree_path)
+                    })
+                    .unwrap_or_else(|| principal.canonical_project_root().to_path_buf());
+                let sessions_dir = self.sessions_dir.clone();
+                let prefs_path =
+                    gwt::issue_monitor_prefs_path_for_repo_path(principal.canonical_project_root());
+                // Session/runtime replacement is serialized by this event loop.
+                // External lifecycle and claim writers share these disk fences.
+                let outcome = gwt::cli::execution_state::with_fleet_cleanup_lease(
+                    &worktree,
+                    &sessions_dir,
+                    Some(&session_id),
+                    || {
+                        let _claim_fence =
+                            gwt_core::operation_deadline::NamedFileLock::try_acquire(
+                                &prefs_path.with_extension("lock"),
+                                "fleet.close",
+                            )?;
+                        let prefs = gwt::load_issue_monitor_prefs(&prefs_path)?;
+                        let same_window = |candidate: &str| {
+                            candidate == id
+                                || (!candidate.contains("::")
+                                    && id.split_once("::").is_some_and(|(_, raw)| raw == candidate))
+                        };
+                        if prefs
+                            .launched_issues
+                            .iter()
+                            .any(|row| same_window(&row.window_id))
+                            || prefs
+                                .launch_confirmations
+                                .iter()
+                                .any(|(owner, confirmation)| {
+                                    same_window(&confirmation.window_id)
+                                        && confirmation.claim_id.as_ref().is_some_and(|claim| {
+                                            prefs.launched_claims.get(owner) == Some(claim)
+                                        })
+                                })
+                        {
+                            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                                "current claim holder is protected; use its owner lifecycle operation"));
+                        }
+                        Ok(self.close_window_outcome(&id))
+                    },
+                );
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => return refusal(&format!("fleet close retained target: {error}; refresh fleet inventory before retry")),
+                };
                 let mut events = vec![OutboundEvent::reply(
                     client_id,
-                    BackendEvent::PaneCloseResult {
+                    BackendEvent::FleetPaneCloseResult {
+                        request_id,
                         ok: outcome.closed,
                         window_id: id,
-                        reason,
+                        reason: (!outcome.closed)
+                            .then(|| "the backend did not remove the window record".to_string()),
                     },
                 )];
                 events.extend(outcome.events);
@@ -14411,6 +14614,64 @@ impl AppRuntime {
             },
         ));
         events
+    }
+
+    fn agent_fleet_pane_inventory(
+        &self,
+        principal: &AgentSessionPrincipal,
+    ) -> Vec<gwt::protocol::FleetPaneView> {
+        self.tabs
+            .iter()
+            .filter(|tab| principal.authorizes_project_root(&tab.project_root))
+            .flat_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .filter(|window| window.preset.requires_process())
+                    .map(move |window| {
+                        let window_id = combined_window_id(&tab.id, &window.id);
+                        let child_pid = self
+                            .runtimes
+                            .get(&window_id)
+                            .and_then(|runtime| runtime.pty.process_id());
+                        let child_started_at =
+                            child_pid.and_then(gwt::process::host_process_start_time);
+                        let session = window
+                            .session_id
+                            .as_deref()
+                            .and_then(|id| self.launch_wizard_cache.session_by_id(id));
+                        let worktree_path = self
+                            .active_agent_sessions
+                            .get(&window_id)
+                            .filter(|active| {
+                                Some(active.session_id.as_str()) == window.session_id.as_deref()
+                            })
+                            .map(|active| &active.worktree_path)
+                            .or_else(|| session.map(|session| &session.worktree_path))
+                            .unwrap_or(&tab.project_root);
+                        gwt::protocol::FleetPaneView {
+                            project_root: tab.project_root.display().to_string(),
+                            runtime_present: self.runtimes.contains_key(&window_id),
+                            child_pid,
+                            child_started_at,
+                            title: window.title.clone(),
+                            state: self.window_status(&window_id).unwrap_or(window.status),
+                            agent_name: window.agent_name.clone(),
+                            preset: window.preset,
+                            worktree_path: worktree_path.display().to_string(),
+                            linked_issue_number: window.linked_issue_number.or_else(|| {
+                                session.and_then(|session| session.linked_issue_number)
+                            }),
+                            is_pm: self
+                                .pm_session_for_root(&tab.project_root)
+                                .is_some_and(|pm| window.session_id.as_ref() == Some(pm)),
+                            session_id: window.session_id.clone(),
+                            window_id,
+                        }
+                    })
+            })
+            .collect()
     }
 
     fn agent_workspace_state_reply(

@@ -58,15 +58,17 @@ const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
 /// acknowledgement.
 const PM_DELIVERY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// The one reason text for a delivery whose acknowledgement never arrived.
-/// Both the body and its submit terminator reached the pane on this path, so
-/// it must not claim the body is staged (Issue #3608 AC-3); the durable
-/// receipt stays the authority, which is why a fresh operation is the wrong
-/// response.
-const PM_DELIVERY_UNVERIFIED_REASON: &str =
-    "PM pane submit was not acknowledged within the delivery window; the prompt was written and \
-     submitted to the pane, and the durable receipt records the final outcome — do not retry with \
-     a new operation";
+/// A physical write does not prove that the target started a turn. In the
+/// original idle-pane failure the body stayed in the composer after submit
+/// was dropped. Keep the operation identity; never stage its body again.
+const PM_DELIVERY_UNCONFIRMED_REASON: &str =
+    "PM pane delivery was not acknowledged; the prompt may still be unsent. Recheck the same \
+     operation_id with the same target and text, never a new operation. Submit-only recovery \
+     requires the original fully written body and unchanged target input";
+
+const PM_DELIVERY_LOST_REASON: &str =
+    "The original target session is unavailable for submit recovery. Turn start remains \
+     unconfirmed; a late exact acknowledgement can still confirm this same operation";
 
 /// Wait for the target Session's acknowledgement to reach the durable receipt,
 /// and report the operation's latest durable status.
@@ -90,8 +92,12 @@ fn await_pm_delivery_status(
             .map_err(|error| format!("PM delivery receipt is unavailable: {error}"))?
             .map(|receipt| receipt.status)
             .unwrap_or(pm_registry::PmDeliveryReceiptStatus::Prepared);
-        if status != pm_registry::PmDeliveryReceiptStatus::Prepared
-            || Instant::now() >= poll_deadline
+        if matches!(
+            status,
+            pm_registry::PmDeliveryReceiptStatus::Verified
+                | pm_registry::PmDeliveryReceiptStatus::Refused
+                | pm_registry::PmDeliveryReceiptStatus::Lost
+        ) || Instant::now() >= poll_deadline
         {
             return Ok(status);
         }
@@ -110,12 +116,7 @@ const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
     height: 520.0,
 };
 
-/// Bootstrap prompt: invokes the materialized gwt-pm guidance skill.
-///
-/// Issue #3965: the restore path rebuilds a launch config from structured
-/// `Session` fields, so it re-applies this from here rather than recovering it
-/// out of the persisted `launch_args`.
-pub(super) const PM_BOOTSTRAP_PROMPT: &str = "$gwt-pm";
+pub(super) use gwt::pm_registry::PM_BOOTSTRAP_PROMPT;
 
 /// SPEC-3431 T-093 (FR-012): a wake the monitor-event path decided on — which
 /// pane receives the prompt and what it says. The window id is only ever the
@@ -1862,15 +1863,17 @@ impl AppRuntime {
                     })
             },
         );
-        let expected_pty = if target_is_live_agent {
-            self.pty_writers.read().ok().and_then(|writers| {
-                writers
-                    .get(window_id)
-                    .map(|entry| Arc::clone(&entry.handle))
-            })
+        let expected_entry = if target_is_live_agent {
+            self.pty_writers
+                .read()
+                .ok()
+                .and_then(|writers| writers.get(window_id).cloned())
         } else {
             None
         };
+        let expected_pty = expected_entry
+            .as_ref()
+            .map(|entry| Arc::clone(&entry.handle));
 
         let operation_id = operation_id.to_string();
         let window_id = window_id.to_string();
@@ -1960,6 +1963,171 @@ impl AppRuntime {
                 pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared)
                     .map_err(|error| format!("PM delivery receipt Prepared commit failed: {error}"))
             });
+            let mut replay_attempted = false;
+            let mut readback_only = false;
+            let mut target_lost = false;
+            // A receipt alone never proves that its body is still in this
+            // composer. Keep a generation-local guard only after a full body
+            // write, consumed by one bounded submit-only recovery.
+            let mut drive_pane = |payload: &str, replay: Option<crate::PmDeliveryReplayGuard>| {
+                let delivery_target_session_id = durable_target_session_id
+                    .clone()
+                    .expect("Prepared PM delivery has a target Session");
+                let expected_pty = expected_pty.as_ref().ok_or_else(||
+                    "pm.message.send refused: target is not an authorized live agent pane".to_string())?;
+                let ordinary_revision = replay.as_ref().map(|guard| guard.ordinary_revision)
+                    .or_else(|| expected_pty.ordinary_input_revision())
+                    .ok_or_else(|| "PM input revision is unavailable; readback-only".to_string())?;
+                if expected_pty.ordinary_input_revision() != Some(ordinary_revision)
+                    || expected_pty.has_unsent_user_input() {
+                    return Err("PM input changed; readback-only recovery".to_string());
+                }
+                let reservation = Arc::clone(expected_pty)
+                    .reserve_input_transaction()
+                    .map_err(|error| {
+                        format!("PM pane input transaction unavailable: {error}")
+                    })?;
+                if replay.as_ref().is_some_and(|guard|
+                    reservation.previous_transaction_revision() != guard.transaction_revision) {
+                    return Err("another protected input intervened; readback-only recovery".to_string());
+                }
+                let mut body_written = false;
+                // Issue #4909: the mode is read on the reservation the
+                // body is written through, so the paste wrapping and
+                // the write see the same composer state.
+                let bracketed_paste = reservation.bracketed_paste_enabled();
+                let outcome = super::pty_io::drive_verified_pane_submit(
+                    payload,
+                    bracketed_paste,
+                    2,
+                    |bytes| {
+                        let written = reservation
+                            .write_input_authorized(bytes, |commit| {
+                                if Instant::now() >= deadline
+                                    || worker_responder.as_ref().is_some_and(|responder| {
+                                        !responder.mutation_is_current()
+                                    })
+                                {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "PM delivery deadline expired before input mutation"
+                                            .to_string(),
+                                    });
+                                }
+                                let current_registration =
+                                    pm_registry::load_pm_prefs(&prefs_path)
+                                        .map_err(|error| {
+                                            gwt_terminal::TerminalError::PtyIoError {
+                                                details: format!(
+                                                    "PM registration revalidation failed: {error}"
+                                                ),
+                                            }
+                                        })?
+                                        .registration;
+                                if current_registration.as_ref() != Some(&registration) {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "registered PM authority changed before input mutation"
+                                            .to_string(),
+                                    });
+                                }
+                                {
+                                    let current = writers.read().map_err(|_| {
+                                        gwt_terminal::TerminalError::PtyIoError {
+                                            details: "PM delivery PTY registry is unavailable"
+                                                .to_string(),
+                                        }
+                                    })?;
+                                    if !current
+                                        .get(&worker_window_id)
+                                        .is_some_and(|entry| expected_entry.as_ref()
+                                            .is_some_and(|expected| Arc::ptr_eq(entry, expected)))
+                                        || !current
+                                            .get(&principal_window_id)
+                                            .is_some_and(|entry| {
+                                                Arc::ptr_eq(&entry.handle, &principal_pty)
+                                            })
+                                    {
+                                        return Err(
+                                            gwt_terminal::TerminalError::PtyIoError {
+                                                details: "PM caller or target runtime generation changed"
+                                                    .to_string(),
+                                            },
+                                        );
+                                    }
+                                }
+                                if Instant::now() >= deadline
+                                    || worker_responder.as_ref().is_some_and(|responder| {
+                                        !responder.mutation_is_current()
+                                    })
+                                {
+                                    return Err(gwt_terminal::TerminalError::PtyIoError {
+                                        details: "PM delivery deadline expired before input commit"
+                                            .to_string(),
+                                    });
+                                }
+                                if !issuer.commit_mutation_if_current(&grant, || {
+                                    worker_responder.as_ref().is_none_or(
+                                        AgentPmSendResponder::try_commit_mutation,
+                                    )
+                                }) {
+                                    return Err(
+                                        gwt_terminal::TerminalError::PtyIoError {
+                                            details: "PM capability or origin changed before input mutation"
+                                                .to_string(),
+                                        },
+                                    );
+                                }
+                                let mut mark_attempted = || {
+                                    if bytes != b"\r" {
+                                        body_attempted = true;
+                                    }
+                                };
+                                reservation.with_unchanged_ordinary_input(ordinary_revision,
+                                    || commit(&mut mark_attempted))
+                            })
+                            .map_err(|error| error.to_string());
+                        if written.is_ok() && bytes != b"\r" {
+                            body_written = true;
+                        }
+                        written
+                    },
+                    |settle| {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        thread::sleep(settle.min(remaining));
+                    },
+                    || {
+                        pm_registry::pm_delivery_receipt_for_operation(
+                            &receipt_path,
+                            &worker_operation_id,
+                        )
+                            .map_err(|error| {
+                                format!(
+                                    "PM delivery acknowledgement is unavailable: {error}"
+                                )
+                            })
+                            .map(|receipt| {
+                                receipt.is_some_and(|receipt| {
+                                    receipt.target_session_id
+                                        == delivery_target_session_id
+                                        && receipt.body_sha256 == body_sha256
+                                        && receipt.status
+                                            == pm_registry::PmDeliveryReceiptStatus::Verified
+                                })
+                            })
+                    },
+                );
+                if body_written && replay.is_none() {
+                    let entry = expected_entry.as_ref().expect("live PM target entry");
+                    *entry.pm_delivery_replay.lock()
+                        .map_err(|_| "PM recovery guard is unavailable".to_string())? =
+                        Some(crate::PmDeliveryReplayGuard {
+                            operation_id: worker_operation_id.clone(),
+                            target_session_id: delivery_target_session_id,
+                            ordinary_revision,
+                            transaction_revision: reservation.transaction_revision(),
+                        });
+                }
+                outcome
+            };
             let result = match prepare {
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Prepared) => {
                     if let Some(reason) = self_delivery_reason.as_deref() {
@@ -1975,140 +2143,7 @@ impl AppRuntime {
                         return;
                     }
                     receipt_prepared = true;
-                    let delivery_target_session_id = durable_target_session_id
-                        .clone()
-                        .expect("Prepared PM delivery has a target Session");
-                    expected_pty
-                        .as_ref()
-                        .cloned()
-                        .ok_or_else(|| {
-                            "pm.message.send refused: target is not an authorized live agent pane"
-                                .to_string()
-                        })
-                        .and_then(|expected_pty| {
-                        let reservation = Arc::clone(&expected_pty)
-                            .reserve_input_transaction()
-                            .map_err(|error| {
-                                format!("PM pane input transaction unavailable: {error}")
-                            })?;
-                        // Issue #4909: the mode is read on the reservation the
-                        // body is written through, so the paste wrapping and
-                        // the write see the same composer state.
-                        let bracketed_paste = reservation.bracketed_paste_enabled();
-                        super::pty_io::drive_verified_pane_submit(
-                            &protected_prompt,
-                            bracketed_paste,
-                            2,
-                            |bytes| {
-                                reservation
-                                    .write_input_authorized(bytes, |commit| {
-                                        if Instant::now() >= deadline
-                                            || worker_responder.as_ref().is_some_and(|responder| {
-                                                !responder.mutation_is_current()
-                                            })
-                                        {
-                                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                                details: "PM delivery deadline expired before input mutation"
-                                                    .to_string(),
-                                            });
-                                        }
-                                        let current_registration =
-                                            pm_registry::load_pm_prefs(&prefs_path)
-                                                .map_err(|error| {
-                                                    gwt_terminal::TerminalError::PtyIoError {
-                                                        details: format!(
-                                                            "PM registration revalidation failed: {error}"
-                                                        ),
-                                                    }
-                                                })?
-                                                .registration;
-                                        if current_registration.as_ref() != Some(&registration) {
-                                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                                details: "registered PM authority changed before input mutation"
-                                                    .to_string(),
-                                            });
-                                        }
-                                        {
-                                            let current = writers.read().map_err(|_| {
-                                                gwt_terminal::TerminalError::PtyIoError {
-                                                    details: "PM delivery PTY registry is unavailable"
-                                                        .to_string(),
-                                                }
-                                            })?;
-                                            if !current
-                                                .get(&worker_window_id)
-                                                .is_some_and(|entry| Arc::ptr_eq(&entry.handle, &expected_pty))
-                                                || !current
-                                                    .get(&principal_window_id)
-                                                    .is_some_and(|entry| {
-                                                        Arc::ptr_eq(&entry.handle, &principal_pty)
-                                                    })
-                                            {
-                                                return Err(
-                                                    gwt_terminal::TerminalError::PtyIoError {
-                                                        details: "PM caller or target runtime generation changed"
-                                                            .to_string(),
-                                                    },
-                                                );
-                                            }
-                                        }
-                                        if Instant::now() >= deadline
-                                            || worker_responder.as_ref().is_some_and(|responder| {
-                                                !responder.mutation_is_current()
-                                            })
-                                        {
-                                            return Err(gwt_terminal::TerminalError::PtyIoError {
-                                                details: "PM delivery deadline expired before input commit"
-                                                    .to_string(),
-                                            });
-                                        }
-                                        if !issuer.commit_mutation_if_current(&grant, || {
-                                            worker_responder.as_ref().is_none_or(
-                                                AgentPmSendResponder::try_commit_mutation,
-                                            )
-                                        }) {
-                                            return Err(
-                                                gwt_terminal::TerminalError::PtyIoError {
-                                                    details: "PM capability or origin changed before input mutation"
-                                                        .to_string(),
-                                                },
-                                            );
-                                        }
-                                        let mut mark_attempted = || {
-                                            if bytes != b"\r" {
-                                                body_attempted = true;
-                                            }
-                                        };
-                                        commit(&mut mark_attempted)
-                                    })
-                                    .map_err(|error| error.to_string())
-                            },
-                            |settle| {
-                                let remaining = deadline.saturating_duration_since(Instant::now());
-                                thread::sleep(settle.min(remaining));
-                            },
-                            || {
-                                pm_registry::pm_delivery_receipt_for_operation(
-                                    &receipt_path,
-                                    &worker_operation_id,
-                                )
-                                    .map_err(|error| {
-                                        format!(
-                                            "PM delivery acknowledgement is unavailable: {error}"
-                                        )
-                                    })
-                                    .map(|receipt| {
-                                        receipt.is_some_and(|receipt| {
-                                            receipt.target_session_id
-                                                == delivery_target_session_id
-                                                && receipt.body_sha256 == body_sha256
-                                                && receipt.status
-                                                    == pm_registry::PmDeliveryReceiptStatus::Verified
-                                        })
-                                    })
-                            },
-                        )
-                    })
+                    drive_pane(&protected_prompt, None)
                 }
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
                     pm_registry::PmDeliveryReceiptStatus::Verified,
@@ -2136,11 +2171,17 @@ impl AppRuntime {
                                 submit_attempts: 0,
                             })
                         }
-                        Ok(pm_registry::PmDeliveryReceiptStatus::Ambiguous) => {
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Ambiguous
+                            | pm_registry::PmDeliveryReceiptStatus::Unconfirmed) => {
                             receipt_terminalized = true;
                             Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
                                 submit_attempts: 0,
                             })
+                        }
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Lost) => {
+                            receipt_terminalized = true;
+                            target_lost = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { submit_attempts: 0 })
                         }
                         Ok(pm_registry::PmDeliveryReceiptStatus::Refused) => {
                             let reason = pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &worker_operation_id)
@@ -2154,7 +2195,7 @@ impl AppRuntime {
                         &worker_operation_id,
                         target_session_id,
                         &body_sha256,
-                        pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+                        pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
                         Some("response_lost_after_prepare"),
                     )
                     .map_err(|error| {
@@ -2177,12 +2218,52 @@ impl AppRuntime {
                     }
                 }
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
-                    pm_registry::PmDeliveryReceiptStatus::Ambiguous,
+                    pm_registry::PmDeliveryReceiptStatus::Ambiguous
+                    | pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
                 )) => {
                     receipt_terminalized = true;
-                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified {
-                        submit_attempts: 0,
-                    })
+                    let same_target = self_delivery_reason.is_none()
+                        && target_is_live_agent && expected_entry.is_some()
+                        && target_session_id == durable_target_session_id;
+                    if !same_target {
+                        match pm_registry::finish_pm_delivery_receipt(
+                            &receipt_path, &worker_operation_id,
+                            durable_target_session_id.as_deref().expect("durable target"),
+                            &body_sha256, pm_registry::PmDeliveryReceiptStatus::Lost,
+                            Some("target_unavailable"),
+                        ) {
+                            Ok(pm_registry::PmDeliveryReceiptStatus::Verified) =>
+                                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 }),
+                            Ok(_) => {
+                                target_lost = true;
+                                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { submit_attempts: 0 })
+                            }
+                            Err(error) => Err(format!("PM target-loss receipt failed: {error}")),
+                        }
+                    } else {
+                        let guard = expected_entry.as_ref().and_then(|entry| {
+                            let mut guard = entry.pm_delivery_replay.lock().ok()?;
+                            if guard.as_ref().is_some_and(|guard|
+                                guard.operation_id == worker_operation_id
+                                && Some(&guard.target_session_id) == durable_target_session_id.as_ref()) {
+                                guard.take()
+                            } else { None }
+                        });
+                        if let Some(guard) = guard {
+                            replay_attempted = true;
+                            drive_pane("\r", Some(guard))
+                        } else {
+                            readback_only = true;
+                            Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { submit_attempts: 0 })
+                        }
+                    }
+                }
+                Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
+                    pm_registry::PmDeliveryReceiptStatus::Lost,
+                )) => {
+                    receipt_terminalized = true;
+                    target_lost = true;
+                    Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { submit_attempts: 0 })
                 }
                 Ok(pm_registry::PmDeliveryPrepareOutcome::Existing(
                     pm_registry::PmDeliveryReceiptStatus::Refused,
@@ -2199,6 +2280,15 @@ impl AppRuntime {
             match result {
                 Ok(super::pty_io::VerifiedPaneSubmitOutcome::Verified { .. }) => {
                     send_terminal("delivered", None)
+                }
+                Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { .. }) if target_lost => {
+                    if pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &worker_operation_id)
+                        .ok().flatten().is_some_and(|receipt|
+                            receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified) {
+                        send_terminal("delivered", None);
+                    } else {
+                        send_terminal("lost", Some(PM_DELIVERY_LOST_REASON.to_string()));
+                    }
                 }
                 Ok(super::pty_io::VerifiedPaneSubmitOutcome::Unverified { .. }) => {
                     let target_session_id = durable_target_session_id
@@ -2218,16 +2308,23 @@ impl AppRuntime {
                         &worker_operation_id,
                         target_session_id,
                         &body_sha256,
-                        pm_registry::PmDeliveryReceiptStatus::Ambiguous,
-                        Some("submit_unverified"),
+                        pm_registry::PmDeliveryReceiptStatus::Unconfirmed,
+                        Some("submit_unconfirmed"),
                     ) {
                         Ok(pm_registry::PmDeliveryReceiptStatus::Verified) => {
                             send_terminal("delivered", None)
                         }
-                        _ => send_terminal(
-                            "unverified",
-                            Some(PM_DELIVERY_UNVERIFIED_REASON.to_string()),
-                        ),
+                        Ok(pm_registry::PmDeliveryReceiptStatus::Lost) =>
+                            send_terminal("lost", Some(PM_DELIVERY_LOST_REASON.to_string())),
+                        status => {
+                            let recovery = if readback_only || replay_attempted {
+                                " Further calls are readback-only; no eligible submit recovery remains."
+                            } else { "" };
+                            let persistence = status.err().map(|error|
+                                format!(" Receipt commit failed: {error}")).unwrap_or_default();
+                            send_terminal("unconfirmed", Some(format!(
+                                "{PM_DELIVERY_UNCONFIRMED_REASON}{recovery}{persistence}")));
+                        }
                     }
                 }
                 Err(mut error) => {
@@ -2237,7 +2334,7 @@ impl AppRuntime {
                             .as_deref()
                             .expect("Prepared PM delivery has a target Session");
                         let status = if body_attempted {
-                            pm_registry::PmDeliveryReceiptStatus::Ambiguous
+                            pm_registry::PmDeliveryReceiptStatus::Unconfirmed
                         } else {
                             pm_registry::PmDeliveryReceiptStatus::Refused
                         };
@@ -2268,12 +2365,12 @@ impl AppRuntime {
                         send_terminal("delivered", None);
                         return;
                     }
-                    if body_attempted {
-                        error.push_str(
-                            "; prompt body may be staged — do not retry with a new operation",
-                        );
+                    if body_attempted || replay_attempted || receipt_terminalized {
+                        send_terminal("unconfirmed", Some(format!(
+                            "{PM_DELIVERY_UNCONFIRMED_REASON}; readback-only until safe recovery is available: {error}")));
+                    } else {
+                        send_terminal("failed", Some(error));
                     }
-                    send_terminal("failed", Some(error));
                 }
             }
         });

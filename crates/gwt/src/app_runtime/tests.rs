@@ -2401,6 +2401,7 @@ fn issue_monitor_autonomous_record(
         last_failure_message: None,
         delivering_since: None,
         review_attempts: None,
+        cancelled_claim_phase: None,
     }
 }
 
@@ -6114,7 +6115,9 @@ pub(super) fn queued_agent_completion_fixture(
     (runtime, recorded, tasks, window_id, result)
 }
 
-fn take_prepared_agent_launch(recorded: &Arc<Mutex<Vec<UserEvent>>>) -> super::PreparedAgentLaunch {
+pub(super) fn take_prepared_agent_launch(
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+) -> super::PreparedAgentLaunch {
     let mut events = recorded.lock().expect("event log");
     let index = events
         .iter()
@@ -9201,6 +9204,7 @@ fn codex_usage_account(
         account_id: None,
         account_label: None,
         plan: None,
+        extra_usage: None,
         windows: vec![gwt_core::usage::UsageWindow::new(
             gwt_core::usage::WindowKind::Weekly,
             weekly_used_percent,

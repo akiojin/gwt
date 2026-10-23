@@ -81,8 +81,8 @@ function supportedAgentVersion(value) {
 // SPEC #5017: maintain the built-in catalog without changing launch profiles.
 function renderSupportedAgentsPanel(panel, agents, options) {
   const document = panel.ownerDocument;
-  panel.replaceChildren();
   if (agents === null) {
+    panel.replaceChildren();
     const loading = document.createElement("p");
     loading.className = "settings-help";
     loading.setAttribute("role", "status");
@@ -93,20 +93,24 @@ function renderSupportedAgentsPanel(panel, agents, options) {
   const send = options?.send || (() => {});
   const maintenance = options?.maintenanceByAgent || new Map();
   const busy = Array.from(maintenance.values()).some((entry) => entry.pending);
-  const automaticLabel = document.createElement("label");
+  // Keep the local checkbox mounted while catalog tables advance in a frame.
+  const automaticLabel = panel.querySelector(".settings-checkbox-label") || document.createElement("label");
+  for (const child of [...panel.childNodes]) if (child !== automaticLabel) child.remove();
   automaticLabel.className = "settings-checkbox-label";
-  const automatic = document.createElement("input");
+  const automatic = automaticLabel.querySelector("input") || document.createElement("input");
   automatic.type = "checkbox";
   automatic.className = "settings-checkbox";
   automatic.setAttribute("aria-label", "Automatically update agents");
   automatic.checked = options?.autoUpdate === true;
   automatic.disabled = busy;
-  automatic.addEventListener("change", () => {
+  automatic.onchange = () => {
     send({ kind: "set_agent_auto_update", enabled: automatic.checked });
-  });
-  automaticLabel.appendChild(automatic);
-  automaticLabel.appendChild(document.createTextNode("Automatically update agents"));
-  panel.appendChild(automaticLabel);
+  };
+  if (!automatic.parentNode) {
+    automaticLabel.appendChild(automatic);
+    automaticLabel.appendChild(document.createTextNode("Automatically update agents"));
+  }
+  if (automaticLabel.parentNode !== panel) panel.appendChild(automaticLabel);
   const help = document.createElement("p");
   help.className = "settings-help";
   help.textContent = "At the next app startup, update installed agents with a verified update route and a known newer version. "
@@ -984,15 +988,24 @@ export function createSettingsSurface({
         autostartChecking: false,
         autostartStatusMessage: "",
         autostartStatusKind: "",
-      });
+      }, { scheduleFrame });
       // Renderer cache only: the model remains the sole source of settings values.
       const renderedSystemPanels = new WeakMap();
       const settingsWindowBodies = new Set();
       agentBackendsModel.subscribeFrame(state => state, state => {
         renderAgentBackendsPanelInAllSettingsWindows(state);
       });
+      // Autostart must disable before send and recover immediately. Other
+      // received snapshots only change presentation on the next shared frame.
+      let previousSystemSettingsState = systemSettingsModel.read();
       systemSettingsModel.subscribe(state => state, state => {
-        renderSystemPanelInAllSettingsWindows(state);
+        const autostartChanged = Object.keys(state).some(key => key.startsWith("autostart")
+          && !Object.is(previousSystemSettingsState[key], state[key]));
+        previousSystemSettingsState = state;
+        if (autostartChanged) renderSystemPanelInAllSettingsWindows(state);
+      });
+      systemSettingsModel.subscribeFrame(state => state, state => {
+        renderSystemPanelInAllSettingsWindows(state, true);
       });
       let nextProfilesRequest = 0;
       const issueSettingsModel = createUiStateStore({});
@@ -1112,13 +1125,15 @@ export function createSettingsSurface({
       const supportedAgentsModel = createUiStateStore({
         agents: null,
         autoUpdate: false,
+        autoUpdateDraft: null,
         maintenanceByAgent: {},
-      });
+      }, { scheduleFrame });
+      const renderedSupportedAgentPanels = new WeakMap();
 
       function supportedAgentPanelOptions() {
         const state = supportedAgentsModel.read();
         return {
-          autoUpdate: state.autoUpdate,
+          autoUpdate: state.autoUpdateDraft ?? state.autoUpdate,
           maintenanceByAgent: new Map(Object.entries(state.maintenanceByAgent)),
           send(message) {
             if (message.kind === "maintain_supported_agent") {
@@ -1132,6 +1147,9 @@ export function createSettingsSurface({
                   },
                 },
               }));
+              renderSupportedAgentPanels();
+            } else if (message.kind === "set_agent_auto_update") {
+              supportedAgentsModel.update(current => ({ ...current, autoUpdateDraft: message.enabled === true }));
             }
             send(message);
           },
@@ -1140,9 +1158,13 @@ export function createSettingsSurface({
 
       function renderSupportedAgentPanels() {
         purgeDetachedSettingsBodies();
+        const state = supportedAgentsModel.read();
         for (const body of settingsWindowBodies) {
           const panel = body.querySelector("[data-settings-panel='supported-agents']");
-          if (panel) renderSupportedAgentsPanel(panel, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
+          if (panel && renderedSupportedAgentPanels.get(panel) !== state) {
+            renderSupportedAgentsPanel(panel, state.agents, supportedAgentPanelOptions());
+            renderedSupportedAgentPanels.set(panel, state);
+          }
         }
       }
 
@@ -1160,6 +1182,7 @@ export function createSettingsSurface({
           return {
             agents: event.agents,
             autoUpdate: event.auto_update === true,
+            autoUpdateDraft: null,
             maintenanceByAgent,
           };
         });
@@ -1168,12 +1191,14 @@ export function createSettingsSurface({
       function applySupportedAgentMaintenance(event) {
         supportedAgentsModel.update(state => ({
           ...state,
+          autoUpdateDraft: event.agent_id === "" && event.success === false ? null : state.autoUpdateDraft,
           maintenanceByAgent: { ...state.maintenanceByAgent, [event.agent_id]: event },
         }));
       }
 
-      supportedAgentsModel.subscribe(state => state, () => {
-        renderSupportedAgentPanels();
+      supportedAgentsModel.subscribeFrame(state => state, () => renderSupportedAgentPanels());
+      supportedAgentsModel.subscribe(state => state.agents, () => {
+        purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
 
@@ -1445,6 +1470,7 @@ export function createSettingsSurface({
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);
         renderSupportedAgentsPanel(panelSupportedAgents, supportedAgentsModel.read().agents, supportedAgentPanelOptions());
+        renderedSupportedAgentPanels.set(panelSupportedAgents, supportedAgentsModel.read());
         renderUsagePanel(panelUsage);
         renderSettingsAgentList();
         // SPEC-1921 2026-05-18 amendment / FR-099: hydrate the Agent
@@ -1744,6 +1770,7 @@ export function createSettingsSurface({
           const next = e.target.value;
           systemSettingsModel.update(state => ({ ...state, language: next,
             statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({ kind: "update_system_settings", language: next });
         });
         section.appendChild(select);
@@ -1769,6 +1796,7 @@ export function createSettingsSurface({
           const next = e.target.checked === true;
           systemSettingsModel.update(state => ({ ...state, codexTrustManagedHooks: next,
             statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
             language: systemSettingsModel.read().language || "auto",
@@ -1798,6 +1826,7 @@ export function createSettingsSurface({
           systemSettingsModel.update(state => ({ ...state,
             agentResource: { ...state.agentResource, ...patch },
             statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
             language: systemSettingsModel.read().language || "auto",
@@ -1807,6 +1836,7 @@ export function createSettingsSurface({
         const rejectAgentResourceInput = (message, input, previous) => {
           input.value = Number.isInteger(previous) ? String(previous) : "";
           systemSettingsModel.update(state => ({ ...state, statusMessage: message, statusKind: "error" }));
+          renderSystemPanelInAllSettingsWindows();
         };
 
         const resourceLabel = document.createElement("label");
@@ -2000,6 +2030,7 @@ export function createSettingsSurface({
           for (const form of panel.querySelectorAll("[data-dirty]")) delete form.dataset.dirty;
           systemSettingsModel.update(state => ({ ...state, boardProvider: next,
             statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
           send({
             kind: "update_system_settings",
             language: systemSettingsModel.read().language || "auto",
@@ -2144,6 +2175,7 @@ export function createSettingsSurface({
                   systemSettingsModel.update(state => ({ ...state,
                     statusMessage: "Paste a valid Teams channel link with groupId and /channel/...",
                     statusKind: "error" }));
+                  renderSystemPanelInAllSettingsWindows();
                   return;
                 }
                 nextTeamsDefaultChannel = composeTeamsDefaultChannel(
@@ -2360,17 +2392,18 @@ export function createSettingsSurface({
         }
       }
 
-      function renderSystemPanelInAllSettingsWindows(state = systemSettingsModel.read()) {
+      function renderSystemPanelInAllSettingsWindows(state = systemSettingsModel.read(), skipAlreadyRendered = false) {
         // State commits immediately; only destructive DOM swaps wait for a
         // native select/input interaction to finish. Flush reads the latest version.
-        const deferred = systemSettingsInteractionGuard.defer(true);
+        let deferred;
         for (const body of Array.from(settingsWindowBodies)) {
           if (!body.isConnected) {
             settingsWindowBodies.delete(body);
             continue;
           }
           const panel = body.querySelector("[data-system-settings-content]");
-          if (panel) {
+          if (panel && (!skipAlreadyRendered || renderedSystemPanels.get(panel) !== state)) {
+            deferred ??= systemSettingsInteractionGuard.defer(true);
             if (deferred) renderSystemPanelStatus(panel, state);
             else renderSystemPanel(panel, state);
           }

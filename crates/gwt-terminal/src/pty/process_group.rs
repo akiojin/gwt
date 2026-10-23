@@ -9,6 +9,8 @@
 
 #[cfg(windows)]
 mod imp {
+    use std::time::{Duration, Instant};
+
     use super::super::ProcessPolicy;
 
     #[derive(Default)]
@@ -18,6 +20,7 @@ mod imp {
         /// verification lease (Issue #4405).
         cpu_cap: Option<u8>,
         cap_lifted: bool,
+        termination_requested: bool,
     }
 
     impl ProcessGroup {
@@ -89,25 +92,56 @@ mod imp {
             Ok(())
         }
 
-        /// Synchronously terminate every process in the group.
-        ///
-        /// Idempotent: subsequent calls (including via `Drop`) become no-ops.
-        pub fn terminate(&mut self) {
-            if let Some(mut job) = self.job.take() {
-                let _ = job.terminate();
+        /// Request termination without consuming the captured Job handle.
+        pub fn terminate(&mut self) -> Result<(), String> {
+            if self.termination_requested {
+                return Ok(());
+            }
+            let job = self
+                .job
+                .as_mut()
+                .ok_or("PTY process Job was not captured")?;
+            job.request_termination()
+                .map_err(|error| format!("terminate PTY process Job: {error}"))?;
+            self.termination_requested = true;
+            Ok(())
+        }
+
+        /// Keep the exact Job until the kernel confirms it has no members.
+        pub fn terminate_and_wait(&mut self, timeout: Duration) -> Result<bool, String> {
+            let started = Instant::now();
+            self.terminate()?;
+            loop {
+                let Some(job) = self.job.as_ref() else {
+                    return Ok(true);
+                };
+                if job
+                    .active_process_count()
+                    .map_err(|error| format!("query PTY process Job: {error}"))?
+                    == 0
+                {
+                    self.job = None;
+                    return Ok(true);
+                }
+                let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                    return Ok(false);
+                };
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
             }
         }
     }
 
     impl Drop for ProcessGroup {
         fn drop(&mut self) {
-            self.terminate();
+            let _ = self.terminate();
         }
     }
 }
 
 #[cfg(unix)]
 mod imp {
+    use std::time::{Duration, Instant};
+
     use nix::{
         errno::Errno,
         sys::signal::{killpg, Signal},
@@ -119,6 +153,7 @@ mod imp {
     #[derive(Default)]
     pub struct ProcessGroup {
         pgid: Option<Pid>,
+        termination_requested: bool,
     }
 
     impl ProcessGroup {
@@ -127,6 +162,7 @@ mod imp {
             // so the child's pid is also its process group id.
             Ok(Self {
                 pgid: Some(Pid::from_raw(pid as i32)),
+                termination_requested: false,
             })
         }
 
@@ -178,20 +214,51 @@ mod imp {
         /// Issue #3705: SIGKILL is sent immediately. A SIGTERM-then-sleep-then-
         /// SIGKILL sequence blocked the GUI event loop for 100ms per live PTY
         /// close and serialized `pane.*` behind it.
-        pub fn terminate(&mut self) {
-            let Some(pgid) = self.pgid.take() else {
-                return;
-            };
+        pub fn terminate(&mut self) -> Result<(), String> {
+            if self.termination_requested {
+                return Ok(());
+            }
+            let pgid = self.pgid.ok_or("PTY process group was not captured")?;
             match killpg(pgid, Signal::SIGKILL) {
-                Ok(()) | Err(Errno::ESRCH) => {}
-                Err(error) => tracing::debug!(?pgid, %error, "killpg SIGKILL failed"),
+                Ok(()) => {}
+                Err(Errno::ESRCH) => self.pgid = None,
+                Err(error) => return Err(format!("killpg({pgid}, SIGKILL): {error}")),
+            }
+            self.termination_requested = true;
+            Ok(())
+        }
+
+        /// A live leader is not required: wait for every captured group member.
+        pub fn terminate_and_wait(&mut self, timeout: Duration) -> Result<bool, String> {
+            let started = Instant::now();
+            self.terminate()?;
+            let Some(pgid) = self.pgid else {
+                return Ok(true);
+            };
+            loop {
+                match killpg(pgid, None) {
+                    Err(Errno::ESRCH) => {
+                        self.pgid = None;
+                        return Ok(true);
+                    }
+                    // macOS reports EPERM for zombie-only groups; wait for
+                    // reap to establish ESRCH without treating EPERM as exit.
+                    #[cfg(target_os = "macos")]
+                    Err(Errno::EPERM) => {}
+                    Err(error) => return Err(format!("probe PTY process group {pgid}: {error}")),
+                    Ok(()) => {}
+                }
+                let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                    return Ok(false);
+                };
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
             }
         }
     }
 
     impl Drop for ProcessGroup {
         fn drop(&mut self) {
-            self.terminate();
+            let _ = self.terminate();
         }
     }
 
@@ -323,7 +390,7 @@ mod tests {
             "ancestor policy is restored"
         );
 
-        group.terminate();
+        group.terminate().expect("request Job termination");
         let _ = child.wait();
     }
 

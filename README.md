@@ -32,6 +32,9 @@ Issues, SPECs, search, and Board context rather than from branch management.
   project search, and agent-pane management.
 - **Operator workspace** — switch between Issues, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
+- **Provider usage** — hover over USAGE for account limits, including Claude's
+  Fable weekly limit and enabled Usage credits with utilization, used/limit,
+  and currency. Enable Claude account usage in Settings → Usage & Limits.
 
 ## Install
 
@@ -318,6 +321,37 @@ gwtd <<'JSON'
 JSON
 ```
 
+`fleet.inventory` returns project agent processes, panes, and Monitor rows in one
+JSON report, including unmatched rows, duplicate worktrees, delivery evidence,
+and partial-source diagnostics. `fleet.orphans` lists processes without an
+observed pane. A missing pane source means an orphan is unconfirmed.
+
+The registered PM can use `fleet.disposition` with a nonempty `targets` array.
+Copy each selected row's `id`, `session_id`, and observed pane `child_pid` /
+`child_started_at`; process-only targets instead need `pid` / `started_at`.
+Unknown delivery rejects the batch unless `allow_unknown:true` is explicit.
+Current claim holders, active execution holders, and undelivered work remain protected.
+`fleet.orphan.terminate` accepts only process targets. Every target receives a
+receipt; generation changes, unsupported backends, and incomplete process
+termination are reported instead of falling back to an ordinary close.
+Orphan termination requires a stable OS process handle (Linux pidfd or a Windows
+process handle). Other platforms, unavailable handles, and uncertain lifecycle
+authority retain the process; `allow_unknown` only overrides delivery uncertainty.
+
+`pane.health` reads project pane health from existing workspace and runtime
+sidecar state without depending on the GUI event loop. Decode the response's
+`output` string as JSON; its `panes` array contains each pane's `classification`,
+`reason_code`, and `recommended_action`.
+Omit `params.id` for all panes, or pass an ID from `pane.list` (a raw pane ID
+also works) to select one. Recommendations are advisory: this operation never
+closes, relaunches, stops, or requeues a pane.
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` starts a workflow using GitHub's shared API budget. Dispatch
 is disabled by default. Allow individual workflow filenames for a repository
 in `~/.gwt/config.toml`:
@@ -560,14 +594,39 @@ membership while holding the Issue. Launch failures show their category and
 the next recovery operation; repeated unchanged failures stop automatic retries
 after the configured attempt limit.
 
+For a live launch, stop also asks its owning host to terminate the exact agent
+and its descendants, including when its pane is gone. `runtime_stop: requested`
+acknowledges the request; check `issue.monitor.status` for process exit.
+Its `active_sessions` lists live PIDs, worktrees, and known `launch_entrypoint`
+values independently of panes. A stopped runtime cannot run verification;
+explicitly resume its Session to continue existing work with a fresh runtime.
+If the target runtime cannot be identified safely, stop refuses the change.
+Peer `pane.close` reports `closed` only after its process tree has terminated.
+A timeout or a restored Session without its captured PTY reports unconfirmed
+exit. Self-close reports `close requested` before the calling agent is terminated.
+
 Anyone can apply `urgent`. Eligible urgent Issues enter the queue automatically,
 even with Auto-refill off; an explicit queue removal still wins. Up to two urgent
 Issues lead the queue in assignment order by default, without changing the saved
 normal order or `max_active`. Set the head limit with
 `issue.monitor.queue.urgent_limit` (`limit: 0` disables priority, not membership).
+Before changing the limit, read `saved_config` and `config_token` from
+`issue.monitor.status`, then pass that token as `expected_config_token`.
+The saved observation includes `urgent_queue_limit`. A conflict leaves preferences
+unchanged: re-read status and reconsider the change before retrying. The reply
+retains the queue fields and includes `saved_config` and `config_token` from the
+saved snapshot. Omitting the guard retains legacy behavior; this value comparison
+does not detect ABA history.
 Overflow follows normal order. `issue.monitor.queue.demote` (`number`) persistently
 returns an Issue to normal priority, overriding its urgent label across scans and
-restarts. Queue cards and details distinguish urgent, overflow, and demotion;
+restarts. Before demoting, read `issue.monitor.queue.list` and pass its
+`urgent_queue_token` as `expected_urgent_queue_token`. This token covers the saved
+urgent limit, grants, and demotions, independently of normal queue order and runtime.
+A mismatch leaves preferences unchanged: re-read the list and reconsider the change.
+The successful reply's queue fields and new token describe the same saved snapshot.
+Omitting the guard retains legacy behavior; `null`, empty strings, and other types
+are invalid. This value comparison does not detect ABA history or guard other controls.
+Queue cards and details distinguish urgent, overflow, and demotion;
 `issue.monitor.queue.list` and `issue.monitor.status` include the reason and
 observed GitHub label actor/time. Missing audit data is shown as unknown.
 
@@ -583,6 +642,14 @@ an empty saved queue, `null` is rejected, and omitting the guard keeps existing
 behavior. This compares queue order values, without tracking intervening history,
 urgent metadata, priority-only changes, or other configuration changes. The
 `issue.monitor.queue.auto_refill` operation sets opt-in refill and its limit.
+Before changing refill settings, read `saved_config` and `config_token` from
+`issue.monitor.status` and pass that token as `expected_config_token`. The saved
+observation includes `terminal_queue_auto_refill` and `terminal_queue_auto_refill_limit`.
+A mismatch rejects the update without changing preferences; read status again and
+reconsider. A successful reply includes the saved observation and new token for
+readback. Omission retains existing behavior; `null`, empty strings and other types
+are rejected. This value comparison does not track intervening history or protect
+other control operations.
 `issue.monitor.launch_now` explicitly adds the Issue at the front of the terminal
 queue and requests a scan. Existing `issue.monitor.priority.move` and
 `issue.monitor.priority.set` operations remain available. To prevent overwriting
@@ -664,6 +731,13 @@ existing manual pool. `issue.monitor.tier.set` with `number` and `tier` raises
 an Issue's persistent minimum tier. `issue.monitor.tiers` reports the
 configuration, Issue history and lowest-tier landing rate (`null` until a
 landing is observed), plus the count of unclassified terminations.
+For a conditional `tiers.set`, read fresh `saved_config` and `config_token`
+from `issue.monitor.status` or `issue.monitor.tiers`, then pass the token as
+`expected_config_token`. A mismatch leaves all preferences unchanged; re-read
+status and reconsider the change, then read back success. The token includes
+saved `launch_auto` and `launch_tiers`. Omitting the guard keeps existing behavior;
+null, blank and non-string guards are rejected. This value comparison does not
+track ABA history or guard individual `tier.set` writes.
 `issue.monitor.status` exposes `launch_tier`, `landing_tier`, total `attempts`,
 excluded `non_agent_attempts`, and their difference `tier_input` on each
 observed Issue row.
@@ -1138,6 +1212,10 @@ in that same agent session with JSON operation `board.show` and
 `params:{"all":true}`, then retry. Automatic reminders do not acknowledge a
 read. Implementation agents send decision requests to `agent:pm`; only the
 registered PM may address a `user:<id>` from an agent Board post.
+
+When a Board decision mentions an idle agent session (`session:<id>`), gwt
+sends that agent a one-line notice to read the ruling and continue. Repeated
+Board refreshes do not repeat the notice.
 
 JSON operation `hook.health` lists external skill commands that conflict with
 gwt's GitHub mutation policy, together with the affected files and alternatives.

@@ -79,7 +79,13 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
 /// instead of treating an empty event list as success.
 pub(crate) struct CloseWindowOutcome {
     pub(crate) closed: bool,
+    pub(crate) reply_deferred: bool,
     pub(crate) events: Vec<OutboundEvent>,
+}
+
+pub(crate) struct PeerPaneCloseReply {
+    pub(super) client_id: String,
+    pub(super) session_id: Option<String>,
 }
 
 /// Issue #4234 AC-3: every `AppRuntime` map that is keyed by a combined window
@@ -636,7 +642,15 @@ impl AppRuntime {
     /// distinguish a landed close from the silent no-op that an unknown or
     /// already-closed window produces.
     pub(crate) fn close_window_outcome(&mut self, id: &str) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, None)
+        self.close_window_outcome_with_monitor_notification(id, true, None, None)
+    }
+
+    pub(super) fn close_peer_window_outcome(
+        &mut self,
+        id: &str,
+        client_id: String,
+    ) -> CloseWindowOutcome {
+        self.close_window_outcome_with_monitor_notification(id, true, None, Some(client_id))
     }
 
     /// Issue #4234 AC-3: drop every window-keyed entry the closing window owns.
@@ -712,7 +726,7 @@ impl AppRuntime {
         &mut self,
         id: &str,
     ) -> Vec<OutboundEvent> {
-        self.close_window_outcome_with_monitor_notification(id, false, None)
+        self.close_window_outcome_with_monitor_notification(id, false, None, None)
             .events
     }
 
@@ -721,7 +735,7 @@ impl AppRuntime {
         id: &str,
         ticket: crate::AgentSelfCloseCapabilityTicket,
     ) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket))
+        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket), None)
     }
 
     fn close_window_outcome_with_monitor_notification(
@@ -729,6 +743,7 @@ impl AppRuntime {
         id: &str,
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        peer_client_id: Option<String>,
     ) -> CloseWindowOutcome {
         // Issue #4145 AC-1: every close route converges here, and Issue #3783
         // designed the accepted close to stay on the event loop, so this guard
@@ -751,10 +766,30 @@ impl AppRuntime {
         else {
             return CloseWindowOutcome {
                 closed: false,
+                reply_deferred: false,
                 events: Vec::new(),
             };
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
+        let peer_reply = peer_client_id.and_then(|client_id| {
+            let session_id = self
+                .active_agent_sessions
+                .get(id)
+                .map(|active| active.session_id.clone())
+                .or_else(|| {
+                    let raw_id = id.strip_prefix(&format!("{}::", context.tab_id))?;
+                    self.tab(&context.tab_id)?
+                        .workspace
+                        .window(raw_id)?
+                        .session_id
+                        .clone()
+                });
+            (self.runtimes.contains_key(id) || session_id.is_some()).then_some(PeerPaneCloseReply {
+                client_id,
+                session_id,
+            })
+        });
+        let reply_deferred = peer_reply.is_some();
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -763,6 +798,7 @@ impl AppRuntime {
         ) {
             return CloseWindowOutcome {
                 closed: false,
+                reply_deferred: false,
                 events: Vec::new(),
             };
         }
@@ -775,12 +811,14 @@ impl AppRuntime {
         self.restore_launch_windows.remove(id);
         // Issue #3783: the accepted close is the in-memory removal above.
         // Everything that may wait on PTY, execution, Session, or Work locks
-        // runs in one detached finalizer and cannot delay PaneCloseResult.
+        // runs in one detached finalizer. Peer completion is sent after reap;
+        // visible removal and the event loop remain immediate.
         self.queue_accepted_window_close_finalizer(
             id,
             issue_monitor_project_root,
             notify_issue_monitor,
             self_close_ticket,
+            peer_reply,
         );
         // Issue #4234 AC-3: the finalizer above takes the runtime, the session
         // and the capability token because it needs their values. Everything
@@ -794,6 +832,7 @@ impl AppRuntime {
         }
         CloseWindowOutcome {
             closed: true,
+            reply_deferred,
             events,
         }
     }
@@ -807,6 +846,7 @@ impl AppRuntime {
         project_root: Option<std::path::PathBuf>,
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        peer_reply: Option<PeerPaneCloseReply>,
     ) {
         self.invalidate_launch_delivery_ack(id);
         self.pending_launch_completions.remove(id);
@@ -852,6 +892,7 @@ impl AppRuntime {
             notify_issue_monitor,
             self_close_ticket,
             closing_window_generation,
+            peer_reply,
         );
         self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);

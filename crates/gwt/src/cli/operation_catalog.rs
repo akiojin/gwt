@@ -230,6 +230,22 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
+        name: "fleet.disposition",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.inventory",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphan.terminate",
+        aliases: &[],
+    },
+    Operation {
+        name: "fleet.orphans",
+        aliases: &[],
+    },
+    Operation {
         name: "github.budget",
         aliases: &[],
     },
@@ -482,6 +498,10 @@ pub const OPERATIONS: &[Operation] = &[
     Operation {
         name: "pane.close",
         aliases: &["pane.stop"],
+    },
+    Operation {
+        name: "pane.health",
+        aliases: &[],
     },
     Operation {
         name: "pane.list",

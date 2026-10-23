@@ -57,9 +57,11 @@ function loadFunctionWithDeps(name, deps) {
   )();
 }
 
-function createSettingsHarness({ scheduleFrame } = {}) {
+function createSettingsHarness({ scheduleFrame, onSend } = {}) {
   const { document, window } = parseHTML("<html><body><main></main></body></html>");
   const sent = [];
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
   const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
@@ -67,8 +69,8 @@ function createSettingsHarness({ scheduleFrame } = {}) {
     document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
   );
   const surface = factory({
-    scheduleFrame,
-    send: message => sent.push(message),
+    scheduleFrame: scheduleFrame || (callback => { frames.add(callback); return () => frames.delete(callback); }),
+    send: message => { onSend?.(message); sent.push(message); },
     createNode(tag, className, text) {
       const node = document.createElement(tag);
       if (className) node.className = className;
@@ -84,7 +86,7 @@ function createSettingsHarness({ scheduleFrame } = {}) {
     },
   });
   const body = document.querySelector("main");
-  return { surface, body, document, window, sent };
+  return { surface, body, document, window, sent, flush };
 }
 
 test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
@@ -332,11 +334,12 @@ test("Update status batches snapshots while toggles and failed-save rollback rem
   flush();
   assert.deepEqual(renders, [1, 0], "detached and unrelated mounts are not rendered");
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
-  assert.equal(frames.size, 0, "another Settings store does not schedule update status");
+  flush();
+  assert.deepEqual(renders, [1, 0], "another Settings store does not render update status");
 });
 
 test("System replies advance one immutable snapshot for all mounts, including while guarded", () => {
-  const { surface, body, document } = createSettingsHarness();
+  const { surface, body, document, flush } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const second = document.createElement("main");
   document.body.appendChild(second);
@@ -344,6 +347,7 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const initial = surface.systemSettingsModel.read();
   const resource = { enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2 };
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "en", board_provider: "slack", agent_resource: resource });
+  flush();
   const loaded = surface.systemSettingsModel.read();
   resource.build_jobs = 99;
   assert.equal(loaded.agentResource.buildJobs, 2, "wire objects cannot mutate committed state");
@@ -355,8 +359,10 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const select = body.querySelector('[id$="-settings-system-language"]');
   surface.systemSettingsInteractionGuard.activate();
   surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja", codex_trust_managed_hooks: false });
+  flush();
   surface.applyAutostartStatus({ enabled: true });
   surface.applyBoardAuthStatus({ slack: true });
+  flush();
   assert.equal(surface.systemSettingsModel.read().language, "ja", "guard delays DOM only");
   assert.equal(body.querySelector('[id$="-settings-system-language"]'), select);
   assert.equal(body.querySelector('[id$="-settings-system-codex-hooks"]').checked, true);
@@ -369,16 +375,94 @@ test("System replies advance one immutable snapshot for all mounts, including wh
   const detached = second.innerHTML;
   second.remove();
   surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied" });
+  flush();
   assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied");
   assert.equal(second.innerHTML, detached, "removed mounts no longer render");
 });
 
+test("System snapshots batch each mounted panel while local controls and autostart stay synchronous", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, window } = createSettingsHarness({
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+    onSend(message) {
+      if (message.kind === "update_autostart") {
+        for (const host of [body, second]) assert.equal(host.querySelector('[id$="-settings-system-autostart"]').disabled, true);
+      }
+    },
+  });
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "second", title: "Settings" });
+  surface.applyAutostartStatus({ enabled: false });
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "en" });
+  surface.resyncSettings();
+  flush();
+  const initial = surface.systemSettingsModel.read();
+  const panels = [body, second].map(host => host.querySelector('[data-system-settings-content]'));
+  const statuses = panels.map(panel => panel.querySelector('[data-role="system-settings-status"]'));
+  const draws = [0, 0];
+  let prototype = statuses[0];
+  while (!Object.hasOwn(prototype, "textContent")) prototype = Object.getPrototypeOf(prototype);
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "textContent");
+  statuses.forEach((status, index) => Object.defineProperty(status, "textContent", {
+    get() { return descriptor.get.call(this); },
+    set(value) { draws[index]++; descriptor.set.call(this, value); },
+  }));
+  for (let index = 1; index <= 50; index++) {
+    surface.applySystemSettingsEvent({ kind: "system_settings", language: index === 50 ? "ja" : "en",
+      agent_resource: { build_jobs: index },
+    });
+  }
+  assert.equal(surface.systemSettingsModel.read().agentResource.buildJobs, 50);
+  assert.equal(initial.language, "en");
+  assert.equal(initial.agentResource.buildJobs, null);
+  assert.deepEqual(draws, [0, 0], "scalar patches must wait for the frame too");
+  assert.equal(frames.size, 1);
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "late", title: "Settings" });
+  assert.equal(late.querySelector('[id$="-settings-system-agent-build-jobs"]').value, "50");
+  const lateNode = late.querySelector("[data-system-settings-content]").firstChild;
+  flush();
+  assert.equal(late.querySelector("[data-system-settings-content]").firstChild, lateNode);
+  assert.deepEqual(draws, [1, 1]);
+  for (const panel of panels) assert.equal(panel.querySelector('[id$="-settings-system-agent-build-jobs"]').value, "50");
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  flush();
+  assert.deepEqual(draws, [1, 1], "an unrelated store does not render System");
+  const resource = body.querySelector('[id$="-settings-system-agent-resource-enabled"]');
+  resource.checked = false;
+  resource.dispatchEvent(new window.Event("change"));
+  assert.equal(body.querySelector('[id$="-settings-system-agent-build-jobs"]').disabled, true);
+  const syncDraws = [...draws];
+  flush();
+  assert.deepEqual(draws, syncDraws, "a frame does not repeat a synchronous local render");
+  surface.applyAutostartStatus({ enabled: false });
+  const autostart = body.querySelector('[id$="-settings-system-autostart"]');
+  autostart.checked = true;
+  autostart.dispatchEvent(new window.Event("change"));
+  surface.applyAutostartError({ message: "Rejected" });
+  assert.equal(autostart.checked, false);
+  assert.equal(autostart.disabled, false);
+  assert.equal(body.querySelector('[data-role="autostart-settings-status"]').textContent, "Rejected");
+  const restoredDraws = [...draws];
+  flush();
+  assert.deepEqual(draws, restoredDraws);
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "en" });
+  second.remove();
+  flush();
+  assert.equal(draws[1], restoredDraws[1], "a detached mount is not rendered");
+});
+
 test("System local resource edits use current model values and preserve wire validation", () => {
-  const { surface, body, window, sent } = createSettingsHarness();
+  const { surface, body, window, sent, flush } = createSettingsHarness();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja", agent_resource: {
     enabled: true, preset: "custom", priority: "idle", cpu_limit_percent: 35, build_jobs: 2,
   } });
+  flush();
   const previous = surface.systemSettingsModel.read();
   const jobs = body.querySelector('[id$="-settings-system-agent-build-jobs"]');
   const trust = body.querySelector('[id$="-settings-system-codex-hooks"]');
@@ -392,6 +476,7 @@ test("System local resource edits use current model values and preserve wire val
   } });
   assert.equal(previous.agentResource.buildJobs, 2);
   surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Denied while focused" });
+  flush();
   assert.equal(body.querySelector("[data-role='system-settings-status']").textContent, "Denied while focused");
   surface.systemSettingsInteractionGuard.release();
   assert.ok(body.querySelector('[id$="-settings-system-codex-hooks"]') === trust,
@@ -409,14 +494,16 @@ test("System local resource edits use current model values and preserve wire val
 });
 
 test("Board auth snapshots jointly render Settings and survive guarded System refreshes", () => {
-  const { surface, body, document } = createSettingsHarness();
+  const { surface, body, document, flush } = createSettingsHarness();
   surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
+  flush();
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const second = document.createElement("main");
   document.body.appendChild(second);
   surface.renderSettingsWindow(second, { id: "settings-second", title: "Settings" });
   const previous = surface.systemSettingsModel.read();
   surface.applyBoardAuthStatus({ slack: true, slack_client_id: "client-a", message: "Connected" });
+  flush();
   const signedIn = surface.systemSettingsModel.read();
   assert.ok(Object.isFrozen(signedIn.boardConfig));
   assert.equal(previous.boardAuth.slack, false, "later replies cannot mutate earlier snapshots");
@@ -426,7 +513,9 @@ test("Board auth snapshots jointly render Settings and survive guarded System re
   }
   surface.systemSettingsInteractionGuard.activate();
   surface.applySystemSettingsEvent({ kind: "system_settings_updated", language: "ja" });
+  flush();
   surface.applyBoardAuthStatus({ slack: false, slack_client_id: "client-b" });
+  flush();
   assert.equal(surface.systemSettingsModel.read().boardAuth.slack, false,
     "the shared model updates while a dropdown is open");
   assert.equal(body.querySelector(".board-auth-status").dataset.signedIn, "true");
@@ -440,6 +529,7 @@ test("Board auth snapshots jointly render Settings and survive guarded System re
   }
   second.remove();
   surface.applyBoardAuthStatus({ slack: true });
+  flush();
   assert.equal(second.querySelector(".board-auth-status").dataset.signedIn, "false",
     "detached mounts are removed from the subscription");
 });
@@ -530,7 +620,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
 });
 
 test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
-  const { surface, body, window } = createSettingsHarness();
+  const { surface, body, window, flush } = createSettingsHarness();
   surface.applySystemSettingsEvent({ kind: "system_settings", board_provider: "slack" });
   surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
   const secret = body.querySelector('input[type="password"]');
@@ -541,6 +631,7 @@ test("Issue #5531: recovered System snapshots preserve unsaved provider and OAut
   port.dispatchEvent(new window.Event("input", { bubbles: true }));
   surface.resyncSettings();
   surface.applyBoardAuthStatus({ oauth_redirect_port: 8765 });
+  flush();
   assert.equal(body.querySelector('input[type="password"]'), secret);
   assert.equal(secret.value, "unsaved-secret");
   assert.equal(body.querySelector(".board-oauth-port-form input"), port);
@@ -706,7 +797,9 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   retry.checked = true;
   const rendersBeforeRetry = renders;
   retry.dispatchEvent(new Event("change"));
-  assert.equal(renders, rendersBeforeRetry, "a local toggle waits for an authoritative reply before rendering");
+  assert.equal(renders, rendersBeforeRetry + 1, "synchronous model subscribers see the local draft");
+  assert.equal(supportedAgentsModel.read().autoUpdate, false, "confirmed settings wait for the backend");
+  assert.equal(supportedAgentsModel.read().autoUpdateDraft, true);
   assert.equal(retry.checked, true);
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.ok(!panel.querySelector('[role="alert"]'), "a successful retry clears the prior setting-save error");
@@ -721,6 +814,89 @@ test("Supported Agents sends maintenance requests and exposes failures and autom
   handlers.applySupportedAgentList({ agents, auto_update: true, maintenance_pending: false });
   assert.match(panel.querySelector('[data-agent-id="grok"]').textContent, /Latest/);
   assert.equal(panel.querySelector('[aria-label="Update Grok Build"]'), null);
+});
+
+test("Supported Agents batches catalogs while local operations and authoritative recovery stay current", () => {
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const { surface, body, document, window, sent } = createSettingsHarness({
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+    onSend(message) {
+      if (message.kind === "maintain_supported_agent") {
+        for (const host of [body, second]) {
+          assert.equal(host.querySelector('[aria-label="Install OpenCode"]').disabled, true,
+            "all mounts disable maintenance actions before sending");
+        }
+      }
+    },
+  });
+  surface.renderSettingsWindow(body, { id: "supported-first", title: "Settings" });
+  const second = document.createElement("main");
+  document.body.appendChild(second);
+  surface.renderSettingsWindow(second, { id: "supported-second", title: "Settings" });
+  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
+  surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
+  const agents = [{ id: "opencode", name: "OpenCode", installed: false, install_supported: true }];
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  flush();
+  const panels = [body, second].map(host => host.querySelector('[data-settings-panel="supported-agents"]'));
+  const tables = panels.map(panel => panel.querySelector("table"));
+  const draws = [0, 0];
+  panels.forEach((panel, index) => {
+    const append = panel.appendChild.bind(panel);
+    panel.appendChild = node => { if (node.tagName === "TABLE") draws[index]++; return append(node); };
+  });
+  for (let index = 0; index < 50; index++) {
+    surface.applySupportedAgentList({ agents: [{ ...agents[0], name: `OpenCode ${index}` }], auto_update: false });
+  }
+  assert.deepEqual(draws, [0, 0], "catalog burst leaves DOM unchanged until the frame");
+  assert.equal(panels[0].querySelector("table"), tables[0]);
+  assert.equal(frames.size, 1);
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /OpenCode 49/,
+    "candidate catalog remains synchronous");
+  // The pending snapshot must not overwrite a later local checkbox edit.
+  const automatic = panels[0].querySelector('[aria-label="Automatically update agents"]');
+  automatic.checked = true;
+  automatic.dispatchEvent(new window.Event("change"));
+  assert.deepEqual(draws, [0, 0], "local toggle commits without synchronous DOM reconstruction");
+  flush();
+  assert.deepEqual(draws, [1, 1]);
+  for (const panel of panels) {
+    assert.match(panel.textContent, /OpenCode 49/);
+    assert.equal(panel.querySelector('[aria-label="Automatically update agents"]').checked, true);
+  }
+  assert.equal(panels[0].querySelector('[aria-label="Automatically update agents"]'), automatic);
+  surface.applySupportedAgentMaintenance({ agent_id: "", pending: false, success: false, message: "Save denied" });
+  flush();
+  assert.equal(automatic.checked, false, "global failure alone rolls back the unconfirmed toggle");
+  assert.match(panels[0].querySelector('[role="alert"]').textContent, /Save denied/);
+  surface.applySupportedAgentList({ agents, auto_update: false });
+  // A late mount draws current state synchronously and does not skip pending siblings.
+  const late = document.createElement("main");
+  document.body.appendChild(late);
+  surface.renderSettingsWindow(late, { id: "supported-late", title: "Settings" });
+  const lateTable = late.querySelector('[data-settings-panel="supported-agents"] table');
+  assert.match(lateTable.textContent, /OpenCode/);
+  flush();
+  assert.equal(late.querySelector('[data-settings-panel="supported-agents"] table'), lateTable);
+  assert.equal(panels[0].querySelector('[role="alert"]'), null);
+  panels[0].querySelector('[aria-label="Install OpenCode"]').click();
+  const before = [...draws];
+  flush();
+  assert.deepEqual(draws, before, "the frame skips the snapshot already rendered before maintenance send");
+  assert.deepEqual(sent.filter(message => message.kind === "maintain_supported_agent"), [
+    { kind: "maintain_supported_agent", agent_id: "opencode", action: "install" },
+  ]);
+  second.remove();
+  const detachedDraws = draws[1];
+  surface.applySupportedAgentList({ agents, auto_update: true });
+  flush();
+  assert.equal(draws[1], detachedDraws);
+  assert.equal(automatic.checked, true);
+  const beforeUnrelated = [...draws];
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" });
+  flush();
+  assert.deepEqual(draws, beforeUnrelated);
 });
 
 test("Supported Agents uses the shared Settings tab and refreshes from its backend snapshot", () => {

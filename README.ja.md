@@ -29,6 +29,9 @@ Agent workspace を materialize するために worktree を使いますが、�
   bundled `gwt-*` skills を使えます。
 - **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
+- **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
+  有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
+  Claude アカウント枠は Settings → Usage & Limits で有効化してください。
 
 ## インストール
 
@@ -303,6 +306,36 @@ gwtd <<'JSON'
 JSON
 ```
 
+`fleet.inventory` はプロジェクトの agent プロセス・pane・Monitor 行を1つの
+JSONレポートで返します。対応が取れない行、worktreeの重複、配信の判定根拠、
+一部の観測元が使えない場合の診断も含みます。`fleet.orphans` はpaneが観測されない
+プロセスを列挙します。pane情報の取得失敗時はorphanと断定しません。
+
+登録済みPMは `fleet.disposition` に空でない `targets` 配列を渡して整理できます。
+選んだ行の `id`、`session_id`、paneの `child_pid` / `child_started_at` を指定します。
+プロセスのみの対象には代わりに `pid` / `started_at` が必要です。
+配信状態がunknownの集合は `allow_unknown:true` を明示しない限り拒否されます。
+現在のclaim保持者、稼働中executionの保持者、未配信の作業は保護されます。
+`fleet.orphan.terminate` はプロセス対象のみ受け付けます。対象ごとにreceiptを返し、
+世代変更、未対応backend、プロセス終端未確認を報告します。通常closeへはfallbackしません。
+orphan終端には固定OS process handle（LinuxのpidfdまたはWindowsのprocess handle）が必要です。
+他のOS、handle取得不可、lifecycle権限が不確かな場合はプロセスを保持します。
+`allow_unknown` で上書きできるのは配信状態の不確かさだけです。
+
+`pane.health` は既存の workspace と runtime sidecar の状態から、GUI event loop に
+依存せずプロジェクトの pane health を読み取ります。応答の `output` 文字列を JSON として
+読んだ `panes` 配列に、各 pane の `classification`、`reason_code`、`recommended_action`
+を返します。`params.id` を省略すると全 pane、`pane.list` の ID（raw pane ID も可）を
+渡すと単一 pane が対象です。
+推奨 action は判断材料であり、この operation 自体は close・relaunch・stop・requeue
+を実行しません。
+
+```bash
+gwtd <<'JSON'
+{"schema_version":1,"operation":"pane.health","params":{}}
+JSON
+```
+
 `actions.dispatch` は共有 GitHub API budget を使って workflow を起動します。
 既定ではすべて拒否します。`~/.gwt/config.toml` でリポジトリごとに
 workflow のファイル名を許可します。
@@ -525,12 +558,34 @@ live な claim/window の識別情報が失われた場合も、operator は `is
 所属を維持します。起動失敗には原因の分類と次の回復操作を表示し、同じ原因の失敗が
 続いた場合は設定済みの試行上限後に自動再試行を止めます。
 
+live な launch の停止では、pane が消えていても、その host に対象の agent と子孫
+プロセスの終了を要求します。`runtime_stop: requested` は要求の受付を示すため、
+終了は `issue.monitor.status` で確認してください。`active_sessions` は pane の有無に
+関係なく生存 PID・worktree・既知の `launch_entrypoint` を返します。
+停止した runtime は検証を開始できません。既存の作業を続けるには、Session を明示的に
+再開して新しい runtime を起動します。対象を安全に特定できない場合は、停止を拒否します。
+別の pane に対する `pane.close` は、プロセスツリーの終了後に `closed` を返します。
+タイムアウト時や、復元した Session の PTY を捕捉できない場合は終了未確認のエラーと
+なります。自分の pane を閉じる場合は、呼び出した agent が終了する前に
+`close requested` を返します。
+
 `urgent` は誰でも付与できます。実行候補の urgent Issue は Auto-refill が無効でも
 自動投入されますが、明示的なキュー削除は優先されます。既定では付与順に最大2件が
 先頭群へ入り、保存済みの通常順序と `max_active` は変わりません。
 `issue.monitor.queue.urgent_limit` の `limit` で上限を変更できます（`0` は先頭群への昇格だけを無効化）。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`urgent_queue_limit` を含みます。不一致なら設定を保存せず、status を再読して変更を再評価します。
+応答は従来のキュー項目を保持し、同じ保存 snapshot の `saved_config` と `config_token` を含みます。
+guard 省略時は従来の挙動を保ちます。この値比較は ABA 履歴を検知しません。
 超過分は通常順序に従います。`issue.monitor.queue.demote` の `number` で指定した Issue は
 永続的に通常優先度へ戻り、scan・再起動後も urgent ラベルより降格が優先されます。
+降格前に `issue.monitor.queue.list` を読み、`urgent_queue_token` を
+`expected_urgent_queue_token` として渡します。保存された urgent 上限・付与情報・降格を
+比較対象とし、通常のキュー順序と runtime は含みません。不一致なら設定を変更せず、
+list を再読して降格を再評価します。成功応答のキュー項目と新 token は同じ保存 snapshot を表します。
+guard 省略時は従来互換で、`null`・空文字・異なる型は拒否します。
+この値比較は ABA 履歴や他の control 操作を保護しません。
 カードと詳細では urgent・上限超過・降格を区別し、`issue.monitor.queue.list` と
 `issue.monitor.status` からも理由と観測済みの GitHub ラベル付与者・時刻を確認できます。
 未取得の履歴は不明として表示します。
@@ -543,6 +598,12 @@ move/remove の前に現在端末の list を読み、その配列を `expected_
 明示的な `[]` は保存キューが空の場合だけ一致し、`null` は拒否します。省略時は従来互換です。
 比較対象はキュー順の値であり、途中の変更履歴、urgent metadata、優先順だけの変更、他の設定変更は検出しません。
 `issue.monitor.queue.auto_refill` は自動補充の有効化と上限を設定します。
+変更前に `issue.monitor.status` の `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。保存観測値には
+`terminal_queue_auto_refill` と `terminal_queue_auto_refill_limit` を含みます。
+不一致なら設定を変更せず拒否するため、status を再読して変更を再判断します。
+成功応答の保存観測値と新 token も読み戻して確認します。省略時は従来互換で、
+`null`・空文字・異なる型は拒否します。途中の変更履歴や他の control 操作は保護しません。
 `issue.monitor.launch_now` は対象を端末キューの先頭へ明示的に追加し、scan を要求します。
 既存の `issue.monitor.priority.move` と `issue.monitor.priority.set` も利用できます。
 途中の優先順変更を上書きしないため、`issue.monitor.status` の保存済み全順序
@@ -611,6 +672,12 @@ backoffに使う総試行回数には数えます。
 `issue.monitor.tier.set` の `number` と `tier` でIssueの段の下限を引き上げ、
 次回起動にも保持できます。`issue.monitor.tiers` は設定・Issue履歴・最下段での
 着地率を返します（着地の観測がなければ `null`）。判定不能な終了の累計も確認できます。
+条件付きで `tiers.set` を実行する場合は、`issue.monitor.status` または
+`issue.monitor.tiers` の fresh な `saved_config` と `config_token` を読み、
+その token を `expected_config_token` として渡します。不一致なら設定ファイル全体を
+変更せず拒否するため、status を再読して変更を再判断し、成功後も読み戻して確認します。
+token は保存された `launch_auto` と `launch_tiers` を含みます。guard の省略は従来互換を保ち、
+null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴や個別の `tier.set` は保護しません。
 `issue.monitor.status` の各行には `launch_tier` と `landing_tier` に加え、総試行回数の
 `attempts`、段に数えなかった `non_agent_attempts`、差分の `tier_input` が表示されます。
 着地は、担当Issueとセッションが一致するWorkの `done` 更新成功を指します。
@@ -1031,6 +1098,10 @@ agent の停止や pane close が Board の未読を報告した場合は、同�
 JSON operation `board.show` に `params:{"all":true}` を渡して本文を読み、再試行します。
 自動 reminder の注入は読了として扱われません。実装 agent の判断依頼は `agent:pm`
 宛に送ります。agent の Board 投稿から `user:<id>` を指定できるのは登録済み PM だけです。
+
+Board の decision が idle の agent session（`session:<id>`）を mention すると、
+gwt は裁定を読んで続行するよう対象 agent に 1 行の通知を送ります。
+Board が再更新されても同じ通知は繰り返しません。
 
 JSON operation `hook.health` では、gwt の GitHub mutation policy と矛盾する外部 skill の
 コマンド、該当ファイル、代替操作を確認できます。既定では有効な Claude plugin を検査します。

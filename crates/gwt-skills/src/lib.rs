@@ -1530,6 +1530,52 @@ mod tests {
     }
 
     #[test]
+    fn issue_4359_autonomous_guidance_continues_after_reversible_rulings() {
+        use crate::coordination_guidance::{SKILL_BODY_EN, SKILL_BODY_JA};
+
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(body.contains("PM default ruling (override available)"));
+            assert!(body.contains("needs_human"));
+        }
+        let materialized = tempfile::tempdir().unwrap();
+        generate_coordination_guidance(materialized.path()).unwrap();
+        let claude = read_asset_contract(
+            materialized
+                .path()
+                .join(".claude/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        let codex = read_asset_contract(
+            materialized
+                .path()
+                .join(".codex/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        assert_eq!(claude, codex);
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut execute_mirrors = Vec::new();
+        for provider in [".claude", ".codex"] {
+            let execute = std::fs::read_to_string(
+                workspace_root.join(format!("{provider}/skills/gwt-execute/SKILL.md")),
+            )
+            .unwrap();
+            for body in [&claude, &execute] {
+                for phrase in [
+                    "PM default ruling (override available)",
+                    "Do not stop to wait for a PM reply",
+                    "After receiving a Board ruling, resume",
+                    "irreversible decisions",
+                    "needs_human",
+                ] {
+                    assert!(body.contains(phrase), "{provider}: missing {phrase}");
+                }
+            }
+            execute_mirrors.push(execute);
+        }
+        assert_eq!(execute_mirrors[0], execute_mirrors[1]);
+    }
+
+    #[test]
     fn gwt_execute_documents_issue_bound_build_lifecycle() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let materialized = tempfile::tempdir().expect("materialization target");

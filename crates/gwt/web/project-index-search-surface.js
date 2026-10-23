@@ -42,7 +42,8 @@ export function createProjectIndexSearchSurface({
   scheduleFrame,
 }) {
       const indexSearchStateMap = new Map();
-      const indexSearchModel = createUiStateStore({});
+      const indexSearchModel = createUiStateStore({}, { scheduleFrame });
+      const renderedSearchResponses = new WeakMap();
       let indexSearchRequestId = 0;
       const pendingIndexOpenTargetsByPreset = new Map();
       const indexStatusModel = createUiStateStore({
@@ -137,9 +138,9 @@ export function createProjectIndexSearchSurface({
           indexSearchModel.update(snapshot => ({ ...snapshot, [windowId]: {
             searching: false, results: [], suggestions: [], error: "",
           } }));
-          indexSearchStateMap.get(windowId).unsubscribe = indexSearchModel.subscribe(
+          indexSearchStateMap.get(windowId).unsubscribe = indexSearchModel.subscribeFrame(
             snapshot => snapshot[windowId],
-            response => { if (response) renderProjectIndexSearch(windowId); },
+            response => { if (response) renderProjectIndexSearch(windowId, true); },
           );
         }
         return indexSearchStateMap.get(windowId);
@@ -255,8 +256,7 @@ export function createProjectIndexSearchSurface({
         return `${Math.round(score * 100)}% match`;
       }
 
-      function indexSearchVisibleResults(state) {
-        const response = indexSearchModel.read()[state.windowId];
+      function indexSearchVisibleResults(state, response = indexSearchModel.read()[state.windowId]) {
         return [
           ...response.results.map((result) => ({ result, suggestion: false })),
           ...response.suggestions.map((result) => ({ result, suggestion: true })),
@@ -266,6 +266,14 @@ export function createProjectIndexSearchSurface({
       function selectedIndexSearchItem(state) {
         const visible = indexSearchVisibleResults(state);
         return visible[state.selectedResultIndex] || visible[0] || null;
+      }
+
+      function renderedIndexSearchItem(windowId, selectedIndex) {
+        const root = document.querySelector(`[data-id='${CSS.escape(windowId)}'] .index-search-root`);
+        const rendered = renderedSearchResponses.get(root);
+        if (!rendered) return null;
+        const visible = indexSearchVisibleResults({ windowId }, rendered.response);
+        return visible[selectedIndex ?? rendered.selectedResultIndex] || visible[0] || null;
       }
 
       function formatIndexSearchEvidence(result, includeMissing = false) {
@@ -314,6 +322,7 @@ export function createProjectIndexSearchSurface({
         if (scopes.length === 0) {
           invalidateProjectIndexSearchRequest(state);
           updateIndexSearchResponse(state, { error: "Select at least one scope.", searching: false });
+          renderProjectIndexSearch(windowId);
           return;
         }
         const status = activeIndexStatus();
@@ -331,6 +340,7 @@ export function createProjectIndexSearchSurface({
         state.inFlightRequestId = requestId;
         state.inFlightSignature = searchSignature;
         updateIndexSearchResponse(state, { searching: true, error: "" });
+        renderProjectIndexSearch(windowId);
         send({
           kind: "search_project_index",
           id: windowId,
@@ -340,7 +350,6 @@ export function createProjectIndexSearchSurface({
           match_mode: state.matchMode,
           worktree_hash: worktreeHash || null,
         });
-        renderProjectIndexSearch(windowId);
       }
 
       function resyncProjectIndexSearch(windowIds) {
@@ -354,13 +363,17 @@ export function createProjectIndexSearchSurface({
         }
       }
 
-      function renderProjectIndexSearch(windowId) {
+      function renderProjectIndexSearch(windowId, fromFrame = false) {
         const local = ensureIndexSearchState(windowId);
-        const state = { ...local, ...indexSearchModel.read()[windowId] };
+        const response = indexSearchModel.read()[windowId];
+        const state = { ...local, ...response };
         const root = document.querySelector(
           `[data-id='${CSS.escape(windowId)}'] .index-search-root`,
         );
         if (!root) return;
+        // Local operations and remounts hydrate immediately. A pending receipt
+        // must not replace their DOM again with the same committed response.
+        if (fromFrame && renderedSearchResponses.get(root)?.response === response) return;
         const status = activeIndexStatus();
         const statusRefreshPending = ensureIndexStatusRefresh(local, status);
         const searchPanel = root.querySelector("[data-index-panel='search']");
@@ -388,6 +401,7 @@ export function createProjectIndexSearchSurface({
             send,
           });
         }
+        renderedSearchResponses.set(root, { response, selectedResultIndex: state.selectedResultIndex });
       }
 
       function renderProjectIndexSearchControls(root, state, status, statusRefreshPending = false) {
@@ -855,8 +869,7 @@ export function createProjectIndexSearchSurface({
           body.querySelector(".index-result-list").addEventListener("dblclick", (event) => {
             const row = event.target.closest("[data-result-index]");
             if (!row) return;
-            state.selectedResultIndex = Number(row.dataset.resultIndex || 0);
-            const result = selectedIndexSearchItem(state)?.result;
+            const result = renderedIndexSearchItem(windowData.id, Number(row.dataset.resultIndex || 0))?.result;
             openIndexResultTarget(result);
           });
           body.querySelector(".index-result-list").addEventListener("keydown", (event) => {
@@ -868,13 +881,13 @@ export function createProjectIndexSearchSurface({
               moveIndexResultSelection(windowData.id, -1);
             } else if (event.key === "Enter") {
               event.preventDefault();
-              const result = selectedIndexSearchItem(state)?.result;
+              const result = renderedIndexSearchItem(windowData.id)?.result;
               openIndexResultTarget(result);
             }
           });
           body.querySelector(".index-result-detail").addEventListener("click", (event) => {
             if (!event.target.closest("[data-action='open-index-result']")) return;
-            const result = selectedIndexSearchItem(state)?.result;
+            const result = renderedIndexSearchItem(windowData.id)?.result;
             openIndexResultTarget(result);
           });
           renderProjectIndexSearch(windowData.id);

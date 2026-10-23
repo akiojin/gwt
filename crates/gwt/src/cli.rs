@@ -23,6 +23,8 @@ pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
 mod feedback;
+mod fleet;
+mod fleet_disposition;
 mod github_budget;
 pub mod governance;
 pub mod gwtd_resolver;
@@ -133,6 +135,7 @@ pub enum CliCommand {
     Workspace(WorkspaceCommand),
     Workflow(WorkflowCommand),
     Pane(PaneCommand),
+    Fleet(fleet_disposition::FleetCommand),
     /// SPEC #3700 FR-007: `perf.summary` / `perf.violations` read operations.
     Perf(perf::PerfCommand),
     /// SPEC-3431: `pm.*` PM agent diagnostics.
@@ -312,6 +315,8 @@ pub enum WorkflowCommand {
 pub enum PaneCommand {
     /// `pane.list`.
     List,
+    /// Read-only health census, independent of GUI dispatch.
+    Health { id: Option<String> },
     /// Assign the authenticated producing Session's own stable Agent name.
     Name { candidate: String },
     /// `pane.read`.
@@ -335,6 +340,7 @@ pub enum PaneCommand {
         project_root: Option<String>,
         id: String,
         text: String,
+        operation_id: Option<String>,
     },
 }
 /// Sub-action for `plan.*` / `build.*` (SPEC-1935 FR-014q/r).
@@ -740,6 +746,7 @@ pub(crate) fn run_collect<E: CliEnv>(
         CliCommand::Workspace(inner) => workspace::run(env, inner, &mut out)?,
         CliCommand::Workflow(inner) => workflow::run(env, inner, &mut out)?,
         CliCommand::Pane(inner) => pane::run(env, inner, &mut out)?,
+        CliCommand::Fleet(inner) => fleet_disposition::run(env, inner, &mut out)?,
         CliCommand::ProviderReset(inner) => provider_reset::run(env, inner, &mut out)?,
         CliCommand::Perf(inner) => perf::run(env, inner, &mut out)?,
         CliCommand::Pm(inner) => pm::run(env, inner, &mut out)?,

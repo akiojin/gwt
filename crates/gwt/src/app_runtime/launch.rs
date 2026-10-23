@@ -5,8 +5,8 @@
 //! - The launch payload types ([`ProcessLaunch`], [`AgentLaunchCompletion`],
 //!   [`AgentLaunchResult`]) and the success dispatch bridge
 //!   (`dispatch_agent_launch_success`)
-//! - [`LaunchWizardMemoryCache`] (session cache backing the Launch Wizard)
-//!   and `launch_config_from_persisted_session`
+//! - Reexports of [`LaunchWizardMemoryCache`] and
+//!   `launch_config_from_persisted_session` from the shared library
 //! - SPEC-2809 launch stage correlation (`next_agent_launch_stage_id`
 //!   fed by the `AppRuntime::agent_launch_stage_counter` field per
 //!   SPEC-3064 FR-002, `emit_agent_launch_stage`) and the
@@ -27,12 +27,16 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
+pub use gwt::launch_wizard::LaunchWizardMemoryCache;
 use gwt::project_runtime::ActiveLaunchHandshakeCleanup;
+pub(super) use gwt::session_launch::launch_config_from_persisted_session;
 #[cfg(test)]
-pub(super) use gwt::session_launch::apply_resume_identity_to_session;
+pub(super) use gwt::session_launch::{
+    apply_resume_identity_to_session, resume_handle_unavailable_reason,
+};
 use gwt::session_launch::{initialize_launch_session, persist_finalized_launch_session};
 use gwt_agent::resolve_host_runner_health_checked;
 
@@ -3174,135 +3178,6 @@ pub(super) fn dispatch_agent_launch_success<F>(
     spawn_project_index_bootstrap(proxy, project_index_root);
 }
 
-/// Why a restored Session cannot be handed to the agent CLI as `--resume`
-/// (SPEC-3966 AC-4).
-///
-/// `None` means the Session does carry a usable handle. Every other answer is
-/// the reason the restore falls back to a brand-new conversation, so the
-/// fallback is never silent.
-pub(super) fn resume_handle_unavailable_reason(
-    session: &gwt_agent::Session,
-) -> Option<&'static str> {
-    if session.exact_resume_session_id().is_some() {
-        return None;
-    }
-    match session.agent_session_id.as_deref().map(str::trim) {
-        None => Some(
-            "no agent_session_id was ever persisted for this Session \
-             (the SessionStart managed hook never reached persist_agent_session_id)",
-        ),
-        Some("") => Some("the persisted agent_session_id is empty"),
-        Some(_) => Some(
-            "the persisted agent_session_id is the Codex placeholder, not a conversation handle",
-        ),
-    }
-}
-
-/// Carry a restored launch's conversation identity onto the successor Session
-/// record (SPEC-3966 AC-5).
-///
-/// Without this the successor is written with no `agent_session_id`, so the
-/// *next* restore has nothing to resume from either and every restart leaves
-/// one more handle-less Session behind.
-pub(super) fn launch_config_from_persisted_session(
-    session: &gwt_agent::Session,
-) -> gwt_agent::LaunchConfig {
-    let agent_id = session.agent_id.clone();
-    let pm_scratch = gwt::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
-    let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
-    builder = builder.working_dir(session.worktree_path.clone());
-    if !session.branch.is_empty() {
-        builder = builder.branch(session.branch.clone());
-    }
-    if let Some(model) = session.model.clone() {
-        builder = builder.model(model);
-    }
-    if let Some(level) = session.reasoning_level.clone() {
-        builder = builder.reasoning_level(level);
-    }
-    // FR-028 belongs to the PM role, including older Sessions whose saved
-    // skip_permissions field defaults to false.
-    if session.skip_permissions || pm_scratch.is_some() {
-        builder = builder.skip_permissions(true);
-    }
-    if session.fast_mode_enabled() {
-        builder = builder.fast_mode(true);
-    }
-    builder = builder.runtime_target(session.runtime_target);
-    if let Some(service) = session.docker_service.clone() {
-        builder = builder.docker_service(service);
-    }
-    builder = builder.docker_lifecycle_intent(session.docker_lifecycle_intent);
-    if let Some(shell) = session.windows_shell {
-        builder = builder.windows_shell(shell);
-    }
-    if let Some(linked) = session.linked_issue_number {
-        builder = builder.linked_issue_number(linked);
-    }
-    // Issue #4217 FR-002: a rebuilt config keeps the route the launcher
-    // originally stamped, so a restored or resumed monitor launch does not
-    // quietly become a human-driven one.
-    builder = builder.launch_route(session.launch_route);
-
-    // Issue #3965: the PM bootstrap prompt is a property of the PM role, not of
-    // any structured `Session` field, so rebuilding a config here used to drop
-    // it and restore the PM as a plain agent under no PM contract. Re-apply it
-    // from the same PM detection that already restores the scratch dir below —
-    // unconditionally, because a persisted `launch_args` that still records the
-    // prompt is not consulted by the builder and would otherwise lose it too.
-    if pm_scratch.is_some()
-        && gwt::pm_registry::pm_autonomous_bootstrap_allowed(&session.worktree_path)
-    {
-        builder = builder.extra_arg(super::pm::PM_BOOTSTRAP_PROMPT);
-    }
-
-    if let Some(resume_id) = session.exact_resume_session_id() {
-        builder = builder
-            .session_mode(gwt_agent::SessionMode::Resume)
-            .resume_session_id(resume_id.to_string())
-            .predecessor_session_id(session.id.clone());
-    } else {
-        // SPEC-3966 AC-4: restoring without a resume handle silently started a
-        // brand-new conversation, which is how the resident PM lost its whole
-        // decision history on every gwt restart without anyone noticing. Say so
-        // instead, with the reason, so the next reader does not have to
-        // reverse-engineer it from an empty Session TOML.
-        tracing::warn!(
-            session_id = %session.id,
-            worktree = %session.worktree_path.display(),
-            agent = ?session.agent_id,
-            reason = resume_handle_unavailable_reason(session).unwrap_or("unknown"),
-            "restored Session has no resume handle; launching a new conversation instead of --resume"
-        );
-        builder = builder.session_mode(gwt_agent::SessionMode::Normal);
-    }
-
-    let mut config = builder.build();
-    if !session.display_name.is_empty() {
-        config.display_name = session.display_name.clone();
-    }
-    if let Some(scratch) = pm_scratch {
-        config.env_vars.insert(
-            gwt::pm_registry::GWT_PM_SCRATCH_DIR_ENV.to_string(),
-            scratch.to_string_lossy().into_owned(),
-        );
-        config.suppress_execution_control = true;
-    }
-    if session.review_dispatch {
-        // Restore the observation role without rematerializing its existing
-        // detached checkout or arming producing execution control.
-        config
-            .env_vars
-            .insert("GWT_REVIEW_DISPATCH".to_string(), "1".to_string());
-        config.suppress_execution_control = true;
-        config.is_ephemeral = true;
-        // The persisted branch can be the detached checkout's display fallback.
-        // Matching it would join a different review that shares that label.
-        config.branch = None;
-    }
-    config
-}
-
 fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProcessStatus {
     #[cfg(windows)]
     if _config.runtime_target == gwt_agent::LaunchRuntimeTarget::Host
@@ -3314,43 +3189,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
         return WindowProcessStatus::Starting;
     }
     WindowProcessStatus::Running
-}
-
-#[cfg(test)]
-mod persisted_review_launch_tests {
-    use super::*;
-
-    #[test]
-    fn restored_review_retains_observation_contract_and_isolated_worktree() {
-        let mut session = gwt_agent::Session::new(
-            "/tmp/isolated-review-checkout",
-            "work",
-            gwt_agent::AgentId::Codex,
-        );
-        session.review_dispatch = true;
-        session.linked_issue_number = Some(5478);
-        session.agent_session_id = Some("review-provider-conversation".to_string());
-        let config = launch_config_from_persisted_session(&session);
-
-        assert_eq!(
-            config
-                .env_vars
-                .get("GWT_REVIEW_DISPATCH")
-                .map(String::as_str),
-            Some("1"),
-            "a restored reviewer must retain its read-only hook identity"
-        );
-        assert!(config.suppress_execution_control);
-        assert!(config.is_ephemeral);
-        assert!(
-            config.branch.is_none(),
-            "a detached review must not join another review via the shared fallback branch"
-        );
-        assert_eq!(config.working_dir.as_ref(), Some(&session.worktree_path));
-        assert!(config.ephemeral_base_ref.is_none());
-        assert_eq!(config.linked_issue_number, Some(5478));
-        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -3688,386 +3526,6 @@ pub(super) fn issue_monitor_trust_candidate_from_feedback(
         session_mode,
         review_dispatch: context.issue_monitor_review_dispatch,
     }))
-}
-
-/// SPEC-3864 T-006: install detection runs off the startup critical path.
-/// The slot starts as a background thread and is joined on first wizard
-/// access; clones share the same slot so a joined result is reused.
-#[derive(Debug)]
-enum AgentOptionsSlot {
-    Loading(Option<std::thread::JoinHandle<Vec<gwt::AgentOption>>>),
-    Ready(Vec<gwt::AgentOption>),
-}
-
-#[derive(Debug)]
-pub struct LaunchWizardMemoryCache {
-    sessions_dir: PathBuf,
-    // Issue #4377: the ledger holds every Session ever launched, stopped ones
-    // included (1,124 files on one host), so it is parsed on a background
-    // thread and joined on first read instead of inside `AppRuntime::new`.
-    sessions: Arc<OnceLock<Vec<gwt_agent::Session>>>,
-    pending_sessions: Arc<Mutex<Option<thread::JoinHandle<Vec<gwt_agent::Session>>>>>,
-    agent_options: Arc<Mutex<AgentOptionsSlot>>,
-    // SPEC-3170 FR-001: Claude capability detection may read settings and run
-    // `claude --version` once per process. The wizard stores the booleans at
-    // cache load time and reuses them on every open.
-    claude_ultracode_supported: bool,
-    claude_workflows_enabled: bool,
-}
-
-impl Clone for LaunchWizardMemoryCache {
-    fn clone(&self) -> Self {
-        Self {
-            sessions_dir: self.sessions_dir.clone(),
-            sessions: self.sessions.clone(),
-            pending_sessions: self.pending_sessions.clone(),
-            agent_options: self.agent_options.clone(),
-            claude_ultracode_supported: self.claude_ultracode_supported,
-            claude_workflows_enabled: self.claude_workflows_enabled,
-        }
-    }
-}
-
-impl LaunchWizardMemoryCache {
-    pub(crate) fn load(sessions_dir: &Path) -> Self {
-        let claude_capabilities = gwt_agent::claude_capability_snapshot();
-        Self {
-            sessions_dir: sessions_dir.to_path_buf(),
-            sessions: Arc::new(OnceLock::new()),
-            pending_sessions: Arc::new(Self::spawn_session_load(sessions_dir)),
-            agent_options: Self::spawn_agent_options_detection(),
-            claude_ultracode_supported: claude_capabilities.ultracode_supported,
-            claude_workflows_enabled: claude_capabilities.workflows_enabled,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn load_with_agent_options(
-        sessions_dir: &Path,
-        agent_options: Vec<gwt::AgentOption>,
-    ) -> Self {
-        Self::load_with_agent_options_and_capabilities(sessions_dir, agent_options, false, false)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn load_with_agent_options_and_capabilities(
-        sessions_dir: &Path,
-        agent_options: Vec<gwt::AgentOption>,
-        claude_ultracode_supported: bool,
-        claude_workflows_enabled: bool,
-    ) -> Self {
-        Self {
-            sessions_dir: sessions_dir.to_path_buf(),
-            sessions: Arc::new(OnceLock::new()),
-            pending_sessions: Arc::new(Self::spawn_session_load(sessions_dir)),
-            agent_options: Arc::new(Mutex::new(AgentOptionsSlot::Ready(agent_options))),
-            claude_ultracode_supported,
-            claude_workflows_enabled,
-        }
-    }
-
-    fn load_sessions(sessions_dir: &Path) -> Vec<gwt_agent::Session> {
-        gwt_agent::session_ledger::load_sessions(sessions_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|session| !durable_launch_recovery_exists(sessions_dir, &session.id))
-            .collect()
-    }
-
-    /// A thread that cannot be spawned leaves the slot empty, and the first
-    /// read then loads inline, so the ledger is never silently empty.
-    fn spawn_session_load(
-        sessions_dir: &Path,
-    ) -> Mutex<Option<thread::JoinHandle<Vec<gwt_agent::Session>>>> {
-        let sessions_dir = sessions_dir.to_path_buf();
-        let handle = thread::Builder::new()
-            .name("gwt-session-ledger".to_string())
-            .spawn(move || Self::load_sessions(&sessions_dir));
-        Mutex::new(match handle {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                tracing::warn!(error = %error, "session ledger thread unavailable; loading on first read");
-                None
-            }
-        })
-    }
-
-    fn sessions(&self) -> &Vec<gwt_agent::Session> {
-        self.sessions.get_or_init(|| {
-            self.pending_sessions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-                .and_then(|handle| handle.join().ok())
-                .unwrap_or_else(|| Self::load_sessions(&self.sessions_dir))
-        })
-    }
-
-    fn sessions_mut(&mut self) -> &mut Vec<gwt_agent::Session> {
-        self.sessions();
-        Arc::make_mut(&mut self.sessions)
-            .get_mut()
-            .expect("session ledger resolved above")
-    }
-
-    fn load_agent_options() -> Vec<gwt::AgentOption> {
-        gwt::load_agent_options()
-    }
-
-    /// Start install detection on a background thread so `load` (and thus
-    /// app startup / settings updates) never waits on `<agent> --version`
-    /// probes. A thread that cannot be spawned falls back to synchronous
-    /// detection so the options are never silently empty.
-    fn spawn_agent_options_detection() -> Arc<Mutex<AgentOptionsSlot>> {
-        let slot = match std::thread::Builder::new()
-            .name("gwt-agent-detect".to_string())
-            .spawn(Self::load_agent_options)
-        {
-            Ok(handle) => AgentOptionsSlot::Loading(Some(handle)),
-            Err(error) => {
-                tracing::warn!(error = %error, "agent detection thread unavailable; detecting inline");
-                AgentOptionsSlot::Ready(Self::load_agent_options())
-            }
-        };
-        Arc::new(Mutex::new(slot))
-    }
-
-    pub(super) fn refresh_agent_options(&mut self) {
-        self.agent_options = Self::spawn_agent_options_detection();
-    }
-
-    /// Refresh after a Host installer in the same active-profile environment.
-    /// Called on the maintenance worker so every version probe stays off Tao.
-    pub(super) fn refresh_agent_options_for_profile(&mut self, config_path: &Path, cwd: &Path) {
-        // A completion can immediately refresh an open wizard. Resolve its
-        // ledger here as well, before that cache is handed back to Tao.
-        self.sessions();
-        let mut options: Vec<_> = self
-            .agent_options()
-            .into_iter()
-            .filter(|agent| agent.custom_agent.is_some())
-            .collect();
-        match gwt_agent::LaunchEnvironment::from_active_profile(
-            config_path,
-            gwt_agent::LaunchRuntimeTarget::Host,
-        ) {
-            Ok(environment) => {
-                let (env, remove_env) = environment.into_parts();
-                let detected = gwt_agent::builtin_agent_descriptors()
-                    .iter()
-                    .filter_map(|descriptor| {
-                        gwt_agent::AgentDetector::detect_by_command_with_environment(
-                            descriptor.command,
-                            &env,
-                            &remove_env,
-                            Some(cwd),
-                        )
-                    })
-                    .collect();
-                options.extend(
-                    gwt::build_builtin_agent_options(detected)
-                        .into_iter()
-                        .filter(|agent| agent.available),
-                );
-            }
-            Err(error) => {
-                tracing::warn!(%error, "cannot refresh agents in the active Host profile")
-            }
-        }
-        self.agent_options = Arc::new(Mutex::new(AgentOptionsSlot::Ready(options)));
-    }
-
-    pub(super) fn agent_options(&self) -> Vec<gwt::AgentOption> {
-        let mut slot = self
-            .agent_options
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
-            let options = handle
-                .take()
-                .and_then(|handle| handle.join().ok())
-                .unwrap_or_else(Self::load_agent_options);
-            *slot = AgentOptionsSlot::Ready(options);
-        }
-        match &*slot {
-            AgentOptionsSlot::Ready(options) => options.clone(),
-            AgentOptionsSlot::Loading(_) => unreachable!("slot joined above"),
-        }
-    }
-
-    /// Settings shows the entire built-in catalog while the wizard still
-    /// offers only installed agents. Reuse its existing detection snapshot.
-    pub(super) fn supported_agents(&self) -> Vec<gwt::protocol::SupportedAgentView> {
-        let options = self.agent_options();
-        gwt_agent::builtin_agent_descriptors()
-            .iter()
-            .map(|descriptor| {
-                let detected = options.iter().find(|option| {
-                    option.id == descriptor.command
-                        && option.available
-                        && option.custom_agent.is_none()
-                });
-                gwt::protocol::SupportedAgentView {
-                    id: descriptor.command.to_string(),
-                    name: descriptor.display_name.to_string(),
-                    installed: detected.is_some(),
-                    available_version: None,
-                    update_check_error: None,
-                    update_available: false,
-                    up_to_date: false,
-                    install_supported: !matches!(
-                        descriptor.distribution,
-                        gwt_agent::DistributionRoute::None
-                    ),
-                    installed_version: detected
-                        .and_then(|agent| agent.installed_version.as_deref())
-                        .map(str::trim)
-                        .filter(|version| !version.is_empty())
-                        .map(str::to_string),
-                }
-            })
-            .collect()
-    }
-
-    /// SPEC-3170 FR-001: cached `claude --version`-derived ultracode capability,
-    /// resolved once at load time so wizard open never re-spawns the probe.
-    pub(super) fn claude_ultracode_supported(&self) -> bool {
-        self.claude_ultracode_supported
-    }
-
-    /// SPEC-3170 FR-001: cached Claude dynamic-workflows capability, resolved
-    /// once at load time so wizard open never re-reads the settings file.
-    pub(super) fn claude_workflows_enabled(&self) -> bool {
-        self.claude_workflows_enabled
-    }
-
-    pub(super) fn quick_start_entries(
-        &self,
-        repo_path: &Path,
-        branch_name: &str,
-    ) -> Vec<gwt::QuickStartEntry> {
-        let sessions = self.visible_sessions();
-        gwt::launch_wizard::quick_start_entries_from_sessions(repo_path, branch_name, &sessions)
-    }
-
-    fn visible_sessions(&self) -> Vec<gwt_agent::Session> {
-        // `sessions` is recovery-filtered at every ingest boundary
-        // (`load_sessions`, `replace_sessions`, and `record_session`). Keep UI
-        // reads cache-only so opening or sorting the wizard never performs one
-        // filesystem probe per Session on the tao thread.
-        self.sessions().clone()
-    }
-
-    pub(super) fn latest_resumable_branch_session(
-        &self,
-        repo_path: &Path,
-        branch_name: &str,
-    ) -> Option<gwt_agent::Session> {
-        let entry = self
-            .quick_start_entries(repo_path, branch_name)
-            .into_iter()
-            .find(|entry| entry.resume_session_id.is_some())?;
-        self.sessions()
-            .iter()
-            .find(|session| session.id == entry.session_id)
-            .cloned()
-    }
-
-    /// Replace all cached sessions with a freshly disk-loaded set. Called from
-    /// the off-thread branch load (#2995) so resume availability and resolution
-    /// observe session TOMLs the hook CLI wrote out-of-process after launch,
-    /// without ever blocking the main UI thread on disk I/O.
-    fn replace_sessions(&mut self, sessions: Vec<gwt_agent::Session>) {
-        let sessions: Vec<_> = sessions
-            .into_iter()
-            .filter(|session| !durable_launch_recovery_exists(&self.sessions_dir, &session.id))
-            .collect();
-        // A still-running startup load is superseded; dropping it detaches.
-        self.pending_sessions = Arc::new(Mutex::new(None));
-        self.sessions = Arc::new(OnceLock::from(sessions));
-    }
-
-    pub(super) fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
-        self.sessions()
-            .iter()
-            .find(|session| session.id == session_id)
-    }
-
-    pub(super) fn agent_preferences(&self) -> gwt::LaunchWizardPreviousProfiles {
-        gwt::launch_wizard::previous_launch_profiles_from_sessions(&self.visible_sessions())
-    }
-
-    pub(super) fn previous_profiles(&self, repo_path: &Path) -> gwt::LaunchWizardPreviousProfiles {
-        gwt::launch_wizard::previous_launch_profiles_for_repo_from_sessions(
-            repo_path,
-            &self.visible_sessions(),
-        )
-    }
-
-    pub(super) fn record_session(&mut self, session: gwt_agent::Session) {
-        if durable_launch_recovery_exists(&self.sessions_dir, &session.id) {
-            self.forget_session(&session.id);
-            return;
-        }
-        let sessions = self.sessions_mut();
-        if let Some(existing) = sessions
-            .iter_mut()
-            .find(|existing| existing.id == session.id)
-        {
-            *existing = session;
-        } else {
-            sessions.push(session);
-        }
-    }
-
-    /// The launch worker has resolved the shared ledger and recovery-filtered
-    /// this snapshot. Later cache replacements are already resolved as well.
-    fn record_prepared_session(&mut self, session_id: &str, session: Option<gwt_agent::Session>) {
-        let sessions = Arc::make_mut(&mut self.sessions)
-            .get_mut()
-            .expect("launch worker resolved the Session ledger");
-        match session {
-            Some(session) => {
-                if let Some(existing) = sessions
-                    .iter_mut()
-                    .find(|existing| existing.id == session.id)
-                {
-                    *existing = session;
-                } else {
-                    sessions.push(session);
-                }
-            }
-            None => sessions.retain(|session| session.id != session_id),
-        }
-    }
-
-    fn forget_prepared_genesis_session(&mut self, identity: &gwt_agent::SessionExecutionIdentity) {
-        let sessions = Arc::make_mut(&mut self.sessions)
-            .get_mut()
-            .expect("launch worker resolved the Session ledger");
-        sessions.retain(|session| {
-            gwt_agent::SessionExecutionIdentity::from_session(session)
-                .ok()
-                .flatten()
-                .as_ref()
-                != Some(identity)
-        });
-    }
-
-    pub(super) fn mark_stopped(&mut self, session_id: &str) {
-        if let Some(session) = self
-            .sessions_mut()
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            session.update_status(gwt_agent::AgentStatus::Stopped);
-        }
-    }
-
-    pub(super) fn forget_session(&mut self, session_id: &str) {
-        self.sessions_mut()
-            .retain(|session| session.id != session_id);
-    }
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -7271,13 +6729,9 @@ impl AppRuntime {
         // compose ps/up incl. image build, exec probes), mirror docker-kind
         // Process Console lines into the agent terminal. Host launches keep
         // their immediate-PTY behavior untouched (FR-142).
-        let docker_output_mirror =
-            (config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker).then(|| {
-                launch_output_mirror::DockerLaunchOutputMirror::start(
-                    proxy.clone(),
-                    window_id.clone(),
-                )
-            });
+        let docker_output_mirror = (config.runtime_target
+            == gwt_agent::LaunchRuntimeTarget::Docker)
+            .then(|| launch_output_mirror::start(proxy.clone(), window_id.clone()));
         let mut issued_capability_token = None;
         let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
         // Issue #4283 AC-5: attribute the pane-create route to its phases so
@@ -7430,6 +6884,9 @@ impl AppRuntime {
             let agent_id = config.agent_id.clone();
             let mut session =
                 initialize_launch_session(&worktree_path, Path::new(&project_root), &config);
+            // Keep a separate observation identity if the resumed authority
+            // cannot be installed. Never overwrite the coordinator's Session.
+            let unbound_session_id = session.id.clone();
             // SPEC-3393 FR-012 (AC-12) / #3410: a Resume/Continue launch
             // recovers producing authority through the continuation
             // coordinator before spawn. Failure degrades to an unbound,
@@ -7540,8 +6997,8 @@ impl AppRuntime {
                 )?;
             }
 
-            let session_id = session.id.clone();
-            let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+            let mut session_id = session.id.clone();
+            let mut runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
             config.env_vars.insert(
                 gwt_agent::GWT_SESSION_ID_ENV.to_string(),
                 session_id.clone(),
@@ -7555,10 +7012,9 @@ impl AppRuntime {
                 .env_vars
                 .entry("COLORTERM".to_string())
                 .or_insert_with(|| "truecolor".to_string());
-            let docker_runtime_worktree = finalize_docker_agent_launch_config_with_binding(
-                &mut config,
-                docker_launch_binding.as_ref(),
-            )?;
+            let docker_runtime_worktree = docker_launch_binding
+                .as_ref()
+                .map(|binding| binding.container_cwd().to_string());
             let agent_project_root = docker_runtime_worktree.unwrap_or_else(|| {
                 config
                     .env_vars
@@ -7654,13 +7110,113 @@ impl AppRuntime {
                 .env_vars
                 .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
                 .cloned();
-            active_launch_handshake_cleanup = capability_install?;
+            active_launch_handshake_cleanup = match capability_install {
+                Ok(handshake) => handshake,
+                Err(error) if rebound_continuation.is_some() => {
+                    // Issue #3626: only automatic Resume/Continue recovered
+                    // through the coordinator may degrade. Fresh and explicitly
+                    // prepared launches retain their fail-closed contract.
+                    // ActiveContinuationInstall already released its own claim;
+                    // a competing Session's handshake must remain untouched.
+                    session.set_execution_binding(None)?;
+                    session.id = unbound_session_id;
+                    session_id = session.id.clone();
+                    runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+                    config.env_vars.insert(
+                        gwt_agent::GWT_SESSION_ID_ENV.to_string(),
+                        session_id.clone(),
+                    );
+                    config.env_vars.insert(
+                        gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV.to_string(),
+                        runtime_path.display().to_string(),
+                    );
+                    // Also mask inherited credentials if issuing an inspection
+                    // capability fails. An input-capable PTY needs no bearer.
+                    let capability_env_keys = [
+                        gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+                        gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+                        gwt_agent::GWT_PANE_WS_URL_ENV,
+                        gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+                    ];
+                    for key in capability_env_keys {
+                        config.env_vars.remove(key);
+                        config.remove_env.push(key.to_string());
+                    }
+                    if let Err(unbound_error) = install_agent_capability_env(
+                        &mut config.env_vars,
+                        agent_capability_issuer.as_ref(),
+                        Path::new(&project_root),
+                        &session_id,
+                        runtime_target,
+                        docker_launch_binding
+                            .as_ref()
+                            .map(DockerLaunchBinding::runtime),
+                    ) {
+                        tracing::warn!(%unbound_error, "resume inspection capability unavailable");
+                    }
+                    // Windows applies removals after explicit env assignments.
+                    // Keep only missing keys masked after inspection issuance.
+                    for key in capability_env_keys {
+                        if config.env_vars.contains_key(key) {
+                            config.remove_env.retain(|removed| removed != key);
+                        }
+                    }
+                    issued_capability_token = config
+                        .env_vars
+                        .get(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV)
+                        .cloned();
+                    let reason = gwt_core::error_ledger::sanitize_error_message(
+                        &Self::sanitize_launch_log_error(&error.to_string()),
+                    );
+                    let message = format!(
+                        "Resume degraded to unbound (no execution authority). Reason: {reason}. \
+                         Input remains available. Use Start Work / Launch to obtain execution \
+                         authority before delivering changes."
+                    );
+                    proxy.send(UserEvent::LaunchTerminalOutput {
+                        window_id: window_id.clone(),
+                        data: format!("\r\n[gwt] {message}\r\n").into_bytes(),
+                    });
+                    proxy.send(UserEvent::Dispatch(vec![OutboundEvent::project(
+                        gwt_core::paths::resolve_project_scope(Path::new(&project_root)).hash,
+                        gwt::protocol::BackendEvent::IssueMonitorToast {
+                            level: "warn".to_string(),
+                            message: message.clone(),
+                            issue_number: config.linked_issue_number,
+                            notification_transition: None,
+                            notification_transition_id: None,
+                        },
+                    )]));
+                    let _ = gwt::error_report::report_error_and_publish_with_context(
+                        gwt_core::error_ledger::ErrorKind::LaunchFailure,
+                        message,
+                        gwt_core::error_ledger::ErrorTarget {
+                            issue: config.linked_issue_number,
+                            window_id: Some(window_id.clone()),
+                            session_id: Some(session_id.clone()),
+                            project_root: Some(project_root.clone()),
+                        },
+                        std::collections::BTreeMap::from([(
+                            "disposition".to_string(),
+                            "degraded_unbound".to_string(),
+                        )]),
+                    );
+                    None
+                }
+                Err(error) => return Err(error),
+            };
             if manual_successor_prepared {
                 config.env_vars.insert(
                     gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV.to_string(),
                     uuid::Uuid::new_v4().to_string(),
                 );
             }
+            // Docker fixes env keys into its argv: finalize only after the
+            // capability and any degraded Session identity are final.
+            finalize_docker_agent_launch_config_with_binding(
+                &mut config,
+                docker_launch_binding.as_ref(),
+            )?;
             let carries_fresh_execution_readiness = config
                 .env_vars
                 .contains_key(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
@@ -11911,39 +11467,6 @@ fi
 }
 
 #[cfg(test)]
-mod fr001_capability_cache_tests {
-    use super::LaunchWizardMemoryCache;
-
-    // SPEC-3170 FR-001: the Claude capability probes are resolved once at cache
-    // load time and the getters return the stored booleans verbatim, so opening
-    // the Launch wizard reads cached values instead of re-spawning
-    // `claude --version` on the tao main event-loop thread.
-    #[test]
-    fn caches_claude_capabilities_for_reuse_without_reprobe() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
-
-        let on = LaunchWizardMemoryCache::load_with_agent_options_and_capabilities(
-            dir.path(),
-            Vec::new(),
-            true,
-            true,
-        );
-        assert!(on.claude_ultracode_supported());
-        assert!(on.claude_workflows_enabled());
-
-        let off = LaunchWizardMemoryCache::load_with_agent_options_and_capabilities(
-            dir.path(),
-            Vec::new(),
-            false,
-            false,
-        );
-        assert!(!off.claude_ultracode_supported());
-        assert!(!off.claude_workflows_enabled());
-    }
-}
-
-#[cfg(test)]
 mod lazy_session_ledger_tests {
     use super::LaunchWizardMemoryCache;
 
@@ -11951,66 +11474,17 @@ mod lazy_session_ledger_tests {
     fn launch_complete_worker_resolves_session_ledger_before_gui_apply() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
-        let (mut runtime, _recorded, tasks, window_id, result) =
+        let (mut runtime, recorded, tasks, window_id, result) =
             crate::app_runtime::tests::queued_agent_completion_fixture(dir.path());
         runtime.launch_wizard_cache =
             LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
-        assert!(runtime.launch_wizard_cache.sessions.get().is_none());
-        runtime.handle_launch_complete(window_id, result);
-        assert!(runtime.launch_wizard_cache.sessions.get().is_none());
+        runtime.handle_launch_complete(window_id.clone(), result);
         crate::app_runtime::tests::drain_queued_blocking_tasks(&tasks);
-        assert!(
-            runtime.launch_wizard_cache.sessions.get().is_some(),
-            "prepared completion must not leave the GUI to join or scan the Session ledger"
-        );
-    }
-
-    /// Issue #4377 (AC-1 / AC-3): the Session ledger is parsed off the
-    /// constructor (and so off `AppRuntime::new`); the first wizard read
-    /// joins it and serves the same Sessions, stopped ones included.
-    #[test]
-    fn session_ledger_loads_off_the_constructor_and_serves_the_same_sessions() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(dir.path());
-        let sessions_dir = dir.path().join("sessions");
-        let worktree = dir.path().join("worktree");
-        std::fs::create_dir_all(&worktree).expect("worktree");
-        let mut stopped =
-            gwt_agent::Session::new(&worktree, "work/stopped", gwt_agent::AgentId::Codex);
-        stopped.id = "session-stopped".to_string();
-        stopped.agent_session_id = Some("native-stopped".to_string());
-        stopped.update_status(gwt_agent::AgentStatus::Stopped);
-        stopped.save(&sessions_dir).expect("save stopped session");
-
-        let cache = LaunchWizardMemoryCache::load_with_agent_options(&sessions_dir, Vec::new());
-
-        assert!(
-            cache.sessions.get().is_none(),
-            "the constructor must not parse the Session ledger"
-        );
-        assert_eq!(
-            cache
-                .session_by_id("session-stopped")
-                .map(|session| session.status),
-            Some(gwt_agent::AgentStatus::Stopped)
-        );
-        assert!(cache.clone().session_by_id("session-stopped").is_some());
-        let expected =
-            gwt::launch_wizard::load_quick_start_entries(&worktree, &sessions_dir, "work/stopped");
-        assert_eq!(
-            expected.len(),
-            1,
-            "the stopped conversation remains resumable"
-        );
-        assert_eq!(
-            cache.quick_start_entries(&worktree, "work/stopped"),
-            expected
-        );
-        let resumed = cache
-            .latest_resumable_branch_session(&worktree, "work/stopped")
-            .expect("stopped session remains a restore candidate");
-        assert_eq!(resumed.id, stopped.id);
-        assert_eq!(resumed.agent_session_id, stopped.agent_session_id);
+        let prepared = crate::app_runtime::tests::take_prepared_agent_launch(&recorded);
+        // Prepared cache ingest requires an already resolved ledger; it panics
+        // rather than joining or scanning the ledger on the GUI thread.
+        runtime.handle_agent_launch_prepared(prepared);
+        assert!(runtime.active_agent_sessions.contains_key(&window_id));
     }
 }
 

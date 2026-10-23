@@ -213,15 +213,18 @@ pub enum IssueCommand {
     },
     MonitorQueueAutoRefill {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         enabled: bool,
         limit: usize,
     },
     MonitorQueueUrgentLimit {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         limit: usize,
     },
     MonitorQueueDemote {
         project_root: Option<std::path::PathBuf>,
+        expected_urgent_queue_token: Option<String>,
         number: u64,
     },
     MonitorConfigSet {
@@ -261,6 +264,7 @@ pub enum IssueCommand {
     /// Configure automatic launch selection; omitted tiers restore defaults.
     MonitorTiersSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         auto: bool,
         tiers: Option<Vec<Vec<crate::IssueMonitorLaunchProfile>>>,
     },
@@ -471,6 +475,7 @@ pub enum PrCommand {
     ReviewThreadsReplyAndResolveBody {
         number: u64,
         body: String,
+        thread_id: Option<String>,
     },
     Checks {
         number: u64,

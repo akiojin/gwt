@@ -856,7 +856,7 @@ pub struct OwnerGenerationHold {
 
 /// Project the current generation of `ledger` and its holder Session, read
 /// from `sessions_dir`, into [`OwnerGenerationHold`]. `None` when the ledger
-/// has no current generation.
+/// has no current generation or parseable effective execution projection.
 #[must_use]
 pub fn owner_generation_hold_from_ledger(
     sessions_dir: &Path,
@@ -864,7 +864,10 @@ pub fn owner_generation_hold_from_ledger(
 ) -> Option<OwnerGenerationHold> {
     let current = ledger.current_generation()?;
     let status = ledger.effective_status_for(current);
-    let holder_session_id = current.identity.initial_session_id.clone();
+    let holder_session_id =
+        serde_json::from_str::<ExecutionControlRecord>(ledger.effective_projection_for(current))
+            .ok()?
+            .primary_session_id;
     let holder_path = sessions_dir.join(format!("{holder_session_id}.toml"));
     let holder_session_state = match gwt_agent::inspect_session_path(&holder_path) {
         gwt_agent::SessionPathState::Present(holder) => format!("{:?}", holder.status),
@@ -1988,6 +1991,21 @@ pub fn reap_startup_defunct_active_generation(
             {
                 return Ok(StartupActiveGenerationReapOutcome::Protected);
             }
+            // An operator stop revokes its runtime, not the recoverable owner.
+            // Keep that authority while the exact stop's operator hold remains,
+            // including the interval before the host finishes tree teardown.
+            let prefs = crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(&candidate.worktree),
+            )?;
+            if prefs.monitor_runtime_stop_requests.iter().any(|request| {
+                request.issue_number == candidate.owner.number
+                    && request.execution_identity == exact_session
+            }) && crate::IssueMonitorState::with_prefs(Default::default(), prefs)
+                .stop_only_reason(candidate.owner.number)
+                .is_some()
+            {
+                return Ok(StartupActiveGenerationReapOutcome::Protected);
+            }
             match gwt_agent::read_session_active_launch_handshake_under_lease(
                 sessions_dir,
                 &exact_session,
@@ -3104,7 +3122,7 @@ pub struct OwnerExecutionDiagnosis {
     pub generation_activated_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_session_id: Option<String>,
-    /// Durable holder state: one of the `AgentStatus` names, or `missing` /
+    /// Durable holder state: an `AgentStatus` wire value, or `missing` /
     /// `unreadable` when the durable Session cannot be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holder_session_state: Option<String>,
@@ -3267,7 +3285,17 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         }
     };
     if let Some(holder) = &holder {
-        diagnosis.holder_session_state = Some(format!("{:?}", holder.status));
+        diagnosis.holder_session_state = Some(
+            match holder.status {
+                gwt_agent::AgentStatus::Unknown => "Unknown",
+                gwt_agent::AgentStatus::Running => "Running",
+                gwt_agent::AgentStatus::Idle => "Idle",
+                gwt_agent::AgentStatus::WaitingInput => "Waiting",
+                gwt_agent::AgentStatus::Stopped => "Stopped",
+                gwt_agent::AgentStatus::Interrupted => "Interrupted",
+            }
+            .to_string(),
+        );
         diagnosis.holder_branch = Some(holder.branch.clone());
         diagnosis.holder_worktree = Some(holder.worktree_path.display().to_string());
         if holder.worktree_path.is_dir() {
@@ -4959,6 +4987,32 @@ pub(crate) fn execution_binding_authorizes_current_generation(
         ))
 }
 
+/// Authenticate bookkeeping provenance across audited takeovers of the same
+/// generation. This proves the historical writer and head, never the caller's
+/// authority to produce mutations or reuse another Session's verification.
+pub(crate) fn execution_binding_has_current_generation_provenance(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    receipt_session_id: &str,
+    receipt_binding: &gwt_agent::ExecutionBindingIdentity,
+) -> io::Result<bool> {
+    let Some(ledger) = load_generation_ledger(worktree, owner)? else {
+        return Ok(false);
+    };
+    let current = ledger.current_generation().ok_or_else(|| {
+        invalid_generation_data("execution generation ledger current id is missing")
+    })?;
+    Ok(
+        current.identity.worktree_binding_hash == worktree_binding_hash(worktree)
+            && execution_binding_matches_historical_prefix(
+                &ledger,
+                current,
+                receipt_session_id,
+                receipt_binding,
+            ),
+    )
+}
+
 /// Recovery-only identity derived from the authoritative owner ledger without
 /// requiring the caller worktree's projection/pointer pair to be readable.
 /// Mutation gates must continue to use [`current_execution_binding`].
@@ -5028,6 +5082,9 @@ pub(crate) fn snapshot_pr_mutation_execution_binding(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CurrentExecutionBindingAuthority {
     ActiveMutation,
+    /// Retire a captured runtime without granting producing authority or
+    /// changing its owner's execution lifecycle.
+    RuntimeCleanup,
     BlockedBuildAbort,
     PrMutation,
     /// Exact GitHub CI admits only Ready creation, without reopening Blocked.
@@ -5044,6 +5101,12 @@ impl CurrentExecutionBindingAuthority {
     fn allows(self, status: ExecutionControlStatus) -> bool {
         match self {
             Self::ActiveMutation => status == ExecutionControlStatus::Active,
+            Self::RuntimeCleanup => matches!(
+                status,
+                ExecutionControlStatus::Active
+                    | ExecutionControlStatus::Completed
+                    | ExecutionControlStatus::Blocked
+            ),
             Self::ProjectionUpdate => matches!(
                 status,
                 ExecutionControlStatus::Active | ExecutionControlStatus::Blocked
@@ -5373,6 +5436,22 @@ pub fn with_current_active_session_execution_identity_lease<T>(
         sessions_dir,
         expected,
         CurrentExecutionBindingAuthority::ActiveMutation,
+        operation,
+    )
+}
+
+/// Clean up one exact current holder runtime at any execution lifecycle state.
+/// The caller must recheck its captured runtime proof under this lease before
+/// signalling the PTY. This authority never permits producing operations.
+pub(crate) fn with_current_runtime_cleanup_session_execution_identity_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    operation: impl FnOnce() -> T,
+) -> io::Result<Option<T>> {
+    with_current_session_execution_identity_lease(
+        sessions_dir,
+        expected,
+        CurrentExecutionBindingAuthority::RuntimeCleanup,
         operation,
     )
 }
@@ -6109,6 +6188,7 @@ fn with_current_session_execution_identity_held_global_lease<T>(
                 }
                 CurrentExecutionBindingAuthority::PrMutation
                 | CurrentExecutionBindingAuthority::CiPrCreation
+                | CurrentExecutionBindingAuthority::RuntimeCleanup
                 | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
             };
             if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6202,6 +6282,7 @@ fn with_current_session_execution_identity_global_lease<T>(
                         }
                         CurrentExecutionBindingAuthority::PrMutation
                         | CurrentExecutionBindingAuthority::CiPrCreation
+                        | CurrentExecutionBindingAuthority::RuntimeCleanup
                         | CurrentExecutionBindingAuthority::ProjectionUpdate => false,
                     };
                     if gwt_agent::SessionExecutionIdentity::from_session(session)
@@ -6626,6 +6707,140 @@ pub fn with_workspace_successor_supersession_lease<T>(
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<T> {
     with_generation_activation_leases(worktree, owner, |_| operation())
+}
+
+/// Fence fleet cleanup against lifecycle acquisition by the selected runtime.
+/// Contention refuses immediately so the GUI can retain the pane and retry.
+/// An unassociated process cannot be cleaned while any execution is active.
+pub fn with_fleet_cleanup_lease<T>(
+    worktree: &Path,
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    let canonical_worktree = dunce::canonicalize(worktree)?;
+    let worktree = canonical_worktree.as_path();
+    let protected = |reason| io::Error::new(ErrorKind::PermissionDenied, reason);
+    let session_owner = |session: &gwt_agent::Session| -> io::Result<Option<ExecutionOwnerKey>> {
+        session
+            .execution_binding
+            .as_ref()
+            .map(|binding| {
+                let kind = match binding.owner_kind.as_str() {
+                    "issue" => ExecutionOwnerKind::Issue,
+                    "spec" => ExecutionOwnerKind::Spec,
+                    _ => return Err(protected("fleet target Session authority is invalid")),
+                };
+                Ok(ExecutionOwnerKey {
+                    kind,
+                    number: binding.owner_number,
+                })
+            })
+            .transpose()
+    };
+    crate::cli::trusted_store::with_write_lease_wait(worktree, Duration::ZERO, || {
+        let record = load(worktree)?;
+        let record_owner = record.as_ref().map(|record| ExecutionOwnerKey {
+            kind: record.owner_kind,
+            number: record.owner_number,
+        });
+        let session = session_id
+            .map(|id| {
+                gwt_agent::validate_session_id_path_component(id)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
+                match gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))) {
+                    Ok(session) => Ok(Some(session)),
+                    Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
+                }
+            })
+            .transpose()?
+            .flatten();
+        let bound_owner = session.as_ref().map(session_owner).transpose()?.flatten();
+        if record_owner
+            .zip(bound_owner)
+            .is_some_and(|(left, right)| left != right)
+        {
+            return Err(protected(
+                "fleet target Session authority changed; refresh fleet inventory",
+            ));
+        }
+        let context = record_owner
+            .or(bound_owner)
+            .map(|owner| GenerationTransactionContext::resolve(worktree, owner))
+            .transpose()?;
+        let cleanup = || {
+            let check_and_run = |state: Option<gwt_agent::SessionPathState>| {
+                if let Some(state) = state {
+                    match state {
+                        gwt_agent::SessionPathState::Present(current) => {
+                            if dunce::canonicalize(&current.worktree_path)?
+                                != dunce::canonicalize(worktree)?
+                                || session_owner(&current)? != bound_owner
+                            {
+                                return Err(protected("fleet target Session authority changed; refresh fleet inventory"));
+                            }
+                        }
+                        gwt_agent::SessionPathState::Error(error) => return Err(error),
+                        gwt_agent::SessionPathState::Missing => {
+                            if session.is_some() {
+                                return Err(protected(
+                                    "fleet target Session disappeared; refresh fleet inventory",
+                                ));
+                            }
+                        }
+                    }
+                }
+                let mut records = load(worktree)?.into_iter().collect::<Vec<_>>();
+                if let Some(context) = context.as_ref() {
+                    if let Some(ledger) = load_owner_generation_ledger_from_context(context)? {
+                        if let Some(current) = ledger.current_generation() {
+                            records.push(
+                                serde_json::from_str::<ExecutionControlRecord>(
+                                    ledger.effective_projection_for(current),
+                                )
+                                .map(hydrate_recovery_envelopes)
+                                .map_err(io::Error::other)?,
+                            );
+                        }
+                    }
+                }
+                for record in records {
+                    if !integrity_ok(&record) {
+                        return Err(protected(
+                            "fleet target execution authority is unreadable; use execution.status",
+                        ));
+                    }
+                    if record.status == ExecutionControlStatus::Active
+                        && session_id.is_none_or(|id| id == record.primary_session_id)
+                    {
+                        return Err(protected("current execution holder is protected; use its owner lifecycle operation"));
+                    }
+                }
+                operation()
+            };
+            match session_id {
+                Some(id) => gwt_agent::with_session_path_lease_wait(
+                    sessions_dir,
+                    id,
+                    Duration::ZERO,
+                    |state| check_and_run(Some(state)),
+                ),
+                None => check_and_run(None),
+            }
+        };
+        match context.as_ref() {
+            Some(context) => crate::cli::trusted_store::with_write_lease_for_resolved_dir_wait(
+                &context.owner_dir,
+                Duration::ZERO,
+                || {
+                    context.validate_unchanged()?;
+                    cleanup()
+                },
+            ),
+            None => cleanup(),
+        }
+    })
 }
 
 fn with_resolved_generation_owner_lease<T>(
@@ -8751,10 +8966,7 @@ pub fn prepare_exact_terminal_active_successor(
                     }
                 }
             }
-            let session_is_terminal = matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            );
+            let session_is_terminal = holder_status_permits_generation_reclaim(session.status);
             if reconcile_active_launch_handshake_under_lease(sessions_dir, expected_session)? {
                 return Err(io::Error::new(
                     ErrorKind::PermissionDenied,
@@ -10118,8 +10330,7 @@ pub fn activate_successor_with_session_rebind(
     {
         return Ok(None);
     }
-    let expected_session_toml = toml::to_string(&expected_session)
-        .map_err(|error| invalid_generation_data(format!("serialize expected Session: {error}")))?;
+    let expected_session_toml = canonical_recovery_session_snapshot(&expected_session)?;
     with_generation_activation_leases(worktree, owner, |context| {
         let expected_repo_hash = expected_session
             .repo_hash
@@ -10134,9 +10345,7 @@ pub fn activate_successor_with_session_rebind(
             sessions_dir,
             &expected_session.id,
             |session| {
-                let durable_session_toml = toml::to_string(session).map_err(|error| {
-                    invalid_generation_data(format!("serialize durable Session: {error}"))
-                })?;
+                let durable_session_toml = canonical_recovery_session_snapshot(session)?;
                 if durable_session_toml != expected_session_toml
                     || session.repo_hash.as_deref() != Some(expected_repo_hash.as_str())
                     || dunce::canonicalize(&session.worktree_path).ok().as_ref()
@@ -10683,7 +10892,16 @@ fn persist_generation_lifecycle_transition_if_owned(
 }
 
 fn canonical_recovery_session_snapshot(session: &gwt_agent::Session) -> io::Result<String> {
-    toml::to_string(session).map_err(|error| {
+    // SPEC #3590: ordinary hooks may advance observations during recovery.
+    // Keep every other field exact, including incarnation, status, Stop/exit,
+    // permissions and execution binding. Do not migrate here: legacy migration
+    // can change status and interruption counts, which must still compare exact.
+    let mut snapshot = session.clone();
+    snapshot.updated_at = snapshot.created_at;
+    snapshot.last_activity_at = snapshot.created_at;
+    snapshot.last_hook_event = None;
+    snapshot.last_hook_event_at = None;
+    toml::to_string(&snapshot).map_err(|error| {
         invalid_generation_data(format!("serialize recovery Session snapshot: {error}"))
     })
 }
@@ -10715,9 +10933,11 @@ fn update_exact_recovery_session_with_publisher<T>(
     mutate: impl FnOnce(&mut gwt_agent::Session) -> io::Result<T>,
     publisher: &mut Option<&mut dyn ExecutionAdoptionPublisher>,
 ) -> io::Result<T> {
-    match gwt_agent::update_session_if_unchanged_with(
+    let expected = canonical_recovery_session_snapshot(expected_session)?;
+    match gwt_agent::update_session_if_matches_with(
         &gwt_core::paths::gwt_sessions_dir(),
         expected_session,
+        |session, _| Ok(canonical_recovery_session_snapshot(session)? == expected),
         |session| {
             if let Some(publisher) = publisher.as_mut() {
                 publisher.acquire()?;
@@ -10742,19 +10962,13 @@ fn update_exact_recovery_session_with_publisher<T>(
             }
             Ok(value)
         }
-        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(io::Error::new(
-            ErrorKind::PermissionDenied,
-            format!(
-                "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session changed after recovery preflight"
-            ),
-        )),
+        Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotChanged) => Err(
+            recovery_session_changed_error("durable Session changed after recovery preflight"),
+        ),
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::SnapshotUnreadable(error)) => {
-            Err(io::Error::new(
-                ErrorKind::PermissionDenied,
-                format!(
-                    "{RECOVERY_SESSION_CHANGED_PREFIX} durable Session became unreadable after recovery preflight: {error}"
-                ),
-            ))
+            Err(recovery_session_changed_error(format!(
+                "durable Session became unreadable after recovery preflight: {error}"
+            )))
         }
         Ok(gwt_agent::SessionSnapshotUpdateOutcome::MutationFailed(error)) => Err(error),
         Err(error) => Err(error),
@@ -15292,29 +15506,27 @@ fn repair_session_binding_if_unchanged(
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(worktree)
         .ok_or_else(|| invalid_generation_data("execution repair repository hash is unavailable"))?
         .to_string();
-    let mut updated = expected_session.clone();
-    let capability_generation = updated
-        .execution_binding
-        .as_ref()
-        .map_or(1, |binding| binding.capability_generation.saturating_add(1));
-    updated
-        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: expected_session.id.clone(),
-            repo_hash,
-            owner_kind: owner.kind.as_str().to_string(),
-            owner_number: owner.number,
-            identity,
-            capability_generation,
-        }))
-        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))?;
-    if updated.save_if_unchanged(&gwt_core::paths::gwt_sessions_dir(), expected_session)? {
-        Ok(())
-    } else {
-        Err(recovery_session_changed_error(
-            "durable Session changed before repair binding CAS",
-        ))
-    }
+    update_exact_recovery_session_with_publisher(
+        expected_session,
+        |session| {
+            let capability_generation = session
+                .execution_binding
+                .as_ref()
+                .map_or(1, |binding| binding.capability_generation.saturating_add(1));
+            session
+                .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                    schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                    session_id: expected_session.id.clone(),
+                    repo_hash,
+                    owner_kind: owner.kind.as_str().to_string(),
+                    owner_number: owner.number,
+                    identity,
+                    capability_generation,
+                }))
+                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error))
+        },
+        &mut None,
+    )
 }
 
 fn restore_quarantined_execution_authority(
@@ -18132,6 +18344,152 @@ mod tests {
         }
     }
 
+    fn with_new_hook_observations(session: &gwt_agent::Session) -> gwt_agent::Session {
+        let mut current = session.clone();
+        let observed_at = session.updated_at + chrono::Duration::seconds(1);
+        current.updated_at = observed_at;
+        current.last_activity_at = observed_at;
+        current.last_hook_event = Some("PreToolUse".to_string());
+        current.last_hook_event_at = Some(observed_at);
+        current
+    }
+
+    fn assert_hook_observations_preserved(
+        current: &gwt_agent::Session,
+        observed: &gwt_agent::Session,
+    ) {
+        assert_eq!(current.last_activity_at, observed.last_activity_at);
+        assert_eq!(current.last_hook_event, observed.last_hook_event);
+        assert_eq!(current.last_hook_event_at, observed.last_hook_event_at);
+    }
+
+    #[test]
+    fn recovery_session_lease_contention_remains_retryable() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let session = gwt_agent::Session::new(home.path(), "work", gwt_agent::AgentId::Codex);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let path = sessions.join(format!("{}.toml", session.id));
+        let before = fs::read(&path).unwrap();
+        gwt_agent::with_session_path_lease(&sessions, &session.id, |_| {
+            let error = update_exact_recovery_session_with_publisher::<()>(
+                &session,
+                |_| panic!("contended recovery must not mutate"),
+                &mut None,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::WouldBlock);
+            assert_eq!(fs::read(&path).unwrap(), before);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn recovery_snapshot_keeps_legacy_status_and_interruption_changes_exact() {
+        let repo = tempfile::tempdir().unwrap();
+        let mut expected = gwt_agent::Session::new(repo.path(), "work", gwt_agent::AgentId::Codex);
+        expected.schema_version = 2;
+        expected.status = gwt_agent::AgentStatus::Running;
+        expected.consecutive_interruptions = 1;
+        let mut changed = expected.clone();
+        changed.status = gwt_agent::AgentStatus::Idle;
+        assert_ne!(
+            canonical_recovery_session_snapshot(&expected).unwrap(),
+            canonical_recovery_session_snapshot(&changed).unwrap()
+        );
+        changed = expected.clone();
+        changed.consecutive_interruptions = 2;
+        assert_ne!(
+            canonical_recovery_session_snapshot(&expected).unwrap(),
+            canonical_recovery_session_snapshot(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn continuation_rebind_preserves_hook_observations_after_preflight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(repo.path(), &active).unwrap();
+        ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(repo.path(), owner)
+            .unwrap()
+            .unwrap();
+        persist_generation_session_binding(repo.path(), owner, "session-original", binding.clone());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let path = sessions.join("session-original.toml");
+        let expected = gwt_agent::Session::load(&path).unwrap();
+        let observed = with_new_hook_observations(&expected);
+        observed.save(&sessions).unwrap();
+        let mut request = successor_request("hook-activity", "host", "execution-continue");
+        request.initial_session_id = expected.id.clone();
+
+        let (_, rebound) = activate_successor_with_session_rebind(
+            repo.path(),
+            owner,
+            &request,
+            SuccessorPredecessorStatus::Active,
+            &binding,
+            &sessions,
+            &expected,
+        )
+        .unwrap()
+        .expect("hook activity must not fence continuation");
+
+        let current = gwt_agent::Session::load(&path).unwrap();
+        assert_hook_observations_preserved(&current, &observed);
+        assert_eq!(current.execution_binding, Some(rebound));
+    }
+
+    #[test]
+    fn repair_binding_preserves_hook_observations_after_preflight() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let repo = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+        let owner = generation_owner();
+        let mut active = active_record("session-original");
+        active.owner_number = owner.number;
+        save(repo.path(), &active).unwrap();
+        ensure_generation_ledger(repo.path(), owner, LegacyActiveDisposition::Live).unwrap();
+        let binding = current_execution_binding(repo.path(), owner)
+            .unwrap()
+            .unwrap();
+        let expected = persist_recovery_session_snapshot(repo.path(), owner, "session-original");
+        let observed = with_new_hook_observations(&expected);
+        observed.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+
+        repair_session_binding_if_unchanged(repo.path(), &expected, owner, binding.clone())
+            .expect("hook activity must not fence repair binding");
+
+        let current = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join("session-original.toml"),
+        )
+        .unwrap();
+        assert_hook_observations_preserved(&current, &observed);
+        assert_eq!(current.execution_binding.unwrap().identity, binding);
+    }
+
     fn successor_request(operation_id: &str, principal_id: &str, source: &str) -> SuccessorRequest {
         SuccessorRequest {
             operation_id: operation_id.to_string(),
@@ -18348,11 +18706,11 @@ mod tests {
     }
 
     /// Issue #3472: an exact terminal runtime exit record releases the holder
-    /// to a fresh-launch supersede only once the durable Session agrees it
-    /// stopped. A terminal sidecar under a still-Running durable Session is
+    /// to a fresh-launch supersede only once the durable Session is reclaimable.
+    /// A terminal sidecar under a still-Running durable Session is
     /// conflicting evidence and must keep refusing.
     #[test]
-    fn unreachable_holder_requires_durably_stopped_session_for_terminal_proof() {
+    fn unreachable_holder_requires_reclaimable_durable_status_for_terminal_proof() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -18401,7 +18759,7 @@ mod tests {
             unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
                 .unwrap()
                 .is_none(),
-            "a terminal exit record under a non-stopped durable Session must not qualify",
+            "a terminal exit record under a non-reclaimable durable Session must not qualify",
         );
 
         let mut stopped = gwt_agent::Session::load(&session_path).unwrap();
@@ -18421,6 +18779,32 @@ mod tests {
             }),
             "the qualifying holder must carry its exact runtime proof for revalidation",
         );
+
+        stopped.update_status(gwt_agent::AgentStatus::Idle);
+        stopped.save(&sessions_dir).unwrap();
+        let (identity, evidence) =
+            unreachable_current_generation_holder(&sessions_dir, dir.path(), owner)
+                .unwrap()
+                .expect("an Idle holder with an exact terminal runtime must qualify");
+        assert!(matches!(
+            evidence,
+            gwt_agent::ManualLaunchRuntimeEvidence::Proof(_)
+        ));
+        let prepared = prepare_exact_terminal_active_successor(
+            dir.path(),
+            owner,
+            &successor_request(
+                "idle-terminal-successor",
+                "gwt-host-manual-launch",
+                FRESH_LINKED_OWNER_LAUNCH_SOURCE,
+            ),
+            &sessions_dir,
+            &identity,
+            evidence,
+            "exact producing runtime terminated before manual Launch Agent",
+        )
+        .expect("successor preparation must accept the same durable states as terminal proof");
+        assert_eq!(prepared.status, ContinuationAttemptStatus::Prepared);
     }
 
     #[test]
@@ -20086,7 +20470,54 @@ mod tests {
             generation_authority_bytes(worktree.path(), owner),
             authority_before
         );
-        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(&session_path).unwrap(), session_before);
+
+        // Runtime revocation preserves the same recovery contract after stop,
+        // even when startup has no selected restore window or runtime sidecar.
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree.path());
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs
+            .failed_issues
+            .push(crate::issue_monitor::IssueMonitorFailedIssue {
+                issue_number: owner.number,
+                message: "stopped: operator pause".into(),
+                window_id: None,
+            });
+        prefs.monitor_runtime_stop_requests.push(
+            crate::issue_monitor::IssueMonitorRuntimeStopRequest {
+                issue_number: owner.number,
+                window_id: "gone-window".into(),
+                session_id: session_id.into(),
+                execution_identity: identity.clone(),
+                host_pid: 10,
+                host_started_at: 11,
+                runtime_incarnation: 12,
+                child_pid: 13,
+                child_started_at: 14,
+                requested_at: Utc::now().to_rfc3339(),
+            },
+        );
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(matches!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Protected,
+        ));
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), owner),
+            authority_before
+        );
+        assert_eq!(fs::read(&session_path).unwrap(), session_before);
+
+        // Releasing the operator hold restores ordinary recovery even though
+        // its historical receipt remains on disk.
+        prefs.failed_issues.clear();
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+        assert!(matches!(
+            reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[])
+                .unwrap(),
+            StartupActiveGenerationReapOutcome::Reaped,
+        ));
     }
 
     /// Ledger-first and projection-first crash points are durable commits. The
@@ -21326,6 +21757,27 @@ mod tests {
         assert!(held.reclaimable);
         assert_eq!(held.recommended_recovery, "generation-reaper");
 
+        // Issue #3953: the JSON diagnosis uses the Session's canonical wire
+        // values, including WaitingInput -> "Waiting", rather than Debug.
+        for status in [
+            gwt_agent::AgentStatus::Unknown,
+            gwt_agent::AgentStatus::Running,
+            gwt_agent::AgentStatus::WaitingInput,
+            gwt_agent::AgentStatus::Stopped,
+            gwt_agent::AgentStatus::Interrupted,
+            gwt_agent::AgentStatus::Idle,
+        ] {
+            let mut session =
+                gwt_agent::Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+            session.update_status(status);
+            session.save(&sessions_dir).unwrap();
+            let json = serde_json::to_value(diagnose_owner(worktree.path(), owner)).unwrap();
+            assert_eq!(
+                json["holder_session_state"],
+                serde_json::to_value(status).unwrap()
+            );
+        }
+
         reap_startup_defunct_active_generation(&candidate, &sessions_dir, &identity, &[]).unwrap();
         let released = diagnose_owner(worktree.path(), owner);
 
@@ -21995,6 +22447,14 @@ mod tests {
             .unwrap()
             .unwrap();
         write_live_runtime(&current_identity);
+        assert_eq!(
+            owner_generation_hold_for_project(worktree.path(), owner.number)
+                .unwrap()
+                .unwrap()
+                .holder_session_id,
+            record.primary_session_id,
+            "the current generation hold must name the takeover holder"
+        );
 
         assert_eq!(
             live_active_owner_generation(worktree.path(), owner.number),
@@ -28399,7 +28859,7 @@ exit 1
                 .into_bytes();
             set_repair_binding_session_race(RecoverySessionRace::Replace(Box::new(replacement)));
 
-            let (code, out) = run_cmd(
+            let result = run_governed_cmd(
                 repo.path(),
                 ExecutionCommand::Repair {
                     reason: "recover corrupt authority".to_string(),
@@ -28407,8 +28867,18 @@ exit 1
             )
             .expect("binding CAS loss must return a typed refusal");
 
-            assert_eq!(code, 2, "{out}");
-            assert!(out.contains(RECOVERY_SESSION_CHANGED_PREFIX), "{out}");
+            assert_eq!(result.exit_code, 2, "{}", result.output);
+            assert!(
+                result.output.contains(RECOVERY_SESSION_CHANGED_PREFIX),
+                "{}",
+                result.output
+            );
+            let refusal = result.refusal.expect("binding CAS authority refusal");
+            assert_eq!(refusal.reason_code, "execution_recovery_session_changed");
+            assert_eq!(
+                refusal.governance.cause,
+                Some(crate::cli::governance::GovernanceCause::ManagedIdentity)
+            );
             assert_eq!(
                 fs::read(gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")))
                     .unwrap(),
@@ -30610,6 +31080,11 @@ exit 1
             seed_build_abort_work_authority(dir.path(), "sess-reopen", owner);
             let verification_record_id = save_covering_evidence(dir.path(), "sess-reopen", true);
 
+            let session_path = gwt_core::paths::gwt_sessions_dir().join("sess-reopen.toml");
+            let observed =
+                with_new_hook_observations(&gwt_agent::Session::load(&session_path).unwrap());
+            set_recovery_session_race(RecoverySessionRace::Replace(Box::new(observed.clone())));
+
             let (code, out) = run_cmd(
                 dir.path(),
                 ExecutionCommand::Reopen {
@@ -30620,6 +31095,10 @@ exit 1
             .unwrap();
             assert_eq!(code, 0, "{out}");
             assert!(out.contains("reopened"), "{out}");
+            assert_hook_observations_preserved(
+                &gwt_agent::Session::load(&session_path).unwrap(),
+                &observed,
+            );
             assert!(
                 out.contains(r#""outcome":"deferred""#) && out.contains("obligation_state_missing"),
                 "{out}"
@@ -33893,6 +34372,49 @@ exit 1
             );
         }
 
+        /// Issue #4363 AC-1: Monitor membership is not execution authority.
+        #[test]
+        fn monitor_unbound_session_can_block_its_current_execution() {
+            let _env_lock = crate::env_test_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "monitor-unbound");
+            let repo = tempfile::tempdir().unwrap();
+            prepare_generation_bound_execution_for_owner(
+                repo.path(),
+                "monitor-unbound",
+                ExecutionOwnerKey {
+                    kind: ExecutionOwnerKind::Issue,
+                    number: 4363,
+                },
+                ExecutionControlStatus::Active,
+            );
+            assert!(crate::load_issue_monitor_prefs(
+                &crate::issue_monitor_prefs_path_for_repo_path(repo.path())
+            )
+            .unwrap()
+            .launched_issues
+            .is_empty());
+
+            let (code, out) = run_cmd(
+                repo.path(),
+                ExecutionCommand::Blocked {
+                    reason: "trusted execution lost its Monitor row".to_string(),
+                    missing_verification: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0, "{out}");
+            let record = load(repo.path()).unwrap().unwrap();
+            assert_eq!(record.status, ExecutionControlStatus::Blocked);
+            assert_eq!(
+                record.blocked_reason.as_deref(),
+                Some("trusted execution lost its Monitor row")
+            );
+        }
+
         #[test]
         fn settlement_refuses_other_sessions_record() {
             let _env_lock = crate::env_test_lock()
@@ -34117,6 +34639,8 @@ exit 1
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-new");
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+            let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+            let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
             let dir = tempfile::tempdir().unwrap();
             crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
             let owner = ExecutionOwnerKey {
@@ -34131,6 +34655,8 @@ exit 1
             persist_generation_session_binding(dir.path(), owner, "sess-old", original_binding);
             let recovery_session = persist_recovery_session_snapshot(dir.path(), owner, "sess-new");
             assert!(recovery_session.execution_binding.is_none());
+            let observed = with_new_hook_observations(&recovery_session);
+            set_recovery_session_race(RecoverySessionRace::Replace(Box::new(observed.clone())));
 
             let (code, out) = run_cmd(
                 dir.path(),
@@ -34148,6 +34674,7 @@ exit 1
                 &gwt_core::paths::gwt_sessions_dir().join("sess-new.toml"),
             )
             .unwrap();
+            assert_hook_observations_preserved(&durable, &observed);
             let binding = durable
                 .execution_binding
                 .expect("adopting Session must receive the transferred execution binding");

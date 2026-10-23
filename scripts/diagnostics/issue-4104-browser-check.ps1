@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
@@ -10,6 +11,7 @@ $gwtBinary = Join-Path $checkout 'target/debug/gwt.exe'
 $gwtdBinary = Join-Path $checkout 'target/debug/gwtd.exe'
 $deps = Join-Path $env:LOCALAPPDATA 'Temp/gwt-playwright-win-1.49.1'
 $checkHome = Join-Path $checkout ('target/issue-4104-home-' + [Guid]::NewGuid().ToString('N'))
+$artifacts = Join-Path $checkHome 'headed'
 $ownedProcess = $null
 $keeper = $null
 $savedEnvironment = @{}
@@ -31,6 +33,7 @@ function Set-CheckEnvironment($variables) {
     }
 }
 
+Push-Location -LiteralPath $checkout
 try {
     if (!$SkipBuild) {
         & cargo build -p gwt --bin gwt --bin gwtd
@@ -92,14 +95,18 @@ try {
     Set-CheckEnvironment @{GWT_PLAYWRIGHT_BASE_URL=$baseUrl;GWT_PLAYWRIGHT_CHECK_HOME=$checkHome;
         GWT_PLAYWRIGHT_NODE_MODULES="$deps/node_modules";NODE_PATH="$deps/node_modules";
         NODE_OPTIONS="--require $($deps.Replace('\','/'))/resolve-playwright.cjs"}
-    & node "$deps/node_modules/@playwright/test/cli.js" test agent-window-scroll.spec.ts --config=crates/gwt/playwright/playwright.config.ts --headed --workers=1 --output=target/issue-4104-headed @PlaywrightArguments
+    & node "$deps/node_modules/@playwright/test/cli.js" test agent-window-scroll.spec.ts --config=crates/gwt/playwright/playwright.config.ts --headed --workers=1 "--output=$artifacts" @PlaywrightArguments
     if ($LASTEXITCODE -ne 0) { throw "Playwright failed: $LASTEXITCODE" }
 } finally {
-    if ($keeper) { $keeper.Dispose() }
-    if ($ownedProcess -and !$ownedProcess.HasExited) { $null = $ownedProcess.WaitForExit(5000) }
-    if ($ownedProcess -and !$ownedProcess.HasExited) {
-        Stop-Process -Id $ownedProcess.Id
-        if (!$ownedProcess.WaitForExit(5000)) { throw "Owned PID $($ownedProcess.Id) survived cleanup" }
+    try {
+        if ($keeper) { $keeper.Dispose() }
+        if ($ownedProcess -and !$ownedProcess.HasExited) { $null = $ownedProcess.WaitForExit(5000) }
+        if ($ownedProcess -and !$ownedProcess.HasExited) {
+            Stop-Process -Id $ownedProcess.Id
+            if (!$ownedProcess.WaitForExit(5000)) { throw "Owned PID $($ownedProcess.Id) survived cleanup" }
+        }
+    } finally {
+        foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
+        Pop-Location
     }
-    foreach ($key in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($key, $savedEnvironment[$key]) }
 }

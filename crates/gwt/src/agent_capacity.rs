@@ -1398,6 +1398,7 @@ mod tests {
                 child_started_at: 3,
                 started_at: "epoch".to_string(),
                 launch_origin: gwt_agent::SessionLaunchOrigin::Unknown,
+                launch_entrypoint: None,
                 restore_source_session_id: None,
             },
         }
