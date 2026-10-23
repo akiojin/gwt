@@ -1352,6 +1352,12 @@ archives and publish both events under content-specific identities. Then retry
 the Git merge. Tracked shards, ordinary events, and tombstones for different
 branches are refused; existing source or archive bytes are never overwritten.
 
+If an existing Work contains both an absolute worktree container and its `.`
+alias, use `workspace.work_repair` with `params.work_id` to inspect a scoped
+repair. It defaults to dry-run; repeat with `"dry_run":false` to apply. The
+operation requires matching Git worktree and durable event evidence, preserves
+terminal state and source files, and refuses ambiguous or missing provenance.
+
 ## Share local Board milestones through GitHub Discussions
 
 To share `decision`, `blocked`, and `handoff` posts across machines, enable

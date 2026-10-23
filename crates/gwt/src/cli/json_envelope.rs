@@ -552,6 +552,13 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 ids: optional_string_vec(params, "ids")?,
             })
         }
+        "workspace.work_repair" => {
+            reject_unknown_params(params, &["work_id", "dry_run"], "workspace.work_repair")?;
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair {
+                work_id: required_string(params, "work_id")?,
+                dry_run: optional_bool(params, "dry_run")?.unwrap_or(true),
+            })
+        }
         "workspace.work_prune" | "workspace.work-prune" => {
             // Issue #4465 AC-4'': this operation closes, discards and detaches
             // durable Work state across every Work in the project, so a scope
@@ -4896,6 +4903,32 @@ mod tests {
         assert!(matches!(
             ok("workspace.work-prune", json!({"dry_run": false})),
             CliCommand::Workspace(WorkspaceCommand::WorkPrune { dry_run: false, .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_work_repair_requires_work_and_defaults_to_dry_run() {
+        assert!(matches!(
+            ok("workspace.work_repair", json!({"work_id":"work-test"})),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: true, .. })
+        ));
+        assert!(matches!(
+            ok(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "dry_run":false})
+            ),
+            CliCommand::Workspace(WorkspaceCommand::WorkRepair { dry_run: false, .. })
+        ));
+        assert!(matches!(
+            err("workspace.work_repair", json!({})),
+            CliParseError::MissingFlag("work_id")
+        ));
+        assert!(matches!(
+            err(
+                "workspace.work_repair",
+                json!({"work_id":"work-test", "project_root":"/foreign"})
+            ),
+            CliParseError::InvalidJson(_)
         ));
     }
 

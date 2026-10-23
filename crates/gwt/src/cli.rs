@@ -252,6 +252,9 @@ pub enum WorkspaceCommand {
         ids: Vec<String>,
         project_root: Option<String>,
     },
+    /// Refold one existing Work's portable container aliases from its durable
+    /// sources. This never creates lifecycle events or changes ownership.
+    WorkRepair { work_id: String, dry_run: bool },
 }
 
 /// SPEC-1942 command model for managed hook argv transport and internal daemon hooks.

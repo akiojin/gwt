@@ -4820,9 +4820,18 @@ fn resolve_unique_existing_work(
         ));
     }
     if matching_containers > 1 {
+        let repair = if item
+            .execution_containers
+            .iter()
+            .any(|container| container.worktree_path.as_deref() == Some(Path::new(".")))
+        {
+            format!("; inspect workspace.work_repair params.work_id=\"{work_id}\" (dry-run by default; params.dry_run=false applies accepted-source repair)")
+        } else {
+            String::new()
+        };
         return Err(workspace_ensure_error(
             session_id,
-            &format!("assigned Work {work_id} has ambiguous matching execution containers"),
+            &format!("assigned Work {work_id} has ambiguous matching execution containers{repair}"),
         ));
     }
     for other in work_items
