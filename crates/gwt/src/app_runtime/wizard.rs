@@ -7689,6 +7689,16 @@ impl AppRuntime {
                     // the chosen provider already sat further down the pool.
                     None => prefs.set_head_launch_profile(launch_profile),
                 }
+                // Auto uses its unchanged tiers, not the manual pool this form
+                // saves. Compensate only when the effective pool changed.
+                if !prefs.launch_auto {
+                    let mut monitor = gwt::IssueMonitorState::with_prefs(
+                        gwt::IssueMonitorConfig::default(),
+                        prefs.clone(),
+                    );
+                    monitor.set_launch_profile_pool(prefs.launch_profile_pool());
+                    *prefs = monitor.prefs();
+                }
                 Ok(())
             },
         );
