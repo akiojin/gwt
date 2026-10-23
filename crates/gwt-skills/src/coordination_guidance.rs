@@ -379,6 +379,44 @@ automatically. Completion and PR
 mutations remain blocked until the current HEAD is confirmed on the configured
 upstream, and verification must be run fresh after that commit/push.
 
+## Issue relationship markers
+
+When registration or discussion selects multiple owners, choose exactly one
+Primary Execution Owner and classify each related Issue before persisting the
+artifacts. For example, with Primary Issue #700 and related Issues #701–#703:
+
+| Classification | Marker destination | Standalone body line |
+| --- | --- | --- |
+| `bundled-required` | Primary | `Bundle-with: #701` |
+| `dependent-follow-up` | Dependent | `Blocked-by: #700` |
+| `reference-only` | Neither | No marker |
+
+Emit `Blocked-by:` only when the dependent actually must wait for its blocker;
+separately deliverable work without that ordering needs no dependency marker.
+Copy or summarize bundled-required tasks and acceptance into the Primary;
+the marker does not replace that scope. Keep reference-only links as context.
+
+Write the applicable markers as standalone lines in a Dependencies section,
+outside Markdown fences and HTML comments. Use space-separated `#N` tokens
+with positive, unique Issue numbers, sorted ascending; omit self references
+and empty markers. Do not put bullets, URLs, commas or explanations on marker
+lines. Merge existing relationships instead of discarding unrelated markers;
+when an agreed classification changes, remove its obsolete marker membership.
+
+Persist plain Issue bodies through `issue.edit`, then read `issue.view` back.
+For a `gwt-spec` owner, use `issue.spec.edit` on its `spec` section and read
+`issue.spec.section` back, including when that section is stored in comments.
+Preserve the remaining sections and acceptance criteria. Confirm the saved
+marker destination and membership for every changed owner before handoff;
+conversation text, a Board post or the Primary's list alone is insufficient.
+If an owner number does not exist yet, finish authorized registration before
+writing its marker; do not persist placeholders.
+
+Markers are relationship data and do not grant execution or mutation authority.
+Keep the existing PM registration, Issue adoption, readiness, launch, verification
+and merge gates. Recording `Bundle-with:` does not claim that bundle launch,
+claim fan-out or completion fan-out is implemented or enabled.
+
 ## Git environment
 
 Do not manually create, switch, or delete branches/worktrees:
