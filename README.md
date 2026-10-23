@@ -739,7 +739,13 @@ from `issue.monitor.status` or `issue.monitor.tiers`, then pass the token as
 status and reconsider the change, then read back success. The token includes
 saved `launch_auto` and `launch_tiers`. Omitting the guard keeps existing behavior;
 null, blank and non-string guards are rejected. This value comparison does not
-track ABA history or guard individual `tier.set` writes.
+track ABA history.
+For a conditional `tier.set`, pass the same fresh configuration token as
+`expected_config_token`. This prevents applying a tier index after saved settings
+change. Conflicts preserve all preferences; re-read status and reconsider, then
+read back success. The same guard validation and omission behavior apply.
+This guards configuration, without versioning individual overrides or ABA history;
+the existing non-decreasing minimum-tier merge remains in effect.
 `issue.monitor.status` exposes `launch_tier`, `landing_tier`, total `attempts`,
 excluded `non_agent_attempts`, and their difference `tier_input` on each
 observed Issue row.

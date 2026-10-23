@@ -679,7 +679,12 @@ backoffに使う総試行回数には数えます。
 その token を `expected_config_token` として渡します。不一致なら設定ファイル全体を
 変更せず拒否するため、status を再読して変更を再判断し、成功後も読み戻して確認します。
 token は保存された `launch_auto` と `launch_tiers` を含みます。guard の省略は従来互換を保ち、
-null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴や個別の `tier.set` は保護しません。
+null・空白・文字列以外は拒否します。値の比較であり、ABA 履歴は検知しません。
+条件付きの `tier.set` にも、同じ fresh な設定 token を `expected_config_token` として渡せます。
+保存設定が変わった後の tier 番号の適用を防ぎます。競合時は設定ファイル全体を変更せず拒否するため、
+status を再読して変更を再判断し、成功後も読み戻して確認します。guard の検証と省略時の互換性は同じです。
+これは保存設定の比較であり、個別 override の履歴や ABA 履歴は検知しません。
+既存の段の下限を下げない更新は維持します。
 `issue.monitor.status` の各行には `launch_tier` と `landing_tier` に加え、総試行回数の
 `attempts`、段に数えなかった `non_agent_attempts`、差分の `tier_input` が表示されます。
 着地は、担当Issueとセッションが一致するWorkの `done` 更新成功を指します。

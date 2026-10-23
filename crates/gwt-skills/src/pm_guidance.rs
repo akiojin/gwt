@@ -899,7 +899,14 @@ body cannot hold `plan` / `tasks` sections.
   and the authority epoch remain unchanged. Re-read status and reconsider the
   change, then read back success. Omitting the guard retains legacy behavior;
   null, blank and non-string guards are invalid. This value comparison does not
-  detect ABA history or guard individual `issue.monitor.tier.set` writes.
+  detect ABA history.
+- For `issue.monitor.tier.set`, use the same fresh configuration token as
+  `expected_config_token` to avoid applying a tier index to changed saved settings.
+  A conflict leaves all preferences and the authority epoch unchanged; re-read
+  status and reconsider, then read back success. Omitting the guard preserves
+  existing behavior; null, blank and non-string guards are invalid.
+  Configuration CAS does not version individual overrides or detect ABA history.
+  The existing non-decreasing minimum-tier merge remains in effect.
 - Provider switching is automatic. `issue.monitor.profiles` returns the launch
   candidate pool (ordered providers with their holds);
   `issue.monitor.profiles.set` replaces the whole pool with
@@ -4297,6 +4304,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
         let intake = unwrapped(&claude);
         for phrase in [
             "For `issue.monitor.tiers.set`, read fresh saved configuration",
+            "For `issue.monitor.tier.set`, use the same fresh configuration token",
+            "Configuration CAS does not version individual overrides",
             "`issue.monitor.tiers` also returns `saved_config` and `config_token`",
             "For `issue.monitor.queue.demote`, re-read `issue.monitor.queue.list`",
             "`urgent_queue_token` as `expected_urgent_queue_token`",

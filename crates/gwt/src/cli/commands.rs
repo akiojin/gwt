@@ -271,6 +271,7 @@ pub enum IssueCommand {
     /// Persist a non-decreasing tier override for one Issue.
     MonitorTierSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
         number: u64,
         tier: u8,
     },
