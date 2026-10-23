@@ -210,6 +210,7 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
   };
   let windows = [issueWindow, ...workspaceWindows];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);

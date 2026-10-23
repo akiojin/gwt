@@ -102,6 +102,7 @@ async function makeFixture({ projection = null, renderOtherWork } = {}) {
   const resumed = [];
   const cleaned = [];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);

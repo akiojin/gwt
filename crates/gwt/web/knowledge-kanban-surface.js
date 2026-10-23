@@ -789,6 +789,7 @@ export function createKnowledgeKanbanSurface({
   isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
+  scheduleFrame,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
   focusWindowLocally,
@@ -1087,7 +1088,7 @@ export function createKnowledgeKanbanSurface({
         label_excluded_issues: [],
         quota_hold: null,
         github_budget: null,
-      }});
+      }}, { scheduleFrame });
       // Receive paths publish the window whose data changed; the synchronous
       // view pulls its current knowledge state without rendering in receive.
       const issueWindowViewModel = createUiStateStore({ windowId: null });
@@ -5166,10 +5167,10 @@ export function createKnowledgeKanbanSurface({
             // Initial rendering follows registration so a failed mount can retry.
             let mounted = false;
             state.monitorSubscriptions = [
-              issueMonitorModel.subscribe(model => model.status, () => {
+              issueMonitorModel.subscribe(model => model, () => {
                 if (mounted && state.kind === "issue") renderIssueMonitorControls(windowMap.get(windowData.id), windowData.id);
               }),
-              issueMonitorModel.subscribe(model => model, () => {
+              issueMonitorModel.subscribeFrame(model => model, () => {
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }),
             ];
