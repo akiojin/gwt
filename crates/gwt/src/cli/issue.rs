@@ -12715,8 +12715,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("repo dir");
         let cache_root = crate::issue_cache::issue_cache_root_for_repo_path_or_detached(&repo);
         std::fs::create_dir_all(cache_root.join("7")).expect("cache entry");
-        let refreshed_at = chrono::Utc::now() - chrono::Duration::minutes(65);
-        let last_full_refresh = refreshed_at.to_rfc3339();
+        let last_full_refresh = (chrono::Utc::now() - chrono::Duration::minutes(65)).to_rfc3339();
         std::fs::write(
             cache_root.join("refresh-meta.json"),
             serde_json::json!({
@@ -12729,14 +12728,12 @@ mod tests {
         let mut env = crate::cli::TestEnv::new(repo.clone());
         let mut out = String::new();
 
-        let before_status = chrono::Utc::now();
         let code = run(
             &mut env,
             IssueCommand::MonitorStatus { project_root: None },
             &mut out,
         )
         .expect("status");
-        let after_status = chrono::Utc::now();
 
         assert_eq!(code, 0);
         let status: serde_json::Value = serde_json::from_str(out.trim()).expect("status json");
@@ -12744,15 +12741,11 @@ mod tests {
         assert_eq!(issue_cache["last_full_refresh"], last_full_refresh);
         assert_eq!(issue_cache["ttl_minutes"], 15);
         assert_eq!(issue_cache["stale"], true);
-        // The CLI samples cache age during the call, regardless of its duration.
-        let refresh_deadline = refreshed_at + chrono::Duration::minutes(15);
-        let sampled_overrun = (before_status - refresh_deadline).num_seconds()
-            ..=(after_status - refresh_deadline).num_seconds();
         assert!(
             issue_cache["stale_by_secs"]
-                .as_i64()
-                .is_some_and(|secs| sampled_overrun.contains(&secs)),
-            "cache age must be sampled during status: {status}"
+                .as_u64()
+                .is_some_and(|secs| (2990..=3010).contains(&secs)),
+            "50 minutes past the TTL: {status}"
         );
     }
 

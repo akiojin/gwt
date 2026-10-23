@@ -2355,9 +2355,6 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
         &[("GROK_HOME", grok_home.to_str().expect("UTF-8 Grok home"))],
     );
     seed_resumed_autonomous_handoff(&fixture, "Approved by PM");
-    // Own static claim inputs so this fixture reaches the real PTY submission.
-    let _projection =
-        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let holder_window_id = fixture
         .holder_window_id
         .clone()
@@ -2559,9 +2556,6 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     );
     convert_monitor_relaunch_fixture_to_grok(&mut fixture, &grok_home);
     seed_resumed_autonomous_handoff(&fixture, "Retry this answer");
-    // Own static claim inputs so this fixture reaches the ambiguous PTY write.
-    let _projection =
-        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let holder_window_id = fixture
         .holder_window_id
         .clone()
@@ -3421,9 +3415,6 @@ fn app_runtime_monitor_fresh_required_delivery_skips_resumable_session() {
         MonitorNativeHolderFixture::None,
         true,
     );
-    // Own static claim inputs so this fixture reaches the FreshRequired launch.
-    let _projection =
-        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
         &fixture.runtime.test_context(),
         3165,

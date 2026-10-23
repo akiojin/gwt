@@ -30576,8 +30576,6 @@ mod tests {
 
     #[test]
     fn provider_quota_hold_rebase_joins_the_later_deadline_in_both_orders() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let earlier = "2026-08-22T12:00:00+09:00";
         let later = "2026-08-22T04:00:00Z";
 

@@ -223,8 +223,6 @@ impl NamedFileLock {
         let result = lock_exclusive_with_observer(&file, || {
             contention_observed = true;
             on_first_contention();
-            #[cfg(any(test, feature = "test-support"))]
-            notify_named_lock_contention(path);
             if report_contention {
                 let _ = named_lock_error(
                     &holder_path,
@@ -262,7 +260,10 @@ impl NamedFileLock {
     /// Work transaction): ordinary contention is not logged, only a failed
     /// acquisition is — and that failure still names the observed holder.
     pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
-        Self::acquire_with_observer(path, operation, false, || {})
+        Self::acquire_with_observer(path, operation, false, || {
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
+        })
     }
 
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.

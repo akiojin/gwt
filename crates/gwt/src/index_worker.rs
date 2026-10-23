@@ -4359,9 +4359,6 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = tempfile::tempdir().expect("tempdir");
-        // The Memory source below belongs to this fixture, not a sibling's HOME.
-        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        assert_eq!(gwt_core::paths::gwt_home(), temp.path().join(".gwt"));
         let repo = temp.path().join("repo");
         std::fs::create_dir(&repo).expect("create repo");
         init_git_repo_with_origin(&repo);

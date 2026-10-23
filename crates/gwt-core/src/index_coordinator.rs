@@ -4346,7 +4346,7 @@ mod tests {
         let search = TargetKey::search("repo-a", None);
         for _ in 0..MAX_CONSECUTIVE_INTERACTIVE_HEAVY_GRANTS {
             coordinator
-                .acquire_interactive_search_heavy(&search, Duration::ZERO)
+                .acquire_interactive_search_heavy(&search, Duration::from_secs(1))
                 .expect("spend search burst")
                 .release()
                 .unwrap();
@@ -4361,7 +4361,7 @@ mod tests {
             .unwrap();
 
         coordinator
-            .acquire_interactive_search_heavy(&search, Duration::ZERO)
+            .acquire_interactive_search_heavy(&search, Duration::from_millis(200))
             .expect("an absent reservation must not keep an idle host from serving search")
             .release()
             .unwrap();
@@ -4376,40 +4376,25 @@ mod tests {
             &TargetKey::repo_shared("repo-a", "files"),
             JobPriority::Background,
         );
-        assert!(matches!(
-            background.acquire_heavy(Duration::ZERO),
-            Err(CoordinatorError::Timeout { .. })
-        ));
-        // Own a real resident registration without a poller racing search for
-        // heavy.lock while it scans the queue on a loaded host.
-        let registration = heavy_queue_entry(
-            &coordinator.heavy_pending_dir(),
-            &background.key().file_stem(),
-            JobPriority::Background,
-        )
-        .unwrap();
-        let path = coordinator
-            .heavy_pending_dir()
-            .join(format!("{}.json", uuid::Uuid::new_v4()));
-        let waiter = publish_live_registration(&path, &registration).unwrap();
-        assert!(coordinator
+        let waiter = std::thread::spawn(move || background.acquire_heavy(Duration::from_secs(5)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !coordinator
             .heavy_lease_status()
             .unwrap()
             .queue
             .iter()
-            .any(|entry| entry.priority == JobPriority::Background && entry.resident));
+            .any(|entry| entry.priority == JobPriority::Background)
+        {
+            assert!(Instant::now() < deadline, "background must enter the queue");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let search_result = coordinator
-            .acquire_interactive_search_heavy(&search, Duration::ZERO)
+            .acquire_interactive_search_heavy(&search, Duration::from_millis(200))
             .map(|lease| lease.release().unwrap());
         coordinator
             .clear_heavy_reservation(&verification_key())
             .unwrap();
-        drop(waiter);
-        background
-            .acquire_heavy(Duration::ZERO)
-            .unwrap()
-            .release()
-            .unwrap();
+        waiter.join().unwrap().unwrap().release().unwrap();
         search_result.expect("search must not defer to a waiter blocked by an absent reservation");
     }
 

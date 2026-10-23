@@ -29,6 +29,8 @@ crates/gwt-core/src/coordination.rs|prompt_board_tail_bounds_reads_with_twelve_t
 crates/gwt-core/src/index_coordinator.rs|a_newcomer_queues_behind_the_waiter|granted_rx.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|background_defers_while_higher_priority_claimant_is_pending|letdeadline=Instant::now()+Duration::from_secs(30)|1
+crates/gwt-core/src/index_coordinator.rs|spent_search_burst_does_not_wait_for_an_absent_reserved_claimant|assert!(Instant::now()<deadline,)|1
+crates/gwt-core/src/index_coordinator.rs|spent_search_burst_does_not_wait_for_an_absent_reserved_claimant|letdeadline=Instant::now()+Duration::from_secs(2)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|assert!(Instant::now()<deadline,)|1
 crates/gwt-core/src/index_coordinator.rs|wait_until|letdeadline=Instant::now()+Duration::from_secs(30)|1
 crates/gwt-core/src/operation_deadline.rs|contended_file_lock_notifies_the_call_scoped_observer|let_deadline=ScopedOperationDeadline::enter(Instant::now()+Duration::from_millis(40))|1
@@ -57,6 +59,7 @@ crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit_windows|while
 crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit|letdeadline=std::time::Instant::now()+Duration::from_secs(2)|1
 crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit|whilestd::time::Instant::now()<deadline|1
 crates/gwt-core/src/runtime.rs|runtime_command_obeys_ambient_operation_deadline|letstart=std::time::Instant::now()+std::time::Duration::from_secs(3600)|1
+crates/gwt-core/src/runtime.rs|runtime_probe_lock_obeys_ambient_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_000))|1
 crates/gwt-core/src/update.rs|pending_manifest_staging_waits_for_writer_while_defer_and_clear_refuse|assert!(matches!(finished_rx.recv_timeout(std::time::Duration::from_secs(1)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)))|1
 crates/gwt-core/tests/env_lock_reentrancy.rs|run_bounded|matchrx.recv_timeout(BUDGET)|1
 crates/gwt-core/tests/index_coordinator.rs|poll_until|whilestart.elapsed()<deadline|1
@@ -203,11 +206,14 @@ crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstra
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|release_rx.recv_timeout(Duration::from_secs(5)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|started_rx.recv_timeout(Duration::from_secs(1)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|wait_for_recorded_event(,&events,|events||1
+crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state|assert!(started.elapsed()<Duration::from_secs(1))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposal|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(5),)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops|*started_at=Instant::now()-Duration::from_secs(61)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|issue_5289_launch_worker_finishes_while_pm_prefs_lock_is_held|letcompleted_while_locked=completion.recv_timeout(Duration::from_secs(10))|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|local_fallback_transaction_preserves_the_background_worker_deadline|letbackground_deadline=Instant::now()+Duration::from_secs(5)|1
+crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline|assert!(elapsed<Duration::from_secs(2),)|1
+crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline|letscan_deadline=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_handoff_tests.rs|app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launching|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_scan_tests.rs|issue_monitor_prefs_snapshot_is_readable_while_its_writer_lock_is_held|letresult=read_rx.recv_timeout(Duration::from_secs(1))|1
@@ -436,6 +442,7 @@ crates/gwt/src/cli/json_envelope.rs|pane_name_waits_for_its_exact_assigned_resul
 crates/gwt/src/cli/pane.rs|read_pane_snapshot_uses_one_absolute_completion_deadline|assert!(started.elapsed()<Duration::from_millis(500),)|1
 crates/gwt/src/cli/pane.rs|request_window_list_outlasts_a_multi_second_backend_stall|matchtokio::time::timeout(Duration::from_millis(200),socket.next()).await|1
 crates/gwt/src/cli/pane.rs|self_pane_close_absolute_deadline_is_not_extended_by_unrelated_frames|assert!(started.elapsed()<Duration::from_millis(500),,started.elapsed())|1
+crates/gwt/src/cli/pr/mod.rs|issue_4850_pr_edit_returns_with_a_warning_when_the_work_items_lock_is_held|assert!(elapsed<std::time::Duration::from_secs(5),)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|assert!(std::time::Instant::now()<deadline,)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(20)|1
 crates/gwt/src/cli/trusted_store.rs|write_lease_refuses_second_writer_with_explicit_retry|let_=release_rx.recv_timeout(Duration::from_secs(10))|1

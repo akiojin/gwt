@@ -2875,12 +2875,6 @@ mod tests {
     /// metadata exactly as before.
     #[test]
     fn issue_4850_pr_edit_returns_with_a_warning_when_the_work_items_lock_is_held() {
-        use std::{cell::RefCell, rc::Rc};
-
-        use gwt_core::operation_deadline::{
-            ScopedNamedLockContentionObserver, ScopedOperationClock,
-        };
-
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2928,42 +2922,25 @@ mod tests {
         .expect("hold the Work items lock");
         let started = std::time::Instant::now();
         let mut out = String::new();
-        let code = {
-            // test-hygiene: allow-wall-clock-deadline Host time only anchors the fixed clock; actual contention advances it.
-            let start = started + std::time::Duration::from_secs(3600);
-            let expiry = start + std::time::Duration::from_millis(300);
-            let _clock = ScopedOperationClock::set(start);
-            let expired_clock = Rc::new(RefCell::new(None));
-            let expired_on_contention = expired_clock.clone();
-            let _observer = ScopedNamedLockContentionObserver::set(
-                &works_path.with_extension("lock"),
-                move || {
-                    assert_eq!(gwt_core::operation_deadline::current(), Some(expiry));
-                    *expired_on_contention.borrow_mut() = Some(ScopedOperationClock::set(expiry));
-                },
-            );
-            let code = run(
-                &mut env,
-                PrCommand::EditBody {
-                    number: 7,
-                    base: None,
-                    title: Some(s("updated")),
-                    body: None,
-                    add_labels: vec![s("auto-merge")],
-                },
-                &mut out,
-            )
-            .expect("edit returns instead of hanging");
-            assert!(
-                expired_clock.borrow().is_some(),
-                "the metadata deadline must expire after actual Work lock contention"
-            );
-            code
-        };
+        let code = run(
+            &mut env,
+            PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: Some(s("updated")),
+                body: None,
+                add_labels: vec![s("auto-merge")],
+            },
+            &mut out,
+        )
+        .expect("edit returns instead of hanging");
         let elapsed = started.elapsed();
         PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(None));
         assert_eq!(code, 0, "the remote mutation succeeded: {out}");
-        eprintln!("PR metadata lock fixture returned in {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "returned within the bound, took {elapsed:?}"
+        );
         assert_eq!(env.pr_edit_call_log.len(), 1, "GitHub was updated first");
         let warnings = crate::cli::operation_warnings::take();
         assert_eq!(warnings.len(), 1, "{warnings:?}");

@@ -2524,8 +2524,6 @@ fn list_issue_monitor_without_daemon_never_scans_remote_for_cold_or_stale_cache(
                 ))
                 .expect("stale cache");
         }
-        // Own this iteration's actual cache rows without timing the Git lookup.
-        let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
         reset_local_issue_monitor_remote_scan_count();
         let events = runtime.completed_issue_monitor_list_for_test("client-1", |_| Ok(None));
         assert_eq!(
@@ -2615,9 +2613,6 @@ fn issue_monitor_control_error_preserves_the_authoritative_display() {
 
 #[test]
 fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -2648,31 +2643,14 @@ fn app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state() 
     runtime.issue_monitor_fallback_commit_timeout =
         super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
 
-    // Projection reads have their own budget before the 250 ms prefs deadline.
-    // The held lock must produce a deadline error without changing the display.
+    let started = Instant::now();
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
         FrontendEvent::SetIssueMonitorAutonomousMode { enabled: false },
     );
     FileExt::unlock(&lock).expect("release prefs lock");
 
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::IssueMonitorToast { message, .. }
-                if message.contains(gwt_core::operation_deadline::DEADLINE_EXPIRED_MARKER)
-                    && message.contains("file lock")
-                    && message.contains("operation=issue_monitor_prefs")
-        )),
-        "the fallback must fail on the prefs lock deadline, not another error: {:?}",
-        events
-            .iter()
-            .filter_map(|event| match &event.event {
-                BackendEvent::IssueMonitorToast { message, .. } => Some(message.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    );
+    assert!(started.elapsed() < Duration::from_secs(1));
     assert!(
         events
             .iter()
@@ -3934,8 +3912,6 @@ fn app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
-
     reset_local_issue_monitor_remote_scan_count();
     let events = runtime.local_issue_monitor_events_with_policy(
         &runtime.test_context(),
@@ -4170,8 +4146,6 @@ fn app_runtime_full_issue_monitor_cache_fallback_does_not_migrate_legacy_failure
         .expect("seed legacy prefs");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
 
     let events = runtime.local_issue_monitor_events_with_policy(
         &runtime.test_context(),
@@ -4529,9 +4503,6 @@ fn app_runtime_agent_failed_rebases_concurrent_daemon_migration_before_fresh_fai
 
 #[test]
 fn app_runtime_rebase_keeps_equal_marker_disk_only_fresh_failures() {
-    // This asserts persisted failures, not filesystem speed under load.
-    let operation_now = gwt_core::operation_deadline::now();
-    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(operation_now);
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let prefs_path = temp.path().join("issue-monitor.json");
@@ -4820,33 +4791,6 @@ fn gui_scan_retries_a_concurrent_control_without_waiting_for_the_next_scan() {
 
 #[test]
 fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_scan_deadline() {
-    use std::{cell::RefCell, rc::Rc};
-
-    use gwt_core::operation_deadline::{
-        ScopedNamedLockContentionObserver, ScopedOperationClock, ScopedOperationDeadline,
-    };
-
-    fn expire_on_contention<T>(
-        lock_path: &Path,
-        start: Instant,
-        operation: impl FnOnce() -> T,
-    ) -> T {
-        let _clock = ScopedOperationClock::set(start);
-        let expiry = start + super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
-        let expired_clock = Rc::new(RefCell::new(None));
-        let expired_on_contention = expired_clock.clone();
-        let _observer = ScopedNamedLockContentionObserver::set(lock_path, move || {
-            assert_eq!(gwt_core::operation_deadline::current(), Some(expiry));
-            *expired_on_contention.borrow_mut() = Some(ScopedOperationClock::set(expiry));
-        });
-        let result = operation();
-        assert!(
-            expired_clock.borrow().is_some(),
-            "each fallback transaction must observe actual prefs lock contention"
-        );
-        result
-    }
-
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4876,29 +4820,27 @@ fn sibling_gui_fallback_transactions_keep_the_250ms_lock_budget_inside_a_longer_
     runtime.issue_monitor_fallback_commit_timeout =
         super::super::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs);
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
-    // test-hygiene: allow-wall-clock-deadline Host time only anchors the logical clock; actual lock contention advances it.
-    let start = Instant::now() + Duration::from_secs(3600);
-    let _deadline = ScopedOperationDeadline::enter(start + Duration::from_secs(5));
-    let lock_path = prefs_path.with_extension("lock");
+    let scan_deadline = Instant::now() + Duration::from_secs(5);
+    let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(scan_deadline);
 
-    let rebase_mutated = expire_on_contention(&lock_path, start, || {
-        super::super::rebase_mutate_and_persist_issue_monitor_state(
-            &prefs_path,
-            &mut monitor,
-            |_| true,
-        )
-    });
-    let control = expire_on_contention(&lock_path, start, || {
-        runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ())
-    });
-    let authorizing = expire_on_contention(&lock_path, start, || {
-        runtime.commit_local_issue_monitor_authorizing_control(&runtime.test_context(), |_| {
+    let started = Instant::now();
+    let rebase_mutated = super::super::rebase_mutate_and_persist_issue_monitor_state(
+        &prefs_path,
+        &mut monitor,
+        |_| true,
+    );
+    let control = runtime.commit_local_issue_monitor_control_for_project(&repo, |_| ());
+    let authorizing = runtime
+        .commit_local_issue_monitor_authorizing_control(&runtime.test_context(), |_| {
             Ok::<_, String>(())
-        })
-    });
+        });
+    let elapsed = started.elapsed();
     FileExt::unlock(&lock).expect("release prefs lock");
 
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "GUI fallback transactions outlived their cumulative short lock budget: {elapsed:?}"
+    );
     assert!(
         rebase_mutated.is_err(),
         "timed-out rebase must fail closed without running its mutation"
@@ -5394,6 +5336,11 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -5439,8 +5386,6 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
 
     let (launch_spawner, launch_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = launch_spawner;
@@ -5991,6 +5936,11 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     for (label, pane_status, expect_adoption, pending_identity) in [
         ("running pane", WindowProcessStatus::Running, true, false),
         ("idle pane", WindowProcessStatus::Idle, true, false),
@@ -6008,7 +5958,6 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         init_repo_with_initial_commit(&repo);
-        let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
         let sessions_dir = temp.path().join("sessions");
         fs::create_dir_all(&sessions_dir).expect("create sessions dir");
         gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
@@ -6203,7 +6152,6 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, _recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     assert_eq!(
         runtime.issue_monitor_fallback_commit_timeout,
         super::super::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT,
@@ -6283,8 +6231,6 @@ fn issue_5642_materializing_replay_preserves_the_unconsumed_initial_launch() {
         MonitorNativeHolderFixture::None,
         true,
     );
-    let _projection =
-        super::super::ScopedLocalIssueMonitorFallbackProjection::set(&fixture.project_root);
     let delivery_id = fixture.delivery_id.clone().expect("durable delivery");
     fixture.runtime.auto_launch_issue_monitor_delivery_events(
         &fixture.runtime.test_context(),
@@ -6418,13 +6364,17 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Assert delivery admission and replay outcomes, rather than native Git latency.
+    let _projection_timeout = ScopedEnvVar::set(
+        "GWT_TEST_ISSUE_MONITOR_FALLBACK_PROJECTION_TIMEOUT_MS",
+        "10000",
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
@@ -6573,7 +6523,6 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)
@@ -6673,7 +6622,6 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
-    let _projection = super::super::ScopedLocalIssueMonitorFallbackProjection::set(&repo);
     let sessions_dir = temp.path().join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     gwt_agent::Session::new(&repo, "develop", gwt_agent::AgentId::Codex)

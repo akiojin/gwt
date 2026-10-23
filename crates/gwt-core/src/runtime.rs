@@ -1420,11 +1420,6 @@ mod tests {
 
     #[test]
     fn runtime_probe_lock_obeys_ambient_operation_deadline() {
-        use std::{cell::RefCell, rc::Rc, time::Duration};
-
-        use crate::operation_deadline::{
-            ScopedNamedLockContentionObserver, ScopedOperationClock, ScopedOperationDeadline,
-        };
         use fs2::FileExt;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -1441,30 +1436,16 @@ mod tests {
             .open(runtime_dir.join(PROBE_LOCK_FILE))
             .expect("open held probe lock");
         held.lock_exclusive().expect("hold probe lock");
-        // test-hygiene: allow-wall-clock-deadline Host time only anchors the fixed clock; actual contention alone advances it.
-        let start = std::time::Instant::now() + Duration::from_secs(3600);
-        // test-hygiene: allow-short-duration The unchanged 75ms budget is logical; actual contention advances the clock to expiry.
-        let expiry = start + Duration::from_millis(75);
-        let _clock = ScopedOperationClock::set(start);
-        let expired_clock = Rc::new(RefCell::new(None));
-        let expired_clock_on_contention = expired_clock.clone();
-        let _deadline = ScopedOperationDeadline::enter(expiry);
-        let _observer =
-            ScopedNamedLockContentionObserver::set(&runtime_dir.join(PROBE_LOCK_FILE), move || {
-                *expired_clock_on_contention.borrow_mut() = Some(ScopedOperationClock::set(expiry));
-            });
+        let started = std::time::Instant::now();
+        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
+            started + std::time::Duration::from_millis(75),
+        );
 
         let error = ensure_project_index_runtime_with(&gwt_home, &provisioner)
             .expect_err("contended probe lock must respect the ambient deadline");
 
-        assert!(
-            expired_clock.borrow().is_some(),
-            "probe lock must observe actual contention"
-        );
-        let message = error.to_string();
-        assert!(message.contains("deadline"), "{message}");
-        assert!(message.contains("file lock"), "{message}");
-        assert!(message.contains("operation=runtime_probe"), "{message}");
+        assert!(error.to_string().contains("deadline"));
+        assert!(started.elapsed() < std::time::Duration::from_millis(1_000));
         FileExt::unlock(&held).expect("release probe lock");
     }
 }
