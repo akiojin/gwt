@@ -5473,14 +5473,19 @@ pub(crate) mod tests {
         // A successful claim is still unowned until a materializer takes it.
         // Both the resident driver and the CLI's cold prefs fallback switch
         // the profile inside the transaction that saves the compensation.
-        for cold_start in [false, true] {
+        for (cold_start, replace_pool) in [(false, false), (true, false), (false, true)] {
             let mut pending = if cold_start {
                 test_monitor_with_prefs(monitor.config.clone(), monitor.prefs())
             } else {
                 monitor.clone()
             };
             let delivery = pending.pending_launch_delivery_id(42).unwrap();
-            pending.switch_launch_profile_agent("openclaw").unwrap();
+            if replace_pool {
+                pending.advance_effect_authority_epoch().unwrap();
+                pending.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                pending.switch_launch_profile_agent("openclaw").unwrap();
+            }
             let committed = pending.prefs();
             pending.rebase_daemon_driver_prefs(&committed);
             assert!(pending.take_pending_launch_requests().is_empty());
@@ -5521,6 +5526,7 @@ pub(crate) mod tests {
         let delivery = monitor.pending_launch_delivery_id(42).unwrap();
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
         monitor.switch_launch_profile_agent("openclaw").unwrap();
+        monitor.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
         assert_eq!(monitor.take_pending_launch_requests().len(), 1);
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
     }
