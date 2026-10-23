@@ -38,13 +38,30 @@ test("Board destination updates and runtime hook refresh preserve controls and f
     const input = root.querySelector(".board-textarea") as HTMLTextAreaElement;
     input.focus(); input.value = "Unsent draft"; input.dispatchEvent(new Event("input")); input.setSelectionRange(2, 5);
     const hook = (event: any) => inject({ kind: "runtime_hook_event", event });
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancel = window.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 0;
+    const chip = root.querySelector("[data-action='board-destination']")!;
+    const originalReplace = chip.replaceChildren;
+    let renders = 0;
+    chip.replaceChildren = function (...nodes) { renders++; originalReplace.apply(this, nodes); };
     try {
       const config = { kind: "project_board_config", project_root: projectRoot,
         provider: "slack", channel: "#shared-board", resolved_provider: "slack",
         resolved_channel: "#shared-board", resolved_source: "project", signed_in: true };
-      inject(config);
+      window.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame; };
+      window.cancelAnimationFrame = frame => { frames.delete(frame); };
+      const before = root.querySelector(".board-destination-text");
+      for (let index = 0; index < 50; index++) inject({ ...config, channel: `#shared-${index}`, resolved_channel: `#shared-${index}` });
       inject({ ...config, project_root: "", resolved_channel: "#invalid" });
       inject({ ...config, project_root: "/unrelated-project", resolved_channel: "#other" });
+      const batch = { before: renders, sameBefore: before === root.querySelector(".board-destination-text"), frames: frames.size, after: 0 };
+      for (const callback of [...frames.values()]) callback(performance.now());
+      batch.after = renders;
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+      chip.replaceChildren = originalReplace;
       const destination = root.querySelector(".board-destination-text")!.textContent;
       hook(null); hook({ kind: "other" });
       hook({ kind: "coordination_event", project_root: "unrelated-project" });
@@ -54,20 +71,44 @@ test("Board destination updates and runtime hook refresh preserve controls and f
       hook({ kind: "coordination_event" });
       const whileLoading = sent.length;
       receive(); hook({ kind: "coordination_event" }); receive();
-      return { destination, ignored, loading, whileLoading, loads: sent.map(event => event.id),
+      return { destination, batch, ignored, loading, whileLoading, loads: sent.map(event => event.id),
         sameCard: !!card && card === root.querySelector('[data-board-entry-id="hook-post"]'),
         sameInput: input === root.querySelector(".board-textarea"), focused: document.activeElement === input,
         draft: input.value, selection: [input.selectionStart, input.selectionEnd] };
-    } finally { WebSocket.prototype.send = originalSend; }
+    } finally {
+      WebSocket.prototype.send = originalSend;
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+      chip.replaceChildren = originalReplace;
+    }
   }, { id, projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
-  expect(result).toEqual({ destination: "Slack #shared-board ⚠", ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
+  expect(result).toEqual({ destination: "Slack #shared-49 ⚠", batch: { before: 0, sameBefore: true, frames: 1, after: 1 },
+    ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
     loads: [id, id], sameCard: true, sameInput: true, focused: true,
     draft: "Unsent draft", selection: [2, 5] });
   await board.locator("[data-action='board-destination']").click();
   const popover = page.locator(".board-destination-popover");
   await expect(popover.locator("select")).toHaveValue("slack");
-  await expect(popover.locator("input").first()).toHaveValue("#shared-board");
+  await expect(popover.locator("input").first()).toHaveValue("#shared-49");
   await popover.getByRole("button", { name: "Cancel", exact: true }).click();
+  const restoreRaf = await page.evaluate(({ projectRoot }) => {
+    (window as any).__boardConfigRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "project_board_config", project_root: projectRoot, resolved_provider: "local",
+    } }));
+    return true;
+  }, { projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
+  try {
+    await expect(board.locator(".board-destination-text")).toHaveText("Local", { timeout: 1000 });
+  } finally {
+    if (restoreRaf) await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__boardConfigRaf;
+      delete (window as any).__boardConfigRaf;
+      delete (document as any).visibilityState;
+    });
+  }
   await page.screenshot({ path: info.outputPath("board-destination.png") });
   expect(errors, "zero console/page errors").toEqual([]);
 });
