@@ -157,9 +157,9 @@ fn bundled_skill_entrypoints_are_short_routers_with_delivered_references() {
     for provider in [".claude", ".codex"] {
         let skills_root = dir.path().join(provider).join("skills");
         // A clean checkout has no runtime-generated coordination guidance.
-        let generated_board = skills_root.join("gwt-coordination/references/board.md");
-        if generated_board.exists() {
-            fs::remove_file(generated_board).expect("exclude locally generated guidance");
+        let generated = skills_root.join("gwt-coordination");
+        if generated.exists() {
+            fs::remove_dir_all(generated).expect("exclude locally generated guidance");
         }
         for entry in fs::read_dir(&skills_root).expect("distributed skills") {
             let skill_dir = entry.expect("skill entry").path();
@@ -1394,16 +1394,16 @@ fn materialized_issue_relationship_output_contract_is_shared_by_both_callers() {
         ] {
             let path = skills.join(caller);
             let text = fs::read_to_string(&path).expect("materialized caller");
-            let target = "../../gwt-coordination/references/work.md#issue-relationship-markers";
-            assert!(
-                text.contains(target),
-                "{provider}/{caller}: missing contract link"
-            );
-            assert!(path
-                .parent()
-                .unwrap()
-                .join(target.split('#').next().unwrap())
-                .is_file());
+            for required in [
+                "`Issue relationship markers`",
+                "generated `gwt-coordination`",
+                "`references/work.md`",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{provider}/{caller}: missing {required}"
+                );
+            }
         }
         contracts.push(contract.to_string());
     }

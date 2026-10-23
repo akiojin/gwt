@@ -24,9 +24,9 @@ related owner is classified (SPEC-3248 Multi-Issue Primary Owner Bundle):
   blocker notes; never a hidden Primary completion requirement
 - `reference-only` — background reading, not part of the PR's completion
 
-Persist that classification using the shared
-[Issue relationship markers](../../gwt-coordination/references/work.md#issue-relationship-markers)
-contract before declaring the artifact update complete. Read back every changed
+Read `Issue relationship markers` in the generated `gwt-coordination` skill's
+`references/work.md` and persist that classification using its shared contract
+before declaring the artifact update complete. Read back every changed
 owner body or SPEC section; prose in the discussion or Primary alone does not
 establish a dependent's `Blocked-by:` relationship. Existing mutation authority
 and discussion approval boundaries still apply.
