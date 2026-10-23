@@ -1557,14 +1557,34 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             fixture.delivery_id.clone(),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-    for _ in 0..2 {
-        drain_queued_blocking_tasks(&queued);
-        fixture
-            .runtime
-            .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-                &fixture.recorded_events,
+    let mut preparation_states = Vec::new();
+    let preparation_phases = capture_tracing_events(|| {
+        for _ in 0..2 {
+            drain_queued_blocking_tasks(&queued);
+            fixture.runtime.handle_issue_monitor_launch_prepared(
+                take_issue4803_monitor_preparation(&fixture.recorded_events),
+            );
+            let prefs = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
+            )
+            .expect("read exact-holder preparation state");
+            preparation_states.push((
+                fixture
+                    .runtime
+                    .issue_monitor_launch_deliveries
+                    .get(fixture.delivery_id.as_deref().unwrap())
+                    .cloned(),
+                fixture
+                    .runtime
+                    .pending_launch_feedback_contexts
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                queued.lock().expect("queued exact-holder tasks").len(),
+                prefs.autonomous_handoffs[0].delivery.clone(),
             ));
-    }
+        }
+    });
     fs2::FileExt::unlock(&history).expect("release name history");
     let windows = &fixture
         .runtime
@@ -1592,7 +1612,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
                 if window_id == &holder_window_id
         ),
-        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane"
+        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane; states={preparation_states:?}; phases={preparation_phases:?}"
     );
 }
 
