@@ -215,7 +215,7 @@ jobs:
       # failure rather than a test failure. Pinned by
       # crates/gwt/tests/ci_linux_dependency_install_contract_test.rs.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb dbus
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps xvfb dbus
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install nextest
@@ -325,7 +325,7 @@ jobs:
             gwt-apt-gtk-${{ runner.os }}-
         timeout-minutes: 5
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install nextest
@@ -412,16 +412,21 @@ jobs:
         with:
           fetch-depth: 0
           filter: blob:none
+      - name: Identify the exact runner image for offline packages
+        id: apt-image
+        run: |
+          test -n "$ImageOS" && test -n "$ImageVersion"
+          echo "version=$ImageOS-$ImageVersion" >>"$GITHUB_OUTPUT"
       - name: Cache Linux GTK dependency packages
         uses: actions/cache@v6
         with:
-          path: ~/.cache/gwt-apt-archives
-          key: gwt-apt-gtk-${{ runner.os }}-${{ hashFiles('scripts/ci-apt.sh') }}
-          restore-keys: |
-            gwt-apt-gtk-${{ runner.os }}-
+          path: ~/.cache/gwt-apt-offline-gtk
+          # A complete archive is replayable only on the same base image.
+          # No prefix fallback: another image can have different base packages.
+          key: gwt-apt-offline-gtk-${{ runner.os }}-${{ runner.arch }}-${{ steps.apt-image.outputs.version }}-${{ hashFiles('scripts/ci-apt.sh') }}
         timeout-minutes: 5
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_OFFLINE_CACHE=1 GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-offline-gtk" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
       - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install nextest
@@ -835,6 +840,15 @@ jobs:
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_mirror_pointer_partial_authority_advertised_by_status -- --exact --test-threads=1 --nocapture
           exact node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::execution_state::tests::command::repair_recovers_malformed_mirror_only_ecr -- --exact --test-threads=1 --nocapture
         timeout-minutes: 15
+      - name: Run native fleet orphan process handle contracts
+        shell: bash
+        run: |
+          both() {
+            "$@" | tee "$RUNNER_TEMP/fleet-process-handles.log"
+            grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/fleet-process-handles.log"
+          }
+          both node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture
+        timeout-minutes: 5
       - name: Run targeted issue cache refresh regression
         run: node scripts/ci-windows-tests.mjs run-lib gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact
         timeout-minutes: 15
@@ -1047,32 +1061,19 @@ jobs:
       - name: Run frontend smoke tests
         run: bash scripts/run-frontend-smoke-tests.sh
         timeout-minutes: 10
-      # Browser bootstrap is split three ways on purpose (#3659). A single
-      # `playwright install --with-deps` hid an unbounded apt transaction
-      # behind a browser download, so a stalled mirror surfaced only as an
-      # opaque 10-minute step timeout. scripts/playwright-version.txt is the
-      # one pin shared with run-visual-tests.sh, so the cache key cannot drift
-      # from the revision the specs resolve, and the shared
-      # ~/.cache/ms-playwright is reused by the script's temp-dir install.
-      - name: Resolve pinned Playwright version
-        id: playwright
-        run: echo "version=$(cat scripts/playwright-version.txt)" >>"$GITHUB_OUTPUT"
-      - name: Cache Playwright browsers
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/ms-playwright
-          key: ms-playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
-      - name: Install Playwright system dependencies (apt)
-        run: bash scripts/install-playwright-browsers.sh system-deps
-        timeout-minutes: 10
-      - name: Install Playwright chromium browser
-        run: bash scripts/install-playwright-browsers.sh browsers
-        timeout-minutes: 10
       # Embedded-frontend specs stub WebSocket + serve crates/gwt/web via
       # page.route, so they run without a live gwt. live-gwt specs self-skip
       # when GWT_PLAYWRIGHT_BASE_URL is unset.
       - name: Run WebView E2E (embedded Playwright specs)
-        run: bash scripts/run-visual-tests.sh
+        # Keep Git/Rust-based regressions on the hosted runner. Only browser
+        # specs need this image's baked-in browsers and OS dependencies.
+        run: |
+          version="$(tr -d '[:space:]' < scripts/playwright-version.txt)"
+          docker run --rm --ipc=host \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace" \
+            --workdir /workspace --env CI=true \
+            "mcr.microsoft.com/playwright:v${version}-noble" \
+            bash scripts/run-visual-tests.sh
         timeout-minutes: 15
 
   report-post-merge-failure:

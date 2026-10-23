@@ -67,6 +67,7 @@ const GIT_HTTPS_AUTH_SETUP_PREFIX: &str = concat!(
 /// historical migration.
 pub const LEGACY_GIT_LAUNCH_FAILURE_MIGRATION_VERSION: u32 = 1;
 pub const ISSUE_COMPLETION_MIGRATION_VERSION: u32 = 1;
+const ISSUE_MONITOR_PREFS_SCHEMA_VERSION: u32 = 1;
 const LEGACY_ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 1;
 const ISSUE_MONITOR_AUTHORITY_FENCE_VERSION: u32 = 2;
 const LEGACY_SHUTDOWN_REVOKE_FENCE: &[u8] = b"gwt issue-monitor shutdown revoke v1\n";
@@ -978,6 +979,12 @@ pub struct IssueMonitorScanError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
+    /// Unversioned legacy preferences use the same known-compatible schema.
+    #[serde(
+        default = "current_issue_monitor_prefs_schema_version",
+        deserialize_with = "deserialize_issue_monitor_prefs_schema_version"
+    )]
+    pub schema_version: u32,
     pub enabled: bool,
     #[serde(default = "default_max_active_agents")]
     pub max_active_agents: usize,
@@ -1313,6 +1320,7 @@ pub struct IssueMonitorTerminalQueue {
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
+            schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
             max_active_agents_mode: IssueMonitorMaxActiveMode::Auto,
@@ -6326,6 +6334,52 @@ fn default_max_active_agents() -> usize {
     1
 }
 
+fn current_issue_monitor_prefs_schema_version() -> u32 {
+    ISSUE_MONITOR_PREFS_SCHEMA_VERSION
+}
+
+fn validate_issue_monitor_prefs_schema_version(actual: u32) -> io::Result<()> {
+    if actual != ISSUE_MONITOR_PREFS_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Issue Monitor preferences schema mismatch: actual={actual}, expected={ISSUE_MONITOR_PREFS_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_issue_monitor_prefs_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let actual = u32::deserialize(deserializer)?;
+    validate_issue_monitor_prefs_schema_version(actual).map_err(serde::de::Error::custom)?;
+    Ok(actual)
+}
+
+/// Full-snapshot saves must not overwrite preferences owned by another schema.
+/// Syntax/EOF failures remain eligible for the existing malformed-JSON recovery.
+fn validate_existing_issue_monitor_prefs_schema(path: &Path) -> io::Result<()> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(error) if error.is_syntax() || error.is_eof() => return Ok(()),
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
+    if let Some(actual) = value.get("schema_version") {
+        let actual = serde_json::from_value(actual.clone())
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        validate_issue_monitor_prefs_schema_version(actual)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn machine_managed_monitor_prefs(path: &Path) -> bool {
     path.strip_prefix(gwt_core::paths::gwt_projects_dir())
         .is_ok_and(|relative| {
@@ -6528,6 +6582,8 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
+    validate_existing_issue_monitor_prefs_schema(path)?;
     crate::machine_agent_settings::migration_before_project_save(path)?;
     let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
     if machine_managed_monitor_prefs(path) {
@@ -6583,16 +6639,26 @@ fn committed_prefs_generation_path(path: &Path) -> std::path::PathBuf {
 /// Only a snapshot that parses is a floor. The sidecar is written after the
 /// canonical file, so it is never newer than what was committed, and being a
 /// separate inode it does not share the canonical file's torn write.
-fn last_committed_prefs_generation(path: &Path) -> Option<IssueMonitorPrefs> {
+fn last_committed_prefs_generation(path: &Path) -> io::Result<Option<IssueMonitorPrefs>> {
     let sidecar = committed_prefs_generation_path(path);
-    let content = fs::read_to_string(&sidecar).ok()?;
-    let mut prefs = crate::update_settings::decode_project_prefs(&content).ok()?;
+    let content = match fs::read_to_string(&sidecar) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut prefs = match crate::update_settings::decode_project_prefs(&content) {
+        Ok(prefs) => prefs,
+        Err(error) if error.is_syntax() || error.is_eof() => return Ok(None),
+        Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+    };
     if machine_managed_monitor_prefs(path) {
-        if let Some(policy) = crate::machine_agent_settings::load().ok()? {
+        if let Some(policy) = crate::machine_agent_settings::load()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?
+        {
             apply_machine_policy_to_prefs(&mut prefs, &policy);
         }
     }
-    Some(prefs)
+    Ok(Some(prefs))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -7015,6 +7081,7 @@ pub fn load_issue_monitor_prefs(path: &Path) -> io::Result<IssueMonitorPrefs> {
 /// Ordinary prefs readers and the monitor's explicit hold primitive stay unchanged.
 pub fn load_issue_monitor_prefs_for_running_version(path: &Path) -> io::Result<IssueMonitorPrefs> {
     if machine_managed_monitor_prefs(path) {
+        load_issue_monitor_prefs_raw(path)?;
         crate::machine_agent_settings::ensure_migrated()?;
     }
     fn applied(prefs: &IssueMonitorPrefs) -> bool {
@@ -7162,6 +7229,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
         let (mut prefs, recovery) = match load_issue_monitor_prefs_unlocked(path) {
             Ok(prefs) => (prefs, None),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                let committed = last_committed_prefs_generation(path)?;
                 let quarantine = unique_corrupt_prefs_path(path);
                 fs::copy(path, &quarantine)?;
                 // Issue #3883 AC-2/AC-5: prefer the last committed generation.
@@ -7172,7 +7240,7 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
                 // launches describe are still running. That single write is
                 // what emptied `active_launches` at max_active 3 with three
                 // launches, and what reverted `autonomous_mode` on restart.
-                match last_committed_prefs_generation(path) {
+                match committed {
                     Some(committed) => (committed, Some((quarantine, error, true))),
                     None => {
                         let mut baseline = recovery_baseline.clone();
@@ -7972,6 +8040,7 @@ impl IssueMonitorState {
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
+            schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
             max_active_agents: self
@@ -18289,6 +18358,7 @@ impl IssueMonitorState {
                 item.state == MonitorInboxState::Queued
                     && !self.cancelled_claim_awaits_runtime(issue_number)
                     && !self.launch_admission_is_held_at(now)
+                    && self.retry_ready_for_saved_profile(issue_number, now)
                     && self.launch_source_exclusion(issue_number).is_none()
                     && self.terminal_queue_contains(issue_number)
                     && !self.has_monitor_pane_for_issue(issue_number)
@@ -20343,13 +20413,9 @@ impl IssueMonitorState {
                 None,
             ),
         };
-        // SPEC #3914 FR-008: prepared claims are only cancelled when the whole
-        // pool is now held; another candidate can still honor them.
-        let every_pool_provider_held =
-            provider.is_some() && self.provider_quota_hold_at(now).is_some();
         self.release_provider_limited_source_tracking(issue_number);
-        if every_pool_provider_held {
-            self.compensate_uncommitted_provider_claims();
+        if provider.is_some() {
+            self.compensate_uncommitted_provider_claims(now);
         }
         let record = self.autonomous_record_mut(issue_number);
         record.retry_not_before = floor;
@@ -20390,13 +20456,25 @@ impl IssueMonitorState {
     /// Attempting tuples stay in the journal until their late result arrives;
     /// exact ReleaseClaim companions make that result harmless without
     /// invalidating unrelated effect authority.
-    fn compensate_uncommitted_provider_claims(&mut self) {
-        let mut cancelled_issues = self
+    fn compensate_uncommitted_provider_claims(&mut self, now: &str) {
+        let every_pool_provider_held = self.provider_quota_hold_at(now).is_some();
+        let cancelled_issues = self
             .pending_effects
             .iter()
             .filter_map(|effect| match &effect.payload {
                 IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } => Some(*issue_number),
                 _ => None,
+            })
+            .chain(
+                self.pending_launch_deliveries
+                    .iter()
+                    .filter(|delivery| delivery.materializer_id.is_none())
+                    .map(|delivery| delivery.issue_number),
+            )
+            // A healthy lower tier cannot honor an Issue's higher tier floor.
+            // Preserve work that still has an eligible provider in its pool.
+            .filter(|issue_number| {
+                every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
             })
             .collect::<BTreeSet<_>>();
         let attempting_claims = self
@@ -20406,7 +20484,8 @@ impl IssueMonitorState {
                 effect.state == IssueMonitorEffectState::Attempting
                     && matches!(
                         effect.payload,
-                        IssueMonitorEffectPayload::AcquireClaim { .. }
+                        IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                            if cancelled_issues.contains(&issue_number)
                     )
             })
             .cloned()
@@ -20415,7 +20494,8 @@ impl IssueMonitorState {
             effect.state != IssueMonitorEffectState::Prepared
                 || !matches!(
                     effect.payload,
-                    IssueMonitorEffectPayload::AcquireClaim { .. }
+                    IssueMonitorEffectPayload::AcquireClaim { issue_number, .. }
+                        if cancelled_issues.contains(&issue_number)
                 )
         });
         for effect in attempting_claims {
@@ -20440,13 +20520,16 @@ impl IssueMonitorState {
         let cancelled_deliveries = self
             .pending_launch_deliveries
             .iter()
-            .filter(|delivery| delivery.materializer_id.is_none())
+            .filter(|delivery| {
+                delivery.materializer_id.is_none()
+                    && cancelled_issues.contains(&delivery.issue_number)
+            })
             .cloned()
             .collect::<Vec<_>>();
-        self.pending_launch_deliveries
-            .retain(|delivery| delivery.materializer_id.is_some());
+        self.pending_launch_deliveries.retain(|delivery| {
+            delivery.materializer_id.is_some() || !cancelled_issues.contains(&delivery.issue_number)
+        });
         for delivery in cancelled_deliveries {
-            cancelled_issues.insert(delivery.issue_number);
             ensure_claim_release_effect(
                 &mut self.pending_effects,
                 self.effect_authority_epoch,
@@ -28463,6 +28546,116 @@ mod tests {
     }
 
     #[test]
+    fn auto_tiers_recheck_provider_availability_after_claim_acquisition() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_auto: true,
+            max_active_agents: 2,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            launch_tiers: vec![
+                vec![test_launch_profile("codex")],
+                vec![test_launch_profile("claude")],
+            ],
+            ..Default::default()
+        };
+        prefs.record_tier_launch(42, 1);
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
+        monitor.set_gui_connected(true);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(issue(42));
+        monitor.record_candidate(issue(44));
+        monitor.complete_active_launch(44, "tab-1::agent-44");
+        monitor.require_fresh_launch_session(42);
+        monitor.record_attempt(42);
+        monitor.set_autonomous_phase(42, AutonomousPhase::Implementing);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 2, |_| false),
+            1
+        );
+        let effect = monitor.pending_effects()[0].clone();
+        assert!(monitor.mark_pending_effect_attempting(&effect.attempt_key()));
+
+        assert_eq!(
+            monitor.try_hold_provider_usage_limit(
+                44,
+                "tab-1::agent-44",
+                "claude",
+                "Claude quota exhausted",
+                Some("2026-10-24T00:00:00Z"),
+                None,
+                now,
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert!(
+            !monitor.launch_admission_is_held_at(now),
+            "the lower tier remains healthy"
+        );
+        assert!(
+            monitor.retry_ready_for_saved_profile(43, now),
+            "other Issues can still use it"
+        );
+        assert!(!monitor.retry_ready_for_saved_profile(42, now));
+        let queued = monitor.queued_issue_numbers();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &effect.payload
+        else {
+            panic!("expected an acquisition");
+        };
+        monitor
+            .complete_pending_effect(&effect.attempt_key())
+            .unwrap();
+        for _ in 0..2 {
+            assert!(!monitor.apply_confirmed_claim(42, claim_id, owner, &effect.effect_id, now));
+        }
+        assert!(monitor.prefs().pending_launch_deliveries.is_empty());
+        assert_eq!(monitor.queued_issue_numbers(), queued);
+        assert!(!monitor.active_launches.contains(&42));
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(
+            monitor.queued_launch_session_strategies[&42],
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(monitor.pending_effects().len(), 1, "one exact compensation");
+        let release = monitor.pending_effects()[0].clone();
+        assert!(
+            matches!(&release.payload, IssueMonitorEffectPayload::ReleaseClaim {
+            issue_number: 42, claim_id: released, owner: released_owner,
+        } if released == claim_id && released_owner == owner)
+        );
+        assert!(monitor.mark_pending_effect_attempting(&release.attempt_key()));
+        monitor
+            .complete_pending_effect(&release.attempt_key())
+            .unwrap();
+        monitor.clear_provider_quota_hold("claude", "quota recovered", now);
+        assert_eq!(
+            monitor.prepare_claim_effects_with_probe("owner", now, 1, |_| false),
+            1
+        );
+        let fresh = monitor.pending_effects()[0].clone();
+        let IssueMonitorEffectPayload::AcquireClaim {
+            claim_id, owner, ..
+        } = &fresh.payload
+        else {
+            panic!("expected a fresh acquisition");
+        };
+        assert!(monitor.apply_confirmed_claim(42, claim_id, owner, &fresh.effect_id, now));
+        assert_eq!(
+            monitor.take_pending_launch_requests()[0].launch_session_strategy,
+            IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
+        assert_eq!(monitor.attempt_count(42), 1);
+        assert_eq!(monitor.prefs().issue_tiers[&42].floor, 1);
+    }
+
+    #[test]
     fn auto_tiers_classify_failures_without_changing_the_retry_ladder() {
         let mut monitor = launched_monitor(42, "tab-1::agent-42");
         let mut prefs = monitor.prefs();
@@ -30176,26 +30369,36 @@ mod tests {
 
     #[test]
     fn provider_hold_restores_fresh_required_from_an_unclaimed_delivery() {
+        let mut prefs = IssueMonitorPrefs {
+            enabled: true,
+            autonomous_mode: true,
+            launch_auto: true,
+            max_active_agents: 4,
+            max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+            launch_tiers: vec![
+                vec![test_launch_profile("codex")],
+                vec![test_launch_profile("claude")],
+            ],
+            ..IssueMonitorPrefs::default()
+        };
+        prefs.record_tier_launch(43, 1);
         let mut monitor = test_monitor_with_prefs(
             IssueMonitorConfig {
                 enabled: true,
                 max_active: 4,
                 ..IssueMonitorConfig::default()
             },
-            IssueMonitorPrefs {
-                enabled: true,
-                max_active_agents: 4,
-                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
-                launch_profile: Some(test_launch_profile("codex")),
-                ..IssueMonitorPrefs::default()
-            },
+            prefs,
         );
-        for number in [42, 43] {
+        monitor.set_gui_connected(true);
+        for number in [42, 43, 44] {
             monitor.terminal_queue_push(&[number], "test", "2026-08-01T00:00:00Z");
             monitor.record_candidate(issue(number));
         }
         monitor.complete_active_launch(42, "tab-1::agent-42");
         monitor.require_fresh_launch_session(43);
+        monitor.record_attempt(43);
+        monitor.set_autonomous_phase(43, AutonomousPhase::Implementing);
         assert!(monitor.apply_confirmed_claim(
             43,
             "claim-43",
@@ -30207,20 +30410,75 @@ mod tests {
             monitor.prefs().pending_launch_deliveries[0].launch_session_strategy,
             IssueMonitorLaunchSessionStrategy::FreshRequired
         );
+        let cancelled_delivery = monitor.pending_launch_delivery_id(43).unwrap();
+        assert!(monitor.apply_confirmed_claim(
+            44,
+            "claim-44",
+            "host/session",
+            "claim-effect-44",
+            "2026-08-22T02:00:00Z",
+        ));
 
         monitor.try_hold_provider_usage_limit(
             42,
             "tab-1::agent-42",
-            "codex",
-            "Codex quota exhausted",
+            "claude",
+            "Claude quota exhausted",
             Some("2026-08-22T04:00:00Z"),
             None,
             "2026-08-22T02:01:00Z",
         );
 
+        assert!(!monitor.launch_admission_is_held_at("2026-08-22T02:01:00Z"));
+        assert_eq!(monitor.pending_launch_delivery_id(43), None);
+        assert_eq!(
+            monitor.inbox_item(43).unwrap().state,
+            MonitorInboxState::Queued
+        );
+        assert!(!monitor.active_issue_numbers().contains(&43));
+        assert_eq!(
+            monitor.autonomous_record(43).unwrap().phase,
+            AutonomousPhase::Idle
+        );
+        assert_eq!(monitor.attempt_count(43), 1);
+        assert_eq!(monitor.prefs().issue_tiers[&43].floor, 1);
         assert_eq!(
             monitor.prefs().queued_launch_session_strategies.get(&43),
             Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(monitor.pending_effects().len(), 1);
+        assert!(matches!(
+            &monitor.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!monitor.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        let requests = monitor.take_pending_launch_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].issue_number, 44,
+            "the healthy lower tier still launches"
+        );
+        let release = monitor.pending_effects()[0].attempt_key();
+        assert!(monitor.mark_pending_effect_attempting(&release));
+        monitor.complete_pending_effect(&release).unwrap();
+        monitor.clear_provider_quota_hold("claude", "recovered", "2026-08-22T02:02:00Z");
+        assert_eq!(
+            monitor.prepare_claim_effects_with_observations(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                4,
+                &BTreeMap::from([(43, false)]),
+            ),
+            1,
+            "the cancelled Issue returns through ordinary admission"
         );
     }
 
@@ -41419,6 +41677,100 @@ mod tests {
         );
         fs::write(&path, serde_json::to_vec(&prefs).unwrap()).unwrap();
         assert_eq!(load_issue_monitor_prefs(&path).unwrap(), prefs);
+    }
+
+    #[test]
+    fn issue_4193_prefs_schema_accepts_current_and_legacy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).expect("serialize current prefs");
+        assert_eq!(stored["schema_version"], 1);
+        fs::write(&path, stored.to_string()).expect("write current prefs");
+        assert_eq!(
+            load_issue_monitor_prefs(&path).expect("current schema"),
+            prefs
+        );
+
+        stored.as_object_mut().unwrap().remove("schema_version");
+        fs::write(&path, stored.to_string()).expect("write legacy prefs");
+        assert_eq!(
+            load_issue_monitor_prefs(&path).expect("legacy schema"),
+            prefs
+        );
+        assert_eq!(
+            serde_json::to_value(IssueMonitorState::new(IssueMonitorConfig::default()).prefs())
+                .expect("serialize projected prefs")["schema_version"],
+            1
+        );
+    }
+
+    #[test]
+    fn issue_4193_prefs_schema_rejects_older_and_newer_stores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        for actual in [0, 2] {
+            let mut stored = serde_json::to_value(IssueMonitorPrefs::default()).unwrap();
+            stored["schema_version"] = serde_json::json!(actual);
+            let original = stored.to_string();
+            fs::write(&path, &original).expect("write incompatible prefs");
+            let error = load_issue_monitor_prefs(&path).expect_err("incompatible schema");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            let message = error.to_string();
+            assert!(message.contains("schema"), "{message}");
+            assert!(message.contains("expected=1"), "{message}");
+            assert!(message.contains(&format!("actual={actual}")), "{message}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn issue_4193_prefs_writers_preserve_an_incompatible_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).unwrap();
+        stored["schema_version"] = serde_json::json!(2);
+        let original = stored.to_string();
+        fs::write(&path, &original).expect("write incompatible prefs");
+
+        let error = save_issue_monitor_prefs(&path, &prefs).expect_err("full save must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let error =
+            mutate_issue_monitor_prefs(&path, |_| -> () { panic!("mutation must not run") })
+                .expect_err("mutation must refuse");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let error = mutate_issue_monitor_prefs_recovering(&path, &prefs, |_| -> () {
+            panic!("recovery mutation must not run")
+        })
+        .expect_err("schema mismatch must not recover from defaults");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert!(!committed_prefs_generation_path(&path).exists());
+    }
+
+    #[test]
+    fn issue_4193_prefs_recovery_preserves_an_incompatible_committed_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("issue-monitor.json");
+        let sidecar = committed_prefs_generation_path(&path);
+        let prefs = IssueMonitorPrefs::default();
+        let mut stored = serde_json::to_value(&prefs).unwrap();
+        stored["schema_version"] = serde_json::json!(2);
+        let original = stored.to_string();
+        fs::write(&sidecar, &original).expect("write incompatible committed prefs");
+        let torn = "{\"enabled\":";
+        fs::write(&path, torn).expect("write torn canonical prefs");
+
+        let error = mutate_issue_monitor_prefs_recovering(&path, &prefs, |_| -> () {
+            panic!("incompatible recovery mutation must not run")
+        })
+        .expect_err("committed schema mismatch must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&path).unwrap(), torn);
+        assert_eq!(fs::read_to_string(&sidecar).unwrap(), original);
     }
 
     #[test]

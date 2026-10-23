@@ -2501,6 +2501,10 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     runtime.launch_wizard_cache.record_session(session.clone());
 
     runtime.bootstrap();
+    assert!(
+        !runtime.issue_monitor_materializer_ready(),
+        "bootstrap must not advertise a ready materializer before the canvas drain"
+    );
 
     assert!(
         runtime.tabs[0]
@@ -2532,7 +2536,8 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     );
     // Only queued bootstrap work is run here. The restore's initial worker
     // uses sample_runtime's fixture runner, and no LaunchComplete is applied.
-    // Delivery preparation queued after canvas-ready remains unexecuted.
+    // After canvas-ready the delivery stays in the per-Issue FIFO until the
+    // restore's initial launch completion is applied.
     let queued = std::mem::take(
         &mut *tasks
             .lock()
@@ -2550,6 +2555,7 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
         Some(1),
         "reaper completion alone must retain the delivery until restore panes are registered"
     );
+    assert!(!runtime.issue_monitor_materializer_ready());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
 
     runtime.handle_frontend_event(
@@ -2569,11 +2575,14 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
     assert_eq!(agent_windows, 1);
     assert_eq!(runtime.pending_auto_resume_sources.len(), 1);
     assert!(runtime.deferred_issue_monitor_launches.is_none());
+    assert!(runtime.issue_monitor_materializer_ready());
     assert_eq!(
-        runtime.issue_monitor_launch_preparations.len(),
+        runtime.issue_monitor_launch_queue.len(),
         1,
-        "both startup conditions release the sentinel delivery exactly once"
+        "both startup conditions release the sentinel delivery to the FIFO exactly once"
     );
+    assert!(runtime.issue_monitor_launch_preparations.is_empty());
+    assert!(runtime.pending_launch_delivery_acks.is_empty());
     assert!(runtime.runtimes.is_empty());
     // LaunchComplete consumes this source map before AgentLaunchPrepared
     // attaches the new Session; the automatic restore marker still owns it.
@@ -3379,6 +3388,10 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
 
     runtime.bootstrap();
 
+    assert!(
+        !runtime.issue_monitor_materializer_ready(),
+        "the bootstrap reaper and canvas drain both precede materializer readiness"
+    );
     assert_eq!(
         effective_status(),
         Some(gwt::cli::execution_state::ExecutionControlStatus::Active),
@@ -3427,6 +3440,7 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
         Some(1),
         "canvas-ready alone must retain the delivery while the reaper is pending"
     );
+    assert!(!runtime.issue_monitor_materializer_ready());
     assert!(runtime.issue_monitor_launch_preparations.is_empty());
     // Keep any canvas-ready blocking work queued; only the bootstrap reaper
     // captured before the canvas event runs in this test.
@@ -3452,5 +3466,48 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
         runtime.deferred_issue_monitor_launches.is_none(),
         "reaper completion releases deliveries after canvas registration"
     );
+    assert!(runtime.issue_monitor_materializer_ready());
     assert_eq!(runtime.issue_monitor_launch_preparations.len(), 1);
+}
+
+/// Issue #5876: startup readiness must precede scheduled claim/launch work.
+#[test]
+fn app_runtime_scheduled_monitor_waits_for_canvas() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let tab = sample_project_tab(
+        "tab-1",
+        "Startup",
+        temp.path().to_path_buf(),
+        ProjectKind::Git,
+        &[],
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.deferred_issue_monitor_launches = Some(Vec::new());
+    let now = "2026-10-23T00:00:00Z";
+
+    assert!(runtime
+        .issue_monitor_scheduled_tick_events_at(now)
+        .is_empty());
+    assert!(
+        tasks.lock().unwrap().is_empty(),
+        "an unready canvas must not start a scan that can claim or expire launches"
+    );
+    assert!(runtime
+        .project_states
+        .values()
+        .all(|state| state.issue_monitor_scheduled_scans_in_flight.is_empty()));
+
+    runtime.deferred_issue_monitor_launches = None;
+    runtime.issue_monitor_scheduled_tick_events_at(now);
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "canvas readiness must resume the normal scheduled worker"
+    );
 }

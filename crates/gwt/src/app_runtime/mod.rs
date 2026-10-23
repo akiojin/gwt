@@ -5515,6 +5515,13 @@ impl AppRuntime {
         events
     }
 
+    /// Bootstrap keeps this queue until canvas restore registration and the
+    /// generation reaper finish. Observing daemon events alone must not admit
+    /// claims whose window-creation deadline would run during that wait.
+    pub(crate) fn issue_monitor_materializer_ready(&self) -> bool {
+        self.deferred_issue_monitor_launches.is_none()
+    }
+
     #[cfg(test)]
     pub(crate) fn spawn_work_merge_status_scan(&self, project_root: PathBuf) {
         self.spawn_work_merge_status_scan_with_pr_titles(project_root, false);
@@ -9905,6 +9912,9 @@ impl AppRuntime {
         &mut self,
         now: &str,
     ) -> Vec<OutboundEvent> {
+        if !self.issue_monitor_materializer_ready() {
+            return Vec::new();
+        }
         let mut events = self.reconcile_activated_issue_monitor_launches();
         events.extend(self.advance_issue_monitor_launch_queue_events());
         let mut seen_prefs_paths = HashSet::new();

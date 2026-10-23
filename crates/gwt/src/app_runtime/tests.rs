@@ -1118,6 +1118,20 @@ fn project_event_isolation_inactive_runtime_events_keep_the_window_owner() {
         .all(|event| event.target == DispatchTarget::Project(context.project_key.clone())));
 }
 
+// Historical cross-worktree records predate portable shard serialization. Seed
+// their immutable bytes before replaying through the compatibility reader.
+fn record_legacy_workspace_work_event_for_test(
+    repo: &Path,
+    event: gwt_core::workspace_projection::WorkEvent,
+) -> gwt_core::error::Result<()> {
+    let shard = gwt_core::paths::gwt_repo_local_work_event_shard_path(repo, &event.id);
+    fs::create_dir_all(shard.parent().expect("legacy shard bucket"))?;
+    let mut bytes = serde_json::to_vec(&event).expect("serialize legacy Work event");
+    bytes.push(b'\n');
+    fs::write(shard, bytes)?;
+    gwt_core::workspace_projection::record_workspace_work_event(repo, event)
+}
+
 fn save_assigned_workspace_projection_for_test(
     repo: &Path,
     session: &ActiveAgentSession,
@@ -4100,7 +4114,7 @@ fn projection_only_continue_runtime(
             pr_state: None,
         }
     });
-    gwt_core::workspace_projection::record_workspace_work_event(&project_root, start)
+    record_legacy_workspace_work_event_for_test(&project_root, start)
         .expect("record projection-only Work");
     if fixture.conflicting_owner {
         let mut update = gwt_core::workspace_projection::WorkEvent::new(
@@ -4145,7 +4159,7 @@ fn projection_only_continue_runtime(
                 pr_state: None,
             },
         );
-        gwt_core::workspace_projection::record_workspace_work_event(&project_root, update)
+        record_legacy_workspace_work_event_for_test(&project_root, update)
             .expect("record conflicting container");
     }
     if fixture.conflicting_branch_only {
@@ -6115,7 +6129,9 @@ pub(super) fn queued_agent_completion_fixture(
     (runtime, recorded, tasks, window_id, result)
 }
 
-fn take_prepared_agent_launch(recorded: &Arc<Mutex<Vec<UserEvent>>>) -> super::PreparedAgentLaunch {
+pub(super) fn take_prepared_agent_launch(
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+) -> super::PreparedAgentLaunch {
     let mut events = recorded.lock().expect("event log");
     let index = events
         .iter()

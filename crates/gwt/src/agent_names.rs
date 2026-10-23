@@ -80,6 +80,20 @@ const JA_NAMES: &str = "
 ロイ ロカ ロミ ロミナ ロン ワカ ワカナ ワコ ワタル
 ";
 
+// Expand exhausted given-name catalogs into localized full names rather than
+// recycling a historical name with a number. Additional family components can
+// expand the catalog again if an entire composed catalog has also been used.
+const EN_FAMILY_NAMES: &str = "
+Adams Bell Clark Davis Evans Ford Green Hall Irving Jones King Lane Moore
+Nash Owen Price Quinn Reed Stone Turner Underwood Vale Walker Xu Young Zane
+";
+const JA_FAMILY_NAMES: &str = "
+アサノ イノウエ ウエダ エンドウ オガワ カトウ キムラ クドウ コバヤシ
+サイトウ シミズ スズキ セキ ソノダ タカハシ チバ ツジ テラダ トミタ
+ナカムラ ニシダ ノダ ハヤシ ヒラノ フクダ ホンダ マツダ ミウラ
+ムラタ モリ ヤマダ ユアサ ヨシダ ワタナベ
+";
+
 fn initial(name: &str) -> Option<char> {
     name.chars().next().map(|ch| ch.to_ascii_lowercase())
 }
@@ -99,39 +113,48 @@ fn choose(
     active: &HashSet<String>,
 ) -> Result<String, String> {
     let catalog = if language == "ja" { JA_NAMES } else { EN_NAMES };
-    let eligible: Vec<_> = catalog
+    let mut candidates: Vec<String> = catalog
         .split_whitespace()
         .filter(|name| !active.iter().any(|other| initial(other) == initial(name)))
+        .map(str::to_string)
         .collect();
-    if eligible.is_empty() {
+    if candidates.is_empty() {
         return Err(
             "All Agent name initials are occupied; close an inactive Agent window and retry".into(),
         );
     }
-    let fresh: Vec<_> = eligible
-        .iter()
-        .copied()
-        .filter(|name| !used.contains(&name.to_lowercase()))
-        .collect();
-    let candidates = if fresh.is_empty() { &eligible } else { &fresh };
-    // The first UUID field is 32 random bits (it has no version/variant bits).
-    // Rejection sampling avoids modulo bias for catalogs of any size.
-    let count = candidates.len() as u32;
-    let limit = u32::MAX - u32::MAX % count;
-    let index = loop {
-        let random = uuid::Uuid::new_v4().as_fields().0;
-        if random < limit {
-            break (random % count) as usize;
-        }
+    let (families, separator) = if language == "ja" {
+        (JA_FAMILY_NAMES, "・")
+    } else {
+        (EN_FAMILY_NAMES, " ")
     };
-    let base = candidates[index];
-    let mut name = base.to_string();
-    let mut suffix = 2usize;
-    while used.contains(&name.to_lowercase()) {
-        name = format!("{base}-{suffix}");
-        suffix += 1;
+    loop {
+        let fresh: Vec<_> = candidates
+            .iter()
+            .filter(|name| !used.contains(&name.to_lowercase()))
+            .collect();
+        if !fresh.is_empty() {
+            // The first UUID field is 32 random bits (no version/variant bits).
+            // Rejection sampling avoids modulo bias for catalogs of any size.
+            let count = fresh.len() as u32;
+            let limit = u32::MAX - u32::MAX % count;
+            let index = loop {
+                let random = uuid::Uuid::new_v4().as_fields().0;
+                if random < limit {
+                    break (random % count) as usize;
+                }
+            };
+            return Ok(fresh[index].clone());
+        }
+        candidates = candidates
+            .iter()
+            .flat_map(|name| {
+                families
+                    .split_whitespace()
+                    .map(move |family| format!("{name}{separator}{family}"))
+            })
+            .collect();
     }
-    Ok(name)
 }
 
 struct HistoryLock(std::fs::File);
@@ -248,6 +271,10 @@ mod tests {
             let mut initials = std::collections::HashMap::new();
             for _ in 0..1000 {
                 let name = allocate(&history, language, &HashSet::new(), &HashSet::new()).unwrap();
+                assert!(
+                    !name.chars().any(|ch| ch.is_ascii_digit()),
+                    "numeric name: {name}"
+                );
                 if language == "ja" {
                     assert!(name.chars().next().unwrap() >= 'ァ', "{name}");
                 } else {
@@ -257,6 +284,29 @@ mod tests {
                 assert!(used.insert(name), "reused a historical identity");
             }
             assert!(*initials.values().max().unwrap() <= 150, "{initials:?}");
+        }
+    }
+
+    #[test]
+    fn exhausted_catalog_expands_without_reusing_legacy_names_or_active_initials() {
+        for (language, catalog, active_name) in
+            [("ja", JA_NAMES, "ミドリ-2"), ("en", EN_NAMES, "Flora-2")]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            let history = temp.path().join("names.jsonl");
+            let mut known: HashSet<String> =
+                catalog.split_whitespace().map(str::to_string).collect();
+            known.insert(active_name.into());
+            let active = HashSet::from([active_name.to_string()]);
+            let name = allocate(&history, language, &active, &known).unwrap();
+            assert!(!name.chars().any(|ch| ch.is_ascii_digit()), "{name}");
+            assert!(!known.contains(&name));
+            assert_ne!(initial(&name), initial(active_name));
+            // A later window reopens the same history without the live window.
+            assert_ne!(
+                allocate(&history, language, &HashSet::new(), &known).unwrap(),
+                name
+            );
         }
     }
 

@@ -466,6 +466,71 @@ mod tests {
         );
         assert_eq!(env.completion_pr_call_log, vec![9001]);
         assert!(env.pr_ready_call_log.is_empty());
+
+        // A successful completion pins its evidence. Replaying that result
+        // must not need the transient verification record or remote PR again.
+        let completed = execution::record_contents(repo.path()).unwrap();
+        let pr_reads = env.completion_pr_call_log.clone();
+        let candidate_reads = env.completion_pr_candidates_call_count;
+        assert!(candidate_reads > 0);
+        std::fs::remove_file(verification::state_path(repo.path())).unwrap();
+        let trusted = super::super::trusted_store::trusted_dir_for_worktree(repo.path()).unwrap();
+        std::fs::remove_file(trusted.join("verification-run.json")).unwrap();
+        assert!(verification::load(repo.path()).unwrap().is_none());
+        env.completion_prs.clear();
+        let mut out = String::new();
+        assert_eq!(
+            execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
+            0,
+            "completed replay: {out}"
+        );
+        assert!(out.contains("already settled"), "{out}");
+        assert_eq!(execution::record_contents(repo.path()).unwrap(), completed);
+        assert_eq!(env.completion_pr_call_log, pr_reads);
+        assert_eq!(env.completion_pr_candidates_call_count, candidate_reads);
+        assert!(env.pr_ready_call_log.is_empty());
+
+        // Terminal replay keeps the owner, Session and integrity boundary.
+        assert!(
+            super::admit(&mut env, "completion-pr-slices", Some(5035), None, &mut out)
+                .unwrap_err()
+                .contains("owner/Session does not match")
+        );
+        let mut foreign = execution::load(repo.path()).unwrap().unwrap();
+        foreign.primary_session_id = "another-session".into();
+        execution::save(repo.path(), &foreign).unwrap();
+        let foreign_bytes = execution::record_contents(repo.path()).unwrap();
+        out.clear();
+        assert_eq!(
+            execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
+            2,
+            "foreign replay: {out}"
+        );
+        assert_eq!(
+            execution::record_contents(repo.path()).unwrap(),
+            foreign_bytes
+        );
+
+        let tampered = completed.unwrap().replace("gwt-execute", "gwt-forged");
+        super::super::trusted_store::write(
+            repo.path(),
+            "execution-control.json",
+            tampered.as_bytes(),
+        )
+        .unwrap();
+        out.clear();
+        assert_eq!(
+            execution::run(&mut env, execution::ExecutionCommand::Complete, &mut out).unwrap(),
+            2,
+            "tampered replay: {out}"
+        );
+        assert!(out.contains("integrity validation"), "{out}");
+        assert_eq!(
+            execution::record_contents(repo.path()).unwrap(),
+            Some(tampered)
+        );
+        assert_eq!(env.completion_pr_call_log, pr_reads);
+        assert_eq!(env.completion_pr_candidates_call_count, candidate_reads);
     }
 
     #[test]

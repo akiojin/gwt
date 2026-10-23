@@ -257,8 +257,16 @@ fn authority_owned_endpoint(
             || endpoint.scope.repo_hash != requested_scope.repo_hash
             || endpoint.scope.target != requested_scope.target
             || endpoint.scope.endpoint_path(gwt_home) != path
-            || !endpoint.is_usable(&endpoint.scope, DAEMON_PROTOCOL_VERSION, is_process_alive)
         {
+            continue;
+        }
+        if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
+            return Err(format!(
+                "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
+                endpoint.protocol_version
+            ));
+        }
+        if !endpoint.is_usable(&endpoint.scope, DAEMON_PROTOCOL_VERSION, is_process_alive) {
             continue;
         }
         matches.push(endpoint);
@@ -520,6 +528,11 @@ fn endpoint_absence_evidence(
     };
     if endpoint.pid > 0 && !is_process_alive(endpoint.pid) {
         EndpointAbsenceEvidence::DefinitelyDead
+    } else if endpoint.protocol_version != DAEMON_PROTOCOL_VERSION {
+        EndpointAbsenceEvidence::Uncertain(format!(
+            "incompatible daemon protocol: actual={}, expected={DAEMON_PROTOCOL_VERSION}; use a compatible gwtd build before retrying",
+            endpoint.protocol_version
+        ))
     } else {
         EndpointAbsenceEvidence::Uncertain(format!(
             "live endpoint mismatch or invalid endpoint metadata for pid {}",
@@ -844,6 +857,50 @@ use crate::process::is_process_alive as is_alive;
 
 #[cfg(test)]
 mod issue_monitor_status_tests {
+    #[test]
+    fn issue_4193_monitor_status_reports_incompatible_protocol_versions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let project = temp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let scope =
+            super::RuntimeScope::from_project_root(&project, super::RuntimeTarget::Host).unwrap();
+        let mut endpoint = super::DaemonEndpoint::new(
+            scope.clone(),
+            std::process::id(),
+            "unused-incompatible-bind".into(),
+            "token".into(),
+            "test-daemon".into(),
+        );
+        for (actual, fenced) in [
+            (super::DAEMON_PROTOCOL_VERSION - 1, false),
+            (super::DAEMON_PROTOCOL_VERSION + 1, true),
+        ] {
+            endpoint.protocol_version = actual;
+            gwt_core::daemon::persist_endpoint(
+                &scope.endpoint_path(&super::paths::gwt_home()),
+                &endpoint,
+            )
+            .unwrap();
+            if fenced {
+                crate::persist_issue_monitor_authority_fence(
+                    &crate::issue_monitor_prefs_path_for_repo_path(&project),
+                    &crate::IssueMonitorAuthorityFence::current_process(),
+                )
+                .unwrap();
+            }
+            let error =
+                super::read_issue_monitor_status(&project).expect_err("incompatible protocol");
+            assert!(!error.allows_local_fallback());
+            let message = error.to_string();
+            assert!(message.contains(&format!("actual={actual}")), "{message}");
+            assert!(
+                message.contains(&format!("expected={}", super::DAEMON_PROTOCOL_VERSION)),
+                "{message}"
+            );
+        }
+    }
+
     #[test]
     fn issue_5694_blocked_status_reports_authority_cause_and_recovery_without_fallback() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1358,7 +1415,9 @@ mod tests {
         assert!(matches!(
             error,
             crate::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(message)
-                if message.contains("live endpoint mismatch")
+                if message.contains("incompatible daemon protocol")
+                    && message.contains(&format!("actual={}", DAEMON_PROTOCOL_VERSION + 1))
+                    && message.contains(&format!("expected={DAEMON_PROTOCOL_VERSION}"))
         ));
     }
 

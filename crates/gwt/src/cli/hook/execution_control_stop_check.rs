@@ -202,6 +202,124 @@ mod tests {
         assert!(reason.contains("build.complete"), "{reason}");
     }
 
+    // SPEC #3590 AC-T2-1/2: waiting suspends every producing Stop path,
+    // including PR reminders, without settling any of their state.
+    #[test]
+    fn monitor_wait_preserves_stop_obligations_until_cleared_expired_or_invalidated() {
+        use crate::cli::action_obligation::{self, ObligationKind};
+        use gwt_core::skill_state::{self, SkillState};
+
+        let (_home_guard, _home, dir) = delivered_worktree();
+        let worktree = dir.path();
+        materialize_at_launch(
+            worktree,
+            ExecutionOwnerKind::Spec,
+            3590,
+            "sess-1",
+            "$gwt-execute",
+            false,
+        )
+        .unwrap();
+        skill_state::save(
+            worktree,
+            "build-spec",
+            &SkillState {
+                start_evidence: None,
+                active: true,
+                owner_spec: Some(3590),
+                started_at: chrono::Utc::now(),
+                phase: Some("verify".into()),
+                session_id: "sess-1".into(),
+            },
+        )
+        .unwrap();
+        for prompt in ["バグを修正して", "PR を作成して"] {
+            assert!(action_obligation::mark_from_prompt(worktree, "sess-1", prompt).unwrap());
+        }
+        assert_eq!(
+            action_obligation::open_kinds(worktree, "sess-1"),
+            vec![ObligationKind::Implementation, ObligationKind::Pr]
+        );
+
+        let check = |silent| {
+            let execution = execution_state::load(worktree).unwrap();
+            let build = skill_state::load(worktree, "build-spec").unwrap();
+            let obligations = action_obligation::load(worktree).unwrap();
+            for (name, output) in [
+                (
+                    "build",
+                    super::super::skill_build_spec_stop_check::handle_with_input(
+                        worktree,
+                        "{}",
+                        Some("sess-1"),
+                    ),
+                ),
+                (
+                    "execution",
+                    handle_with_input(worktree, "{}", Some("sess-1")),
+                ),
+                (
+                    "P11 / PR",
+                    super::super::action_obligation_stop_check::handle_with_input(
+                        worktree,
+                        "{}",
+                        Some("sess-1"),
+                    ),
+                ),
+            ] {
+                if silent {
+                    assert_eq!(output, HookOutput::Silent, "{name}");
+                } else {
+                    assert!(
+                        matches!(output, HookOutput::StopBlock { .. }),
+                        "{name}: {output:?}"
+                    );
+                }
+            }
+            assert_eq!(execution_state::load(worktree).unwrap(), execution);
+            assert_eq!(skill_state::load(worktree, "build-spec").unwrap(), build);
+            assert_eq!(action_obligation::load(worktree).unwrap(), obligations);
+        };
+        check(false);
+        let mut monitor = crate::IssueMonitorState::new(crate::IssueMonitorConfig::default());
+        monitor.complete_active_launch(3590, "tab::sess-1");
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(worktree);
+        let now = chrono::Utc::now().to_rfc3339();
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(true);
+
+        // Isolate PR so an implementation obligation cannot mask a PR regression.
+        action_obligation::settle_kinds_best_effort(
+            worktree,
+            "sess-1",
+            &[ObligationKind::Implementation],
+            "verify.run acceptance fixture",
+        );
+        assert_eq!(
+            action_obligation::open_kinds(worktree, "sess-1"),
+            vec![ObligationKind::Pr]
+        );
+        check(true);
+        monitor.clear_autonomous_wait(3590, &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
+
+        // Advance the stored anchor instead of sleeping through the wait cap.
+        let expired = (chrono::Utc::now() - chrono::Duration::hours(4)).to_rfc3339();
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &expired);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
+
+        monitor.clear_autonomous_wait(3590, &now);
+        monitor.declare_autonomous_wait(3590, "CI pending", "CI finishes", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(true);
+        monitor.invalidate_autonomous_wait(3590, "pm", "CI finished", &now);
+        crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+        check(false);
+    }
+
     // Settlement (completed or blocked) passes Stop.
     #[test]
     fn settled_record_passes_stop() {

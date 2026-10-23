@@ -334,8 +334,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, work_event)
-        .expect("record work event");
+    record_legacy_workspace_work_event_for_test(&repo, work_event).expect("record work event");
 
     // Initial load captures the latest related-work snapshot for issue 42.
     let immediate = runtime.load_knowledge_bridge_events(
@@ -392,7 +391,7 @@ fn select_knowledge_bridge_entry_is_cache_backed_detail_only() {
             pr_state: None,
         },
     );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, second_event)
+    record_legacy_workspace_work_event_for_test(&repo, second_event)
         .expect("record second work event");
     write_issue_link_store(
         &repo,

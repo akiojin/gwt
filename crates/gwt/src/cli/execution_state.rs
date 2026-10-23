@@ -3221,7 +3221,10 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
     };
     let contents = match read_owner_ledger_from_dir(&context.owner_dir) {
         Ok(Some(contents)) => contents,
-        Ok(None) => return diagnosis,
+        Ok(None) => {
+            diagnose_legacy_active_owner(&context.worktree, owner, &mut diagnosis);
+            return diagnosis;
+        }
         Err(error) => {
             diagnosis.warnings.push(error.to_string());
             diagnosis.recommended_recovery = "unavailable".to_string();
@@ -3393,6 +3396,80 @@ pub fn diagnose_owner(worktree: &Path, owner: ExecutionOwnerKey) -> OwnerExecuti
         );
     }
     diagnosis
+}
+
+/// Read-only pre-generation diagnosis, including a PM in another worktree.
+fn diagnose_legacy_active_owner(
+    worktree: &Path,
+    owner: ExecutionOwnerKey,
+    diagnosis: &mut OwnerExecutionDiagnosis,
+) {
+    let inspect = |path: &Path, diagnosis: &mut OwnerExecutionDiagnosis| {
+        let contents = match read_record_contents(path) {
+            Ok(Some(contents)) => contents,
+            Ok(None) => return false,
+            Err(error) => {
+                diagnosis
+                    .warnings
+                    .push(format!("{}: {error}", path.display()));
+                return false;
+            }
+        };
+        let Ok(record) = serde_json::from_str::<ExecutionControlRecord>(&contents)
+            .map(hydrate_recovery_envelopes)
+        else {
+            return false;
+        };
+        if record.owner_kind != owner.kind
+            || record.owner_number != owner.number
+            || record.status != ExecutionControlStatus::Active
+        {
+            return false;
+        }
+        // A damaged generation pointer is not a legacy execution.
+        let has_generation_pointer = generation_pointer_path(path).exists()
+            || crate::cli::trusted_store::trusted_dir_for_worktree(path)
+                .is_some_and(|dir| dir.join(GENERATION_POINTER_FILE).exists());
+        diagnosis.ecr_status = Some(record.status);
+        diagnosis.holder_session_id = Some(record.primary_session_id.clone());
+        diagnosis.holder_worktree = Some(
+            dunce::canonicalize(path)
+                .unwrap_or_else(|_| path.to_path_buf())
+                .display()
+                .to_string(),
+        );
+        diagnosis.generation_entrypoint = Some(record.entrypoint.clone());
+        diagnosis.generation_activated_at = Some(record.launched_at);
+        diagnosis.holder_runtime = Some("unknown".to_string());
+        diagnosis.recommended_recovery_reason =
+            "A legacy Active execution exists without a generation ledger. The next Issue Monitor launch will import it while preserving its holder and Active status, then refuse duplicate production. Read execution.status again after import and use its issue.monitor.stop recovery before requeueing."
+                .to_string();
+        if has_generation_pointer {
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "A generation pointer exists without its owner ledger; this is damaged generation authority, not a legacy execution."
+                    .to_string();
+        } else if !integrity_ok(&record) {
+            diagnosis.recommended_recovery = "unavailable".to_string();
+            diagnosis.recommended_recovery_reason =
+                "The legacy Active execution failed integrity validation; it cannot be imported safely."
+                    .to_string();
+        }
+        true
+    };
+    if inspect(worktree, diagnosis) {
+        return;
+    }
+    match crate::worktree_inventory::enumerate_worktrees(worktree, None) {
+        Ok(worktrees) => {
+            for entry in worktrees {
+                if entry.path != worktree && inspect(&entry.path, diagnosis) {
+                    break;
+                }
+            }
+        }
+        Err(error) => diagnosis.warnings.push(error.to_string()),
+    }
 }
 
 fn owner_generation_ledger_exists(worktree: &Path, owner: ExecutionOwnerKey) -> io::Result<bool> {
@@ -19817,24 +19894,48 @@ mod tests {
                     pr_state: None,
                 },
             );
-            let staged = gwt_core::workspace_projection::transact_workspace_state_with_commit(
-                dir.path(),
-                &request.operation_id,
-                |_, _, _| Ok(((), vec![event])),
-                || {
-                    if activated {
-                        activate_successor(&worktree, owner, &request).unwrap();
-                    } else {
-                        abort_successor(&worktree, owner, &request, "launch failed").unwrap();
-                    }
-                    Err(gwt_core::GwtError::Other("lost external response".into()))
-                },
+            // Model the v4 marker left by the old writer after losing an
+            // external response. Its main-root store contains an absolute
+            // linked-worktree path that new portable writes must reject.
+            let current_path =
+                gwt_core::paths::gwt_workspace_projection_path_for_repo_path(dir.path());
+            let work_items_path =
+                gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(dir.path());
+            let mut work_items =
+                gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(dir.path())
+                    .unwrap();
+            work_items.apply_event(event.clone());
+            let fingerprint = |path: &Path| match std::fs::read(path) {
+                Ok(bytes) => format!("sha256:{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes)),
+                Err(error) if error.kind() == ErrorKind::NotFound => "missing".to_string(),
+                Err(error) => panic!("read fixture precondition: {error}"),
+            };
+            let marker = serde_json::json!({
+                "version": 4,
+                "transaction_id": uuid::Uuid::new_v4().to_string(),
+                "current_path": current_path,
+                "work_items_path": work_items_path,
+                "current_precondition": fingerprint(&current_path),
+                "work_items_precondition": fingerprint(&work_items_path),
+                "projection": projection,
+                "work_items": work_items,
+                "events_path": gwt_core::paths::gwt_repo_local_work_events_dir(dir.path()),
+                "events": [event],
+                "external_commit": {
+                    "operation_id": request.operation_id,
+                    "phase": "prepared"
+                }
+            });
+            std::fs::write(
+                current_path.with_file_name("pending-state-transaction.json"),
+                serde_json::to_vec_pretty(&marker).unwrap(),
             )
-            .unwrap_err();
-            assert!(
-                staged.to_string().contains("lost external response"),
-                "{staged}"
-            );
+            .unwrap();
+            if activated {
+                activate_successor(&worktree, owner, &request).unwrap();
+            } else {
+                abort_successor(&worktree, owner, &request, "launch failed").unwrap();
+            }
             let authority_before = generation_authority_bytes(&worktree, owner);
             let sessions_dir = gwt_core::paths::gwt_sessions_dir();
             assert!(!sessions_dir
@@ -20229,6 +20330,291 @@ mod tests {
             .find(|candidate| candidate.owner == owner)
             .expect("startup Active candidate");
         (candidate, identity)
+    }
+
+    struct Issue3744ChildCleanup(std::sync::Arc<gwt_terminal::PtyHandle>);
+
+    impl Drop for Issue3744ChildCleanup {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+
+    fn issue_3744_runtime(
+        worktree: &Path,
+        session_id: &str,
+        incarnation: u64,
+    ) -> (
+        gwt_agent::SessionExecutionIdentity,
+        std::sync::Arc<gwt_terminal::PtyHandle>,
+    ) {
+        crate::cli::trusted_store::init_git_repo_with_origin(worktree);
+        let (_, identity) = startup_reaper_active_fixture_with_status(
+            worktree,
+            generation_owner(),
+            session_id,
+            gwt_agent::AgentStatus::Running,
+        );
+        assert_eq!(
+            with_current_active_session_execution_identity_lease(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &identity,
+                || (),
+            )
+            .unwrap(),
+            Some(()),
+            "the finalizer fixture must have exact active owner and Session authority"
+        );
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/D", "/S", "/C", "ping -n 121 127.0.0.1 >NUL"])
+        } else {
+            ("/bin/sh", vec!["-c", "sleep 120"])
+        };
+        let pane = gwt_terminal::Pane::new(
+            "issue-3744".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            std::collections::HashMap::new(),
+            Some(worktree.to_owned()),
+        )
+        .unwrap();
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            incarnation,
+        )
+        .save(&gwt_agent::runtime_state_path(
+            &gwt_core::paths::gwt_sessions_dir(),
+            session_id,
+        ))
+        .unwrap();
+        (identity, pane.shared_pty())
+    }
+
+    fn issue_3744_wait_until(mut condition: impl FnMut() -> bool) {
+        // test-hygiene: allow-wall-clock-deadline Observe detached finalizer files; no completion event is exposed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !condition() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Bound observation of the real detached finalizer's durable output.
+                std::time::Instant::now() < deadline,
+                "finalizer did not converge"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn issue_3744_failure_path(sessions: &Path, session: &str, incarnation: u64) -> PathBuf {
+        sessions
+            .join("teardown-failures")
+            .join(session)
+            .join(format!("{}-{incarnation}.json", std::process::id()))
+    }
+
+    fn issue_3744_stopped(
+        sessions: &Path,
+        identity: &gwt_agent::SessionExecutionIdentity,
+        incarnation: u64,
+    ) -> bool {
+        gwt_agent::Session::load(&sessions.join(format!("{}.toml", identity.session_id)))
+            .is_ok_and(|session| session.status == gwt_agent::AgentStatus::Stopped)
+            && gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+                sessions,
+                &identity.session_id,
+            ))
+            .is_ok_and(|runtime| {
+                runtime.status == gwt_agent::AgentStatus::Stopped
+                    && runtime.execution_identity.as_ref() == Some(identity)
+                    && runtime.runtime_incarnation == Some(incarnation)
+            })
+    }
+
+    #[test]
+    fn issue_3744_late_exit_is_persisted_after_diagnostic_deadline() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        // Detached finalizers must share this home; ScopedGwtHome is thread-local.
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "late-exit-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(!crate::session_finalizer::persist_terminal_after_exit(
+            pty.clone(),
+            sessions.clone(),
+            identity.clone(),
+            3744,
+            "late-exit".into(),
+        ));
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        issue_3744_wait_until(|| marker.is_file());
+        let failure: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(failure["exit_confirmed"], false);
+        assert_eq!(
+            gwt_agent::Session::load(&sessions.join("late-exit-3744.toml"))
+                .unwrap()
+                .status,
+            gwt_agent::AgentStatus::Running,
+            "a diagnostic timeout must not fabricate child exit proof"
+        );
+        assert!(crate::session_finalizer::kill_and_reap(&pty, "late-exit").unwrap());
+        issue_3744_wait_until(|| issue_3744_stopped(&sessions, &identity, 3744));
+        assert!(
+            marker.is_file(),
+            "the diagnostic must remain durable after recovery"
+        );
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_reacquires_owner_lease_and_recovers_after_timeout() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "leased-stop-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        let context =
+            GenerationTransactionContext::resolve(worktree.path(), generation_owner()).unwrap();
+        with_resolved_generation_owner_lease(&context, |_| {
+            let sessions = sessions.clone();
+            let identity = identity.clone();
+            let child = pty.clone();
+            let worker = std::thread::spawn(move || {
+                crate::session_finalizer::persist_terminal_after_exit(
+                    child,
+                    sessions,
+                    identity,
+                    3744,
+                    "leased-stop".into(),
+                )
+            });
+            assert!(
+                !worker.join().unwrap(),
+                "live PTY must take the deferred path"
+            );
+            assert!(crate::session_finalizer::kill_and_reap(&pty, "leased-stop").unwrap());
+            issue_3744_wait_until(|| marker.is_file());
+            assert!(
+                marker.is_file(),
+                "owner lease failure must leave a durable marker"
+            );
+            let failure: serde_json::Value =
+                serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+            assert_eq!(failure["exit_confirmed"], true);
+            Ok(())
+        })
+        .unwrap();
+        issue_3744_wait_until(|| issue_3744_stopped(&sessions, &identity, 3744));
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_rejection_records_failure_and_preserves_successor() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let (identity, pty) = issue_3744_runtime(worktree.path(), "replaced-stop-3744", 3744);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(crate::session_finalizer::kill_and_reap(&pty, "replaced-stop").unwrap());
+        let sidecar = gwt_agent::runtime_state_path(&sessions, &identity.session_id);
+        gwt_agent::SessionRuntimeState::for_execution(
+            gwt_agent::AgentStatus::Running,
+            &identity,
+            3745,
+        )
+        .save(&sidecar)
+        .unwrap();
+        let session_path = sessions.join("replaced-stop-3744.toml");
+        let session_before = fs::read(&session_path).unwrap();
+        let runtime_before = fs::read(&sidecar).unwrap();
+        assert!(!crate::session_finalizer::persist_terminal_after_exit(
+            pty,
+            sessions.clone(),
+            identity.clone(),
+            3744,
+            "replaced-stop".into(),
+        ));
+        let marker = issue_3744_failure_path(&sessions, &identity.session_id, 3744);
+        issue_3744_wait_until(|| marker.is_file());
+        assert!(marker.is_file(), "a false persist result must be recorded");
+        assert_eq!(fs::read(session_path).unwrap(), session_before);
+        assert_eq!(fs::read(sidecar).unwrap(), runtime_before);
+    }
+
+    #[test]
+    fn issue_3744_terminal_persist_cleans_up_completed_and_blocked_current_generations() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = unset_live_session_env();
+        for (session_id, settlement) in [
+            ("completed-cleanup-3744", ExecutionSettlement::Completed),
+            (
+                "blocked-cleanup-3744",
+                ExecutionSettlement::Blocked {
+                    reason: "current generation cleanup".into(),
+                    missing_verification: None,
+                },
+            ),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let worktree = tempfile::tempdir().unwrap();
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let (identity, pty) = issue_3744_runtime(worktree.path(), session_id, 3744);
+            let _cleanup = Issue3744ChildCleanup(pty.clone());
+            assert!(matches!(
+                settle(worktree.path(), session_id, settlement).unwrap(),
+                SettleResult::Settled(_)
+            ));
+            assert_eq!(
+                with_current_active_session_execution_identity_lease(&sessions, &identity, || ())
+                    .unwrap(),
+                None,
+                "terminal cleanup must not grant Active mutation authority"
+            );
+            assert!(crate::session_finalizer::kill_and_reap(&pty, session_id).unwrap());
+            let authority_before = generation_authority_bytes(worktree.path(), generation_owner());
+            assert!(!crate::session_finalizer::persist_terminal_after_exit(
+                pty,
+                sessions.clone(),
+                identity.clone(),
+                3744,
+                session_id.into(),
+            ));
+            let marker = issue_3744_failure_path(&sessions, session_id, 3744);
+            issue_3744_wait_until(|| {
+                marker.is_file() || issue_3744_stopped(&sessions, &identity, 3744)
+            });
+            assert!(
+                issue_3744_stopped(&sessions, &identity, 3744),
+                "terminal cleanup must persist for the same Completed or Blocked generation"
+            );
+            assert_eq!(
+                generation_authority_bytes(worktree.path(), generation_owner()),
+                authority_before,
+                "runtime cleanup must preserve owner lifecycle authority"
+            );
+        }
     }
 
     /// SPEC-2359 W-37 / Issue #3735: startup cost is bounded by repository
@@ -21663,6 +22049,73 @@ mod tests {
             ExactSessionRuntimeDisposition::ChildExited,
             "conflicting terminal proofs cannot hide the absence of every exact child"
         );
+    }
+
+    #[test]
+    fn issue_6118_owner_status_finds_legacy_active_in_another_worktree_without_writing() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_env = unset_live_session_env();
+        let project = tempfile::tempdir().unwrap();
+        let main = project.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(&main);
+        let legacy_worktree = project.path().join("legacy");
+        let status = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "--detach", "-q"])
+            .arg(&legacy_worktree)
+            .arg("HEAD")
+            .current_dir(&main)
+            .status()
+            .unwrap();
+        assert!(status.success(), "create linked fixture worktree");
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 6118,
+        };
+        let mut legacy = active_record("legacy-july-holder");
+        legacy.owner_kind = owner.kind;
+        legacy.owner_number = owner.number;
+        legacy.launched_at = "2026-07-28T00:00:00Z".parse().unwrap();
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        let legacy_path = state_path(&legacy_worktree);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+        let diagnosis = diagnose_owner(&main, owner);
+
+        assert_eq!(diagnosis.ecr_status, Some(ExecutionControlStatus::Active));
+        assert_eq!(
+            diagnosis.holder_session_id.as_deref(),
+            Some("legacy-july-holder")
+        );
+        assert_eq!(
+            diagnosis.holder_worktree.as_deref().map(Path::new),
+            Some(dunce::canonicalize(&legacy_worktree).unwrap().as_path())
+        );
+        assert_eq!(diagnosis.generation_activated_at, Some(legacy.launched_at));
+        assert!(diagnosis.generation_id.is_none());
+        assert!(!diagnosis.reclaimable);
+        assert_eq!(diagnosis.recommended_recovery, "gwt-execute");
+        assert!(diagnosis.recommended_recovery_reason.contains("import"));
+        assert!(diagnosis
+            .recommended_recovery_reason
+            .contains("issue.monitor.stop"));
+        assert!(!diagnosis
+            .recommended_recovery_reason
+            .contains("a fresh launch can take it"));
+        assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+        assert!(!generation_ledger_path(&legacy_worktree, owner)
+            .unwrap()
+            .exists());
+        assert!(!generation_pointer_path(&legacy_worktree).exists());
+        assert!(!crate::cli::trusted_store::under_trusted_management(
+            &legacy_worktree
+        ));
     }
 
     #[test]

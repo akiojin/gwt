@@ -377,6 +377,15 @@ fn nightly_windows_index_e2e_runs_real_scopes_and_background_contention() {
         let run = job.find(&command).unwrap_or_else(|| panic!("missing {test}"));
         assert!(build < run, "compile before running {test}");
     }
+    let steps = named_steps(job);
+    let (_, benchmark) = steps
+        .iter()
+        .find(|(name, _)| name == "Measure alternating scope searches with real E5")
+        .expect("Windows must run the existing alternating-scope 2s benchmark");
+    assert!(benchmark.contains("GWT_INDEX_REAL_SEARCH_BENCHMARK: \"1\""));
+    assert!(benchmark.contains("HF_HUB_CACHE: ${{ env.HF_HOME }}/hub"));
+    assert!(benchmark.contains("working-directory: crates/gwt-core/runtime"));
+    assert!(benchmark.contains("run: python -m unittest discover -s tests -p test_search_multi_contract.py -k test_cli_searches_reuse_worker_and_reopen_published_store -v"));
     let reporter = job_body(&nightly, "  report-nightly-failure:");
     let needs = reporter
         .lines()
@@ -542,6 +551,22 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
                 .count(),
             7
         );
+        if lib {
+            let fleet = steps
+                .iter()
+                .find(|step| {
+                    step["name"].as_str()
+                        == Some("Run native fleet orphan process handle contracts")
+                })
+                .expect("Windows must execute both fleet process handle contracts");
+            assert!(
+                fleet["run"]
+                    .as_str()
+                    .unwrap()
+                    .contains("grep -Fq 'test result: ok. 2 passed; 0 failed; 0 ignored;'"),
+                "the native handle filter must not pass with zero matches"
+            );
+        }
         for (index, step) in steps.iter().enumerate() {
             if step["uses"].as_str() == Some("Swatinem/rust-cache@v2") {
                 assert!(step["env"]["CARGO_PROFILE_DEV_DEBUG"].is_null());
@@ -631,6 +656,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
     // Issue #5565 split the original 49 default filters across both hosts.
     // Issue #5560 adds the FIFO regression; warm keeps its separate filter above.
     let mut expected_filters = vec![
+        "gwt lib gwt cli::fleet_disposition::tests::orphan_process_handle_ -- --test-threads=1 --nocapture",
         "gwt lib gwt issue_cache::tests::targeted_issue_refresh_writes_one_snapshot_without_marking_full_cache_fresh -- --exact",
         "gwt bin gwt app_runtime::tests::continuation_completion_tests::startup_self_heal_converges_legacy_config_without_a_runtime_guard -- --exact --test-threads=1",
         "gwt test hook_contracts hook_health_test::codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies -- --exact --test-threads=1",
@@ -696,7 +722,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 64);
+    assert_eq!(expected_filters.len(), 65);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

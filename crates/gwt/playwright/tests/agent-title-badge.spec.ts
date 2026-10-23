@@ -95,17 +95,18 @@ test.describe("Agent title role and worktree badges", () => {
     await page.locator("#window-list-button").click();
     const agent = page.locator(".window-list-row").first();
     await expect(agent.locator(".window-worktree-badge")).toHaveText("Fix cache");
-    await page.evaluate(() => (window as any).__assignAgentName("Lumen"));
-    await expect(agent.locator(".window-worktree-badge")).toHaveText("Lumen");
-    await expect(agent.locator(".window-worktree-badge")).toHaveAccessibleName("Lumen — Branch-backed worktree");
-    await expect(agent.locator(".window-list-title")).toHaveText("Lumen — Fix cache");
+    const assignedName = info.project.name.includes("light") ? "Maya Clark" : "ミオ・アサノ";
+    await page.evaluate(name => (window as any).__assignAgentName(name), assignedName);
+    await expect(agent.locator(".window-worktree-badge")).toHaveText(assignedName);
+    await expect(agent.locator(".window-worktree-badge")).toHaveAccessibleName(`${assignedName} — Branch-backed worktree`);
+    await expect(agent.locator(".window-list-title")).toHaveText(`${assignedName} — Fix cache`);
     await expect(agent.locator(".window-role-badge")).toHaveText("Codex");
     await expect(page.locator("#fleet-minimap")).toHaveCount(0);
     await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-title"))
       .toHaveText("Lyra");
     await expect(page.locator(".agent-kanban-card[data-window-id='agent-3'] .agent-kanban-card-meta"))
       .toContainText("Review cache");
-    await expect(page.locator(".window-list-title", { hasText: "Lumen — Fix cache" })).toBeVisible();
+    await expect(page.locator(".window-list-title", { hasText: `${assignedName} — Fix cache` })).toBeVisible();
     await page.locator(".window-list-row")
       .filter({ has: page.locator(".window-list-title", { hasText: "Agent Kanban" }) }).click();
     const kanban = page.locator(".workspace-window[data-id='kanban-1']");
@@ -114,7 +115,7 @@ test.describe("Agent title role and worktree badges", () => {
     await kanban.screenshot({ path: screenshot });
     await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
     await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText("Lumen — Fix cache");
+    await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText(`${assignedName} — Fix cache`);
     await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Intake Agent");
     await page.screenshot({ path: info.outputPath("agent-names.png") });
   });

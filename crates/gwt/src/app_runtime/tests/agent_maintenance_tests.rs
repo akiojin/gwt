@@ -570,7 +570,9 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
     );
     tab.kind = ProjectKind::NonRepo;
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.deferred_issue_monitor_launches = Some(Vec::new());
     runtime.agent_maintenance.busy = true;
+    assert!(!runtime.issue_monitor_materializer_ready());
     runtime.pending_startup_pm_tabs.push("tab-1".into());
     runtime.pending_startup_auto_resume_sessions.push(
         super::super::PendingStartupAutoResumeSession {
@@ -590,6 +592,10 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
         },
     );
     assert!(immediate.is_empty());
+    assert!(
+        !runtime.issue_monitor_materializer_ready(),
+        "canvas arrival cannot admit launches while maintenance defers the restore drain"
+    );
     assert_eq!(runtime.pending_startup_pm_tabs, ["tab-1"]);
     assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
     assert!(
@@ -609,6 +615,7 @@ fn startup_canvas_ready_preserves_pm_queue_until_maintenance_finishes() {
             catalog: None,
         },
     );
+    assert!(runtime.issue_monitor_materializer_ready());
     assert!(runtime.pending_startup_pm_tabs.is_empty());
     assert!(
         runtime.pending_startup_auto_resume_sessions.is_empty(),
