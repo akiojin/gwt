@@ -377,6 +377,15 @@ fn nightly_windows_index_e2e_runs_real_scopes_and_background_contention() {
         let run = job.find(&command).unwrap_or_else(|| panic!("missing {test}"));
         assert!(build < run, "compile before running {test}");
     }
+    let steps = named_steps(job);
+    let (_, benchmark) = steps
+        .iter()
+        .find(|(name, _)| name == "Measure alternating scope searches with real E5")
+        .expect("Windows must run the existing alternating-scope 2s benchmark");
+    assert!(benchmark.contains("GWT_INDEX_REAL_SEARCH_BENCHMARK: \"1\""));
+    assert!(benchmark.contains("HF_HUB_CACHE: ${{ env.HF_HOME }}/hub"));
+    assert!(benchmark.contains("working-directory: crates/gwt-core/runtime"));
+    assert!(benchmark.contains("run: python -m unittest discover -s tests -p test_search_multi_contract.py -k test_cli_searches_reuse_worker_and_reopen_published_store -v"));
     let reporter = job_body(&nightly, "  report-nightly-failure:");
     let needs = reporter
         .lines()
