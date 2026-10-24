@@ -1,6 +1,38 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.141.0] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Autoのkind優先候補で起動前権限を判定する
+- **monitor:** Normalize accepted launch profile agent ids
+- **monitor:** Stop prefs churn from invalidating spawn admission forever
+
+### Features
+
+- **pm:** Expose milestone member dependency diagnostics
+- **pm:** Goal の所属 Issue に依存診断を表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record live Logs delivery metadata
+- **work:** Record stop warning slice delivery audit
+- **work:** Record stop warning audit pr metadata
+- **work:** Link milestone dependency PR
+- **work:** Settle public stop warning delivery records
+- **work:** Link final stop warning audit pr
+- **work:** Link Goal dependency PR
+
+### Refactor
+
+- **ui:** Render live Logs from shared state
+- **ui:** Notify Board mentions from shared state
+
+### Testing
+
+- **monitor:** Backdate mtimes instead of sleeping in #6096 tests
+
 ## [9.140.0] - 2026-10-24
 
 ### Bug Fixes
