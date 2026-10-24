@@ -264,7 +264,11 @@ async function liveReceipts(sampler: ProcessSampler): Promise<Receipt[]> {
 
 async function assertOutput(surfaces: Surface[], timeout = 30_000): Promise<void> {
   for (const { page, id } of surfaces) {
-    await expect(page.locator(`.agent-tile[data-agent-id="${id}"]`)).toBeAttached();
+    const row = page.locator(`.work-row[data-window-id="${id}"]`);
+    await expect(row).toBeVisible();
+    const preview = row.locator(".terminal-text-preview");
+    await expect(preview).toHaveText(/\S/, { timeout });
+    expect((await preview.innerText()).trim().split("\n").length).toBeLessThanOrEqual(3);
     await expect.poll(() => page.evaluate(id => String((window as any).__gwtTerminalTestApi?.bufferText?.(id) || ""), id),
       { message: `PTY output from ${id}`, timeout }).toContain("GWT_MEMORY_TICK");
   }
@@ -317,6 +321,8 @@ async function launch(page: Page, branch: string): Promise<string> {
       .find((pane: any) => !before.includes(pane.id) && pane.agent_id === agent);
   }, { before, agent: AGENT }, { timeout: 90_000 }).then(handle => handle.jsonValue());
   expect(pane.status, "new Agent pane launch status").not.toBe("error");
-  await page.locator('.op-rail__surface[data-surface="agents"]').click();
+  await page.locator('.op-rail__surface[data-surface="works"]').click();
+  if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+    await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
   return pane.id;
 }

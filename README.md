@@ -30,7 +30,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Agents, Board, and Settings
+- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
 - **Provider usage** — hover over USAGE for account limits, including Claude's
   Fable weekly limit and enabled Usage credits with utilization, used/limit,
@@ -461,7 +461,7 @@ Common windows include:
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
   open this same Work Item view. Issue Monitor agents are mirrored read-only in
   the Issue window's right pane,
-  and `Windowize` opens the same session in an individual Agents tab for input.
+  and `Windowize` opens the same session in its native terminal in Works for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -501,14 +501,11 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-gwt assigns each worker Agent a random memorable name in the output language
-when it starts. Its badge, window title, Fleet, Kanban, and Board show that
-name, and the PM uses it when reporting work. Names are unique across the
-project's history and never receive numeric suffixes; exhausted catalogs expand
-with localized family names. Automatic restoration keeps the existing name;
-explicitly restarting an Issue's Agent assigns a fresh name. Issue comments
-record assignments, handovers, PR creation, and completion; PR bodies also
-include the responsible name. The resident PM keeps its own fixed identity.
+Implementation Agents are persistent project members with memorable names in the output language.
+A new Issue reuses an available member; a continuation prefers its previous member when available.
+New member names are unique within the project and use localized family names when needed.
+Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
+Kanban, Board, Issue comments, and PR attribution. The resident PM keeps its own role identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -553,8 +550,9 @@ Use **Issues settings** to
 expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. The summary switches remain available when settings are collapsed.
-Auto-apply updates is in **System**. Select **Manual** to edit
-Max active, then select **Apply** to save the final number. **Auto** disables editing
+Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
+edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
+Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
 and shows the effective limit, with **Measuring capacity…** while measurement is pending.
 Lowering the limit below the active count keeps existing agents running; new launches
 wait until the active count falls below the limit. Auto-refill is
@@ -576,12 +574,13 @@ tier or the current next-tier selection. The preview shows provider, model and
 effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
 next launch; a running agent keeps its profile. Changes appear after the server
 accepts them, and the highest tier explains why it cannot be raised. Next-tier
-previews remain subject to launch-time checks. **Windowize** opens the agent in an individual Agents
-tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
+previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal in Works.
+**Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
 
-**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+The shared **Machine budget** remains separate from a roster's requested member count.
+Its default **Auto** policy reflects CPU,
 free memory and disk space, the GUI's CPU use, and live agents in other projects.
 Registered projects without live agents consume no share. **Machine budget**
 shows the limiting resource and distinguishes the Monitor's implementation/review
@@ -590,18 +589,22 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+Before a roster is created, the legacy **Max active** control can select a **Manual**
+override or **Auto** to follow the recommendation. This machine policy is shared
 by all projects on this machine. Manual is a total worker limit; each project receives
 the remaining capacity after other projects' workers, while PM windows stay separate.
 Settings shows this project's allocation and other projects' worker consumption.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
-timing-dependent test failures may block unrelated PRs. Automation uses
+timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
+`issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
+members; Auto requests are rejected to keep membership and requested capacity equal.
+For legacy projects without a roster, automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
-and the shared `agent_capacity` measurement.
+and the shared `agent_capacity` measurement. Roster projects also report
+`agent_roster_capacity` and `agent_roster_revision` for the project member setting.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -1739,27 +1742,28 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
-- Open **PM** from its separate rail entry; PM uses a single pane.
-- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
-- Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
-- Use **Close split** to keep the active surface in one pane.
-- In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
+- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works.
+- **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-Workspaces saved with the former free-placement layout restore their windows and sessions into the current surfaces; obsolete positions, sizes, and camera settings are discarded on save.
+Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
+branch and verification facts. Unavailable measurements display **—**, including context remaining
+unless the provider reports it directly. Today totals use this project's measured conversations;
+account-wide usage is not copied into them. Individual PR information is not shown here.
+
+Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
+setting do not return after reload or restart; the roster's Team/Past tabs remain.
 
 ## Agent Navigation
 
-Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
-Agent tabs by activity: running/starting first, waiting/idle next, then the
-remaining Agents. Agents shown inside Issues and Shell terminals are included;
-PM is skipped. Cycling keeps the split view and focuses the selected
-terminal for input. Closing the selected tab returns to All agents without stopping the
-agent; cycling can reopen the same terminal.
-
-Agent card and tab titles stay on one line with the name fixed at the start.
-Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
-Issue and Project Manager settings also explain their controls on hover and keyboard focus.
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select current implementation
+Agents by activity while keeping the split layout. PM and auxiliary Shells are skipped.
+The selected native terminal receives input; returning to the list keeps every session running.
+Names stay on one line, and longer purposes can be scrolled horizontally or read on hover.
+Issue and Project Manager settings explain their controls on hover and keyboard focus.
 
 ## Operator Design Language (SPEC-2356)
 

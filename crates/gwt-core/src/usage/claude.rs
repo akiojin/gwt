@@ -363,6 +363,8 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
     let mut output = 0u64;
     let mut cache_create = 0u64;
     let mut cache_read = 0u64;
+    let mut measured_cache_create = Some(0u64);
+    let mut measured_cache_read = Some(0u64);
     let mut model: Option<String> = None;
     let mut context_used: Option<u64> = None;
     let mut saw_assistant = false;
@@ -381,21 +383,19 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         let Some(msg) = obj.get("message") else {
             continue;
         };
-        saw_assistant = true;
         if let Some(m) = msg.get("model").and_then(Value::as_str) {
             model = Some(m.to_string());
         }
         let Some(usage) = msg.get("usage") else {
             continue;
         };
-        let inp = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let outp = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let Some(inp) = usage.get("input_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(outp) = usage.get("output_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        saw_assistant = true;
         let cc = usage
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
@@ -408,6 +408,16 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         output += outp;
         cache_create += cc;
         cache_read += cr;
+        measured_cache_create = measured_cache_create
+            .zip(
+                usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64),
+            )
+            .map(|(sum, tokens)| sum + tokens);
+        measured_cache_read = measured_cache_read
+            .zip(usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .map(|(sum, tokens)| sum + tokens);
         // The latest assistant turn's prompt footprint approximates the
         // current context occupancy.
         context_used = Some(inp + cc + cr);
@@ -424,6 +434,14 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         input_tokens: input,
         output_tokens: output,
         total_tokens,
+        cache_read_tokens: saw_assistant.then_some(measured_cache_read).flatten(),
+        cache_creation_tokens: saw_assistant.then_some(measured_cache_create).flatten(),
+        reported_context_left_pct: None,
+        provider_session_id: Some(session_id.to_owned()),
+        project_path: None,
+        agent_member_id: None,
+        active: true,
+        telemetry: None,
         context_used_tokens: context_used,
         context_limit_tokens: context_limit,
         context_left_pct,
@@ -788,6 +806,10 @@ mod tests {
         assert_eq!(s.context_limit_tokens, Some(200_000));
         assert!(s.context_left_pct.is_some());
         assert_eq!(s.state, UsageState::Ok);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["cache_read_tokens"], 150);
+        assert_eq!(wire["cache_creation_tokens"], 30);
+        assert!(wire["reported_context_left_pct"].is_null());
     }
 
     #[test]

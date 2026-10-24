@@ -285,7 +285,7 @@ function renderIssuesSettingsPanel(panel, options) {
   }
   if (panel.dataset.maxActiveProject !== project?.project_root) delete panel.dataset.maxActiveDraft;
   panel.dataset.maxActiveProject = project?.project_root || "";
-  let committedMax = status?.max_active_agents_override;
+  let committedMax = status?.agent_roster_capacity ?? status?.max_active_agents_override;
   const max = field(launch, "Max active", "number", committedMax == null
     ? status?.max_active_agents ?? 0
     : panel.dataset.maxActiveDraft ?? committedMax);
@@ -337,7 +337,17 @@ function renderIssuesSettingsPanel(panel, options) {
   panel.updateMaxActiveStatus = nextStatus => {
     latestStatus = nextStatus;
     const wasAuto = max.disabled;
-    committedMax = nextStatus?.max_active_agents_override ?? null;
+    const projectMembers = Number.isInteger(nextStatus?.agent_roster_capacity) && nextStatus.agent_roster_capacity > 0;
+    committedMax = projectMembers ? nextStatus.agent_roster_capacity : nextStatus?.max_active_agents_override ?? null;
+    mode.disabled = projectMembers;
+    scope.textContent = projectMembers
+      ? "This project: enabled members determine the requested capacity. Machine safety limits still apply."
+      : "All projects on this machine. Manual sets the shared requested maximum.";
+    const explanation = projectMembers
+      ? "Enabled members in this project. Changing this number resizes the persistent Agents roster; effective launch allocation can be lower because of machine safety limits."
+      : capacityExplanation;
+    setControlExplanation(max, explanation, "settings-max-active");
+    setControlExplanation(capacity, explanation, "settings-capacity");
     max.disabled = committedMax == null;
     mode.querySelector(`[value="${max.disabled ? "auto" : "manual"}"]`).selected = true;
     if (max.disabled || wasAuto || panel.dataset.maxActiveDraft == null) {
@@ -357,6 +367,7 @@ function renderIssuesSettingsPanel(panel, options) {
   };
   panel.updateMaxActiveStatus(status);
   mode.addEventListener("change", () => {
+    if (latestStatus?.agent_roster_capacity != null) return;
     const wasAuto = max.disabled;
     delete panel.dataset.maxActiveDraft;
     max.disabled = mode.value === "auto";

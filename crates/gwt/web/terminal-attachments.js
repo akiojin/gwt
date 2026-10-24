@@ -127,8 +127,8 @@ export function createTerminalAttachments({
       });
 
       function ensureAttachmentProgressSurface(windowId) {
-        const terminalHost = terminalMap.get(windowId)?.terminalContainer?.parentElement;
-        const host = terminalHost?.dataset.agentId === windowId
+        const terminalHost = terminalMap.get(windowId)?.terminalContainer;
+        const host = terminalHost?.dataset.windowId === windowId
           ? terminalHost : workspaceWindowElement(windowId) || document.body;
         let surface = host.querySelector(".attachment-progress");
         if (surface) {
@@ -733,9 +733,9 @@ export function createTerminalAttachments({
       }
 
       function attachmentWindowIdFromElement(element) {
-        const tile = element?.closest?.(".agent-tile[data-agent-id]");
-        if (tile) {
-          return tile.closest(".agents-surface--preview") ? null : tile.dataset.agentId;
+        const full = element?.closest?.(".works-full");
+        if (full && !full.hidden && !full.closest(".works-surface--preview")) {
+          return full.querySelector(".works-terminal[data-window-id]")?.dataset.windowId || null;
         }
         return element?.closest?.(".workspace-window")?.dataset?.id || null;
       }

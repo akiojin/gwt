@@ -15,10 +15,10 @@ const SURFACE_BY_PRESET = Object.freeze({
   workspace: "issues",
   branches: "issues",
   pr: "issues",
-  agent: "agents",
-  claude: "agents",
-  codex: "agents",
-  shell: "agents",
+  agent: "works",
+  claude: "works",
+  codex: "works",
+  shell: "settings",
   board: "board",
   memo: "board",
   settings: "settings",
@@ -42,9 +42,9 @@ export function surfaceForWindow(windowData) {
   if (windowData?.is_pm) {
     return "pm";
   }
-  if (["agent", "claude", "codex"].includes(windowData?.preset)) return "agents";
+  if (["agent", "claude", "codex"].includes(windowData?.preset)) return "works";
   if (windowData?.preset === "settings" && windowData.surface_owner === "pm") return "pm";
-  if (windowData?.preset === "shell" && windowData.surface_owner === "agents") return "agents";
+  if (windowData?.preset === "shell") return "settings";
   if (windowData?.preset === "settings" && windowData.settingsSection === "issues") return "issues";
   return surfaceForPreset(windowData?.preset);
 }

@@ -35,8 +35,13 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
       const id = pane.id;
       await expect.poll(async () => (await receipts()).some(receipt => receipt.session === pane!.session_id),
         { timeout: 60_000 }).toBe(true);
-      await page.locator('.op-rail__surface[data-surface="agents"]').click();
-      const tile = page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + id + '"]');
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      const row = page.locator('.work-row[data-window-id="' + id + '"]');
+      await expect(row.locator(".terminal-text-preview")).toBeVisible();
+      await row.getByRole("button", { name: "Open terminal", exact: true }).click();
+      const tile = page.locator('.works-full .works-terminal[data-window-id="' + id + '"]');
       await expect(tile.locator(".xterm-rows")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => buffer(page, id), { timeout: 30_000 }).toContain("GWT5379_READY 0");
@@ -65,7 +70,10 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
 
       // A new WebSocket must receive a fresh authoritative PTY snapshot, not the old browser buffer.
       await page.reload();
-      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      await row.getByRole("button", { name: "Open terminal", exact: true }).click();
       await expect(tile.locator(".xterm-rows")).toBeVisible();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await expect.poll(() => page.evaluate(id => (window as any).__gwtPlaywrightMessages.some((entry: any) =>
@@ -83,7 +91,7 @@ test("one Agent delivers fixed output and restores its screen", async ({ page },
       await rm(barrier, { force: true });
       if (pane) {
         await sendLiveGwtEvent(page, { kind: "close_window", id: pane.id });
-        await expect(page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + pane.id + '"]'))
+        await expect(page.locator('.work-row[data-window-id="' + pane.id + '"]'))
           .toHaveCount(0, { timeout: 60_000 });
       }
     }

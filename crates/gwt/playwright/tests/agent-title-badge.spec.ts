@@ -114,16 +114,17 @@ test.describe("Agent title role and worktree badges", () => {
     const screenshot = info.outputPath("kanban-agent-names.png");
     await kanban.screenshot({ path: screenshot });
     await info.attach("Kanban agent names", { path: screenshot, contentType: "image/png" });
-    await page.locator('.op-rail__surface[data-surface="agents"]').click();
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1'] h3")).toHaveText(`${assignedName} — Fix cache`);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-2'] h3")).toHaveText("Intake Agent");
+    await page.locator('.op-rail__surface[data-surface="works"]').click();
+    await expect(page.locator(".work-row[data-window-id='agent-1'] .work-name")).toHaveText(assignedName);
+    await expect(page.locator(".work-row[data-window-id='agent-1'] .work-purpose")).toHaveText("Fix cache");
+    await expect(page.locator(".work-row[data-window-id='agent-2'] .work-purpose")).toHaveText("Intake Agent");
     const frameResults = [];
     for (const suspended of [false, true]) {
       const result = await page.evaluate(async ({ suspended, assignedName }) => {
-        const title = document.querySelector<HTMLElement>(".agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='agent-1'] .agent-title__purpose")!;
+        const title = document.querySelector<HTMLElement>(".works-surface:not(.works-surface--preview) .work-row[data-window-id='agent-1'] .work-purpose")!;
         const before = title.textContent;
         const label = suspended ? "Fallback" : "Frame";
-        const expected = ` — ${label} 49`;
+        const expected = `${label} 49`;
         const originalFrame = window.requestAnimationFrame;
         let renders = 0;
         let completed: () => void;
@@ -140,10 +141,10 @@ test.describe("Agent title role and worktree badges", () => {
           for (let index = 0; index < 50; index++) (window as any).__injectAgentTitle(`${label} ${index}`);
           const beforeFlush = title.textContent;
           await Promise.race([changed, new Promise<never>((_, reject) => {
-            deadline = setTimeout(() => reject(new Error("Agents frame did not render within one second")), 1000);
+            deadline = setTimeout(() => reject(new Error("Works frame did not render within one second")), 1000);
           })]);
           return { before, beforeFlush, renders, elapsed: performance.now() - started,
-            title: title.closest("h3")!.textContent, expected: `${assignedName}${expected}` };
+            title: `${title.closest(".work-row")!.querySelector(".work-name")!.textContent} — ${title.textContent}`, expected: `${assignedName} — ${expected}` };
         } finally {
           clearTimeout(deadline);
           observer.disconnect();
@@ -156,12 +157,12 @@ test.describe("Agent title role and worktree badges", () => {
       expect(result.elapsed).toBeLessThan(1000);
       frameResults.push({ suspended, ...result });
     }
-    await info.attach("Agents frame results", { body: JSON.stringify(frameResults, null, 2), contentType: "application/json" });
-    const agentTitle = page.getByRole("tab", { name: `${assignedName} — Fallback 49`, exact: true });
+    await info.attach("Works frame results", { body: JSON.stringify(frameResults, null, 2), contentType: "application/json" });
+    const agentTitle = page.locator('.work-row[data-window-id="agent-1"]');
     await agentTitle.focus();
     await agentTitle.hover();
     await expect(agentTitle).toBeFocused();
-    await expect(agentTitle).toHaveAttribute("aria-label", `${assignedName} — Fallback 49`);
+    await expect(agentTitle).toHaveAttribute("aria-label", new RegExp(`${assignedName}.*Fallback 49.*Open terminal`));
     await page.screenshot({ path: info.outputPath("agent-names.png") });
   });
 
@@ -364,6 +365,7 @@ async function installAgentTitleBadgeBackend(
     const windows = [
       {
         id: "agent-1",
+        session_id: "agent-1-session",
         title: primaryAgentFixture.title,
         preset: "agent",
         geometry: { x: 20, y: 640, width: 520, height: 280 },
@@ -385,6 +387,7 @@ async function installAgentTitleBadgeBackend(
       },
       {
         id: "agent-2",
+        session_id: "agent-2-session",
         title: "Intake Agent",
         preset: "agent",
         geometry: { x: 30, y: 680, width: 500, height: 280 },
@@ -406,6 +409,7 @@ async function installAgentTitleBadgeBackend(
       },
       {
         id: "agent-3",
+        session_id: "agent-3-session",
         title: "Restored Agent",
         preset: "agent",
         geometry: { x: 40, y: 720, width: 480, height: 280 },
@@ -482,6 +486,11 @@ async function installAgentTitleBadgeBackend(
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
+          this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "title-badge-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-3', session_id: 'agent-3-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } });
         }, 0);
       }
 

@@ -29,6 +29,7 @@
     <link rel="stylesheet" href="/styles/tokens.css" />
     <link rel="stylesheet" href="/styles/typography.css" />
     <link rel="stylesheet" href="/styles/components.css" />
+    <link rel="stylesheet" href="/styles/works-agents.css" />
     <link rel="stylesheet" href="/assets/xterm/xterm.css" />
     <link rel="preload" as="style" href="/styles/app.css" />
     <link rel="stylesheet" href="/styles/app.css" />
@@ -154,12 +155,16 @@
               <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h5v16H3z"/><path d="M9.5 4h5v11h-5z"/><path d="M16 4h5v8h-5z"/></svg>
               <span class="op-rail__surface-label">Issues</span>
             </button>
+            <button class="op-rail__item op-rail__surface" type="button" data-surface="works" aria-pressed="false" title="Works: live agent output and native terminals">
+              <span class="op-rail__surface-icon" aria-hidden="true">▤</span>
+              <span class="op-rail__surface-label">Works</span>
+            </button>
             <button
               class="op-rail__item op-rail__surface"
               type="button"
               data-surface="agents"
               aria-pressed="false"
-              title="Agents: bring every agent window into view"
+              title="Agents: project members, capacity and assignment history"
             >
               <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h18v16H3z"/><path d="M7 9l3 3-3 3"/><path d="M12 15h5"/></svg>
               <span class="op-rail__surface-label">Agents</span>

@@ -132,9 +132,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
     await expect(win).toBeAttached({ timeout: 10_000 });
-    // Select the agent tab so the focused-pane helper has a target.
-    await page.getByRole("tab", { name: "Aster", exact: true }).click();
-    await page.locator('.agent-tile[data-agent-id="agent-1"]').click();
+    // Open the exact native work so the focused-pane helper has a target.
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await page.locator('.works-terminal[data-window-id="agent-1"] .xterm-helper-textarea').focus();
 
     await page.evaluate(() => {
       window.prompt = () => "hello agent";
@@ -172,7 +173,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       const win = page.locator(`.workspace-window[data-id="${id}"]`);
       return {
         win,
-        tile: page.locator(`.agent-tile[data-agent-id="${id}"]`),
+        tile: page.locator(`.works-terminal[data-window-id="${id}"]`),
         statusChip: win.locator(".status-chip"),
         toast: page.locator(
           `.toast-alerts__item[data-toast-id="attention-${id}"]`,
@@ -181,6 +182,8 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     };
     const manual = uiFor("agent-2");
     const monitor = uiFor("agent-3");
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(manual.tile).toBeVisible({ timeout: 10_000 });
     await expect(monitor.tile).toBeHidden();
 
@@ -257,7 +260,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
 
     await manual.toast.click();
-    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "agents");
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "works");
     await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(manual.toast).toHaveCount(0);
 
@@ -427,6 +430,13 @@ async function installKillSwitchBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit({ kind: "active_work_projection", projection: { id: "attention-local-live", active_works: [], local_agent_activity: {
+            project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "attention-fixture", observed_at: new Date().toISOString(), agents: [
+              { window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-2", session_id: "session-agent-2", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-3", session_id: "session-agent-3", runtime_incarnation: 1, is_pm: false, issue_number: null },
+            ],
+          } } });
         }, 0);
       }
 

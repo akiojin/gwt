@@ -73,7 +73,7 @@ export function selectNextAgentFocusWindowId(
 ) {
   const candidates = (windows || [])
     .map((windowData, index) => ({ windowData, index }))
-    .filter(({ windowData }) => windowData?.id && surfaceForWindow(windowData) === "agents")
+    .filter(({ windowData }) => windowData?.id && surfaceForWindow(windowData) === "works")
     .map((candidate) => ({
       ...candidate,
       priority: agentFocusPriority(

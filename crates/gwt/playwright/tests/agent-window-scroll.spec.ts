@@ -25,7 +25,11 @@ test.describe("Agent window scrollback lifecycle", () => {
       await setActiveAgentTab(page, "agent-2");
       await expect(agentTile(page, "agent-1")).toBeHidden();
       await emitTerminalText(page, "agent-1", numberedLines(`hidden-${index}`, 20));
-      await expectPendingRefresh(page, "agent-1", true);
+      // Inert native caches retain a measured grid while another work is full.
+      // Output must parse immediately so visible Issue mirrors remain live.
+      await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-1")))
+        .toContain(`hidden-${index} 020`);
+      await expectPendingRefresh(page, "agent-1", false);
 
       await setActiveAgentTab(page, "agent-1");
       await expect(agentTile(page, "agent-1")).toBeVisible();
@@ -46,7 +50,9 @@ test.describe("Agent window scrollback lifecycle", () => {
     await setActiveAgentTab(page, "agent-2");
     await expect(agentTile(page, "agent-1")).toBeHidden();
     await emitTerminalSnapshot(page, "agent-1", numberedLines("snapshot-replay", 220));
-    await expectPendingRefresh(page, "agent-1", true);
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi!.bufferText("agent-1")))
+      .toContain("snapshot-replay 220");
+    await expectPendingRefresh(page, "agent-1", false);
 
     await setActiveAgentTab(page, "agent-1");
     await expect(agentTile(page, "agent-1")).toBeVisible();
@@ -77,6 +83,14 @@ test.describe("Agent window scrollback lifecycle", () => {
     if (liveBase) await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     else await page.addInitScript(() => {
       (window as any).__selectionCopy = "";
+      (window as any).__nativeCopyEvents = [];
+      // Xterm's native Cmd+C uses ClipboardEvent, while menu/drag copy uses
+      // navigator.clipboard. Feed both real transports into the fixture shim.
+      document.addEventListener("copy", event => {
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+        (window as any).__nativeCopyEvents.push(text);
+        (window as any).__selectionCopy = text;
+      });
       Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
         writeText: async (text: string) => { (window as any).__selectionCopy = text; },
         readText: async () => (window as any).__selectionCopy,
@@ -128,14 +142,23 @@ async function expectDragCopiesRenderedRows(page: Page, info: TestInfo, phase: s
   await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
     .toBe(selection.text);
   await page.evaluate(() => navigator.clipboard.writeText("clipboard reset"));
-  // Windows copies the selection with Ctrl+C; Linux CI keeps Ctrl+C for the PTY.
-  await page.keyboard.press(process.platform === "win32" ? "Control+c" : "Control+Shift+c");
+  // Match the browser platform used by classifyTerminalCopyKeyEvent. macOS
+  // intentionally leaves Ctrl-based keys on the PTY path and copies with Cmd+C.
+  const platform = await page.evaluate(() => (navigator as any).userAgentData?.platform || navigator.platform || "");
+  const shortcut = /mac|iphone|ipad|ipod/i.test(platform) ? "Meta+c" : /win/i.test(platform) ? "Control+c" : "Control+Shift+c";
+  await info.attach(`copy-shortcut-${phase}`, { body: JSON.stringify({ platform, shortcut }), contentType: "application/json" });
+  const nativeCopiesBefore = await page.evaluate(() => (window as any).__nativeCopyEvents?.length || 0);
+  await page.keyboard.press(shortcut);
+  if (!liveBase && /mac|iphone|ipad|ipod/i.test(platform)) {
+    await expect.poll(() => page.evaluate(() => (window as any).__nativeCopyEvents.length)).toBeGreaterThan(nativeCopiesBefore);
+    expect(await page.evaluate(() => (window as any).__nativeCopyEvents.at(-1))).toBe(selection.text);
+  }
   await expect.poll(() => page.evaluate(async () => (await navigator.clipboard.readText()).replace(/\r\n/g, "\n")))
     .toBe(selection.text);
 }
 
 function agentTile(page: Page, windowId: string) {
-  return page.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='${windowId}']`);
+  return page.locator(`.works-surface:not(.works-surface--preview) .works-terminal[data-window-id='${windowId}']`);
 }
 
 async function openAgentsFixture(page: Page, projectName: string): Promise<string[]> {
@@ -147,7 +170,7 @@ async function openAgentsFixture(page: Page, projectName: string): Promise<strin
   if (!liveBase) await installEmbeddedRoutes(page);
   await installAgentScrollBackend(page);
   await page.goto(appUrl);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("button", { name: "Works", exact: true }).click();
   await setActiveAgentTab(page, "agent-1");
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   return errors;
@@ -185,7 +208,7 @@ async function expectWheelMovesScrollback(page: Page, windowId: string): Promise
   const before = await terminalScrollMetrics(page, windowId);
   expect(before.hasScrollback).toBe(true);
 
-  const root = agentTile(page, windowId).locator(".terminal-root");
+  const root = agentTile(page, windowId);
   const box = await root.boundingBox();
   expect(box).not.toBeNull();
   await page.mouse.move(Math.round(box!.x + box!.width / 2), Math.round(box!.y + box!.height / 2));
@@ -237,12 +260,12 @@ async function terminalScrollMetrics(page: Page, windowId: string): Promise<{
   viewportRefreshPending: boolean;
 }> {
   return page.evaluate((id) => {
-    const tile = document.querySelector<HTMLElement>(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='${id}']`);
+    const tile = document.querySelector<HTMLElement>(`.works-surface:not(.works-surface--preview) .works-terminal[data-window-id='${id}']`);
     const metrics = window.__gwtTerminalTestApi?.metrics(id);
     const baseY = metrics?.baseY ?? 0;
     const rows = metrics?.rows ?? 0;
     return {
-      hidden: tile?.hidden ?? true,
+      hidden: !tile || !tile.getClientRects().length || getComputedStyle(tile).visibility === "hidden",
       viewportY: metrics?.viewportY ?? 0,
       baseY,
       rows,
@@ -290,8 +313,10 @@ async function emitTerminalStatus(
 }
 
 async function setActiveAgentTab(page: Page, windowId: "agent-1" | "agent-2"): Promise<void> {
-  await page.locator(`#agents-tab-${windowId}`).click();
-  await expect(page.locator(`#agents-tab-${windowId}`)).toHaveAttribute("aria-selected", "true");
+  const back = page.locator('.works-full:not([hidden]) [data-action="back"]');
+  if (await back.isVisible()) await back.click();
+  await page.locator(`.work-row[data-window-id="${windowId}"] .work-open`).click();
+  await expect(agentTile(page, windowId)).toBeVisible();
 }
 
 async function emitBackendEvent(page: Page, payload: unknown): Promise<void> {
@@ -381,6 +406,10 @@ async function installAgentScrollBackend(page: Page): Promise<void> {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState("agent-1"));
+          this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "scroll-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-2', session_id: 'agent-2-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } });
         }, 0);
       }
 
@@ -424,6 +453,7 @@ declare global {
     };
     __gwtPlaywrightTestBridge?: boolean;
     __gwtTerminalTestApi?: {
+      bufferText(windowId: string): string;
       metrics(windowId: string): {
         baseY: number;
         rows: number;

@@ -3301,6 +3301,8 @@ mod tests {
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
             max_active_agents_scope: "machine".to_string(),
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,

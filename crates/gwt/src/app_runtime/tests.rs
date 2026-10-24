@@ -3072,7 +3072,10 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         },
     )
     .expect("save Auto prefs");
+    let machine_policy_before =
+        gwt::machine_agent_settings::ensure_migrated().expect("saved machine policy");
     let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+    let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .working_dir(&repo)
         .build();
@@ -3142,6 +3145,7 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         "a changed shared capacity must invalidate prepared admission"
     );
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
 
     fs::write(
         machine_state.join("agent-capacity.json"),
@@ -3165,7 +3169,28 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         .unwrap()
         .next()
         .is_none());
-    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    // Valid admission materializes the persistent roster before provider
+    // preparation. A later provider failure must release its reservation and
+    // preserve machine policy and every unrelated project preference.
+    let mut after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let roster = after
+        .agent_roster
+        .take()
+        .expect("first valid admission initializes the roster");
+    assert_eq!(roster.enabled_count(), 1);
+    assert_eq!(after.max_active_agents, roster.enabled_count());
+    assert!(roster
+        .members
+        .iter()
+        .all(|member| member.assignment.is_none()));
+    // The roster owns the requested count; legacy on-disk compatibility
+    // mirrors are not additional project settings.
+    prefs_before_typed.max_active_agents = roster.enabled_count();
+    assert_eq!(after, prefs_before_typed);
+    assert_eq!(
+        gwt::machine_agent_settings::load().unwrap(),
+        Some(machine_policy_before)
+    );
 }
 
 #[test]
@@ -3243,6 +3268,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
         let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+        let prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(&repo)
             .linked_issue_number(42)
@@ -3297,7 +3323,25 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             assert!(completion.is_err_and(|reason| reason.detail.contains("config parse error")));
         }
         assert!(runtime.runtimes.is_empty());
-        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        let prefs_after = fs::read(&prefs_path).unwrap();
+        if case == "expired" || case == "invalidated" {
+            let mut after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let roster = after
+                .agent_roster
+                .take()
+                .expect("admitted implementation initializes its roster");
+            assert_eq!(roster.enabled_count(), 3);
+            assert!(roster
+                .members
+                .iter()
+                .all(|member| member.assignment.is_none()));
+            assert_eq!(after, prefs_before_typed);
+        } else {
+            assert_eq!(
+                prefs_after, prefs_before,
+                "wait/review must not mutate the roster"
+            );
+        }
     }
 }
 

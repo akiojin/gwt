@@ -2834,7 +2834,8 @@ fn try_apply_issue_monitor_control(
         } => {
             // The decoder already verified the resident PM's authority to
             // enable monitoring. Rejecting ON again here closes the whole lane.
-            if max_active_agents == Some(0)
+            if (max_active_auto && monitor.prefs().agent_roster.is_some())
+                || max_active_agents == Some(0)
                 || (allowed_labels.is_none()
                     && enabled.is_none()
                     && autonomous_mode.is_none()
@@ -3827,7 +3828,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         let requested = candidate
                             .prefs()
                             .max_active_last_change
-                            .filter(|_| explicit_max_active);
+                            .filter(|_| explicit_max_active && disk.agent_roster.is_none());
                         let policy = crate::machine_agent_settings::checked_update(
                             disk,
                             expected_config_token.as_deref(),
@@ -3855,6 +3856,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         candidate.persist_machine_max_active_change(&accepted.control_id)?;
                     }
                 }
+                candidate.synchronize_agent_roster_capacity(prefs_path)?;
                 candidate.set_last_control_receipt(crate::IssueMonitorControlReceipt {
                     control_id: accepted.control_id.clone(),
                     should_scan: applied.flatten().unwrap_or(false),

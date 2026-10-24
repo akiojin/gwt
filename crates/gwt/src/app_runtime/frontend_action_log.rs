@@ -149,6 +149,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::AgentRoster { .. } => FrontendUserActionLog::new("agent_roster", "agents"),
         FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")

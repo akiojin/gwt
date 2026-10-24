@@ -416,6 +416,12 @@ pub enum FrontendEvent {
     },
     /// Request an immediate usage refresh (SPEC-2970 FR-022).
     RefreshUsage,
+    /// Project-bound member controls. The client cannot select a filesystem root.
+    AgentRoster {
+        action: crate::agent_names::AgentRosterAction,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
     StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
@@ -2003,6 +2009,64 @@ pub struct FleetPaneView {
     pub is_pm: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterView {
+    pub project_key: String,
+    pub revision: u64,
+    pub members: Vec<AgentRosterMemberView>,
+    pub capacity: usize,
+    pub recommended_capacity: Option<usize>,
+    pub past_contributors: Vec<AgentPastContributorView>,
+    pub past_complete: bool,
+    pub by_session: std::collections::BTreeMap<String, AgentWorkFactsView>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterMemberView {
+    #[serde(flatten)]
+    pub member: crate::agent_names::AgentMember,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub history: Vec<AgentAssignmentHistoryView>,
+    pub issue_count: Option<usize>,
+    pub landed_count: Option<usize>,
+    pub active_seconds: Option<u64>,
+    pub tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAssignmentHistoryView {
+    pub session_id: String,
+    pub issue_number: Option<u64>,
+    pub title: Option<String>,
+    pub result: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPastContributorView {
+    pub session_id: String,
+    pub name: String,
+    pub kind: String,
+    pub issue_numbers: Vec<u64>,
+    pub first_posted_at: Option<String>,
+    pub last_posted_at: Option<String>,
+    pub post_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWorkFactsView {
+    pub branch: String,
+    pub ahead_of_develop: Option<usize>,
+    pub model: Option<String>,
+    pub provider: String,
+    pub last_action: Option<String>,
+    pub elapsed_seconds: Option<u64>,
+    pub warning_count: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -2071,6 +2135,14 @@ pub enum BackendEvent {
         board_entry_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// Project-scoped persistent membership and assignment history.
+    AgentRoster {
+        roster: AgentRosterView,
+    },
+    AgentRosterError {
+        project_key: String,
+        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -3014,6 +3086,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "agent_roster",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_roster_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3529,6 +3611,8 @@ impl BackendEvent {
             BackendEvent::FleetPaneList { .. } => "fleet_pane_list",
             BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
             BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
+            BackendEvent::AgentRoster { .. } => "agent_roster",
+            BackendEvent::AgentRosterError { .. } => "agent_roster_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -5040,6 +5124,20 @@ mod tests {
             FrontendEvent::RefreshIndexStatus { project_root }
                 if project_root == "/repo/worktree"
         ));
+    }
+
+    #[test]
+    fn frontend_event_accepts_project_roster_actions() {
+        for action in [
+            serde_json::json!({"kind":"read"}),
+            serde_json::json!({"kind":"add"}),
+            serde_json::json!({"kind":"rest","member_id":"member-1"}),
+        ] {
+            let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind":"agent_roster", "action":action, "expected_revision":3
+            }));
+            assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
+        }
     }
 
     #[test]

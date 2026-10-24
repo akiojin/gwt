@@ -25,7 +25,9 @@ test.describe("Agent window navigation without tabs", () => {
     if (!liveBase) await installEmbeddedRoutes(page);
     await installTabbedAgentsBackend(page);
     await page.goto(appUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
   });
 
   test.afterEach(async ({ page }, info) => {
@@ -46,18 +48,18 @@ test.describe("Agent window navigation without tabs", () => {
   });
 
   test("Windows focuses a legacy grouped agent for input without destructive close chrome", async ({ page }) => {
-    const active = page.locator(".agent-tile[data-agent-id='agent-1']");
-    const target = page.locator(".agent-tile[data-agent-id='agent-2']");
+    const active = page.locator(".works-terminal[data-window-id='agent-1']");
+    const target = page.locator(".works-terminal[data-window-id='agent-2']");
     const source = page.locator(".workspace-window[data-id='agent-2']");
     await expect(target).toBeHidden();
     await page.locator("#window-list-button").click();
     await rowFor(page, "Birch").click();
     await expect(target).toBeVisible();
     await expect(active).toBeHidden();
-    await expect(target.locator("h3")).toHaveText("Birch");
-    await expect.poll(() => page.evaluate(() => window.__tabbedAgentsFixture.sent
-      .some(message => message.kind === "startup_terminal_ready" && message.id === "agent-2")))
-      .toBe(true);
+    await expect(page.locator(".works-full-name")).toHaveText("Birch");
+    // Read-only list caches intentionally omit the startup performance beacon;
+    // the existing input readiness metric and real input prove the live gate.
+    await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("agent-2").isReady)).toBe(true);
     await target.locator(".xterm-helper-textarea").focus();
     await expect(target.locator(".xterm-helper-textarea")).toBeFocused();
     await page.keyboard.type("hello");
@@ -69,8 +71,8 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(source.locator('[data-action="close"]')).toHaveCount(0);
     await expect(page.locator("#window-close-confirm-modal")).toHaveCount(0);
     expect(await closedIds()).toEqual([]);
-    // Agent tabs close only the view; the terminal remains owned by its session.
-    await page.getByRole("button", { name: "Close Birch tab", exact: true }).click();
+    // Back changes presentation only; the native terminal remains owned by its session.
+    await page.locator('.works-full [data-action="back"]').click();
     expect(await closedIds()).toEqual([]);
     await page.locator("#window-list-button").click();
     await rowFor(page, "Birch").click();
@@ -105,7 +107,7 @@ test.describe("Agent window navigation without tabs", () => {
     expect(burst).toEqual({ unchanged: true, rebuilds: 1, focusPreserved: true, hoverPreserved: true });
     await expect(chip).toHaveClass(/idle/);
     await expect(chip.locator(".status-label")).toHaveText("Idle");
-    await expect(page.getByRole("tab", { name: "Aster", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".works-full-name")).toHaveText("Aster");
     const fallback = await panel.evaluate(async panel => {
       const originalRaf = window.requestAnimationFrame;
       window.requestAnimationFrame = () => 0;
@@ -136,7 +138,7 @@ test.describe("Agent window navigation without tabs", () => {
       (row as HTMLButtonElement).click();
     });
     await expect(panel).toBeHidden();
-    await expect(page.getByRole("tab", { name: "Birch", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator(".works-full-name")).toHaveText("Birch");
     await trigger.click();
     await expect(panel).toBeVisible();
     await page.keyboard.press("Escape");
@@ -144,40 +146,29 @@ test.describe("Agent window navigation without tabs", () => {
     await expect(trigger).toBeFocused();
   });
 
-  test("provider runtime pushes update header, tab and fleet counts within one second", async ({ page }, info) => {
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
+  test("provider runtime pushes update Works and fleet counts within one second", async ({ page }, info) => {
+    await page.locator('.works-full [data-action="back"]').click();
     await page.evaluate(() => window.__tabbedAgentsFixture.emitStaleWorkProjection());
     const transitions = [];
     for (const state of ["running", "waiting", "idle"]) {
       const label = state[0].toUpperCase() + state.slice(1);
       await page.evaluate(state => window.__tabbedAgentsFixture.emitProviderStates(state), state);
       await expect.poll(() => page.evaluate(({ state, label }) => {
-        const headers = ["agent-1", "agent-2"].every(id => {
-          const header = document.querySelector(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"] header`);
-          const tab = document.getElementById(`agents-tab-${id}`)?.parentElement;
-          return [header, tab].every(element => element?.querySelector(".status-chip .status-label")?.textContent === label);
-        });
-        const ready = headers && ["running", "waiting", "idle"].every(candidate =>
+        const rows = ["agent-1", "agent-2"].every(id => document.querySelector(`.work-row[data-window-id="${id}"] .work-state`)?.textContent === label);
+        const counts = ["running", "waiting", "idle"].every(candidate =>
+          document.querySelector(`.works-counts [data-count="${candidate}"]`)?.textContent === (candidate === state ? "2" : "0") &&
           document.getElementById(`op-strip-${candidate}`)?.textContent === (candidate === state ? "2" : "0"));
-        if (ready) window.__tabbedAgentsFixture.lastStateObserved = performance.now();
-        return ready;
+        if (rows && counts) window.__tabbedAgentsFixture.lastStateObserved = performance.now();
+        return rows && counts;
       }, { state, label }), { timeout: 1000, intervals: [10, 25, 50] }).toBe(true);
       const elapsed = await page.evaluate(() => window.__tabbedAgentsFixture.lastStateObserved - window.__tabbedAgentsFixture.lastStatePush);
-      expect(elapsed, `${state} push reaches all three state surfaces`).toBeLessThan(1000);
+      expect(elapsed, `${state} push reaches Works and fleet`).toBeLessThan(1000);
       transitions.push({ state, elapsed_ms: elapsed });
       for (const [id, name] of [["agent-1", "Aster"], ["agent-2", "Birch"]]) {
-        const tile = page.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${id}"]`);
-        const tab = page.locator(`#agents-tab-${id}`);
-        await expect(tile.locator("h3")).toHaveText(name);
-        await expect(tab).toHaveAccessibleName(name);
-        for (const container of [tile.locator("header"), tab.locator("..")]) {
-          const chip = container.locator(".status-chip");
-          await expect(chip).toBeVisible();
-          await expect(chip).toHaveClass(new RegExp(`\\b${state}\\b`));
-          const title = container.locator(".agent-title");
-          const [titleBounds, chipBounds] = await Promise.all([title.boundingBox(), chip.boundingBox()]);
-          expect(chipBounds!.x, "runtime state is visually separate from the name").toBeGreaterThan(titleBounds!.x + titleBounds!.width);
-        }
+        const row = page.locator(`.work-row[data-window-id="${id}"]`);
+        await expect(row.locator(".work-name")).toHaveText(name);
+        await expect(row).toHaveAttribute("data-state", state);
+        await expect(row.locator(".work-state")).toHaveText(label);
       }
     }
     await info.attach("runtime-transitions", { body: JSON.stringify(transitions, null, 2), contentType: "application/json" });
@@ -187,6 +178,7 @@ test.describe("Agent window navigation without tabs", () => {
 
 async function installTabbedAgentsBackend(page) {
   await page.addInitScript(() => {
+    window.__gwtPlaywrightTestBridge = true;
     const baseWindow = {
       preset: "agent",
       geometry: { x: 180, y: 120, width: 720, height: 360 },
@@ -266,6 +258,10 @@ async function installTabbedAgentsBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
+          this.emit({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "window-navigation-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'session-agent-1', runtime_incarnation: 1, is_pm: false, issue_number: null },
+          { window_id: 'agent-2', session_id: 'session-agent-2', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } });
         }, 0);
       }
 

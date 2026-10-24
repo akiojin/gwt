@@ -117,21 +117,21 @@ test("AC34 launch-failed and queued stale windows never advertise a live pane", 
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
   await expect(column(page, "active").locator('[data-issue-number="4777"]')).toHaveCount(1);
   for (const number of [4499, 5016]) {
-    await expect(row(page, number)).not.toContainText("Shown in Agents");
+    await expect(row(page, number)).not.toContainText("Shown in Works");
     await expect(row(page, number).locator('[data-action="focus-surface-window"]')).toHaveCount(0);
     await expect(column(page, "active").locator(`[data-issue-number="${number}"]`)).toHaveCount(0);
     await row(page, number).locator(".knowledge-row-select").click();
-    await expect(page.locator(".knowledge-detail-pane")).not.toContainText("Shown in Agents");
+    await expect(page.locator(".knowledge-detail-pane")).not.toContainText("Shown in Works");
     await expect(page.locator('.knowledge-detail-pane [data-action="open-window"]')).toHaveCount(0);
   }
-  await expect(row(page, 4777)).toContainText("Shown in Agents");
+  await expect(row(page, 4777)).toContainText("Shown in Works");
   await expect(row(page, 4777).locator('[data-action="focus-surface-window"]')).toHaveCount(1);
   await page.evaluate(() => (window as any).__queueActivity([
     { window_id: "tab-queue::pm", session_id: "pm", runtime_incarnation: 1, is_pm: true },
   ]));
   await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 0 issues · PM 1");
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
-  await expect(row(page, 4777)).not.toContainText("Shown in Agents");
+  await expect(row(page, 4777)).not.toContainText("Shown in Works");
   await expect(row(page, 4777).locator('[data-action="focus-surface-window"]')).toHaveCount(0);
 });
 
@@ -1083,8 +1083,7 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
 });
 
 test("Monitor list bursts render once while controls remain synchronous", async ({ page }) => {
-  const result = await page.evaluate(async () => {
-    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  const result = await page.evaluate(() => {
     const board = document.querySelector(".issue-queue-board")!;
     const originalRaf = window.requestAnimationFrame;
     const originalCancel = window.cancelAnimationFrame;
@@ -1092,10 +1091,20 @@ test("Monitor list bursts render once while controls remain synchronous", async 
     let next = 0;
     window.requestAnimationFrame = run => { frames.set(++next, run); return next; };
     window.cancelAnimationFrame = id => { frames.delete(id); };
-    const observer = new MutationObserver(() => {});
+    let rowAddCount = 0;
+    const recordRowAdds = (records: MutationRecord[]) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element && node.matches('.knowledge-row[data-issue-number="3"]')) rowAddCount++;
+      }
+    };
+    const observer = new MutationObserver(recordRowAdds);
     observer.observe(board, { childList: true, subtree: true });
-    const rowAdds = () => observer.takeRecords().reduce((count, record) => count +
-      [...record.addedNodes].filter(node => node instanceof Element && node.matches('.knowledge-row[data-issue-number="3"]')).length, 0);
+    const rowAdds = () => { recordRowAdds(observer.takeRecords()); return rowAddCount; };
+    const dispose = () => {
+      observer.disconnect();
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+    };
     const inject = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
     try {
       const initialRow = board.querySelector('[data-issue-number="3"]');
@@ -1110,17 +1119,34 @@ test("Monitor list bursts render once while controls remain synchronous", async 
         active: document.querySelector('[data-metric="active"]')!.textContent };
       (document.querySelector('[data-action="monitor-autonomous"]') as HTMLElement).click();
       const request = (window as any).__queueMessages.filter((message: any) => message.kind === "set_issue_monitor_autonomous_mode").at(-1);
-      for (const [id, run] of [...frames]) { frames.delete(id); run(performance.now()); }
-      return { before, rows: rowAdds(), active: !!board.querySelector('[data-queue-column="active"] [data-issue-number="3"]'),
-        latest: board.querySelector('[data-issue-number="3"] [data-key="tier-minimum"]')?.textContent, request };
-    } finally {
-      observer.disconnect();
-      window.requestAnimationFrame = originalRaf;
-      window.cancelAnimationFrame = originalCancel;
+      (window as any).__monitorBurst = {
+        read: () => {
+          for (const [id, run] of [...frames]) { frames.delete(id); run(performance.now()); }
+          return { rows: rowAdds(), active: !!board.querySelector('[data-queue-column="active"] [data-issue-number="3"]'),
+            latest: board.querySelector('[data-issue-number="3"] [data-key="tier-minimum"]')?.textContent };
+        },
+        dispose,
+      };
+      return { before, request };
+    } catch (error) {
+      dispose();
+      throw error;
     }
   });
-  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 1 · 1 issue · PM 0" }, rows: 1, active: false,
-    latest: "Min tier 49", request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
+  try {
+    expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 1 · 1 issue · PM 0" },
+      request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
+    // A model frame may already be queued on the original rAF. Wait for the
+    // final facts within Playwright's deadline, counting all intervening adds.
+    await expect.poll(() => page.evaluate(() => (window as any).__monitorBurst.read()), {
+      message: "the burst renders the latest facts exactly once",
+    }).toEqual({ rows: 1, active: false, latest: "Min tier 49" });
+  } finally {
+    await page.evaluate(() => {
+      (window as any).__monitorBurst.dispose();
+      delete (window as any).__monitorBurst;
+    });
+  }
   const select = row(page, 3).locator(".knowledge-row-select");
   await select.focus();
   await page.evaluate(() => {

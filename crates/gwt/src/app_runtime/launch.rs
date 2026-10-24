@@ -2832,8 +2832,6 @@ pub(super) struct IssueMonitorSpawnAdmissionInput {
     pub(super) issue_number: u64,
     pub(super) target_branch: String,
     pub(super) issue_link_cache_dir: PathBuf,
-    pub(super) known_agent_names: std::collections::HashSet<String>,
-    pub(super) active_agent_names: std::collections::HashSet<String>,
 }
 
 pub(super) const ISSUE_MONITOR_SPAWN_ADMISSION_STALE: &str =
@@ -3063,9 +3061,6 @@ pub(super) struct PreparedIssueMonitorSpawnAdmission {
     pub(super) monitor: gwt::IssueMonitorState,
     pub(super) host_started_at: Option<u64>,
     pub(super) purpose_title: Option<String>,
-    // Existing-pane adoption and answers do not need a new name and must not
-    // fail just because the history could not reserve an unused candidate.
-    reserved_agent_name: Result<String, String>,
     host_project_roots: std::collections::BTreeSet<PathBuf>,
     dependencies: Vec<IssueMonitorAdmissionFileStamp>,
     capacity_expires_at: Option<u64>,
@@ -3236,53 +3231,24 @@ impl IssueMonitorSpawnAdmissionInput {
             thread = "worker",
             "Issue Monitor launch phase"
         );
-        phase_started = std::time::Instant::now();
         let capacity = monitor
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
         let capacity_limit = monitor.effective_max_active_agents();
         let decision = IssueMonitorSpawnAdmissionDecision::evaluate(&monitor, self.issue_number);
-        let (purpose_title, reserved_agent_name) = if let Some(previous) = previous {
-            (
-                previous.purpose_title.clone(),
-                previous.reserved_agent_name.clone(),
-            )
+        // Preparation is read-only: adoption and stale results must not consume
+        // a member. The final materializer reserves after its admission fences.
+        let purpose_title = if let Some(previous) = previous {
+            previous.purpose_title.clone()
         } else {
-            let purpose_title = agent_launch_purpose_title(
+            agent_launch_purpose_title(
                 &self.project_root,
                 Some(self.issue_number),
                 Some(&self.target_branch),
                 &self.issue_link_cache_dir,
             )
-            .map_err(|error| error.to_string())?;
-            tracing::info!(
-                target: "gwt.launch.timing",
-                phase = "monitor_purpose",
-                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-                thread = "worker",
-                "Issue Monitor launch phase"
-            );
-            phase_started = std::time::Instant::now();
-            let language = gwt_config::Settings::load()
-                .map(|settings| settings.ai.effective_language())
-                .unwrap_or("en");
-            let history = gwt_core::paths::gwt_project_dir_for_repo_path(&self.project_root)
-                .join("agent-names.jsonl");
-            let reserved_agent_name = gwt::agent_names::allocate(
-                &history,
-                language,
-                &self.active_agent_names,
-                &self.known_agent_names,
-            );
-            tracing::info!(
-                target: "gwt.launch.timing",
-                phase = "monitor_agent_name",
-                elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0,
-                thread = "worker",
-                "Issue Monitor launch phase"
-            );
-            (purpose_title, reserved_agent_name)
+            .map_err(|error| error.to_string())?
         };
         // The GUI checks is_current before applying this result and again at
         // pane creation. Keep stale observations available for a narrow refresh
@@ -3293,7 +3259,6 @@ impl IssueMonitorSpawnAdmissionInput {
             monitor,
             host_started_at: gwt::process::host_process_start_time(std::process::id()),
             purpose_title,
-            reserved_agent_name,
             host_project_roots: self.host_project_roots.iter().cloned().collect(),
             dependencies,
             capacity_expires_at,
@@ -5295,8 +5260,10 @@ impl AppRuntime {
             if let Some(event) = self.cached_active_work_projection_broadcast_for_tab(&tab_id) {
                 events.push(event);
             }
-            self.request_active_work_projection_refresh(&project_root);
         }
+        // A standalone manual launch also changes the live agent census even
+        // when it does not write a Work projection.
+        self.request_active_work_projection_refresh(&project_root);
         let composed_status = self
             .window_status(&window_id)
             .unwrap_or(WindowProcessStatus::Running);
@@ -5646,19 +5613,52 @@ impl AppRuntime {
         // Legacy direct presets bypass the Launch Wizard, but their PTYs
         // still belong in the same Session observation and stop lifecycle.
         let mut named_assignment = None;
+        let mut direct_member_reservation = None;
         if matches!(preset, WindowPreset::Claude | WindowPreset::Codex) {
             let previous_session_id = self
                 .tab(tab_id)
                 .and_then(|tab| tab.workspace.window(raw_id))
                 .and_then(|window| window.session_id.clone());
-            let agent_name = match self.ensure_window_agent_name(tab_id, raw_id) {
-                Ok(name) => name,
+            let reservation_id = uuid::Uuid::new_v4().to_string();
+            let inherited = previous_session_id
+                .as_ref()
+                .and_then(|id| {
+                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{id}.toml"))).ok()
+                })
+                .and_then(|session| session.agent_member_id);
+            let issue = self
+                .tab(tab_id)
+                .and_then(|tab| tab.workspace.window(raw_id))
+                .and_then(|window| window.linked_issue_number);
+            let member = match gwt::agent_names::reserve_project_member(
+                &project_root,
+                &self.sessions_dir,
+                &reservation_id,
+                issue,
+                issue.and_then(|number| {
+                    gwt::issue_monitor_worker::cached_agent_member_spec_owner(&project_root, number)
+                }),
+                None,
+                inherited.as_deref(),
+            ) {
+                Ok(member) => member,
                 Err(error) => {
                     self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                     self.window_details.insert(window_id.clone(), error.clone());
                     return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
                 }
             };
+            let agent_name = Some(member.name.clone());
+            if let Some(tab) = self.tab_mut(tab_id) {
+                tab.workspace.set_agent_name(raw_id, agent_name.clone());
+            }
+            env.insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id.clone());
+            env.insert("GWT_AGENT_RESERVATION_ID".into(), reservation_id.clone());
+            direct_member_reservation = Some((
+                project_root.clone(),
+                member.agent_member_id.clone(),
+                reservation_id.clone(),
+            ));
             if let Some(name) = &agent_name {
                 env.insert("GWT_AGENT_NAME".into(), name.clone());
             } else {
@@ -5675,6 +5675,7 @@ impl AppRuntime {
                 .unwrap_or_default();
             let mut session = gwt_agent::Session::new(&project_root, &branch, agent_id.clone());
             session.agent_name = agent_name;
+            session.agent_member_id = Some(member.agent_member_id.clone());
             session.linked_issue_number = self
                 .tab(tab_id)
                 .and_then(|tab| tab.workspace.window(raw_id))
@@ -5685,11 +5686,32 @@ impl AppRuntime {
             session.launch_args = launch.args.clone();
             session.update_status(gwt_agent::AgentStatus::Running);
             if let Err(error) = session.save(&self.sessions_dir) {
+                let _ = gwt::agent_names::release_project_member(
+                    &project_root,
+                    &self.sessions_dir,
+                    &member.agent_member_id,
+                    &reservation_id,
+                );
                 let detail = format!("Failed to save agent Session: {error}");
                 self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
                 self.window_details
                     .insert(window_id.clone(), detail.clone());
                 return self.status_events(window_id, WindowProcessStatus::Error, Some(detail));
+            }
+            if let Err(error) = gwt::agent_names::bind_project_member_session(
+                &project_root,
+                &member.agent_member_id,
+                &reservation_id,
+                &session.id,
+            ) {
+                let _ = gwt::agent_names::release_project_member(
+                    &project_root,
+                    &self.sessions_dir,
+                    &member.agent_member_id,
+                    &reservation_id,
+                );
+                self.set_window_status(tab_id, raw_id, WindowProcessStatus::Error);
+                return self.status_events(window_id, WindowProcessStatus::Error, Some(error));
             }
             self.launch_wizard_cache.record_session(session.clone());
             named_assignment = Some(session.clone());
@@ -5737,6 +5759,14 @@ impl AppRuntime {
                 self.status_events(window_id, composed_status, None)
             }
             Err(error) => {
+                if let Some((root, member, reservation)) = direct_member_reservation {
+                    let _ = gwt::agent_names::release_project_member(
+                        &root,
+                        &self.sessions_dir,
+                        &member,
+                        &reservation,
+                    );
+                }
                 if let Some(id) = stage_id {
                     emit_agent_launch_stage(id, "error", &error);
                 }
@@ -6102,7 +6132,6 @@ impl AppRuntime {
         issue_number: u64,
         target_branch: &str,
     ) -> IssueMonitorSpawnAdmissionInput {
-        let (known_agent_names, active_agent_names) = self.agent_name_reservations(None);
         IssueMonitorSpawnAdmissionInput {
             project_root: project_root.to_path_buf(),
             host_project_roots: self
@@ -6113,8 +6142,6 @@ impl AppRuntime {
             issue_number,
             target_branch: target_branch.to_string(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
-            known_agent_names,
-            active_agent_names,
         }
     }
 
@@ -6153,9 +6180,28 @@ impl AppRuntime {
         let prepared_purpose_title = prepared_monitor_admission
             .as_ref()
             .map(|prepared| prepared.purpose_title.clone());
-        let prepared_agent_name = prepared_monitor_admission
-            .as_ref()
-            .map(|prepared| prepared.reserved_agent_name.clone());
+        let roster_spec_number = config.linked_issue_number.and_then(|number| {
+            prepared_monitor_admission
+                .as_ref()
+                .and_then(|prepared| {
+                    prepared.monitor.inbox_item(number).and_then(|item| {
+                        if item.issue.labels.iter().any(|label| label == "gwt-spec") {
+                            Some(number)
+                        } else {
+                            item.issue
+                                .body
+                                .as_deref()
+                                .and_then(gwt::knowledge_bridge::parent_spec_from_body)
+                        }
+                    })
+                })
+                .or_else(|| {
+                    gwt::issue_monitor_worker::cached_agent_member_spec_owner(
+                        &context.project_root,
+                        number,
+                    )
+                })
+        });
         let is_review = config
             .env_vars
             .get("GWT_REVIEW_DISPATCH")
@@ -6399,28 +6445,72 @@ impl AppRuntime {
             .is_some_and(gwt::pm_registry::is_canonical_pm_worktree)
         {
             config.env_vars.remove("GWT_AGENT_NAME");
+            config.env_vars.remove("GWT_AGENT_MEMBER_ID");
+            config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
             None
+        } else if is_review {
+            // Independent reviewers have their own admission slot and cannot
+            // borrow an implementation member while it is working.
+            config.env_vars.remove("GWT_AGENT_MEMBER_ID");
+            config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
+            let name = self.allocate_agent_name(&project_root_path, inherited_agent_name)?;
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), name.clone());
+            Some(name)
         } else {
-            let name = match prepared_agent_name {
-                Some(reserved) => {
-                    let name = reserved?;
-                    let (_, active) = self.agent_name_reservations(None);
-                    gwt::agent_names::ensure_available_initial(&name, &active)
-                        .map_err(|_| ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string())?;
-                    name
-                }
-                None => self.allocate_agent_name(&project_root_path, inherited_agent_name)?,
-            };
+            let reservation_id = config
+                .env_vars
+                .get("GWT_AGENT_RESERVATION_ID")
+                .filter(|_| inherited_agent_name.is_some())
+                .cloned()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let delivery_id = launch_feedback_context
+                .as_ref()
+                .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref());
+            let member = gwt::agent_names::reserve_project_member(
+                &project_root_path,
+                &self.sessions_dir,
+                &reservation_id,
+                config.linked_issue_number,
+                roster_spec_number,
+                delivery_id,
+                config
+                    .env_vars
+                    .get("GWT_AGENT_MEMBER_ID")
+                    .filter(|_| inherited_agent_name.is_some() || continuation.is_some())
+                    .map(String::as_str),
+            )?;
+            let assignment = member.assignment.as_ref().expect("reserved assignment");
+            config
+                .env_vars
+                .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id);
+            config.env_vars.insert(
+                "GWT_AGENT_RESERVATION_ID".into(),
+                assignment.reservation_id.clone(),
+            );
+            let name = member.name;
             config
                 .env_vars
                 .insert("GWT_AGENT_NAME".into(), name.clone());
             Some(name)
         };
-        let prepared_manual_launch_claim = claim_prepared_manual_successor_launch(
-            &self.sessions_dir,
-            &project_root_path,
-            &config,
-        )?;
+        let prepared_manual_launch_claim =
+            claim_prepared_manual_successor_launch(&self.sessions_dir, &project_root_path, &config)
+                .inspect_err(|_| {
+                    if let Some((member, reservation)) = config
+                        .env_vars
+                        .get("GWT_AGENT_MEMBER_ID")
+                        .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
+                    {
+                        let _ = gwt::agent_names::release_project_member(
+                            &project_root_path,
+                            &self.sessions_dir,
+                            member,
+                            reservation,
+                        );
+                    }
+                })?;
         record_issue_monitor_gui_spawn_phase(
             issue_monitor_issue_number,
             "monitor_gui_spawn_dependencies",
@@ -6537,7 +6627,11 @@ impl AppRuntime {
         }
 
         let worker_window_id = window_id.clone();
+        #[cfg(test)]
+        let launch_home = gwt_config::home::gwt_home_override();
         let worker = thread::spawn(move || {
+            #[cfg(test)]
+            let _home = launch_home.map(gwt_core::test_support::ScopedGwtHome::set);
             Self::spawn_agent_window_async_with_claim(
                 proxy,
                 sessions_dir,
@@ -6625,6 +6719,11 @@ impl AppRuntime {
             == gwt_agent::LaunchRuntimeTarget::Docker)
             .then(|| launch_output_mirror::start(proxy.clone(), window_id.clone()));
         let mut issued_capability_token = None;
+        let member_reservation = config
+            .env_vars
+            .get("GWT_AGENT_MEMBER_ID")
+            .zip(config.env_vars.get("GWT_AGENT_RESERVATION_ID"))
+            .map(|(member, reservation)| (member.clone(), reservation.clone()));
         let mut active_launch_handshake_cleanup = prepared_manual_launch_claim;
         // Issue #4283 AC-5: attribute the pane-create route to its phases so
         // the next regression is read from the perf stream, not guessed.
@@ -7170,6 +7269,14 @@ impl AppRuntime {
                 })
                 .into());
             }
+            if let Some((member, reservation)) = member_reservation.as_ref() {
+                gwt::agent_names::bind_project_member_session(
+                    Path::new(&project_root),
+                    member,
+                    reservation,
+                    &session.id,
+                )?;
+            }
             let expected_execution_identity =
                 gwt_agent::SessionExecutionIdentity::from_session(&session)?;
 
@@ -7277,6 +7384,14 @@ impl AppRuntime {
                 );
             }
             Err(error) => {
+                if let Some((member, reservation)) = member_reservation.as_ref() {
+                    let _ = gwt::agent_names::release_project_member(
+                        Path::new(&project_root),
+                        &sessions_dir,
+                        member,
+                        reservation,
+                    );
+                }
                 if let Some(handshake) = active_launch_handshake_cleanup.as_ref() {
                     let _ = gwt::cli::execution_state::finish_active_session_launch_handshake(
                         &sessions_dir,

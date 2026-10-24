@@ -4035,7 +4035,348 @@ fn merge_workspace_projection_membership_cache_only(
     cached.active_work_count = cached.active_works.len();
 }
 
+fn agent_roster_view(
+    context: &ProjectContext,
+    roster: gwt::agent_names::AgentRoster,
+    sessions: &[Arc<gwt_agent::Session>],
+    entries: &[gwt_core::coordination::BoardEntry],
+    past_complete: bool,
+    sessions_dir: &Path,
+) -> gwt::AgentRosterView {
+    use std::collections::{BTreeMap, BTreeSet};
+    let normalized_root =
+        dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
+    let sessions: Vec<_> = sessions
+        .iter()
+        .filter(|session| {
+            repo_hash
+                .as_ref()
+                .is_some_and(|hash| session.repo_hash.as_deref() == Some(hash.as_str()))
+                || dunce::canonicalize(
+                    session
+                        .project_state_root
+                        .as_deref()
+                        .unwrap_or(&session.worktree_path),
+                )
+                .unwrap_or_else(|_| {
+                    session
+                        .project_state_root
+                        .clone()
+                        .unwrap_or_else(|| session.worktree_path.clone())
+                }) == normalized_root
+        })
+        .collect();
+    let posts_for = |session_id: &str| {
+        entries
+            .iter()
+            .filter(|entry| entry.origin_session_id.as_deref() == Some(session_id))
+            .collect::<Vec<_>>()
+    };
+    let history_for = |session: &gwt_agent::Session| {
+        let posts = posts_for(&session.id);
+        let title = posts
+            .iter()
+            .filter(|entry| entry.title_summary.is_some())
+            .max_by_key(|entry| entry.created_at)
+            .and_then(|entry| entry.title_summary.clone());
+        gwt::AgentAssignmentHistoryView {
+            session_id: session.id.clone(),
+            issue_number: session.linked_issue_number,
+            title,
+            result: Some(format!("{:?}", session.status)),
+            started_at: session.created_at.to_rfc3339(),
+            ended_at: (session.status == gwt_agent::AgentStatus::Stopped)
+                .then(|| session.updated_at.to_rfc3339()),
+        }
+    };
+    let members = roster
+        .members
+        .iter()
+        .map(|member| {
+            let mut assigned: Vec<_> = sessions
+                .iter()
+                .copied()
+                .filter(|session| {
+                    session.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+                })
+                .collect();
+            assigned.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+            let latest = assigned.first();
+            let issues: BTreeSet<_> = assigned
+                .iter()
+                .filter_map(|session| session.linked_issue_number)
+                .collect();
+            gwt::AgentRosterMemberView {
+                member: member.clone(),
+                provider: latest.map(|session| session.agent_id.command().to_string()),
+                model: latest.and_then(|session| session.model.clone()),
+                history: assigned
+                    .iter()
+                    .map(|session| history_for(session))
+                    .collect(),
+                issue_count: Some(issues.len()),
+                landed_count: None,
+                active_seconds: None,
+                tokens: None,
+            }
+        })
+        .collect();
+    let mut past: BTreeMap<String, gwt::AgentPastContributorView> = BTreeMap::new();
+    for entry in entries {
+        let (Some(session_id), Some(name)) = (&entry.origin_session_id, &entry.origin_agent_name)
+        else {
+            continue;
+        };
+        let session = sessions.iter().find(|session| session.id == *session_id);
+        if gwt::pm_registry::pane_is_pm(
+            &context.project_root,
+            session.map(|session| session.worktree_path.as_path()),
+            Some(session_id),
+        ) {
+            continue;
+        }
+        let key = session
+            .and_then(|session| session.agent_member_id.clone())
+            .unwrap_or_else(|| session_id.clone());
+        let kind = session
+            .map(|session| {
+                if session.review_dispatch {
+                    "review"
+                } else {
+                    "implementation"
+                }
+            })
+            .unwrap_or("unknown");
+        let contributor = past
+            .entry(key)
+            .or_insert_with(|| gwt::AgentPastContributorView {
+                session_id: session_id.clone(),
+                name: name.clone(),
+                kind: kind.to_string(),
+                issue_numbers: Vec::new(),
+                first_posted_at: Some(entry.created_at.to_rfc3339()),
+                last_posted_at: Some(entry.created_at.to_rfc3339()),
+                post_count: past_complete.then_some(0),
+            });
+        if let Some(count) = &mut contributor.post_count {
+            *count += 1;
+        }
+        let stamp = entry.created_at.to_rfc3339();
+        if contributor
+            .first_posted_at
+            .as_ref()
+            .is_none_or(|first| stamp < *first)
+        {
+            contributor.first_posted_at = Some(stamp.clone());
+        }
+        if contributor
+            .last_posted_at
+            .as_ref()
+            .is_none_or(|last| stamp > *last)
+        {
+            contributor.last_posted_at = Some(stamp);
+        }
+        for issue in entry
+            .related_owners
+            .iter()
+            .filter_map(|owner| owner.parse::<u64>().ok())
+            .chain(session.and_then(|session| session.linked_issue_number))
+        {
+            if !contributor.issue_numbers.contains(&issue) {
+                contributor.issue_numbers.push(issue);
+            }
+        }
+        contributor.issue_numbers.sort_unstable();
+    }
+    // The Session ledger also proves contributions that never posted to Board.
+    // Stable member ids aggregate current records; legacy Sessions stay separate.
+    for session in &sessions {
+        let Some(name) = session.agent_name.as_ref() else {
+            continue;
+        };
+        if gwt::pm_registry::pane_is_pm(
+            &context.project_root,
+            Some(&session.worktree_path),
+            Some(&session.id),
+        ) {
+            continue;
+        }
+        let key = session
+            .agent_member_id
+            .clone()
+            .unwrap_or_else(|| session.id.clone());
+        let contributor = past
+            .entry(key)
+            .or_insert_with(|| gwt::AgentPastContributorView {
+                session_id: session.id.clone(),
+                name: name.clone(),
+                kind: if session.review_dispatch {
+                    "review"
+                } else {
+                    "implementation"
+                }
+                .into(),
+                issue_numbers: Vec::new(),
+                first_posted_at: Some(session.created_at.to_rfc3339()),
+                last_posted_at: Some(session.updated_at.to_rfc3339()),
+                post_count: past_complete.then_some(0),
+            });
+        if let Some(issue) = session.linked_issue_number {
+            if !contributor.issue_numbers.contains(&issue) {
+                contributor.issue_numbers.push(issue);
+                contributor.issue_numbers.sort_unstable();
+            }
+        }
+    }
+    let inventory = gwt::session_inventory::observe_sessions(&context.project_root, sessions_dir);
+    let mut by_session = BTreeMap::new();
+    for observed in inventory.sessions {
+        let Some(session) = sessions
+            .iter()
+            .find(|session| session.id == observed.session_id)
+        else {
+            continue;
+        };
+        let posts = posts_for(&session.id);
+        let last = posts.iter().max_by_key(|entry| entry.created_at);
+        by_session.insert(
+            session.id.clone(),
+            gwt::AgentWorkFactsView {
+                branch: session.branch.clone(),
+                ahead_of_develop: gwt_git::git_divergence(
+                    &session.worktree_path,
+                    "HEAD",
+                    "refs/remotes/origin/develop",
+                )
+                .ok()
+                .map(|divergence| divergence.ahead),
+                model: session.model.clone(),
+                provider: session.agent_id.command().to_string(),
+                last_action: last.map(|entry| {
+                    format!(
+                        "{} · {}",
+                        entry.kind.as_str(),
+                        entry.created_at.to_rfc3339()
+                    )
+                }),
+                elapsed_seconds: chrono::DateTime::parse_from_rfc3339(&observed.started_at)
+                    .ok()
+                    .map(|started| {
+                        (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                            .num_seconds()
+                            .max(0) as u64
+                    }),
+                warning_count: None,
+            },
+        );
+    }
+    let capacity =
+        gwt::agent_capacity::project_capacity(&context.project_root, &BTreeSet::new(), 0);
+    gwt::AgentRosterView {
+        project_key: context.project_key.to_string(),
+        revision: roster.revision,
+        members,
+        capacity: roster.enabled_count(),
+        recommended_capacity: capacity
+            .measurement_complete
+            .then_some(capacity.recommended_implementation_count),
+        past_contributors: past.into_values().collect(),
+        past_complete,
+        by_session,
+        error: None,
+    }
+}
+
 impl AppRuntime {
+    pub(crate) fn agent_roster_events(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &ClientId,
+        action: gwt::agent_names::AgentRosterAction,
+        expected_revision: Option<u64>,
+    ) -> Vec<OutboundEvent> {
+        if !matches!(action, gwt::agent_names::AgentRosterAction::Read)
+            && expected_revision.is_none()
+        {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::AgentRosterError {
+                    project_key: context.project_key.to_string(),
+                    message: "Load the Agent roster before changing members".into(),
+                },
+            )];
+        }
+        let context_owned = context.clone();
+        let reply_to = client_id.clone();
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let result = gwt::agent_names::mutate_project_roster(
+                &context_owned.project_root,
+                &sessions_dir,
+                action,
+                expected_revision,
+            );
+            let (roster, error) = match result {
+                Ok(roster) => (Some(roster), None),
+                Err(error) => (
+                    gwt::agent_names::read_project_roster(
+                        &context_owned.project_root,
+                        &sessions_dir,
+                    )
+                    .ok(),
+                    Some(error),
+                ),
+            };
+            let event = if let Some(roster) = roster {
+                match gwt_agent::session_ledger::load_sessions_shared(&sessions_dir) {
+                    Ok(sessions) => {
+                        let entries = gwt_core::coordination::load_entries_since(
+                            &context_owned.project_root,
+                            chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                        );
+                        let complete = entries.is_ok();
+                        let mut view = agent_roster_view(
+                            &context_owned,
+                            roster,
+                            &sessions,
+                            &entries.unwrap_or_default(),
+                            complete,
+                            &sessions_dir,
+                        );
+                        view.error = error;
+                        BackendEvent::AgentRoster { roster: view }
+                    }
+                    Err(error) => BackendEvent::AgentRosterError {
+                        project_key: context_owned.project_key.to_string(),
+                        message: error.to_string(),
+                    },
+                }
+            } else {
+                BackendEvent::AgentRosterError {
+                    project_key: context_owned.project_key.to_string(),
+                    message: error
+                        .unwrap_or_else(|| "Agent roster unavailable; refresh and retry".into()),
+                }
+            };
+            proxy.send(UserEvent::ProjectDispatch {
+                context: context_owned,
+                events: vec![OutboundEvent::reply(&reply_to, event)],
+            });
+        });
+        match spawn {
+            Ok(()) => Vec::new(),
+            Err(message) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::AgentRosterError {
+                    project_key: context.project_key.to_string(),
+                    message,
+                },
+            )],
+        }
+    }
+
     /// Capture process-local identity only; process/Session I/O belongs to the
     /// blocking observer. PM is an agent here and Shell is deliberately absent.
     fn local_agent_activity_candidates(&self, tab_id: &str) -> Vec<LocalAgentActivityCandidate> {
@@ -5891,6 +6232,69 @@ fn agent_names_for_tab(tab: &ProjectTabRuntime) -> HashMap<String, String> {
 #[cfg(test)]
 mod bounded_cache_merge_tests {
     use super::*;
+
+    #[test]
+    fn roster_history_uses_project_and_member_identity_and_retains_legacy_contributors_without_posts(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let context = ProjectContext {
+            tab_id: "project-tab".into(),
+            project_key: gwt_core::repo_hash::compute_path_hash(&root),
+            generation: 1,
+            project_root: root.clone(),
+        };
+        let roster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"member-1","name":"Shared","enabled":true,"created_at":"2026-10-25T00:00:00Z"
+        }]})).unwrap();
+        let mut own = gwt_agent::Session::new(&root, "own", gwt_agent::AgentId::Codex);
+        own.agent_member_id = Some("member-1".into());
+        own.agent_name = Some("Shared".into());
+        own.linked_issue_number = Some(4777);
+        let own_id = own.id.clone();
+        let mut other = own.clone();
+        other.id = "other-member".into();
+        other.agent_member_id = Some("member-2".into());
+        other.linked_issue_number = Some(5016);
+        let mut foreign = own.clone();
+        foreign.id = "foreign".into();
+        foreign.project_state_root = Some(temp.path().join("other-project"));
+        foreign.worktree_path = temp.path().join("other-project");
+        foreign.linked_issue_number = Some(9999);
+        let mut legacy = own.clone();
+        legacy.id = "legacy".into();
+        legacy.agent_member_id = None;
+        legacy.agent_name = Some("Legacy".into());
+        legacy.linked_issue_number = Some(4499);
+        let sessions = [own, other, foreign, legacy]
+            .into_iter()
+            .map(Arc::new)
+            .collect::<Vec<_>>();
+        let view = agent_roster_view(
+            &context,
+            roster,
+            &sessions,
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+        );
+        assert_eq!(view.members[0].issue_count, Some(1));
+        assert_eq!(view.members[0].history.len(), 1);
+        assert_eq!(view.members[0].history[0].session_id, own_id);
+        let legacy = view
+            .past_contributors
+            .iter()
+            .find(|entry| entry.session_id == "legacy")
+            .expect("exact ledger contributor remains visible without Board posts");
+        assert_eq!(legacy.issue_numbers, [4499]);
+        assert_eq!(legacy.post_count, Some(0));
+        assert!(!view
+            .past_contributors
+            .iter()
+            .any(|entry| entry.session_id == "foreign"));
+    }
 
     fn retired_activity_fixture(
         temp_root: &Path,

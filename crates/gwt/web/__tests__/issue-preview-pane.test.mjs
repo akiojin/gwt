@@ -373,7 +373,7 @@ test("Windowize hands the mirrored agent back to the canvas", async (t) => {
   })]);
   fixture.surface.renderKnowledgeBridge("win-1");
   const detail = fixture.body.querySelector(".knowledge-detail-pane");
-  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
+  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Works/);
   assert.ok(detail.querySelector('[data-action="focus-surface-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
 });
@@ -421,7 +421,7 @@ test("no preview pane is rendered when the Issue has no auto-launched agent", as
 test("app.js wires the read-only mirror and the Windowize handoff", () => {
   assert.match(
     appSource,
-    /createTerminalRuntime:\s*\(id,\s*terminalRoot,\s*options\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot,\s*\{ \.\.\.options, readOnly: Boolean\(agentsHost\) \|\| options\?\.readOnly \}\)/,
+    /createTerminalRuntime:\s*\(id,\s*terminalRoot,\s*options\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot,\s*\{ \.\.\.options, readOnly: Boolean\(worksHost\) \|\| options\?\.readOnly \}\)/,
     "the Issue surface receives the shared terminal runtime factory",
   );
   assert.match(
