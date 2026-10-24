@@ -5129,18 +5129,23 @@ test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge update
 test("branch_entries telemetry uses the guarded helper without the retired git layer (SPEC-2356)", () => {
   const branchCase = appSource.match(/case\s+"branch_entries":[\s\S]*?break;/);
   assert.ok(branchCase, "expected branch_entries receive case");
+  assert.match(branchCase[0], /branchEntriesViewModel\.update\(/);
+  assert.doesNotMatch(branchCase[0], /renderBranches\(|applyOperatorTelemetryCounts\(/);
+  assert.match(appSource, /branchEntriesViewModel\.subscribe\(state => state, renderBranchEntries\)/);
+  const view = extractFunctionBody(appSource, "renderBranchEntries");
+  assert.match(view, /renderBranches\(windowId\)[\s\S]*applyOperatorTelemetryCounts\(/);
   assert.match(
-    branchCase[0],
+    view,
     /applyOperatorTelemetryCounts\(\{\s*branches:\s*branchesCount,\s*\}\)/,
     "branch telemetry must route through the guarded applyOperatorTelemetryCounts helper",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /git:\s*branchesCount/,
     "the dead Sidebar Layers git counter must no longer be forwarded",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /window\.__operatorShell\?\.applyTelemetryCounts/,
     "branch telemetry must not call applyTelemetryCounts directly",
   );

@@ -1128,3 +1128,25 @@ test("Knowledge error completions commit shared state and reject direct renderin
     assert.ok(delegated(bypass).some(finding => finding.kind.startsWith('dom-')));
   }
 });
+
+
+test("Branch entry receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/branch_entries');
+  // The existing state lookup, pure ingest and selection normalization stay synchronous.
+  const dataCalls = [
+    '06cc29f0a75de93d059de5c527a04967d87070031924e5869c4b23a4091837d3',
+    'aa6152497be4307a6487effac25ca2b1f6c60c783b33a9fa9e44790765b56278',
+    'ab5d1ad7bc29d19bedd30294402bc6d9e9bc3f639854ea775759b01c741de37d',
+  ];
+  assert.ok(findings(app).every(finding => finding.kind === 'unresolved-call'));
+  assert.deepEqual(findings(app).map(finding => finding.hash).sort(), dataCalls);
+  for (const bypass of ['document.body.textContent = event.id;',
+    'frontendUnits.branchesFileTreeSurface.renderBranches(event.id);']) {
+    const mutated = app.replace('case "branch_entries": {', `case "branch_entries": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).some(finding => !dataCalls.includes(finding.hash)));
+  }
+});
