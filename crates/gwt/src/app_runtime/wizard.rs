@@ -668,7 +668,7 @@ enum PreparedIssueMonitorDeliveryFailure {
 pub(crate) struct IssueMonitorLaunchPrepared {
     context: super::ProjectContext,
     request: super::DeferredIssueMonitorLaunch,
-    prefs_stamp: Option<(u64, std::time::SystemTime)>,
+    prefs_stamp: Option<super::IssueMonitorPrefsStamp>,
     provider_usage: Vec<gwt_core::usage::ProviderUsage>,
     delivery: PreparedIssueMonitorDelivery,
 }
@@ -3920,7 +3920,7 @@ impl AppRuntime {
                 }
             });
             if selection != current_selection || handoff != issue_monitor_resume_handoff(&request.project_root, issue_number)
-                || source_prefs_stamp != super::issue_monitor_prefs_stamp(&prefs_path)
+                || !super::issue_monitor_prefs_stamp_is_current(&prefs_path, &source_prefs_stamp)
             {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
@@ -4409,8 +4409,10 @@ impl AppRuntime {
         // Metadata has the same freshness contract as the Monitor prefs cache.
         // Never reacquire the prefs writer lock from the GUI to validate worker facts.
         let prefs_stamp_started = std::time::Instant::now();
-        let prefs_changed = prefs_stamp
-            != super::issue_monitor_prefs_stamp(&issue_monitor_prepared_prefs_path(&context));
+        let prefs_changed = !super::issue_monitor_prefs_stamp_is_current(
+            &issue_monitor_prepared_prefs_path(&context),
+            &prefs_stamp,
+        );
         let prefs_stamp_elapsed_ms = prefs_stamp_started.elapsed().as_secs_f64() * 1000.0;
         let provider_changed = provider_usage != self.provider_usage_accounts;
         let source_changed = delivery
