@@ -71,8 +71,12 @@ test.describe("Issue queue real backend launch", () => {
           .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind,
             activity: payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
         await info.attach("local-live-wire", { body: JSON.stringify({ observations, errors }, null, 2), contentType: "application/json" });
-      } finally { await fixture.stop(); }
+      } finally {
+        // Close the client before its server so cleanup cannot trigger reconnect errors.
+        try { await page.close(); } finally { await fixture.stop(); }
+      }
     }
+    expect(errors, "zero console/page errors including fixture cleanup").toEqual([]);
   });
 
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
