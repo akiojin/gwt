@@ -39766,6 +39766,75 @@ mod tests {
     }
 
     #[test]
+    fn markerless_scan_claim_and_launch_preserve_legacy_behavior() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        let now = "2026-10-24T00:00:00Z";
+        let mut baseline = None;
+        for body in [None, Some("Ordinary issue text referencing #43.")] {
+            let client = FakeIssueClient::new();
+            let mut candidates = [issue(42), issue(43)];
+            for candidate in &mut candidates {
+                candidate.body = body.map(str::to_string);
+                client.seed(IssueSnapshot {
+                    author_login: None,
+                    number: IssueNumber(candidate.number),
+                    title: candidate.title.clone(),
+                    body: candidate.body.clone().unwrap_or_default(),
+                    labels: candidate.labels.clone(),
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("t1"),
+                    comments: Vec::new(),
+                });
+            }
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.set_gui_connected(true);
+            let scan = scan_queued_candidates(&mut monitor, &candidates, now);
+            assert_eq!((scan.scanned, scan.claimed, scan.blocked), (2, 0, 0));
+            assert!(client.call_log().is_empty(), "scanning never claims");
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [42, 43]);
+            assert_eq!(monitor.claim_probe_plan(1), (1, vec![42, 43]));
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.inbox_view_at(now).iter().all(|item| {
+                item.state == MonitorInboxState::Queued && item.dependency.is_none()
+            }));
+
+            let probes = std::cell::RefCell::new(Vec::new());
+            let launches =
+                monitor.claim_next_launch_requests_with_probe(&client, "owner", now, 1, |number| {
+                    probes.borrow_mut().push(number);
+                    false
+                });
+            assert_eq!(*probes.borrow(), [42]);
+            assert_eq!(launches.len(), 1);
+            assert_eq!(launches[0].issue_number, 42);
+            assert_eq!(launches[0].branch_name, "work/issue-42");
+            assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+            assert!(client.comments(IssueNumber(43)).is_empty());
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [43]);
+            assert_eq!(monitor.active_count(), 1);
+            let observed = (
+                scan,
+                launches,
+                client.call_log(),
+                client.comments(IssueNumber(42)),
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(
+                    &observed, expected,
+                    "ordinary prose retains marker-less behavior"
+                );
+            } else {
+                baseline = Some(observed);
+            }
+        }
+    }
+
+    #[test]
     fn dependency_markers_ignore_examples_self_references_and_malformed_lines() {
         let declarations = parse_issue_monitor_dependencies(
             "Blocked-by: #44 #42 #43 #44\nBundle-with: #47 #42\n\
