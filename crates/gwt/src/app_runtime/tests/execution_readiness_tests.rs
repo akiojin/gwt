@@ -901,7 +901,7 @@ fn fresh_execution_session_start_routes_monitor_ack_to_feedback_owner_project() 
 }
 
 /// SPEC #3200 FR-052: a fresh linked-owner launch is not producing until
-/// SessionStart authenticates, so `spawn_agent_window_with_placement` defers
+/// SessionStart authenticates, so `spawn_agent_window_with_options` defers
 /// the Issue Monitor completion. The SessionStart finalizer therefore owns the
 /// durable delivery ACK — if it emitted the plain "launch succeeded" events the
 /// delivery tuple would stay pending forever and the daemon would redeliver it.

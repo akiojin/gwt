@@ -2336,7 +2336,7 @@ fn continue_work_ready_timeout_does_not_terminate_a_window_owned_by_another_sess
 fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
     let source = include_str!("../launch.rs");
     let launch_dispatch_start = source
-        .find("fn spawn_agent_window_with_placement(")
+        .find("fn spawn_agent_window_with_options(")
         .expect("launch dispatch function");
     let async_preparation_start = source[launch_dispatch_start..]
         .find("pub(crate) fn spawn_agent_window_async(")
