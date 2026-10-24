@@ -3840,7 +3840,7 @@ impl AppRuntime {
                 input
             });
             let retrying_facts = reusable.is_some();
-            let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), if retrying_facts { input.claim_or_reuse() } else { input.claim() }));
+            let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), if retrying_facts { input.claim_or_reuse() } else { input.claim_from_worker() }));
             record_issue_monitor_worker_phase("monitor_claim", &mut phase_started);
             let handoff = issue_monitor_resume_handoff(&request.project_root, issue_number);
             let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path);
@@ -3986,7 +3986,7 @@ impl AppRuntime {
             let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
             let claim = claim_input
                 .as_ref()
-                .map(|input| (input.materializer_window_id.clone(), input.claim()));
+                .map(|input| (input.materializer_window_id.clone(), input.claim_from_worker()));
             record_issue_monitor_worker_phase("monitor_answer_claim", &mut phase_started);
             let prepared = if claim
                 .as_ref()

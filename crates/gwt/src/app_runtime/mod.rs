@@ -1407,6 +1407,36 @@ impl IssueMonitorLaunchClaimInput {
         )
     }
 
+    /// Claim from a launch-preparation worker. The worker is off the GUI
+    /// event loop, so it waits for the daemon's serialized prefs commit
+    /// instead of the 200ms GUI budget: a busy daemon scan otherwise turns
+    /// every claim into an uncertain outcome and the launch never creates a
+    /// window (Issue #6096).
+    pub(super) fn claim_from_worker(
+        &self,
+    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
+        self.claim_with_publishers(
+            |snapshot, tabs| {
+                gwt::daemon_publisher::publish_issue_monitor_window_snapshot(
+                    &self.project_root,
+                    snapshot,
+                    tabs,
+                )
+            },
+            |payload| {
+                let payload = gwt::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    payload,
+                    self.materializer_pid,
+                );
+                gwt::daemon_publisher::publish_durable_issue_monitor_control(
+                    &self.project_root,
+                    payload,
+                )
+            },
+        )
+    }
+
     /// Reuse an exact durable reservation after checking it against the latest
     /// prefs and this retry's current canvas. Re-publishing an unchanged claim
     /// would invalidate other launches preparing against the same prefs file.
@@ -1429,7 +1459,7 @@ impl IssueMonitorLaunchClaimInput {
         {
             return Ok(true);
         }
-        self.claim()
+        self.claim_from_worker()
     }
 
     fn matches_durable_claim(&self, prefs: &gwt::IssueMonitorPrefs) -> bool {
