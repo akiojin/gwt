@@ -5581,7 +5581,7 @@ export function createKnowledgeKanbanSurface({
               }
               state.error = message;
             }
-            renderKnowledgeBridge(event.id);
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
             break;
           }
           case "knowledge_error": {

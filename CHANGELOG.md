@@ -1,6 +1,16 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.141.1] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Ignore scan re-stamped prefs record fields in launch admission (#6096)
+
+### Refactor
+
+- **ui:** Render knowledge phase completions from shared state
+
 ## [9.141.0] - 2026-10-24
 
 ### Bug Fixes

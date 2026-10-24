@@ -831,6 +831,29 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Knowledge phase completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const phases = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_bridge_phase_updated'));
+  const local = text => phases(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => phases(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "knowledge_bridge_phase_updated": {',
+    'case "knowledge_bridge_phase_updated": { renderKnowledgeBridge(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).length > 0);
+  assert.ok(delegated(app, bypass).length > 0);
+  const appBypass = app.replace('case "knowledge_bridge_phase_updated":',
+    'case "knowledge_bridge_phase_updated": document.body.textContent = event.kind;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("Board entries commit shared data and reject direct mention rendering", () => {
   const file = 'crates/gwt/web/board-logs-surface.js';
   const appFile = 'crates/gwt/web/app.js';
