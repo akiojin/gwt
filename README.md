@@ -540,11 +540,13 @@ only this host. It does not change another machine's independent project store.
 
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
-a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
-appear red; error details and history stay in the notification center. Use ⚙ to
+a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
+**Issues settings**. The switches show the server-confirmed On / Off state.
+Only current failures appear red; error details and history stay in the notification center.
+Use **Issues settings** to
 expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. Autonomous and Start / Stop return to the summary when collapsed.
+profiles. The summary switches remain available when settings are collapsed.
 Auto-apply updates is in **System**. Select **Manual** to edit
 Max active, then select **Apply** to save the final number. **Auto** disables editing
 and shows the effective limit, with **Measuring capacity…** while measurement is pending.

@@ -750,6 +750,15 @@ test("four columns preserve labelled controls, provenance, empty guidance and na
   const modeBox=await page.locator(".knowledge-view-mode").boundingBox();
   expect(Math.abs(searchBox!.y-modeBox!.y), "search and view mode share one filter row").toBeLessThan(2);
   await expect(page.locator('[data-action="monitor-settings"]')).toHaveAttribute("aria-label", "Issues settings");
+  const controls = page.getByRole("group", {name:"Monitor controls",exact:true});
+  await expect(controls.locator('[data-action="monitor-settings"]')).toHaveText("⚙ Issues settings");
+  await expect(controls.getByRole("switch", {name:"Auto-refill",exact:true})).toBeVisible();
+  const refillBox = await controls.locator('[data-action="monitor-auto-refill"]').boundingBox();
+  const autonomousBox = await controls.locator('[data-action="monitor-autonomous"]').boundingBox();
+  expect(Math.abs(refillBox!.y-autonomousBox!.y), "refill and autonomous share the same controls row").toBeLessThan(2);
+  for (const button of await controls.getByRole("button").all()) {
+    expect(await button.innerText(), "every Monitor action has visible words").toMatch(/[A-Za-z]/);
+  }
   await expect(page.locator('[data-action="refresh-knowledge"]')).toHaveText("↻ Refresh");
   await expect(page.getByRole("group",{name:"Monitor status",exact:true})).toBeVisible();
   await expect(page.getByRole("group",{name:"Monitor controls",exact:true})).toBeVisible();
@@ -786,6 +795,12 @@ test("T-7a: current labels explain themselves with keyboard focus and hover", as
   const before = await controlMessages();
   const queueMetric = page.locator('[data-metric="queue"]');
   await queueMetric.focus();
+  await page.keyboard.press("Tab");
+  const refill = page.getByRole("switch", { name: "Auto-refill", exact: true });
+  await expect(refill).toBeFocused();
+  await expect(popup).toBeVisible();
+  await expect(popup).toContainText("Automatically add eligible Backlog issues to the queue");
+  await expect(refill).toHaveAttribute("aria-describedby", await popup.getAttribute("id") as string);
   await page.keyboard.press("Tab");
   const autonomous = page.getByRole("switch", { name: "Autonomous mode" });
   await expect(autonomous).toBeFocused();
@@ -1276,16 +1291,22 @@ test("Issue #4499 a card missing at drop time explains why it cannot move", asyn
 });
 
 test("auto-refill starts off and toggle and limit use server-confirmed values", async ({ page }) => {
+  const controls = page.getByRole("group", {name:"Monitor controls",exact:true});
+  const toggle=controls.getByRole("switch",{name:"Auto-refill",exact:true});
+  await confirm(page,[3,4],{terminal_queue_auto_refill:false,terminal_queue_auto_refill_limit:3});
+  await expect(toggle).toHaveAttribute("aria-checked","false");
+  await expect(toggle).toContainText("Off");
+  await toggle.click();
+  await expect.poll(()=>messages(page)).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:3}]);
+  await expect(toggle).toHaveAttribute("aria-checked","false");
+  await confirm(page,[3,4],{terminal_queue_auto_refill:true});
+  await expect(toggle).toHaveAttribute("aria-checked","true");
+  await expect(toggle).toContainText("On");
   await page.getByRole("button", {name:"Issues settings",exact:true}).click();
   const issues = page.locator('[data-settings-panel="issues"]');
   await expect(issues.locator(".settings-issues-options")).toHaveAttribute("open", "");
   await expect(issues.locator('[data-action="monitor-settings"]')).toBeFocused();
-  const toggle=issues.getByLabel("Auto-refill",{exact:true});
-  await expect(toggle).not.toBeChecked();
-  await toggle.click();
-  await expect.poll(()=>messages(page)).toEqual([{kind:"set_issue_monitor_auto_refill",enabled:true,limit:3}]);
-  await confirm(page,[3,4],{terminal_queue_auto_refill:true});
-  await expect(toggle).toBeChecked();
+  await expect(issues.getByRole("checkbox",{name:"Auto-refill",exact:true})).toBeChecked();
   await issues.getByLabel("Refill limit",{exact:true}).fill("5");
   await issues.getByLabel("Refill limit",{exact:true}).press("Tab");
   await expect.poll(async()=>(await messages(page)).at(-1)).toEqual({kind:"set_issue_monitor_auto_refill",enabled:true,limit:5});

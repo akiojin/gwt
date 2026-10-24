@@ -144,7 +144,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
-  for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
+  for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
     assert.equal(body.querySelector(selector), null, `${selector} belongs to Settings`);
   }
 
@@ -161,11 +161,11 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   assert.equal(pill.title, "");
 });
 
-test("AC-23: ⚙ holds the settings copy and the held fallback in its tooltip", async (t) => {
+test("AC-23: labelled settings holds the settings copy and the held fallback in its tooltip", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const gear = body.querySelector('.knowledge-monitor-bar [data-action="monitor-settings"]');
-  assert.equal(gear.textContent, "⚙");
+  assert.equal(gear.textContent, "⚙ Issues settings");
 
   surface.applyIssueMonitorStatus({
     ...STATUS,

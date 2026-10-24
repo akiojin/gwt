@@ -1353,16 +1353,18 @@ export function createKnowledgeKanbanSurface({
           toggle.dataset.enabled = enabled ? "true" : "false";
           toggle.classList.toggle("primary", !enabled);
         }
-        // Issue #3561: the Autonomous control is a WAI-ARIA switch whose label
+        // Issue #3561 / #4499: each control is a WAI-ARIA switch whose label
         // names the setting and whose aria-checked + state word carry the
         // current value. It renders only what the server status says — the
         // click handler never writes a local optimistic value.
-        const autonomous = element.querySelector('[data-action="monitor-autonomous"]');
-        if (autonomous) {
-          const enabled = Boolean(issueMonitorModel.read().status.autonomous_mode);
-          autonomous.setAttribute("aria-checked", enabled ? "true" : "false");
-          autonomous.dataset.enabled = enabled ? "true" : "false";
-          const stateWord = autonomous.querySelector(".knowledge-monitor-switch__state");
+        for (const [action, setting] of [["monitor-autonomous", "autonomous_mode"],
+          ["monitor-auto-refill", "terminal_queue_auto_refill"]]) {
+          const toggle = element.querySelector(`[data-action="${action}"]`);
+          if (!toggle) continue;
+          const enabled = Boolean(issueMonitorModel.read().status[setting]);
+          toggle.setAttribute("aria-checked", enabled ? "true" : "false");
+          toggle.dataset.enabled = enabled ? "true" : "false";
+          const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
 
@@ -1567,6 +1569,15 @@ export function createKnowledgeKanbanSurface({
             send({
               kind: "set_issue_monitor_enabled",
               enabled: !Boolean(issueMonitorModel.read().status.enabled),
+            });
+          });
+        bar
+          .querySelector('[data-action="monitor-auto-refill"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_auto_refill",
+              enabled: !Boolean(issueMonitorModel.read().status.terminal_queue_auto_refill),
+              limit: issueMonitorModel.read().status.terminal_queue_auto_refill_limit ?? 0,
             });
           });
         bar
@@ -5138,13 +5149,18 @@ export function createKnowledgeKanbanSurface({
                   <span class="knowledge-monitor-metric" data-metric="active">Active 0/1</span>
                   <span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span>
                   </div><div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
+                  <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Auto-refill" data-action="monitor-auto-refill" data-enabled="false">
+                    <span class="knowledge-monitor-switch__label">Auto-refill</span>
+                    <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
+                    <span class="knowledge-monitor-switch__state">Off</span>
+                  </button>
                   <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Autonomous mode" data-action="monitor-autonomous" data-enabled="false">
                     <span class="knowledge-monitor-switch__label">Autonomous</span>
                     <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
                     <span class="knowledge-monitor-switch__state">Off</span>
                   </button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
-                  <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙</button>
+                  <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                   </div>
                   <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                 </section>
@@ -5209,6 +5225,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
