@@ -421,6 +421,48 @@ fn dead_project_assignments(
         .collect())
 }
 
+/// History supplies a preference, never evidence that a member is idle.
+fn previous_spec_member(root: &Path, sessions_dir: &Path, spec_number: u64) -> Option<String> {
+    let sessions = gwt_agent::session_ledger::load_sessions_shared(sessions_dir).ok()?;
+    let normalized = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let project_root = normalized(root);
+    let repo_hash = gwt_core::repo_hash::detect_repo_hash(root);
+    let mut specs = std::collections::HashMap::new();
+    sessions
+        .into_iter()
+        .filter_map(|session| {
+            let member = session
+                .agent_member_id
+                .as_ref()
+                .filter(|id| !id.is_empty())?;
+            let issue = session.linked_issue_number?;
+            if session.review_dispatch
+                || crate::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
+                || (!repo_hash
+                    .as_ref()
+                    .is_some_and(|hash| session.repo_hash.as_deref() == Some(hash.as_str()))
+                    && normalized(
+                        session
+                            .project_state_root
+                            .as_deref()
+                            .unwrap_or(&session.worktree_path),
+                    ) != project_root)
+            {
+                return None;
+            }
+            let same_spec = issue == spec_number
+                || *specs.entry(issue).or_insert_with(|| {
+                    crate::issue_monitor_worker::cached_agent_member_spec_owner(root, issue)
+                }) == Some(spec_number);
+            if !same_spec {
+                return None;
+            }
+            Some((session.created_at, session.id.clone(), member.clone()))
+        })
+        .max()
+        .map(|(_, _, member)| member)
+}
+
 /// Reserve one exact assignment; retries reuse the delivery's existing member.
 pub fn reserve_project_member(
     root: &Path,
@@ -434,6 +476,11 @@ pub fn reserve_project_member(
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let dead = dead_project_assignments(&path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
+    let historical_member = if inherited_member_id.is_none() {
+        spec_number.and_then(|spec| previous_spec_member(root, sessions_dir, spec))
+    } else {
+        None
+    };
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
@@ -508,8 +555,15 @@ pub fn reserve_project_member(
                 .position(|member| {
                     member.enabled
                         && member.assignment.is_none()
-                        && spec_number.is_some()
-                        && member.last_spec_number == spec_number
+                        && historical_member.as_deref() == Some(member.agent_member_id.as_str())
+                })
+                .or_else(|| {
+                    roster.members.iter().position(|member| {
+                        member.enabled
+                            && member.assignment.is_none()
+                            && spec_number.is_some()
+                            && member.last_spec_number == spec_number
+                    })
                 })
                 .or_else(|| {
                     roster
@@ -1426,6 +1480,58 @@ mod tests {
             &gwt_core::paths::gwt_sessions_dir(),
             &preferred.agent_member_id,
             "next",
+        )
+        .unwrap();
+
+        // Another SPEC must not erase a member's earlier SPEC ownership.
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let held =
+            reserve_project_member(&root, &sessions, "held-z", Some(90), Some(90), None, None)
+                .unwrap();
+        let x = reserve_project_member(&root, &sessions, "history-x", Some(9), Some(9), None, None)
+            .unwrap();
+        assert_ne!(x.agent_member_id, restored.members[0].agent_member_id);
+        let mut x_session = gwt_agent::Session::new(&root, "work/x", gwt_agent::AgentId::Codex);
+        x_session.project_state_root = Some(root.clone());
+        x_session.agent_member_id = Some(x.agent_member_id.clone());
+        x_session.agent_name = Some(x.name.clone());
+        x_session.linked_issue_number = Some(9);
+        x_session.update_status(gwt_agent::AgentStatus::Stopped);
+        x_session.save(&sessions).unwrap();
+        bind_project_member_session(&root, &x.agent_member_id, "history-x", &x_session.id).unwrap();
+        release_project_member(&root, &sessions, &x.agent_member_id, "history-x").unwrap();
+        let y = reserve_project_member(
+            &root,
+            &sessions,
+            "history-y",
+            Some(10),
+            Some(10),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(y.agent_member_id, x.agent_member_id);
+        release_project_member(&root, &sessions, &y.agent_member_id, "history-y").unwrap();
+        release_project_member(&root, &sessions, &held.agent_member_id, "held-z").unwrap();
+        let x_again = reserve_project_member(
+            &root,
+            &sessions,
+            "history-x-again",
+            Some(9),
+            Some(9),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            x_again.agent_member_id, x.agent_member_id,
+            "X -> Y -> idle -> X must prefer X's previous member over the first roster row"
+        );
+        release_project_member(
+            &root,
+            &sessions,
+            &x_again.agent_member_id,
+            "history-x-again",
         )
         .unwrap();
         crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
