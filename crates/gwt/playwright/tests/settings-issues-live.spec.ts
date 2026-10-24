@@ -287,10 +287,7 @@ test.describe("Issue #5322 Settings", () => {
           await current.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
             .some(({ payload }: any) => payload.kind === "workspace_state"));
           await openSettings(current, "issues");
-          await sendLiveGwtEvent(current, { kind: "update_window_geometry",
-            id: await settings(current).getAttribute("data-id"),
-            geometry: { x: 20, y: 20, width: 1200, height: 820 }, cols: 0, rows: 0 });
-          await expect(settings(current)).toHaveCSS("height", "820px");
+          await expect(settings(current)).toBeVisible();
           await expect(autonomous(current)).toBeEnabled();
           await expect(panel(current, "issues")).toContainText(project.root);
         }

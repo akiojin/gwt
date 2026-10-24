@@ -15,17 +15,12 @@ fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
     ] {
         let request = serde_json::from_value(serde_json::json!({
             "kind": "create_window", "preset": "settings",
-            "surface_owner": owner, "bounds": canvas_bounds()
+            "surface_owner": owner
         }))
         .expect("create request");
         runtime.handle_frontend_event("client-1".to_string(), request);
     }
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let tab = runtime.tab("tab-1").expect("tab");
     let windows = &tab.workspace.persisted().windows;
     assert_eq!(
@@ -55,8 +50,7 @@ fn app_runtime_surface_owner_cannot_promote_an_agent_to_pm() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let request = serde_json::from_value(serde_json::json!({
-        "kind": "create_window", "preset": "codex", "surface_owner": "pm",
-        "bounds": canvas_bounds()
+        "kind": "create_window", "preset": "codex", "surface_owner": "pm"
     }))
     .expect("agent request");
     runtime.handle_frontend_event("client-1".to_string(), request);
@@ -93,7 +87,7 @@ fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
         command_args_override: None,
     };
     runtime
-        .spawn_wizard_shell_window("tab-1", config, canvas_bounds())
+        .spawn_wizard_shell_window("tab-1", config)
         .expect("Shell window");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !recorded_events.lock().expect("events").iter().any(|event| {
@@ -1264,12 +1258,7 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Memo,
-        canvas_bounds(),
-        None,
-    );
+    let events = runtime.create_window_events(&runtime.test_context(), WindowPreset::Memo, None);
 
     assert!(events.is_empty());
     assert!(runtime.window_lookup.is_empty());
@@ -1297,8 +1286,7 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
         WindowPreset::Work,
         WindowPreset::Branches,
     ] {
-        let events =
-            runtime.create_window_events(&runtime.test_context(), preset, canvas_bounds(), None);
+        let events = runtime.create_window_events(&runtime.test_context(), preset, None);
         assert!(!events.is_empty());
         for window in &runtime
             .tab("tab-1")
@@ -1319,12 +1307,7 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
         .windows
         .len();
     for _ in 0..2 {
-        runtime.create_window_events(
-            &runtime.test_context(),
-            WindowPreset::Settings,
-            canvas_bounds(),
-            None,
-        );
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Settings, None);
     }
     assert_eq!(
         runtime
@@ -1352,12 +1335,8 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    let first_events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let first_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let first = runtime
         .tab("tab-1")
         .expect("tab")
@@ -1368,12 +1347,8 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         .expect("first Work window")
         .clone();
 
-    let repeated_events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let repeated_events =
+        runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -1399,10 +1374,10 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
     );
     assert!(first_events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(repeated_events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(
         !repeated_events
             .iter()

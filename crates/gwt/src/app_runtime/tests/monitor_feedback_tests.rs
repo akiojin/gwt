@@ -219,7 +219,7 @@ fn issue_4537_hub_sync_does_not_contain_project_workspace() {
     assert!(
         events.iter().all(|event| !matches!(
             event.event,
-            BackendEvent::WindowCanvasState { .. }
+            BackendEvent::WorkspaceState { .. }
                 | BackendEvent::TerminalSnapshot { .. }
                 | BackendEvent::LaunchWizardState { .. }
         )),
@@ -1065,9 +1065,7 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let other = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3166));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
@@ -1171,7 +1169,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         .tab_mut("tab-1")
         .unwrap()
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+        .add_window(WindowPreset::Agent);
     let foreign_window_id = combined_window_id("tab-1", &foreign.id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
     assert!(tab
@@ -1362,9 +1360,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let unrelated = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let unrelated = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace
         .set_linked_issue_number(&unrelated.id, Some(3166));
     tab.workspace
@@ -1527,9 +1523,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
     insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let other = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3165));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
@@ -1539,7 +1533,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         .set_agent_name(&holder_raw_id, Some("ExistingExactHolder".to_string())));
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows.swap(0, 1);
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     fixture.runtime.register_window("tab-1", &other.id);
     assert_eq!(
         fixture

@@ -5300,13 +5300,3 @@ test("window navigation publishes the selected pane without changing layout", ()
   assert.match(body, /windowId, notifyFocus, serial:/);
   assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
 });
-test("fixed surface bounds use the visible host dimensions", () => {
-  const body = extractFunctionBody(appSource, "visibleBounds");
-  const bounds = new Function("document", body);
-  const area = { clientWidth: 1200, clientHeight: 800 };
-  const doc = { querySelector: selector => {
-    assert.equal(selector, ".surface-area");
-    return area;
-  } };
-  assert.deepEqual(bounds(doc), { x: 0, y: 0, width: 1200, height: 800 });
-});

@@ -18,7 +18,7 @@
 // - closeModal(): closes the Add Window preset modal before the wizard
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
-//   the frontendUnits registry and visibleBounds() stay there).
+//   the frontendUnits registry stays there).
 import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";

@@ -262,7 +262,7 @@ test.describe("Issue preview placement", () => {
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     const detail = page.locator(".knowledge-detail-pane");
     await expect(detail.locator(".issue-preview-empty")).toHaveText("Shown in Agents. Use Focus window to view the agent output.");
-    await detail.locator('[data-action="focus-canvas-window"]').click();
+    await detail.locator('[data-action="focus-surface-window"]').click();
     await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "focus_window").at(-1)?.id))
@@ -286,7 +286,7 @@ test.describe("Issue preview placement", () => {
     await page.screenshot({ path: info.outputPath("issue-4804-existing-window.png") });
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
-      await detail.locator('[data-action="focus-canvas-window"]').click();
+      await detail.locator('[data-action="focus-surface-window"]').click();
       await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview-2"] .xterm')).toBeVisible();
       await expect(page.locator(".agent-tile")).toHaveCount(3);
       await page.locator('.op-rail__surface[data-surface="issues"]').click();
@@ -298,7 +298,7 @@ test.describe("Issue preview placement", () => {
     const pair = page.locator('.issue-split-pair[data-issue-number="3671"]');
     await expect(pair).toHaveAttribute("data-window-id", "tab-issue::agent-preview-2");
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await expect(pair.locator('[data-action="focus-canvas-window"]')).toBeVisible();
+    await expect(pair.locator('[data-action="focus-surface-window"]')).toBeVisible();
 
     await page.evaluate(() => {
       window.__patchWindow("tab-issue::issue-1", { preset: "agent_kanban" });
@@ -328,7 +328,7 @@ test.describe("Issue preview placement", () => {
     await page.evaluate(() => window.__patchWindow("tab-issue::issue-1", { preset: "settings" }));
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await expect(pair.locator('[data-action="focus-canvas-window"]')).toBeVisible();
+    await expect(pair.locator('[data-action="focus-surface-window"]')).toBeVisible();
   });
 
   test("Issue #4804: a stopped canvas preserves live inline output until closed", async ({ page }) => {
@@ -353,7 +353,7 @@ test.describe("Issue preview placement", () => {
       .metrics("tab-issue::agent-preview").readOnly)).toBe(true);
     await page.evaluate(() => window.__emitAgentOutput("LIVE INLINE WITH RETAINED CANVAS"));
     await expect(preview.locator(".terminal-root")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
-    await preview.locator('[data-action="focus-canvas-window"]').click();
+    await preview.locator('[data-action="focus-surface-window"]').click();
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "focus_window").at(-1)?.id))
       .toBe("tab-issue::agent-preview-2");
@@ -373,7 +373,7 @@ test.describe("Issue preview placement", () => {
     await expect(pair.locator(".issue-split-terminal .terminal-root")).toBeVisible();
     await expect(pair.locator(".issue-split-terminal")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await pair.locator('[data-action="focus-canvas-window"]').click();
+    await pair.locator('[data-action="focus-surface-window"]').click();
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "focus_window").at(-1)?.id))
       .toBe("tab-issue::agent-preview-2");
@@ -522,14 +522,14 @@ test.describe("Issue preview placement", () => {
       ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
     );
     await expect(face).toHaveCount(1);
-    await expect(face).toHaveClass(/is-on-canvas/);
+    await expect(face).toHaveClass(/is-in-agents/);
     await expect(face).toContainText("Shown in Agents");
     await expect(face.locator(".terminal-root")).toHaveCount(0);
     await expect(face.locator("[data-action='windowize-issue-preview']")).toHaveCount(0);
     await expect(
       page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
     ).toHaveText("Running");
-    await face.locator("[data-action='focus-canvas-window']").click();
+    await face.locator("[data-action='focus-surface-window']").click();
     await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect
       .poll(() =>
@@ -734,10 +734,10 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair).toBeVisible();
-    await expect(pair).toHaveClass(/is-on-canvas/);
+    await expect(pair).toHaveClass(/is-in-agents/);
     await expect(pair.locator(".issue-split-placeholder")).toContainText("Shown in Agents");
     await expect(pair.locator(".terminal-root")).toHaveCount(0);
-    await expect(pair.locator("[data-action='focus-canvas-window']")).toBeVisible();
+    await expect(pair.locator("[data-action='focus-surface-window']")).toBeVisible();
     await expect(page.locator(".surface-knowledge .issue-split-pair")).toHaveCount(3);
 
     expect(consoleErrors).toEqual([]);

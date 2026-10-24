@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use gwt::persistence::{WindowGeometry, WindowProcessStatus};
+use gwt::persistence::WindowProcessStatus;
 // Issue #3632: every prompt this module injects closes with the one canonical
 // reporting clause the Stop-gate continuation also uses; see
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
@@ -107,14 +107,6 @@ fn await_pm_delivery_status(
         );
     }
 }
-
-/// Fixed geometry for a freshly spawned PM pane.
-const PM_WINDOW_GEOMETRY: WindowGeometry = WindowGeometry {
-    x: 96.0,
-    y: 96.0,
-    width: 860.0,
-    height: 520.0,
-};
 
 pub(super) use gwt::pm_registry::PM_BOOTSTRAP_PROMPT;
 
@@ -382,7 +374,7 @@ pub(crate) enum PmEnsureTrigger {
 /// Preparing the worktree is Git work — `git worktree add` for a first spawn,
 /// `git fetch` plus a detached checkout for every refresh — and its cost scales
 /// with the repository's worktree count. Running it inline held the tao event
-/// loop for seconds during the canvas-ready restore drain, so the preparation
+/// loop for seconds during the surface-ready restore drain, so the preparation
 /// moves to a blocking worker and the spawn it gates is replayed from this
 /// payload when the worker reports back.
 #[derive(Debug, Clone)]
@@ -402,7 +394,6 @@ pub(crate) enum PmWorktreeContinuation {
         project_root: PathBuf,
         session: Box<gwt_agent::Session>,
         workspace_resume_context: Option<WorkspaceResumeContext>,
-        fallback_geometry: WindowGeometry,
         origin: RestoreOrigin,
         /// SPEC-3431 FR-001: whether the resumed pane must be recorded in
         /// `pending_pm_launches`, so launch completion rewrites `pm.json` to
@@ -448,33 +439,18 @@ impl PmWorktreeContinuation {
 }
 
 impl AppRuntime {
-    /// SPEC-3431 FR-001/FR-002: ensure the resident PM pane for `tab_id`.
-    ///
-    /// Focuses a live PM instead of spawning a duplicate, resumes a stale
-    /// registration's conversation when the durable session is still
-    /// materializable, and otherwise performs a fresh silent spawn. Never
-    /// spawns implementation agents.
+    /// Ensure the resident PM pane for this project. Focus the existing pane,
+    /// resume a stale registration when materializable, or start one PM.
     pub(crate) fn ensure_pm_agent_for_tab(
         &mut self,
         tab_id: &str,
-        trigger: PmEnsureTrigger,
-    ) -> Vec<OutboundEvent> {
-        self.ensure_pm_agent_for_tab_with_bounds(tab_id, None, trigger)
-    }
-
-    /// [`Self::ensure_pm_agent_for_tab`] with the caller's visible canvas
-    /// bounds, so an existing PM is framed in the viewport (FR-019).
-    pub(crate) fn ensure_pm_agent_for_tab_with_bounds(
-        &mut self,
-        tab_id: &str,
-        canvas_bounds: Option<WindowGeometry>,
         trigger: PmEnsureTrigger,
     ) -> Vec<OutboundEvent> {
         #[cfg(test)]
         if !test_gate::PM_ENSURE_ENABLED.with(|cell| cell.get()) {
             return Vec::new();
         }
-        let mut events = self.ensure_pm_agent_events(tab_id, canvas_bounds, trigger);
+        let mut events = self.ensure_pm_agent_events(tab_id, trigger);
         // FR-026: the ensure gate is where the PM's live state changes, so it
         // is also where the settings panel learns about it. Skipped ensures
         // (opt-out, non-Git tab, backoff floor) still report — "not running"
@@ -488,7 +464,6 @@ impl AppRuntime {
     fn ensure_pm_agent_events(
         &mut self,
         tab_id: &str,
-        canvas_bounds: Option<WindowGeometry>,
         trigger: PmEnsureTrigger,
     ) -> Vec<OutboundEvent> {
         let Some(tab) = self.tab(tab_id) else {
@@ -559,8 +534,8 @@ impl AppRuntime {
             .and_then(|registration| self.live_pm_window_id(&registration.session_id))
         {
             // FR-019: the PM launcher must always land the user on the PM, so
-            // focusing frames it in the viewport rather than only raising it.
-            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+            // focusing selects its rail surface.
+            return self.focus_existing_live_work_agent_events(&window_id);
         }
         // Issue #3607 AC-1/AC-2: the singleton is per *repository*, not per
         // project store. One repository can own two stores after a scope split
@@ -579,7 +554,7 @@ impl AppRuntime {
                 pm_registry::PmStartBlockKind::AnotherStoreOwnsThePm,
                 "another project store in this repository already owns the resident PM".to_string(),
             );
-            return self.focus_existing_live_work_agent_events(&window_id, canvas_bounds);
+            return self.focus_existing_live_work_agent_events(&window_id);
         }
         let Some(registration) = prefs.registration else {
             tracing::info!(
@@ -2639,7 +2614,7 @@ impl AppRuntime {
     }
 
     /// Window id of the live pane bound to `session_id`, if any: the session
-    /// is in the active registry, its window is still on the canvas, and the
+    /// is in the active registry, its window is still in the catalog, and the
     /// composed window status is not terminal.
     pub(crate) fn live_pm_window_id(&self, session_id: &str) -> Option<String> {
         self.active_agent_sessions
@@ -2968,19 +2943,13 @@ impl AppRuntime {
                 project_root: project_root.to_path_buf(),
                 session: Box::new(session),
                 workspace_resume_context: None,
-                fallback_geometry: PM_WINDOW_GEOMETRY,
                 origin: RestoreOrigin::Automatic,
                 register_pm_launch: true,
             });
         }
         let before = self.pm_window_ids(tab_id);
-        let events = self.spawn_restored_agent_session(
-            tab_id,
-            session,
-            None,
-            PM_WINDOW_GEOMETRY,
-            RestoreOrigin::Automatic,
-        );
+        let events =
+            self.spawn_restored_agent_session(tab_id, session, None, RestoreOrigin::Automatic);
         self.mark_new_pm_windows(tab_id, &before, project_root);
         events
     }
@@ -3068,7 +3037,6 @@ impl AppRuntime {
                     project_root,
                     session,
                     workspace_resume_context,
-                    fallback_geometry,
                     origin,
                     register_pm_launch,
                 } => {
@@ -3077,7 +3045,6 @@ impl AppRuntime {
                         &tab_id,
                         *session,
                         workspace_resume_context,
-                        fallback_geometry,
                         origin,
                     );
                     if let Some(before) = before {
@@ -3112,7 +3079,7 @@ impl AppRuntime {
         // refresh prunes unbundled `gwt-*` skills right after.
         let config = Self::pm_launch_config(worktree, &profile);
         let before = self.pm_window_ids(tab_id);
-        match self.spawn_agent_window_at_geometry(tab_id, config, PM_WINDOW_GEOMETRY, None, None) {
+        match self.spawn_agent_window_with_identity(tab_id, config, None, None) {
             Ok(events) => {
                 self.mark_new_pm_windows(tab_id, &before, project_root);
                 events

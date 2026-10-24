@@ -1712,7 +1712,7 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
             .tab_mut("tab-project")
             .expect("tab")
             .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds())
+            .add_window(WindowPreset::Agent)
             .id;
         let id = combined_window_id("tab-project", &raw_id);
         runtime.register_window("tab-project", &raw_id);
@@ -2681,9 +2681,7 @@ fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() 
     assert!(tab
         .workspace
         .set_session_id("agent-caller", Some("caller-session".to_string())));
-    let launch_failed = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let launch_failed = tab.workspace.add_window(WindowPreset::Agent);
     let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
     assert!(
         tab.workspace
@@ -3018,7 +3016,7 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     assert!(
         current_events
             .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
         "the current observation grant must still receive its scoped snapshot"
     );
 }
@@ -3709,7 +3707,7 @@ fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
     assert!(
         observed
             .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
         "the settled grant must still receive its scoped snapshot"
     );
 
@@ -3801,7 +3799,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
 
     let [OutboundEvent {
         target: DispatchTarget::Client(client_id),
-        event: BackendEvent::WindowCanvasState { workspace },
+        event: BackendEvent::WorkspaceState { workspace },
         ..
     }] = events.as_slice()
     else {
@@ -3830,7 +3828,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
     let ready_workspace = ready_events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("frontend_ready workspace state");
@@ -4355,9 +4353,7 @@ fn correlated_agent_self_close_rejects_same_project_peer_window() {
     assert!(tab
         .workspace
         .set_session_id("agent-project", Some("session-project".to_string())));
-    let peer = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let peer = tab.workspace.add_window(WindowPreset::Agent);
     assert!(tab
         .workspace
         .set_session_id(&peer.id, Some("session-peer".to_string())));
@@ -4414,9 +4410,7 @@ fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
     assert!(tab
         .workspace
         .set_session_id("agent-project", Some("session-project".to_string())));
-    let duplicate = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let duplicate = tab.workspace.add_window(WindowPreset::Agent);
     assert!(tab
         .workspace
         .set_session_id(&duplicate.id, Some("session-project".to_string())));
@@ -4694,7 +4688,7 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
+            .filter(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
             .count(),
         1
     );
@@ -4885,9 +4879,7 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
         WindowPreset::Claude,
         WindowProcessStatus::Running,
     );
-    let second = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let second = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace
         .set_agent_name(&second.id, Some("Falcon".into()));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
@@ -4906,7 +4898,7 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
     );
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(runtime.assign_missing_agent_names().is_empty());
 }
 

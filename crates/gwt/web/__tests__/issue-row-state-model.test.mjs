@@ -32,7 +32,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22row-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 test("pending SessionStart diagnosis uses the existing row reason without changing launch state", async () => {
@@ -259,7 +259,6 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     sendWindowFocus: (id) => calls.focusedRemotely.push(id),
     focusOrSpawnPreset() {},
     openIssueLaunchWizard: (windowId, number) => calls.launchWizard.push({ windowId, number }),
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime: (id, root) => {
       calls.terminalMounts.push({ id, root });
@@ -271,13 +270,12 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     getActiveWorkProjection: () => projection,
     workAttentionFor: attentionForWorkspace,
     formatWorkLifecycleLabel: formatLifecycleStateLabel,
-    continueWork: (workId, bounds) => {
-      calls.continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      calls.continued.push({ workId });
       return true;
     },
     openWorkspaceResumePicker: (workId) => calls.resumed.push(workId),
     openWorkspaceCleanup: (candidate, windowId) => calls.cleaned.push({ candidate, windowId }),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
   });
   surface.mountKnowledgeWindow(issueWindow, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
@@ -346,7 +344,7 @@ test("Issue #4804 a retained canvas preserves live inline output and Focus until
   const row = fixture.body.querySelector('.knowledge-row[data-issue-number="4804"]');
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.equal(fixture.body.querySelectorAll('[data-action="windowize-issue-preview"]').length, 0);
-  row.querySelector('[data-action="focus-canvas-window"]').click();
+  row.querySelector('[data-action="focus-surface-window"]').click();
   assert.deepEqual(fixture.calls.focusedLocally, ["retained"]);
   row.querySelector('[data-action="stop-agent"]').click();
   assert.deepEqual(fixture.sent.filter(message => message.kind === "stop_window")
@@ -358,7 +356,7 @@ test("Issue #4804 a retained canvas preserves live inline output and Focus until
   fixture.body.querySelector('[data-issue-view="split"]').click();
   const pair = fixture.body.querySelector('.issue-split-pair[data-issue-number="4804"]');
   assert.equal(pair.dataset.windowId, "live");
-  pair.querySelector('[data-action="focus-canvas-window"]').click();
+  pair.querySelector('[data-action="focus-surface-window"]').click();
   assert.deepEqual(fixture.calls.focusedLocally, ["retained", "retained"]);
   fixture.setWindows([live]);
   fixture.surface.renderKnowledgeBridge("win-1");
@@ -466,14 +464,14 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
     "stop-agent",
   ]);
 
-  const onCanvas = issueRowStateModel({
+  const inAgents = issueRowStateModel({
     entry: knowledgeEntry(3671, { monitor_state: "launched" }),
     work: workRow(),
     attention: attentionForWorkspace(workRow()),
-    canvasWindow: agentWindow("agent-1", 3671, { placement: { kind: "canvas" } }),
+    surfaceWindow: agentWindow("agent-1", 3671, { placement: { kind: "canvas" } }),
   });
-  assert.equal(onCanvas.primary.label, "Running");
-  assert.deepEqual(onCanvas.actions, ["focus-canvas-window"]);
+  assert.equal(inAgents.primary.label, "Running");
+  assert.deepEqual(inAgents.actions, ["focus-surface-window"]);
 
   for (const [status, label, tone] of [
     ["waiting", "Needs input", "needs-input"],
@@ -610,8 +608,8 @@ test("issueRowStateModel derives one primary badge, bounded secondary info, and 
 
 // The canvas face of a Windowized agent is found through the Work projection
 // (agent window id / session id) or through the ids this surface Windowized.
-test("issueCanvasAgentWindowsForIssue links canvas agent windows back to their Issue", async () => {
-  const { issueCanvasAgentWindowsForIssue } = await importSurfaceModule();
+test("issueSurfaceAgentWindowsForIssue links canvas agent windows back to their Issue", async () => {
+  const { issueSurfaceAgentWindowsForIssue } = await importSurfaceModule();
   const byWindowId = agentWindow("agent-1", 3671, { placement: { kind: "canvas" } });
   const bySessionId = agentWindow("agent-2", 3671, {
     placement: { kind: "canvas" },
@@ -635,12 +633,12 @@ test("issueCanvasAgentWindowsForIssue links canvas agent windows back to their I
     ],
   });
   assert.deepEqual(
-    issueCanvasAgentWindowsForIssue(windows, work, new Set(["agent-3"])).map((w) => w.id),
+    issueSurfaceAgentWindowsForIssue(windows, work, new Set(["agent-3"])).map((w) => w.id),
     ["agent-1", "agent-2", "agent-3"],
   );
-  assert.deepEqual(issueCanvasAgentWindowsForIssue(windows, null, new Set()), []);
+  assert.deepEqual(issueSurfaceAgentWindowsForIssue(windows, null, new Set()), []);
   assert.deepEqual(
-    issueCanvasAgentWindowsForIssue(windows, null, new Set(["agent-3", "agent-4"])).map(
+    issueSurfaceAgentWindowsForIssue(windows, null, new Set(["agent-3", "agent-4"])).map(
       (w) => w.id,
     ),
     ["agent-3"],
@@ -649,12 +647,12 @@ test("issueCanvasAgentWindowsForIssue links canvas agent windows back to their I
 });
 
 test("Issue #4804 recognizes a linked canvas window before its Work projection arrives", async () => {
-  const { issueCanvasAgentWindowsForIssue } = await importSurfaceModule();
+  const { issueSurfaceAgentWindowsForIssue } = await importSurfaceModule();
   const canvas = agentWindow("agent-1", 3671, {
     linked_issue_number: 3671, placement: { kind: "canvas" },
   });
   assert.deepEqual(
-    issueCanvasAgentWindowsForIssue([canvas], null, new Set(), 3671).map(window => window.id),
+    issueSurfaceAgentWindowsForIssue([canvas], null, new Set(), 3671).map(window => window.id),
     [canvas.id],
   );
 });
@@ -676,7 +674,7 @@ test("Issue #4804 focuses its existing window across repeated actions and permit
   assert.ok(!fixture.body.querySelector('[data-action="windowize-issue-preview"]'),
     "Kanban and the output preview offer focus while this project already has a window");
   assert.match(fixture.body.querySelector(".issue-preview-empty").textContent, /Shown in Agents/);
-  const focus = fixture.body.querySelector('[data-action="focus-canvas-window"]');
+  const focus = fixture.body.querySelector('[data-action="focus-surface-window"]');
   focus.click();
   focus.click();
   assert.deepEqual(fixture.calls.focusedRemotely, [canvas.id, canvas.id]);
@@ -686,7 +684,7 @@ test("Issue #4804 focuses its existing window across repeated actions and permit
   const split = fixture.body.querySelector('.issue-split-pair[data-issue-number="3671"]');
   assert.equal(split.dataset.windowId, canvas.id);
   assert.ok(!split.querySelector('[data-action="windowize-issue-preview"]'));
-  assert.ok(split.querySelector('[data-action="focus-canvas-window"]'));
+  assert.ok(split.querySelector('[data-action="focus-surface-window"]'));
   fixture.body.querySelector('[data-issue-view="list"]').click();
 
   fixture.setWindows([inline]);
@@ -942,7 +940,7 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
   menu3671.open = true;
   menu3671.querySelector('[data-action="continue-work"]').click();
   assert.deepEqual(fixture.calls.continued, [
-    { workId: "work-3671", bounds: { x: 0, y: 0, width: 1280, height: 800 } },
+    { workId: "work-3671" },
   ]);
   const reopened = fixture.body.querySelector('[data-issue-number="3671"] .knowledge-row-menu');
   reopened.open = true;
@@ -995,16 +993,16 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   const row = fixture.body.querySelector('[data-issue-number="3671"]');
   const face = row.querySelector(".issue-agent-status");
   assert.ok(face, "the row keeps an agent face for the Windowized agent");
-  assert.equal(face.classList.contains("is-on-canvas"), true);
+  assert.equal(face.classList.contains("is-in-agents"), true);
   assert.equal(face.dataset.windowId, "agent-1");
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, 0, "nothing is mounted");
   assert.match(face.textContent, /Shown in Agents/);
   assert.equal(face.querySelector('[data-action="windowize-issue-preview"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
-  assert.deepEqual(visibleActions(row), ["focus-canvas-window"]);
+  assert.deepEqual(visibleActions(row), ["focus-surface-window"]);
 
-  row.querySelector('[data-action="focus-canvas-window"]').click();
+  row.querySelector('[data-action="focus-surface-window"]').click();
   assert.deepEqual(fixture.calls.focusedLocally, ["agent-1"]);
   assert.deepEqual(fixture.calls.focusedRemotely, ["agent-1"]);
   assert.equal(
@@ -1033,7 +1031,7 @@ test("Issue row state CSS uses Operator tokens only", () => {
     ".knowledge-row-menu",
     ".knowledge-row-menu-list",
     ".knowledge-row-menu-item",
-    ".issue-agent-status.is-on-canvas",
+    ".issue-agent-status.is-in-agents",
     ".issue-agent-status-placeholder",
     ".issue-card-output",
     ".issue-card-output-text",

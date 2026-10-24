@@ -80,8 +80,7 @@ use crate::{
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
-        AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
-        WindowProcessStatus, WindowSurfaceOwner,
+        AgentKanbanLane, PersistedWindowState, ProjectKind, WindowProcessStatus, WindowSurfaceOwner,
     },
     preset::WindowPreset,
 };
@@ -220,14 +219,6 @@ pub struct IndexSearchResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_terms: Vec<String>,
     pub target: IndexSearchTarget,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArrangeMode {
-    Tile,
-    Stack,
-    Align,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,9 +416,7 @@ pub enum FrontendEvent {
     },
     /// Request an immediate usage refresh (SPEC-2970 FR-022).
     RefreshUsage,
-    StartupAutoResumeReady {
-        bounds: WindowGeometry,
-    },
+    StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
         navigation_ms: f64,
@@ -437,11 +426,8 @@ pub enum FrontendEvent {
         id: String,
     },
     /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
-    /// resident PM pane if it is not running, then frames it in the viewport.
-    OpenPmAgent {
-        #[serde(default)]
-        bounds: Option<WindowGeometry>,
-    },
+    /// resident PM pane if it is not running, then activates its surface.
+    OpenPmAgent {},
     /// SPEC-3431 FR-026: opt the active project in or out of PM auto-start.
     /// Governs the next project open only — it never stops a live PM.
     SetPmAutoStart {
@@ -493,35 +479,17 @@ pub enum FrontendEvent {
     },
     CreateWindow {
         preset: WindowPreset,
-        bounds: WindowGeometry,
         #[serde(default)]
         surface_owner: Option<WindowSurfaceOwner>,
     },
     FocusWindow {
         id: String,
-        bounds: Option<WindowGeometry>,
     },
     CycleFocus {
         direction: FocusCycleDirection,
-        bounds: WindowGeometry,
-    },
-    UpdateViewport {
-        viewport: CanvasViewport,
-    },
-    ArrangeWindows {
-        mode: ArrangeMode,
-        bounds: WindowGeometry,
-    },
-    DockWindowTab {
-        id: String,
-        target_id: String,
     },
     ActivateWindowTab {
         id: String,
-    },
-    DetachWindowTab {
-        id: String,
-        geometry: WindowGeometry,
     },
     PlaceAgentWindowInKanban {
         id: String,
@@ -537,7 +505,6 @@ pub enum FrontendEvent {
     },
     UndockAgentWindow {
         id: String,
-        geometry: Option<WindowGeometry>,
     },
     /// SPEC-3885 FR-012: fold a Windowized Issue window back into its Issue row. The
     /// window already knows its Issue, so the frontend only names the window.
@@ -561,14 +528,6 @@ pub enum FrontendEvent {
         #[serde(default)]
         candidate: String,
         request_id: String,
-    },
-    UpdateWindowGeometry {
-        id: String,
-        geometry: WindowGeometry,
-        cols: u16,
-        rows: u16,
-        #[serde(default)]
-        base_geometry_revision: Option<u64>,
     },
     CloseWindow {
         id: String,
@@ -849,7 +808,6 @@ pub enum FrontendEvent {
     OpenBoardOriginAgent {
         id: String,
         origin_session_id: String,
-        bounds: Option<WindowGeometry>,
     },
     SelectProfile {
         id: String,
@@ -911,9 +869,7 @@ pub enum FrontendEvent {
     /// (the gwt launch / Session TOML). `agent_session_id`, when present,
     /// names a specific Session (a conversation UUID under that Work) so a
     /// single Session row can be resumed directly; when absent the Work's
-    /// latest conversation is resumed. `bounds` carries the frontend's
-    /// current viewport so the spawned agent window appears at a sensible
-    /// position inside the visible canvas.
+    /// latest conversation is resumed.
     ResumeWorkspaceAgent {
         /// Retry correlation only; this value grants no authority.
         #[serde(default)]
@@ -921,7 +877,6 @@ pub enum FrontendEvent {
         session_id: String,
         #[serde(default)]
         agent_session_id: Option<String>,
-        bounds: WindowGeometry,
     },
     /// Start or recover the producing Execution for one opaque Work identity.
     ///
@@ -931,12 +886,10 @@ pub enum FrontendEvent {
     ContinueWork {
         operation_id: String,
         work_id: String,
-        bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
         id: String,
         branch_name: String,
-        bounds: WindowGeometry,
     },
     OpenLaunchWizard {
         id: String,
@@ -949,7 +902,6 @@ pub enum FrontendEvent {
     },
     LaunchWizardAction {
         action: LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
     },
     SetIssueMonitorEnabled {
         enabled: bool,
@@ -1374,7 +1326,6 @@ fn default_board_history_limit() -> usize {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
-    pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
     // Compatibility field only. Workspace history is intentionally not carried
     // by frequently-broadcast workspace_state events; active_work_projection is
@@ -2059,7 +2010,7 @@ pub enum BackendEvent {
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
     #[serde(rename = "workspace_state")]
-    WindowCanvasState {
+    WorkspaceState {
         workspace: AppStateView,
     },
     ActiveWorkProjection {
@@ -3542,7 +3493,7 @@ impl BackendEvent {
             BackendEvent::ProjectNotification { .. } => "project_notification",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
-            BackendEvent::WindowCanvasState { .. } => "workspace_state",
+            BackendEvent::WorkspaceState { .. } => "workspace_state",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
@@ -3738,7 +3689,7 @@ mod tests {
             BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
             BranchResumeInfo, BranchScope,
         },
-        persistence::{WindowGeometry, WindowState},
+        persistence::WindowState,
     };
 
     use super::{
@@ -4269,76 +4220,14 @@ mod tests {
     }
 
     #[test]
-    fn update_window_geometry_deserializes_base_geometry_revision_contract() {
-        let legacy = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "update_window_geometry",
-            "id": "w-1",
-            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
-            "cols": 80,
-            "rows": 24
-        }))
-        .expect("deserialize legacy update_window_geometry");
-
-        assert!(matches!(
-            legacy,
-            FrontendEvent::UpdateWindowGeometry {
-                id,
-                geometry: WindowGeometry {
-                    x: 1.0,
-                    y: 2.0,
-                    width: 300.0,
-                    height: 200.0,
-                },
-                base_geometry_revision: None,
-                ..
-            } if id == "w-1"
-        ));
-
-        let modern = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "update_window_geometry",
-            "id": "w-1",
-            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
-            "cols": 80,
-            "rows": 24,
-            "base_geometry_revision": 7
-        }))
-        .expect("deserialize modern update_window_geometry");
-
-        assert!(matches!(
-            modern,
-            FrontendEvent::UpdateWindowGeometry {
-                id,
-                geometry: WindowGeometry {
-                    x: 1.0,
-                    y: 2.0,
-                    width: 300.0,
-                    height: 200.0,
-                },
-                base_geometry_revision: Some(7),
-                ..
-            } if id == "w-1"
-        ));
-    }
-
-    #[test]
-    fn frontend_event_startup_auto_resume_ready_deserializes_visible_bounds() {
+    fn frontend_event_startup_auto_resume_ready_ignores_legacy_bounds() {
         let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
             "kind": "startup_auto_resume_ready",
             "bounds": { "x": 8.0, "y": 16.0, "width": 1200.0, "height": 800.0 }
         }))
         .expect("deserialize startup auto-resume readiness");
 
-        assert!(matches!(
-            event,
-            FrontendEvent::StartupAutoResumeReady {
-                bounds: WindowGeometry {
-                    x: 8.0,
-                    y: 16.0,
-                    width: 1200.0,
-                    height: 800.0,
-                }
-            }
-        ));
+        assert!(matches!(event, FrontendEvent::StartupAutoResumeReady {}));
     }
 
     #[test]
@@ -5752,10 +5641,8 @@ mod tests {
             FrontendEvent::OpenBoardOriginAgent {
                 id,
                 origin_session_id,
-                bounds,
             } if id == "tab-1::board-1"
                 && origin_session_id == "session-origin"
-                && bounds.as_ref().is_some_and(|bounds| bounds.width == 1200.0)
         ));
     }
 

@@ -676,14 +676,8 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
     let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let board_raw_id = tab
-        .workspace
-        .add_window(WindowPreset::Board, canvas_bounds())
-        .id;
-    let agent_raw_id = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds())
-        .id;
+    let board_raw_id = tab.workspace.add_window(WindowPreset::Board).id;
+    let agent_raw_id = tab.workspace.add_window(WindowPreset::Agent).id;
     let board_window_id = combined_window_id("tab-1", &board_raw_id);
     let agent_window_id = combined_window_id("tab-1", &agent_raw_id);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
@@ -707,7 +701,6 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
         FrontendEvent::OpenBoardOriginAgent {
             id: board_window_id,
             origin_session_id: "session-origin".to_string(),
-            bounds: Some(canvas_bounds()),
         },
     );
 
@@ -721,7 +714,7 @@ fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
     assert!(events.iter().any(|event| matches!(
         event,
         OutboundEvent {
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -826,7 +819,6 @@ fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
         FrontendEvent::OpenBoardOriginAgent {
             id: board_window_id.clone(),
             origin_session_id: "missing-session".to_string(),
-            bounds: Some(canvas_bounds()),
         },
     );
 
@@ -909,7 +901,7 @@ fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_vi
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1143,7 +1135,7 @@ fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

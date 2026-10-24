@@ -27,8 +27,8 @@ fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast(
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-        "embedded terminal grid resize must not mutate canvas geometry"
+            .all(|event| !matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "embedded terminal grid resize must not broadcast window metadata"
     );
     let pane = runtime
         .runtimes
@@ -42,15 +42,10 @@ fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast(
 
 #[test]
 fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
-    // Issue #2937: cycle_focus must NOT clobber the PTY size that the
-    // frontend established via its real xterm fit. The backend's
-    // geometry_to_pty_size approximation is only a spawn bootstrap;
-    // reverting an already-fitted PTY back to it on every window switch
-    // is what desyncs the child's grid from xterm and corrupts the
-    // rendered terminal (recovers on manual resize).
+    // Issue #2937: focus rotation must preserve the grid established by
+    // frontend xterm fit rather than resetting a live child on each switch.
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let bounds = canvas_bounds();
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -64,25 +59,8 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
     insert_test_pane_runtime(&mut runtime, &shell_id);
     insert_test_pane_runtime(&mut runtime, &claude_id);
 
-    // Sentinel that differs from geometry_to_pty_size for any open
-    // window, so a clobber via the approximation is detectable.
     const REAL_COLS: u16 = 137;
     const REAL_ROWS: u16 = 41;
-    for raw_id in ["shell-1", "claude-1"] {
-        let geometry = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(raw_id)
-            .expect("window")
-            .geometry
-            .clone();
-        assert_ne!(
-            geometry_to_pty_size(&geometry),
-            (REAL_COLS, REAL_ROWS),
-            "sentinel must differ from the approximation to be meaningful",
-        );
-    }
 
     // Simulate the frontend's real xterm fit having sized each PTY.
     for window_id in [&shell_id, &claude_id] {
@@ -99,11 +77,7 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 
     assert_eq!(
         runtime
-            .cycle_focus_events(
-                &runtime.test_context(),
-                FocusCycleDirection::Forward,
-                bounds
-            )
+            .cycle_focus_events(&runtime.test_context(), FocusCycleDirection::Forward)
             .len(),
         1
     );
@@ -119,17 +93,15 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
         assert_eq!(
             pane.screen().size(),
             (REAL_ROWS, REAL_COLS),
-            "cycle_focus must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+            "cycle_focus must preserve the frontend-fitted PTY size",
         );
     }
 }
 
 #[test]
 fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
-    // SPEC-2008 Phase 34 / Issue #2937 companion: tab activation changes only
-    // the active marker. The backend must not resize the PTY from the shared
-    // group geometry, because the frontend's visible xterm fit owns the real
-    // cols/rows for the revealed tab.
+    // Issue #2937 companion: tab activation changes only the focus order.
+    // Frontend xterm fit owns the grid of the revealed terminal.
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
@@ -143,10 +115,6 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
     let shell_id = combined_window_id("tab-1", "shell-1");
     let claude_id = combined_window_id("tab-1", "claude-1");
 
-    assert_eq!(
-        runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
-        1
-    );
     let _ = runtime.activate_window_tab_events(&shell_id);
 
     insert_test_pane_runtime(&mut runtime, &shell_id);
@@ -154,21 +122,6 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
 
     const REAL_COLS: u16 = 173;
     const REAL_ROWS: u16 = 31;
-    for raw_id in ["shell-1", "claude-1"] {
-        let geometry = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(raw_id)
-            .expect("window")
-            .geometry
-            .clone();
-        assert_ne!(
-            geometry_to_pty_size(&geometry),
-            (REAL_COLS, REAL_ROWS),
-            "sentinel must differ from the shared-geometry approximation",
-        );
-    }
 
     for window_id in [&shell_id, &claude_id] {
         runtime
@@ -187,12 +140,9 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
     assert_eq!(events.len(), 1);
     let workspace = &runtime.tab("tab-1").expect("tab").workspace;
     assert!(
-        workspace
-            .window("claude-1")
-            .expect("claude")
-            .tab_group_active
+        workspace.window("claude-1").expect("claude").z_index
+            > workspace.window("shell-1").expect("shell").z_index
     );
-    assert!(!workspace.window("shell-1").expect("shell").tab_group_active);
     for window_id in [&shell_id, &claude_id] {
         let pane = runtime
             .runtimes
@@ -204,67 +154,8 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
         assert_eq!(
             pane.screen().size(),
             (REAL_ROWS, REAL_COLS),
-            "tab activation must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
+            "tab activation must preserve the frontend-fitted PTY size",
         );
-    }
-}
-
-#[test]
-fn app_runtime_arrange_windows_does_not_clobber_real_fit_pty_size() {
-    // Issue #2937 companion: arrange_windows shares the same all-window
-    // resize fan-out as cycle_focus. The frontend re-fit (driven by the
-    // geometry_revision bump) is the single source of truth for PTY
-    // size; the backend must not revert PTYs to the approximation here.
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let bounds = canvas_bounds();
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Claude],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let shell_id = combined_window_id("tab-1", "shell-1");
-    let claude_id = combined_window_id("tab-1", "claude-1");
-    insert_test_pane_runtime(&mut runtime, &shell_id);
-    insert_test_pane_runtime(&mut runtime, &claude_id);
-
-    const REAL_COLS: u16 = 151;
-    const REAL_ROWS: u16 = 47;
-    for window_id in [&shell_id, &claude_id] {
-        runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane")
-            .resize(REAL_COLS, REAL_ROWS)
-            .expect("resize");
-    }
-
-    assert_eq!(
-        runtime
-            .arrange_windows_events(&runtime.test_context(), ArrangeMode::Tile, bounds)
-            .len(),
-        1
-    );
-
-    for window_id in [&shell_id, &claude_id] {
-        let pane = runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane");
-        assert_eq!(
-                pane.screen().size(),
-                (REAL_ROWS, REAL_COLS),
-                "arrange_windows must not clobber the frontend-fitted PTY size via geometry_to_pty_size",
-            );
     }
 }
 
@@ -311,7 +202,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 
     assert!(matches!(
         events.get(1).map(|event| &event.event),
-        Some(BackendEvent::WindowCanvasState { .. })
+        Some(BackendEvent::WorkspaceState { .. })
     ));
     let projection = events.iter().find_map(|event| match &event.event {
         BackendEvent::ActiveWorkProjection { projection } => Some(projection),
@@ -339,7 +230,7 @@ fn app_runtime_frontend_ready_replays_active_work_projection_separately_from_wor
 }
 
 #[test]
-fn app_runtime_geometry_focus_dock_and_activate_never_build_disk_projection() {
+fn app_runtime_focus_and_activate_never_build_disk_projection() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let first = temp.path().join("first");
@@ -365,24 +256,15 @@ fn app_runtime_geometry_focus_dock_and_activate_never_build_disk_projection() {
     let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-1"));
     let shell_id = combined_window_id("tab-2", "shell-1");
     let claude_id = combined_window_id("tab-2", "claude-1");
-    let bounds = canvas_bounds();
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    assert!(!runtime
-        .focus_window_events(&shell_id, Some(bounds.clone()))
-        .is_empty());
-    assert!(!runtime
-        .update_window_geometry_events(&shell_id, bounds.clone(), 120, 36, None)
-        .is_empty());
-    assert!(!runtime
-        .dock_window_tab_events(&claude_id, &shell_id)
-        .is_empty());
+    assert!(!runtime.focus_window_events(&shell_id).is_empty());
     assert!(!runtime.activate_window_tab_events(&claude_id).is_empty());
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
         0,
-        "UpdateWindowGeometry/FocusWindow/DockWindowTab/ActivateWindowTab must stay cache-only \
+        "FocusWindow/ActivateWindowTab must stay cache-only \
          and never enter the disk-backed projection builder",
     );
 }
@@ -479,7 +361,7 @@ fn app_runtime_select_project_tab_preserves_other_project_wizard() {
     assert!(events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &other_context.project_key)));
     assert!(matches!(
         events[0].event,
-        BackendEvent::WindowCanvasState { .. }
+        BackendEvent::WorkspaceState { .. }
     ));
     assert!(matches!(
         events[1].event,
@@ -823,7 +705,7 @@ fn project_prepare_open_commits_once_and_reuses_an_existing_project_key() {
     )), "opening an existing project must produce an explicit Hub completion");
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(
         runtime
             .handle_project_navigation_prepared(prepared)
@@ -1037,7 +919,7 @@ fn project_prepare_open_drops_stale_completion_after_newer_tab_selection() {
     assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-second"));
     assert!(select_events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
 
     open_task();
     let prepared = take_project_navigation_completion(&recorded_events);
@@ -1202,10 +1084,10 @@ fn select_project_tab_broadcast_keeps_the_resolved_agent_worktree_form() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
-        .expect("WindowCanvasState broadcast for the selected tab");
+        .expect("WindowRegistry broadcast for the selected tab");
     let form = workspace
         .tabs
         .iter()
@@ -1466,7 +1348,7 @@ fn app_runtime_window_focus_refreshes_only_its_owner_project() {
         .expect("test project state")
         .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
 
-    let events = runtime.focus_window_events(&combined_window_id("tab-2", "shell-2"), None);
+    let events = runtime.focus_window_events(&combined_window_id("tab-2", "shell-2"));
 
     assert!(
         runtime
@@ -1478,7 +1360,7 @@ fn app_runtime_window_focus_refreshes_only_its_owner_project() {
     );
     assert_eq!(events.len(), 1);
     assert!(matches!((&events[0].target, &events[0].event),
-        (DispatchTarget::Project(key), BackendEvent::WindowCanvasState { workspace })
+        (DispatchTarget::Project(key), BackendEvent::WorkspaceState { workspace })
         if Some(key) == runtime.project_key_for_tab("tab-2") && workspace.active_tab_id.as_deref() == Some("tab-2")));
 }
 
@@ -1575,7 +1457,7 @@ fn app_runtime_runtime_status_uses_lightweight_events_for_non_structural_status(
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "non-structural runtime status changes must not force a full workspace_state"
     );
     assert!(
@@ -1752,11 +1634,8 @@ fn app_runtime_launch_wizard_continue_resolves_runtime_context_from_worktree() {
             .runtime_context_resolved
     );
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].event,
@@ -1863,11 +1742,8 @@ fn app_runtime_launch_wizard_continue_does_not_materialize_missing_worktree() {
         .open_launch_wizard_for_branch("tab-1", &repo, branch_name, None, None)
         .expect("open launch wizard");
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert_eq!(events.len(), 1);
     let pending_view = runtime
         .project_state(&runtime.test_context())
@@ -2115,11 +1991,8 @@ fn app_runtime_launch_wizard_continue_falls_back_to_host_without_resolved_docker
     assert_eq!(phase_one.selected_runtime_target, "host");
     assert!(!phase_one.show_runtime_target);
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert_eq!(events.len(), 1);
     let pending_view = runtime
         .project_state(&runtime.test_context())
@@ -2238,7 +2111,6 @@ fn app_runtime_workspace_add_agent_opens_branch_launch_without_branches_window()
         gwt::LaunchWizardAction::UseStartMethod {
             method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
         },
-        None,
     );
     let configured_view = runtime
         .project_state(&runtime.test_context())
@@ -2592,7 +2464,6 @@ fn app_runtime_resume_branch_latest_agent_accepts_work_window_preset() {
         FrontendEvent::ResumeBranchLatestAgent {
             id: window_id,
             branch_name: "main".to_string(),
-            bounds: canvas_bounds(),
         },
     );
 
@@ -2866,11 +2737,8 @@ fn app_runtime_launch_wizard_submit_failure_emits_structured_error_log() {
         .launch_wizard = Some(sample_no_agent_launch_wizard_session("tab-1", &repo));
 
     let events = capture_tracing_events(|| {
-        let _ = runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            Some(canvas_bounds()),
-        );
+        let _ = runtime
+            .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     });
 
     let rows = gwt_core::error_ledger::list_since(None).unwrap();
@@ -2939,7 +2807,6 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
         &runtime.test_context(),
         Some("client-1"),
         LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
     );
 
     assert_eq!(events.len(), 1);
@@ -2973,11 +2840,8 @@ fn app_runtime_launch_submit_returns_materialization_pending_before_dispatch() {
     );
     drop(recorded);
 
-    let duplicate_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    let duplicate_events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert!(
         duplicate_events
             .iter()
@@ -3025,7 +2889,6 @@ fn app_runtime_launch_wizard_set_agent_failure_logs_requested_agent() {
             LaunchWizardAction::SetAgent {
                 agent_id: "codex".to_string(),
             },
-            Some(canvas_bounds()),
         );
     });
 

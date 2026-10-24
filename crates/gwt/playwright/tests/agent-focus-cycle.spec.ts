@@ -215,7 +215,7 @@ async function settleAndClearMessages(page: Page): Promise<void> {
 
 async function installFocusCycleBackend(page: Page): Promise<void> {
   await page.addInitScript(names => {
-    const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
+    const surfaceWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
       preset: "agent",
@@ -243,7 +243,7 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
     // Workspace order deliberately differs from runtime rank. The running
     // Agent is off-canvas; the PM and Shell must never become candidates.
     const windows = [
-      canvasWindow("shell-topmost", {
+      surfaceWindow("shell-topmost", {
         title: "Shell",
         preset: "shell",
         agent_id: null,
@@ -251,46 +251,46 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
         geometry: { x: 80, y: 80, width: 560, height: 340 },
         z_index: 40,
       }),
-      canvasWindow("pm-window", {
+      surfaceWindow("pm-window", {
         preset: "claude",
         is_pm: true,
         status: "running",
         z_index: 2,
       }),
-      canvasWindow("issue-window", {
+      surfaceWindow("issue-window", {
         preset: "issue",
         agent_id: null,
         z_index: 3,
       }),
-      canvasWindow("board-window", {
+      surfaceWindow("board-window", {
         preset: "board",
         agent_id: null,
         z_index: 4,
       }),
-      canvasWindow("agent-waiting", {
+      surfaceWindow("agent-waiting", {
         status: "waiting",
         geometry: { x: 700, y: 80, width: 560, height: 340 },
         z_index: 10,
       }),
-      canvasWindow("agent-live-future", {
+      surfaceWindow("agent-live-future", {
         status: "idle",
         geometry: { x: 1010, y: 460, width: 560, height: 340 },
         z_index: 15,
       }),
-      canvasWindow("agent-running", {
+      surfaceWindow("agent-running", {
         status: "running",
         placement: { kind: "issue_preview", issue_window_id: "issue-window", issue_number: 4777 },
         geometry: { x: 1320, y: 80, width: 560, height: 340 },
         z_index: 20,
       }),
-      canvasWindow("agent-stopped-tab-peer", {
+      surfaceWindow("agent-stopped-tab-peer", {
         status: "stopped",
         geometry: { x: 1940, y: 80, width: 560, height: 340 },
         z_index: 30,
         tab_group_id: "agent-tabs",
         tab_group_active: true,
       }),
-      canvasWindow("agent-starting-hidden", {
+      surfaceWindow("agent-starting-hidden", {
         status: "starting",
         geometry: { x: 1940, y: 80, width: 560, height: 340 },
         z_index: 5,

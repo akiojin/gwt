@@ -21,8 +21,8 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       await gotoLiveGwt(page, base!, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       try {
-        const id = await createShell(page, created, 80);
-        const focusedId = await createShell(page, created, 820);
+        const id = await createShell(page, created);
+        const focusedId = await createShell(page, created);
         await page.locator('.op-rail__surface[data-surface="agents"]').click();
         await page.getByRole("tab", { name: "All agents", exact: true }).click();
         const target = page.locator(`.agent-tile[data-agent-id="${id}"]`);
@@ -116,7 +116,6 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
     await withLiveGwtBackendLock(base!, info, async () => {
       const errors: string[] = [];
       const outputs = new Map<string, string>();
-      const geometries = new Map<string, { x: number; y: number; width: number; height: number }>();
       const created: string[] = [];
       const sent = new Map<string, number>();
       const received = new Map<string, number>();
@@ -147,11 +146,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             outputs.set(event.id, (outputs.get(event.id) ?? "")
               + Buffer.from(event.data_base64, "base64").toString("utf8"));
           }
-          if (event.kind === "workspace_state") {
-            for (const tab of event.workspace.tabs ?? []) {
-              for (const window of tab.workspace?.windows ?? []) geometries.set(window.id, window.geometry);
-            }
-          }
+
         });
       });
       await gotoLiveGwt(page, base!, { enableTestBridge: true });
@@ -160,8 +155,8 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       let verified = false;
       try {
-        const foreground = await createShell(page, created, 80);
-        const background = await createShell(page, created, 820);
+        const foreground = await createShell(page, created);
+        const background = await createShell(page, created);
         await sendLiveGwtEvent(page, { kind: "terminal_input", id: background, data:
           "node -e \"setInterval(()=>process.stdout.write('GWT_' + 'GRID_BACKGROUND_5117_' + 'x'.repeat(512) + '\\n'),100)\"\r" });
         await expect.poll(() => (outputs.get(background) ?? "").includes("GWT_GRID_BACKGROUND_5117_"),
@@ -193,16 +188,18 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             samplesBefore: processed, samplesAfter: null,
             windowRepliesBefore: received.get("window_list") ?? 0, windowRepliesAfter: null };
           burstTrace.push(trace);
-          await page.evaluate(({ id, count, burst }) => {
+          await page.evaluate(({ id, count }) => {
             const send = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_send", { detail }));
             send({ kind: "list_windows" });
             for (let index = 0; index < count; index += 1) {
               send({ kind: "update_terminal_grid", id, cols: 80 + index % 40, rows: 24 + index % 12 });
             }
             send({ kind: "update_terminal_grid", id, cols: 111, rows: 33 });
-            // Concurrent persisted frontend work alongside the streaming PTY.
-            if (burst % 10 === 0) send({ kind: "update_viewport", viewport: { x: burst % 20, y: 0, zoom: 1 } });
-          }, { id: foreground, count: gridsPerBurst, burst });
+          }, { id: foreground, count: gridsPerBurst });
+          // Exercise actual surface resize/layout alongside the streaming PTY.
+          if (burst % 10 === 0) await page.setViewportSize({
+            width: 1440 - burst % 20 * 4, height: 900 - burst % 20 * 2,
+          });
           await expect.poll(() => sent.get("update_terminal_grid") ?? 0,
             { message: `burst ${burst} reaches the project WebSocket`, timeout: 15_000 })
             .toBeGreaterThanOrEqual(sentBefore + gridsPerBurst + 1);
@@ -228,19 +225,18 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         expect(p95).toBeLessThanOrEqual(500);
         await expectPtyGrid(page, outputs, foreground, "BURST", 111, 33);
 
-        // Geometry broadcasts also fit the frontend's terminal. Assert the
-        // resulting real grid, then verify a later standalone grid replaces it.
-        const geometry = { x: 96, y: 80, width: 700, height: 440 };
-        await sendLiveGwtEvent(page, { kind: "update_window_geometry", id: foreground,
-          geometry, cols: 101, rows: 29 });
-        await expect.poll(() => geometries.get(foreground)).toEqual(geometry);
-        const shell = page.locator(`.workspace-window[data-id="${foreground}"]`);
-        await expect(shell).toHaveCSS("width", "700px");
-        await expect(shell).toHaveCSS("height", "440px");
+        // The fixed surface follows the browser viewport; its fit sends the
+        // real terminal grid. A later standalone grid must still replace it.
+        const beforeFit = await page.evaluate(id => window.__gwtTerminalTestApi.metrics(id), foreground);
+        await page.setViewportSize({ width: 1200, height: 760 });
+        await expect.poll(async () => page.evaluate(id => {
+          const metrics = window.__gwtTerminalTestApi.metrics(id);
+          return { cols: metrics.cols, rows: metrics.rows };
+        }, foreground)).not.toEqual({ cols: beforeFit.cols, rows: beforeFit.rows });
         const fitted = await page.evaluate(id => window.__gwtTerminalTestApi.metrics(id), foreground);
         expect(fitted.cols).toBeGreaterThan(0);
         expect(fitted.rows).toBeGreaterThan(0);
-        await expectPtyGrid(page, outputs, foreground, "GEOMETRY", fitted.cols, fitted.rows);
+        await expectPtyGrid(page, outputs, foreground, "REFIT", fitted.cols, fitted.rows);
         processed = (await samples()).length;
         await sendLiveGwtEvent(page, { kind: "update_terminal_grid", id: foreground, cols: 103, rows: 31 });
         await expect.poll(async () => (await samples()).length).toBeGreaterThan(processed);
@@ -267,17 +263,17 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
           // its old shells. Preserve the original error when the body failed.
           if (verified) await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
         }
-        await sendLiveGwtEvent(page, { kind: "update_viewport", viewport: { x: 0, y: 0, zoom: 1 } });
+        await page.setViewportSize({ width: 1440, height: 900 });
       }
     });
   });
 });
 
-async function createShell(page: Page, created: string[], x: number): Promise<string> {
+async function createShell(page: Page, created: string[]): Promise<string> {
   const before = new Set(await page.locator(".workspace-window").evaluateAll(nodes =>
     nodes.map(node => (node as HTMLElement).dataset.id)));
   await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell",
-    bounds: { x, y: 80, width: 700, height: 440 } });
+    });
   const id = await page.waitForFunction(seen => {
     const shell = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="shell"]')]
       .find(node => !seen.includes(node.dataset.id!));

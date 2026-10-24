@@ -573,7 +573,7 @@ export function classifyProjectWindowVisibility({
 /**
  * Predicate used by both the host resize fan-out and the existing
  * `fitTerminal` short-circuit. Only the current DOM layout controls refresh;
- * saved canvas placement no longer represents a window's visibility.
+ * surface ownership and actual DOM layout determine visibility.
  */
 export function viewportEligibleForRefresh({ element }) {
   if (element && element.isConnected === false) return false;

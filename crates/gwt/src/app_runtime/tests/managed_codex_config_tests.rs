@@ -412,7 +412,7 @@ fn clone_project_done_opens_workspace_home_and_replies_to_its_client() {
         event,
         OutboundEvent {
             target: DispatchTarget::Project(_),
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -2710,7 +2710,7 @@ fn workspace_view_for_tab_omits_work_item_history_from_workspace_state() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(empty_workspace_state()),
+        workspace: WindowRegistry::from_persisted(empty_workspace_state()),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

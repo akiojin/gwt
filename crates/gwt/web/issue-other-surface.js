@@ -175,7 +175,6 @@ export function createIssueOtherSurface({
   openWorkspaceCleanup,
   send,
   windowMap,
-  getResumeBounds,
   focusBoardEntry,
   launchPending,
   continueWork,
@@ -1401,11 +1400,10 @@ export function createIssueOtherSurface({
       if (launchPending?.isPending(`continue:${workId}`)) {
         return;
       }
-      const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-      if (!bounds || typeof continueWork !== "function") {
+      if (typeof continueWork !== "function") {
         return;
       }
-      if (continueWork(workId, bounds)) {
+      if (continueWork(workId)) {
         const focusRoot = button.closest?.(".window") || button.ownerDocument;
         renderWindows(true);
         const replacement = Array.from(
@@ -1495,10 +1493,6 @@ export function createIssueOtherSurface({
     if (!sessionId) {
       return;
     }
-    const bounds = typeof getResumeBounds === "function" ? getResumeBounds() : null;
-    if (!bounds) {
-      return;
-    }
     const operationId = createLaunchOperationId("resume");
     // resume_workspace_agent loads the launch config from the gwt session id
     // (the Work) and resumes the specific conversation named by
@@ -1515,7 +1509,6 @@ export function createIssueOtherSurface({
       operation_id: operationId,
       session_id: sessionId,
       agent_session_id: agentSessionId,
-      bounds,
     });
     renderWindows(true);
   }

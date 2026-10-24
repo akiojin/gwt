@@ -942,7 +942,7 @@ fn app_runtime_select_and_save_profile_broadcasts_snapshot_to_profile_windows() 
         title: "Repo".to_string(),
         project_root: repo,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1263,7 +1263,6 @@ fn frontend_project_log_tab_id_routes_non_window_owners() {
         (
             FrontendEvent::LaunchWizardAction {
                 action: gwt::LaunchWizardAction::Cancel,
-                bounds: None,
             },
             Some("tab-a"),
         ),
@@ -1383,7 +1382,7 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
     );
 
     let context_b = runtime.project_context(&tab_b_id).unwrap();
-    runtime.create_window_events(&context_b, WindowPreset::Logs, canvas_bounds(), None);
+    runtime.create_window_events(&context_b, WindowPreset::Logs, None);
     let logs_b_raw_id = runtime
         .tab(&tab_b_id)
         .expect("opened project tab")
@@ -1512,7 +1511,6 @@ fn app_runtime_routes_restored_opened_and_queued_logs_by_project_scope() {
                 Some(&context_a),
                 &FrontendEvent::FocusWindow {
                     id: logs_a_id.clone(),
-                    bounds: Some(canvas_bounds()),
                 }
             )
             .as_ref(),

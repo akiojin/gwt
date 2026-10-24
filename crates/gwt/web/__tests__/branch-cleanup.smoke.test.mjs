@@ -487,7 +487,6 @@ test("Workspace-owned cleanup result re-renders the modal even without a Branche
     branchCleanupModal: modalEl,
     branchCleanupDialog: dialogEl,
     launchPending: { settleWhere() {} },
-    visibleBounds: () => ({}),
     getActiveWorkProjection: () => null,
     renderWorkspaceWindows: () => {
       workspaceRenderCount += 1;
@@ -547,7 +546,6 @@ function mountCleanupSurface(surfaceModule, windowId, launchPending = { settleWh
     branchCleanupModal: modalEl,
     branchCleanupDialog: dialogEl,
     launchPending,
-    visibleBounds: () => ({}),
     getActiveWorkProjection: () => null,
     renderWorkspaceWindows: () => {},
   });

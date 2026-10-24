@@ -2256,7 +2256,6 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(retry_events.iter().all(|event| !matches!(
         &event.event,
@@ -2798,7 +2797,6 @@ fn app_runtime_close_finalizer_completes_while_a_live_pty_reader_is_attached() {
     runtime
         .spawn_process_window_with_console_kind(
             &window_id,
-            canvas_bounds(),
             ProcessLaunch {
                 initial_prompt_file: None,
                 command,
@@ -3290,7 +3288,6 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
-            bounds: Some(canvas_bounds()),
         },
     );
     assert!(submit_events.iter().any(|event| {
@@ -3311,7 +3308,7 @@ fn app_runtime_launch_wizard_submit_emits_agent_window_launching_status() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("workspace state after wizard submit");
@@ -3372,7 +3369,6 @@ fn app_runtime_launch_complete_missing_wizard_window_surfaces_open_error() {
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
-            bounds: Some(canvas_bounds()),
         },
     );
     let launch_events = dispatch_launch_materialization_request(

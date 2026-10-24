@@ -32,7 +32,6 @@ fn issue_restart_can_replace_its_own_initial_when_every_initial_is_reserved() {
         "tab-1",
         session,
         None,
-        canvas_bounds(),
         super::super::startup::RestoreOrigin::UserRequested,
     );
 
@@ -85,7 +84,7 @@ fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_windo
     }
 
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-    let events = runtime.startup_auto_resume_ready_events(canvas_bounds());
+    let events = runtime.startup_auto_resume_ready_events();
 
     assert_eq!(runtime.pending_auto_resume_sources.len(), 2);
     assert_eq!(runtime.restore_launch_windows.len(), 2);
@@ -116,7 +115,6 @@ fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_windo
         runtime
             .spawn_process_window_with_console_kind(
                 &window_id,
-                canvas_bounds(),
                 ProcessLaunch {
                     initial_prompt_file: None,
                     command: command.into(),
@@ -173,13 +171,7 @@ fn restore_name_allocation_failure_notifies_automatically_and_keeps_manual_error
             )
             .unwrap();
 
-            let events = runtime.spawn_restored_agent_session(
-                "tab-1",
-                session,
-                None,
-                canvas_bounds(),
-                origin,
-            );
+            let events = runtime.spawn_restored_agent_session("tab-1", session, None, origin);
             assert!(runtime.pending_auto_resume_sources.is_empty());
             assert_eq!(
                 events.iter().any(|event| matches!(event.event,
@@ -320,7 +312,7 @@ fn restore_summary_waits_for_async_preparation_failure_in_each_restore_route() {
         let prepared = capture_tracing_events(|| {
             if startup {
                 runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-                runtime.startup_auto_resume_ready_events(canvas_bounds());
+                runtime.startup_auto_resume_ready_events();
             } else {
                 runtime.restore_open_project_windows("tab-1");
             }
@@ -384,8 +376,8 @@ fn startup_restore_summary_includes_missing_worktrees_before_queue_and_before_sp
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
         assert_eq!(runtime.pending_startup_auto_resume_sessions.len(), 1);
         fs::remove_dir(temp.path().join("session-removed")).expect("remove queued worktree");
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
+        runtime.startup_auto_resume_ready_events();
     });
     assert!(runtime.pending_auto_resume_sources.is_empty());
     let summary = restore_admission_summary(&logs);
@@ -452,7 +444,6 @@ fn restored_session_rechecks_that_its_worktree_is_a_directory_before_spawning() 
         "tab-1",
         source,
         None,
-        canvas_bounds(),
         super::super::startup::RestoreOrigin::Automatic,
     );
     assert!(events.is_empty());
@@ -518,7 +509,7 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
             .map(|pending| pending.session.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(queued, vec!["session-live"]);
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
         let window_id = runtime
             .restore_launch_windows
             .keys()
@@ -533,7 +524,6 @@ fn startup_restore_admits_only_resumable_sessions_with_live_work() {
         runtime
             .spawn_process_window_with_console_kind(
                 &window_id,
-                canvas_bounds(),
                 ProcessLaunch {
                     initial_prompt_file: None,
                     command: command.to_string(),
@@ -787,7 +777,7 @@ fn startup_restore_limits_windows_to_the_last_open_set() {
         // Issue #4305 (AC-5): the summary counts restores that actually
         // reached a PTY, so it is emitted from the canvas-ready drain once
         // every prepared window has settled — not from the selection pass.
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
         let prepared = runtime
             .restore_launch_windows
             .keys()
@@ -1251,7 +1241,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
     )
     .expect("seed monitor prefs");
     let drain_logs = capture_tracing_events(|| {
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
     });
     assert!(
         runtime.restore_launch_windows.is_empty() && runtime.pending_auto_resume_sources.is_empty(),
@@ -1443,10 +1433,7 @@ fn restore_launch_failures_do_not_accumulate_error_windows_across_generations() 
     for generation in 0..2 {
         let raw_id = {
             let tab = runtime.tab_mut("tab-1").expect("tab");
-            tab.workspace
-                .add_window(WindowPreset::Agent, canvas_bounds())
-                .id
-                .clone()
+            tab.workspace.add_window(WindowPreset::Agent).id.clone()
         };
         let window_id = combined_window_id("tab-1", &raw_id);
         runtime.window_lookup.insert(
@@ -1565,7 +1552,7 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         title: "Restore Scale".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1714,7 +1701,7 @@ fn restore_launch_failure_before_pty_leaves_no_error_window_across_generations()
         title: "Restore Failure".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

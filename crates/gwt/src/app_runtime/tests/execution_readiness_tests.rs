@@ -793,7 +793,7 @@ fn prepared_manual_successor_loser_is_rejected_before_pane_creation() {
     let mut losing_runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
 
     let error = losing_runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect_err("the concurrent Prepared materializer must lose before pane creation");
 
     assert!(error.contains("already being materialized"), "{error}");
@@ -988,7 +988,7 @@ fn fresh_execution_session_start_acks_durable_issue_monitor_launch_delivery() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "an authenticated SessionStart must complete the fresh launch"
     );
     let ack_events = fixture.runtime.finish_queued_delivery_acks(&ack_tasks);
@@ -2587,7 +2587,7 @@ fn fresh_execution_generic_close_aborts_candidate_in_background() {
                 .tab_mut("tab-1")
                 .unwrap()
                 .workspace
-                .add_window(WindowPreset::Agent, canvas_bounds())
+                .add_window(WindowPreset::Agent)
                 .id;
             runtime.register_window("tab-1", &raw_id);
             fixture.window_id = combined_window_id("tab-1", &raw_id);
