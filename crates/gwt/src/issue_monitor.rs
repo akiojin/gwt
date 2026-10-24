@@ -11378,6 +11378,14 @@ impl IssueMonitorState {
         self.compensate_permission_blocked_launch_deliveries(true);
     }
 
+    pub(crate) fn set_issue_minimum_launch_tier(&mut self, number: u64, tier: u8) {
+        let minimum = self.tier_overrides.entry(number).or_default();
+        *minimum = (*minimum).max(tier);
+        if self.launch_auto {
+            self.compensate_permission_blocked_launch_deliveries(true);
+        }
+    }
+
     pub fn launch_usage_threshold_percent(&self) -> u8 {
         self.launch_usage_threshold_percent
     }
