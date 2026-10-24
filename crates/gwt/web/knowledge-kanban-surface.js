@@ -354,20 +354,16 @@ function issueLaunchRecovery(entry) {
   return "";
 }
 
-export function issueQueueColumn(entry, work = null, liveWindow = null) {
+export function issueQueueColumn(entry, work = null, localLive = false) {
+  if (localLive === true) return "active";
   if (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry.monitor_state)) {
-    // Closing an Issue does not stop its agent or release a monitor launch.
-    const live = liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status);
-    return live || Number(work?.active_agents) > 0 || ["launching", "launched"].includes(entry.monitor_state)
-      ? "active" : "done";
+    return "done";
   }
   if (issueStopReason(entry) !== null) return "backlog";
-  if (liveWindow && ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(liveWindow).status)) return "active";
-  // Judgment holds are not live launches; Work activity can outlast the agent.
+  // Reservations, window status and historical Work activity are not child
+  // liveness evidence. Keep their existing action/authority rules separate.
   if (["needs_human", "blocked_by_claim", "launch_failed", "agent_failed"].includes(entry.monitor_state)) return "backlog";
-  if (["launching", "launched"].includes(entry.monitor_state)) return "active";
   if (work?.status_category === "blocked") return "backlog";
-  if (Number(work?.active_agents) > 0) return "active";
   return isIssueInTerminalQueue(entry) ? "queued" : "backlog";
 }
 
@@ -376,10 +372,10 @@ function issueEntryHasLabel(entry, name) {
   return labels.some((label) => String(label || "").trim().toLowerCase() === name);
 }
 
-function issueRowPrimaryView({ entry, attention, inlineWindow, surfaceWindow }) {
+function issueRowPrimaryView({ entry, attention, inlineWindow, surfaceWindow, localLive = null }) {
   if (issueStopReason(entry) !== null) return { key: "monitor:held", label: "Held", tone: "idle" };
   const live = inlineWindow || surfaceWindow;
-  if (live) {
+  if (live && localLive !== false) {
     const view = issuePreviewStatusView(live);
     if (ISSUE_ROW_LIVE_AGENT_STATUSES.has(view.status)) {
       return { key: `agent:${view.status}`, label: view.label, tone: view.tone };
@@ -391,6 +387,9 @@ function issueRowPrimaryView({ entry, attention, inlineWindow, surfaceWindow }) 
   }
   const lane = ISSUE_ROW_WORK_LANE_VIEWS[attention?.lane];
   if (lane) {
+    if (attention.lane === "running" && localLive === false) {
+      return { key: "work:recorded", label: "Recorded work", tone: "idle" };
+    }
     return { key: `work:${attention.lane}`, label: lane.label, tone: lane.tone };
   }
   return issueEntryStateKey(entry) === "closed"
@@ -410,7 +409,7 @@ function legacyMonitorExclusionReason(entry) {
     ? "This exclusion was reported by an older monitor. Refresh to confirm queue membership." : "";
 }
 
-function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, surfaceWindow }) {
+function issueRowSecondaryItems({ entry, work, attention, primary, localLive = null }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
@@ -424,13 +423,18 @@ function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow,
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
-    issueQueueColumn(entry, work, inlineWindow || surfaceWindow) === "active";
+    issueQueueColumn(entry, work, localLive) === "active";
   const reason = cleanupPending ? "Session cleanup pending"
     : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
     items.push({ kind: "reason", key: "reason", label: reason });
   }
   if (recovery) items.push({ kind: "reason", key: "recovery", label: recovery, title: recovery });
+  if (localLive === false && entry?.blocked_by_owner) {
+    items.push({ kind: "chip", key: "elsewhere", label: "Claimed elsewhere", title: entry.blocked_by_owner });
+  } else if (localLive === false && primary.key !== "work:recorded" && (Number(work?.active_agents) > 0 || entry?.monitor_state === "launched")) {
+    items.push({ kind: "chip", key: "recorded", label: "Recorded work" });
+  }
   if (Number.isFinite(entry?.queue_position)) {
     const terminal = String(entry?.queue_terminal || "").trim();
     items.push({
@@ -570,8 +574,9 @@ export function issueRowStateModel({
   inlineWindow = null,
   surfaceWindow = null,
   queue = null,
+  localLive = null,
 } = {}) {
-  const context = { entry, work, attention, inlineWindow, surfaceWindow, queue };
+  const context = { entry, work, attention, inlineWindow, surfaceWindow, queue, localLive };
   const primary = issueRowPrimaryView(context);
   const secondary = issueRowSecondaryItems({ ...context, primary });
   const { order, limit = ISSUE_ROW_ACTION_LIMIT } = issueRowActionOrder(context);
@@ -797,6 +802,7 @@ export function createKnowledgeKanbanSurface({
   isKnowledgeWindowVisible = () => true,
   getWorkspaceWindows,
   windowCatalogModel,
+  agentActivityModel,
   scheduleFrame,
   pendingIndexOpenTargetsByPreset,
   knowledgeKindForPreset,
@@ -963,7 +969,7 @@ export function createKnowledgeKanbanSurface({
       }
 
       function issueStateExplanation(primary, entry) {
-        if (primary.key === "agent:error") {
+        if (["agent:error", "monitor:agent_failed"].includes(primary.key)) {
           const cause = String(entry?.error_message || "").trim();
           return `The agent session reported an error. ${cause || "No error details were reported by the agent or Issue Monitor."}`;
         }
@@ -993,6 +999,7 @@ export function createKnowledgeKanbanSurface({
           "work:remote": "This Work is only available remotely.",
           "work:needs_attention": "This Work needs attention before it can continue.",
           "work:running": "This Work is active.",
+          "work:recorded": "This Work records past activity; no local live agent has been observed.",
           "work:paused": "This Work is paused with no active agent.",
           "issue:open": "The issue is open on GitHub; this alone does not mean an agent is running.",
           "issue:closed": "The issue is closed on GitHub.",
@@ -1315,11 +1322,10 @@ export function createKnowledgeKanbanSurface({
         }
         const active = bar.querySelector('[data-metric="active"]');
         if (active) {
-          const bridgeState = knowledgeBridgeStateMap.get(windowId);
-          const count = bridgeState ? filteredIssueEntries(bridgeState)
-            .filter(entry => issueQueueColumnForEntry(entry, windowId) === "active").length : 0;
-          active.textContent = `Active ${count}/${maxActive}`;
-          explainIssueControl(active, `Issues in the Active column. Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
+          const activity = agentActivityModel?.read();
+          active.textContent = activity?.count == null ? "Active —"
+            : `Active ${activity.count} · ${activity.issueCount} ${activity.issueCount === 1 ? "issue" : "issues"} · PM ${activity.pmCount}`;
+          explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
         if (queue) {
@@ -3220,7 +3226,7 @@ export function createKnowledgeKanbanSurface({
       function queueProjectedEntry(entry) {
         const live = issueMonitorModel.read().inboxByIssue[entry.number];
         if (live) entry = { ...entry, state: live.issue.state ?? entry.state, monitor_state: live.state,
-          exclusion_reason: live.exclusion_reason ?? null };
+          exclusion_reason: live.exclusion_reason ?? null, blocked_by_owner: live.blocked_by_owner ?? null };
         const diagnosis = live?.error_message;
         entry = { ...entry, error_message: typeof diagnosis === "string" ? diagnosis : null,
           readiness_diagnosis: typeof diagnosis === "string" &&
@@ -3240,10 +3246,11 @@ export function createKnowledgeKanbanSurface({
 
       function issueQueueColumnForEntry(entry, windowId) {
         const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-        const faces = issueRowFaces(windowId, entry, work);
-        const live = faces.inlineWindow || faces.surfaceWindow;
-        const owned = live?.linked_issue_number == null || Number(live.linked_issue_number) === entry.number;
-        return issueQueueColumn(entry, work, owned ? live : null);
+        return issueQueueColumn(entry, work, issueHasLocalAgent(entry));
+      }
+
+      function issueHasLocalAgent(entry) {
+        return Boolean(agentActivityModel?.read().byIssue[entry.number]?.length);
       }
 
       function renderIssueQueueBoard(windowId, state, list, entries) {
@@ -3267,7 +3274,7 @@ export function createKnowledgeKanbanSurface({
           const explanations = {
             backlog: "Open issues that are not queued and have no running agent.",
             queued: "Issues waiting to launch. Their queue positions show the launch order.",
-            active: "Issues with an agent launching or running. Card output is a read-only preview.",
+            active: "Issues with a live agent on this terminal. Card output is a read-only preview; the Active badge counts agents including PM.",
             done: "Closed issues or issues the monitor reports as merged or released.",
           };
           let heading = column.querySelector("h3");
@@ -3277,7 +3284,7 @@ export function createKnowledgeKanbanSurface({
             body = createNode("div", "issue-queue-items");
             column.append(heading, body);
           }
-          const headingText = `${label} · ${items.length}`;
+          const headingText = `${label} · ${items.length}${phase === "active" ? (items.length === 1 ? " issue" : " issues") : ""}`;
           if (heading.textContent !== headingText) heading.textContent = headingText;
           explainIssueControl(heading, explanations[phase], `column-${phase}`);
           reconcileKnowledgeList(body, items, {
@@ -3290,9 +3297,8 @@ export function createKnowledgeKanbanSurface({
               return JSON.stringify([{ ...entry, queue_position: entry.queue_position ?? null, monitor_state: entry.monitor_state ?? null }, work, faces, faces.inlineWindow ? issueAgentElapsedLabel(faces.inlineWindow) : null,
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
-                phase === "active" ? issueProjectWindows(windowId).filter(target =>
-                  target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
-                    work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
+                agentActivityModel?.read().byIssue[entry.number],
+                phase === "active" ? issueCurrentAgentWindows(issueProjectWindows(windowId), entry) : null]);
             },
             update: (row, entry) => {
               row.classList.toggle("selected", state.selectedNumber === entry.number);
@@ -3306,18 +3312,8 @@ export function createKnowledgeKanbanSurface({
             render: entry => {
               const row = renderIssueRow(windowId, state, entry);
               if (phase === "active") {
-                const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-                const agents = work?.agents || [];
-                const windows = issueProjectWindows(windowId);
+                const windows = issueCurrentAgentWindows(issueProjectWindows(windowId), entry);
                 for (const target of windows) {
-                  if (!target.agent_id || target.preset === "pm" ||
-                      !ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(target.status)) continue;
-                  const linked = Number(target.linked_issue_number ?? target.placement?.issue_number);
-                  const belongs = Number.isFinite(linked)
-                    ? linked === entry.number
-                    : agents.some(agent => agent.window_id === target.id ||
-                      (target.session_id && agent.session_id === target.session_id));
-                  if (!belongs) continue;
                   if (!row.classList.contains("has-live-output")) {
                     row.querySelector(".issue-agent-status")?.remove();
                     row.classList.add("has-live-output");
@@ -3785,6 +3781,7 @@ export function createKnowledgeKanbanSurface({
           attention,
           inlineWindow: faces.inlineWindow,
           surfaceWindow: faces.surfaceWindow,
+          localLive: issueHasLocalAgent(entry),
         });
         const context = { windowId, state, entry, work, queue: null, target, ...faces };
         const pair = createNode("div", "issue-split-pair");
@@ -4139,6 +4136,7 @@ export function createKnowledgeKanbanSurface({
           queue,
           inlineWindow: faces.inlineWindow,
           surfaceWindow: faces.surfaceWindow,
+          localLive: issueHasLocalAgent(entry),
           target: faces.inlineWindow || faces.surfaceWindow,
         };
         const row = issueRowStateModel(context);
@@ -4701,10 +4699,17 @@ export function createKnowledgeKanbanSurface({
         return windows.filter(window => ids.has(window.id));
       }
 
+      function issueCurrentAgentWindows(windows, entry) {
+        const agents = agentActivityModel?.read().byIssue[entry.number] || [];
+        return windows.filter(target => agents.some(agent =>
+          agent.window_id === target.id && agent.session_id === target.session_id));
+      }
+
       function issueRowFaces(windowId, entry, work) {
         const windows = issueProjectWindows(windowId);
-        const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
-        const surfaceWindows = issueSurfaceAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
+        const inline = issueCurrentAgentWindows(issuePreviewWindowsForIssue(windows, windowId, entry.number), entry);
+        const surfaceWindows = issueCurrentAgentWindows(
+          issueSurfaceAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number), entry);
         const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
         const liveSurface = surfaceWindows.find(isLive);
         if (liveSurface) return { inlineWindow: null, surfaceWindow: liveSurface };
@@ -4739,6 +4744,7 @@ export function createKnowledgeKanbanSurface({
           attention,
           inlineWindow: faces.inlineWindow,
           surfaceWindow: faces.surfaceWindow,
+          localLive: issueHasLocalAgent(entry),
           queue,
         });
         const context = {
@@ -5193,10 +5199,15 @@ export function createKnowledgeKanbanSurface({
                 if (mounted) renderKnowledgeBridge(windowData.id);
               }),
             ];
+            if (agentActivityModel && state.kind === "issue") {
+              state.monitorSubscriptions.push(agentActivityModel.subscribeFrame(model => model, () => {
+                if (mounted) renderKnowledgeBridge(windowData.id);
+              }));
+            }
             if (windowCatalogModel && state.kind === "issue") {
               state.monitorSubscriptions.push(windowCatalogModel.subscribeFrame(model =>
                 JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
-                  .map(windowData => [windowData.id, windowData.linked_issue_number,
+                  .map(windowData => [windowData.id, windowData.session_id, windowData.linked_issue_number,
                     windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,
                     Object.hasOwn(model.catalog.runtimeStates, windowData.id)
                       ? model.catalog.runtimeStates[windowData.id] : windowData.status])), () => {

@@ -1,5 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
+import { createAgentActivityModel } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -422,6 +423,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // route, never from in-page selection, so reconnects rebind the same
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
+      const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -1154,6 +1156,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
 
       function setConnectionState(connected) {
+        if (!connected) clearAgentActivity();
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -3724,6 +3727,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         // projection that is already broadcast, and reuses the Work surface's own
         // derivations and action paths rather than re-deriving them.
         getActiveWorkProjection: () => activeWorkProjection,
+        agentActivityModel,
         workAttentionFor: attentionForWorkspace,
         renderOtherWork: (parent, windowId, options) =>
           workspaceOverviewSurface.renderInto(parent, windowId, options),
@@ -5149,6 +5153,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             break;
           case "active_work_projection":
           case "active_work_projection_patch":
+            applyAgentActivitySnapshot(event.projection?.local_agent_activity);
             applyActiveWorkProjectionReceiveEvent(event);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
@@ -5491,6 +5496,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         agentsSurface?.dispose();
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
+        agentActivityModel.dispose();
         launchWizardVisibilityModel.dispose();
       }, { once: true });
 

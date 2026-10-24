@@ -1218,7 +1218,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
     }
 }
 
-fn sample_runtime(
+pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
     active_tab_id: Option<&str>,

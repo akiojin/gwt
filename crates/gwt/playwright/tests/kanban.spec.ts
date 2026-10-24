@@ -522,7 +522,7 @@ test.describe("Issue Bridge load recovery", () => {
       "Queue 3",
     );
     await expect(issueSurface.locator('.knowledge-monitor-bar [data-metric="active"]')).toHaveText(
-      "Active 0/2",
+      "Active —",
     );
     await expect(issueSurface.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
     await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
@@ -579,7 +579,7 @@ test.describe("Issue Bridge load recovery", () => {
       });
     });
     await expect(autonomous).toHaveAttribute("aria-checked", "true");
-    await expect(issueSurface.locator('[data-metric="active"]')).toHaveText("Active 0/4");
+    await expect(issueSurface.locator('[data-metric="active"]')).toHaveText("Active —");
     await expect(issueSurface.locator('[data-metric="active"]')).toHaveAttribute(
       "aria-description", /Monitor agent capacity: 1\/4/,
     );

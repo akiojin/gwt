@@ -12,6 +12,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 import {
   attentionForWorkspace,
   formatLifecycleStateLabel,
@@ -108,13 +109,85 @@ test("Issue #6141 closed issues keep live sessions in Active until cleanup", asy
   const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
   const entry = knowledgeEntry(6141, { state: "closed", monitor_state: "released" });
   const live = agentWindow("live", 6141);
-  assert.equal(issueQueueColumn(entry, null, live), "active");
-  assert.equal(issueQueueColumn(entry, workRow()), "active");
-  assert.equal(issueQueueColumn({ ...entry, monitor_state: "launched" }), "active");
+  assert.equal(issueQueueColumn(entry, null, true), "active");
+  assert.equal(issueQueueColumn(entry, workRow()), "done");
+  assert.equal(issueQueueColumn({ ...entry, monitor_state: "launched" }), "done");
   assert.equal(issueQueueColumn(entry, null, { ...live, status: "stopped" }), "done");
   assert.equal(issueQueueColumn(entry, null, { ...live, status: "error" }), "done");
-  const model = issueRowStateModel({ entry, inlineWindow: live });
+  const model = issueRowStateModel({ entry, inlineWindow: live, localLive: true });
   assert.deepEqual(model.secondary.map(item => item.label), ["Closed", "Session cleanup pending"]);
+});
+
+test("AC34 recorded Work, launching and stale windows cannot prove a local live agent", async () => {
+  const { issueQueueColumn, issueRowStateModel } = await importSurfaceModule();
+  for (const monitor_state of [null, "launching", "launched"]) {
+    const entry = knowledgeEntry(4777, { monitor_state });
+    assert.equal(issueQueueColumn(entry, workRow({ active_agents: 18 })), "backlog");
+    assert.equal(issueQueueColumn(entry, null, agentWindow("stale", 4777)), "backlog");
+    assert.equal(issueQueueColumn(entry, null, true), "active", "only canonical local membership counts");
+  }
+  assert.equal(issueQueueColumn(knowledgeEntry(4777, { state: "closed" }), workRow()), "done");
+  const recorded = issueRowStateModel({ entry: knowledgeEntry(4777), work: workRow(),
+    attention: { lane: "running" }, inlineWindow: agentWindow("stale", 4777), localLive: false });
+  assert.equal(recorded.primary.label, "Recorded work");
+  assert.doesNotMatch(recorded.primary.label, /Active|Running/);
+});
+
+test("AC34 Active counts local agents once and separates recorded and foreign work", async t => {
+  const agents = [agentWindow("one", 4777), agentWindow("two", 4777),
+    agentWindow("three", 5016), agentWindow("four", 3431), { id: "pm", is_pm: true }];
+  const fixture = await makeFixture({ workspaceWindows: agents, projection: { active_works: [
+    workRow({ id: "old", active_agents: 18, linked_issue_numbers: [99] }),
+  ] } });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [4777, 5016, 3431].map(number => knowledgeEntry(number))
+    .concat(knowledgeEntry(99, { related_work_refs: [{ id: "old" }] }), knowledgeEntry(100)));
+  fixture.surface.applyIssueMonitorInbox([{ issue: { number: 100 }, state: "blocked_by_claim", blocked_by_owner: "other-host" }]);
+  assert.equal(fixture.body.querySelector('[data-metric="active"]').textContent, "Active 5 · 3 issues · PM 1");
+  assert.equal(fixture.body.querySelectorAll('[data-queue-column="active"] .knowledge-row').length, 3);
+  assert.match(fixture.body.querySelector('[data-issue-number="99"]').textContent, /Recorded work/);
+  assert.match(fixture.body.querySelector('[data-issue-number="100"]').textContent, /Claimed elsewhere/);
+  fixture.setLiveAgents([agents[4]]);
+  fixture.surface.renderAllKnowledgeBridgeWindows();
+  assert.equal(fixture.body.querySelector('[data-metric="active"]').textContent, "Active 1 · 0 issues · PM 1");
+  assert.equal(fixture.body.querySelectorAll('[data-queue-column="active"] .knowledge-row').length, 0);
+});
+
+test("AC34 stale Issue windows cannot offer Focus or agent faces in row, detail or split", async t => {
+  const stale = [agentWindow("old-4499", 4499, { status: "idle", linked_issue_number: 4499,
+    placement: { kind: "canvas" } }), agentWindow("old-5016", 5016, { status: "idle" })];
+  const live = agentWindow("live-4777", 4777);
+  const fixture = await makeFixture({ workspaceWindows: [...stale, live], localAgents: [live],
+    projection: { active_works: [workRow({ id: "old-work", active_agents: 19,
+      agents: stale.map(target => ({ window_id: target.id })) })] } });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [
+    knowledgeEntry(4499, { monitor_state: "launch_failed", related_work_refs: [{ id: "old-work" }] }),
+    knowledgeEntry(5016, { monitor_state: "queued", queue_position: 1, related_work_refs: [{ id: "old-work" }] }),
+    knowledgeEntry(4777),
+  ]);
+  for (const number of [4499, 5016]) {
+    const row = fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+    assert.ok(!row.querySelector('[data-action="focus-surface-window"], [data-action="windowize-issue-preview"]'),
+      `Issue ${number} has no current local pane to focus or windowize`);
+    assert.equal(row.querySelector(".issue-agent-status"), null);
+    fixture.surface.requestKnowledgeDetail("win-1", "issue", number);
+    fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+    const detail = fixture.body.querySelector(".knowledge-detail-pane");
+    assert.equal(detail.querySelector('[data-action="open-window"], [data-action="focus-surface-window"]'), null);
+    assert.doesNotMatch(detail.textContent, /Shown in Agents|Read-only preview/);
+  }
+  fixture.setLiveAgents([live, { ...stale[0], id: "absent-4499" },
+    { ...stale[1], session_id: "successor-5016" }]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  for (const number of [4499, 5016]) {
+    const row = fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+    assert.ok(!row.querySelector(".issue-agent-status, .issue-card-output"),
+      "census membership also requires the same actual window and Session");
+  }
+  fixture.body.querySelector('[data-issue-view="split"]').click();
+  assert.deepEqual([...fixture.body.querySelectorAll(".issue-split-pair")]
+    .map(pair => Number(pair.dataset.issueNumber)), [4777]);
 });
 
 test("Issue #6141 Active metric follows the displayed cards and errors explain their cause", async t => {
@@ -123,16 +196,17 @@ test("Issue #6141 Active metric follows the displayed cards and errors explain t
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   fixture.surface.applyIssueMonitorStatus({ active_count: 7, max_active_agents: 8 });
   applyEntries(fixture.surface, fixture.load, [knowledgeEntry(6141, { state: "closed" })]);
-  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1");
+  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1 issue");
   const metric = fixture.body.querySelector('[data-metric="active"]');
-  assert.equal(metric.textContent, "Active 1/8");
+  assert.equal(metric.textContent, "Active 1 · 1 issue · PM 0");
   assert.match(metric.dataset.issueExplanation, /capacity.*7\/8/i);
   runtimeStates.live = "error";
+  fixture.setLiveAgents([]);
   fixture.surface.applyIssueMonitorInbox([{ issue: { number: 6141, state: "closed" },
     state: "agent_failed", error_message: "Agent exited with code 42" }]);
   fixture.surface.renderAllKnowledgeBridgeWindows();
   assert.equal(fixture.body.querySelector('[data-queue-column="done"] h3').textContent, "Done · 1");
-  assert.equal(metric.textContent, "Active 0/8");
+  assert.equal(metric.textContent, "Active 0 · 0 issues · PM 0");
   assert.match(fixture.body.querySelector('.knowledge-row .knowledge-row-badge').dataset.issueExplanation, /Agent exited with code 42/);
 });
 
@@ -142,10 +216,10 @@ test("Issue #5491 judgment holds outrank stale Work activity but preserve live a
   for (const monitor_state of ["needs_human", "blocked_by_claim"]) {
     const entry = knowledgeEntry(5491, { monitor_state, queue_position: 2, error_message: reason });
     assert.equal(issueQueueColumn(entry, workRow()), "backlog");
-    assert.equal(issueQueueColumn(entry, workRow(), agentWindow("live", 5491)), "active");
+    assert.equal(issueQueueColumn(entry, workRow(), true), "active");
   }
   assert.equal(issueQueueColumn(knowledgeEntry(5491), workRow({ status_category: "blocked" })), "backlog");
-  assert.equal(issueQueueColumn(knowledgeEntry(5491, { monitor_state: "launching" }), workRow({ status_category: "blocked" })), "active");
+  assert.equal(issueQueueColumn(knowledgeEntry(5491, { monitor_state: "launching" }), workRow({ status_category: "blocked" })), "backlog");
   const model = issueRowStateModel({ entry: knowledgeEntry(5491, { monitor_state: "needs_human", error_message: reason }) });
   assert.equal(model.primary.label, "Needs human");
   assert.equal(model.secondary[0].label, reason);
@@ -198,6 +272,7 @@ function workRow(overrides = {}) {
 function agentWindow(id, issueNumber, overrides = {}) {
   return {
     id,
+    session_id: `session-${id}`,
     preset: "agent",
     title: `Agent ${id}`,
     agent_id: "codex",
@@ -214,7 +289,7 @@ function createNode(document, tagName, className, text) {
   return node;
 }
 
-async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue", runtimeStates = {} } = {}) {
+async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], projection = null, kind = "issue", runtimeStates = {}, localAgents = workspaceWindows } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML("<!doctype html><html><head></head><body></body></html>");
   globalThis.document = document;
@@ -234,8 +309,19 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     terminalMounts: [],
   };
   let windows = [issueWindow, ...workspaceWindows];
+  const activity = createAgentActivityModel("project-1");
+  let observation = 0;
+  const setLiveAgents = (agents) => activity.applyAgentActivitySnapshot({
+    project_key: "project-1", host_id: "test-host",
+    observed_at: new Date(1792840000000 + observation++).toISOString(),
+    agents: agents.map(target => ({ window_id: target.id, session_id: target.session_id ?? `session-${target.id}`,
+      runtime_incarnation: 1, is_pm: Boolean(target.is_pm),
+      issue_number: target.linked_issue_number ?? target.placement?.issue_number ?? null })),
+  });
+  setLiveAgents(localAgents);
   const surface = mod.createKnowledgeKanbanSurface({
     scheduleFrame: run => { run(); return () => {}; },
+    agentActivityModel: activity.model,
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);
@@ -289,6 +375,8 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
     sent,
     surface,
     window,
+    setLiveAgents,
+    activity,
     setWindows: (next) => {
       windows = [issueWindow, ...next];
     },
@@ -840,7 +928,7 @@ test("every rendered Issue row has one primary badge, at most two secondary item
 
   const row47 = fixture.body.querySelector('[data-issue-number="47"]');
   assert.equal(row47.querySelector(".knowledge-row-badge").textContent, "Needs human");
-  assert.deepEqual(secondaryItems(row47), [{ kind: "reason", text: "Resolve blocker" }]);
+  assert.deepEqual(secondaryItems(row47), [{ kind: "reason", text: "Resolve blocker" }, { kind: "chip", text: "Recorded work" }]);
   assert.deepEqual(visibleActions(row47), ["continue-work", "resume-work"]);
 
   const row50 = fixture.body.querySelector('[data-issue-number="50"]');

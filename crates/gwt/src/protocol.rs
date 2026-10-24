@@ -1823,6 +1823,28 @@ pub struct ActiveWorkItemView {
     pub cleanup_blocked_reason: Option<String>,
 }
 
+/// Read-only membership measured from this GUI host's current agent children.
+/// This does not grant launch, close, or Issue Monitor slot authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityView {
+    pub project_key: String,
+    pub host_id: String,
+    pub observed_at: String,
+    /// `None` is an attempted observation with unknown membership; an empty
+    /// vector is an observed zero, not missing census data.
+    #[serde(default)]
+    pub agents: Option<Vec<LocalAgentActivityAgentView>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityAgentView {
+    pub window_id: String,
+    pub session_id: String,
+    pub runtime_incarnation: u64,
+    pub issue_number: Option<u64>,
+    pub is_pm: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
@@ -1856,6 +1878,8 @@ pub struct ActiveWorkProjectionView {
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_agent_activity: Option<LocalAgentActivityView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4722,6 +4746,7 @@ mod tests {
                     remote_delete_available: true,
                 }),
                 managed_hook_health: None,
+                local_agent_activity: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
                     linked_issue_numbers: Vec::new(),
@@ -4850,9 +4875,50 @@ mod tests {
             Some(false),
             "Work cleanup must default to local-only deletion"
         );
-        let BackendEvent::ActiveWorkProjection { projection } = event else {
+        let BackendEvent::ActiveWorkProjection { mut projection } = event else {
             unreachable!("constructed full projection")
         };
+        assert!(
+            serde_json::to_value(&projection)
+                .unwrap()
+                .get("local_agent_activity")
+                .is_none(),
+            "non-observing producers omit the census"
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:unknown",
+                "observed_at": "2026-10-24T00:00:00Z",
+                "agents": null
+            }))
+            .expect("an Unknown observation retains its metadata"),
+        );
+        let unknown = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            unknown.pointer("/local_agent_activity/agents"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            unknown
+                .pointer("/local_agent_activity/host_id")
+                .and_then(Value::as_str),
+            Some("123:unknown")
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:456",
+                "observed_at": "2026-10-24T00:00:01Z",
+                "agents": []
+            }))
+            .expect("an observed zero remains distinct from Unknown"),
+        );
+        let zero = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            zero.pointer("/local_agent_activity/agents"),
+            Some(&serde_json::json!([]))
+        );
         let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
             .expect("serialize bounded active work projection patch");
         assert_eq!(

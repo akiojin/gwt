@@ -41,6 +41,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/knowledge-event-refresh.test.mjs \
   crates/gwt/web/__tests__/knowledge-issue-monitor.test.mjs \
   crates/gwt/web/__tests__/agent-kanban-surface.test.mjs \
+  crates/gwt/web/__tests__/agent-activity-model.test.mjs \
   crates/gwt/web/__tests__/issue-preview-placement.test.mjs \
   crates/gwt/web/__tests__/issue-preview-pane.test.mjs \
   crates/gwt/web/__tests__/issue-row-work-info.test.mjs \

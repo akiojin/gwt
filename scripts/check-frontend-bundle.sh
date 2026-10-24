@@ -28,6 +28,7 @@ node_check crates/gwt/web/migration-modal.js
 node_check crates/gwt/web/project-clone-modal.js
 node_check crates/gwt/web/board-surface.js
 node_check crates/gwt/web/agent-kanban-surface.js
+node_check crates/gwt/web/agent-activity-model.js
 node_check crates/gwt/web/issue-other-surface.js
 node_check crates/gwt/web/theme-manager.js
 node_check crates/gwt/web/theme-toggle.js

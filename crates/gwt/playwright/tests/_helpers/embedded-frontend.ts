@@ -28,6 +28,7 @@ const ROOT_MODULES = new Set([
   "hub-app.js",
   // SPEC-2008 Phase 38 — Agent Kanban window surface.
   "agent-kanban-surface.js",
+  "agent-activity-model.js",
   // SPEC-2013 2026-06-16 amendment — quiet Agent completion notices.
   "agent-completion-notifications.js",
   "project-page-metadata.js",

@@ -88,6 +88,7 @@ root_js_modules! {
     "project-clone-modal.js" => "renderProjectCloneModal",
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
+    "agent-activity-model.js" => "createAgentActivityModel",
     "issue-other-surface.js" => "createIssueOtherSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",

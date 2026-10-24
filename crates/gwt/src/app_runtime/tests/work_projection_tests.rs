@@ -1,6 +1,87 @@
 use super::*;
 
 #[test]
+fn local_agent_activity_reports_an_observed_empty_project() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let view = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let wire = serde_json::to_value(view).unwrap();
+    assert_eq!(
+        wire["local_agent_activity"]["agents"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        wire["local_agent_activity"]["project_key"],
+        runtime.project_key_for_tab("tab-1").unwrap().to_string()
+    );
+    assert!(chrono::DateTime::parse_from_rfc3339(
+        wire["local_agent_activity"]["observed_at"]
+            .as_str()
+            .unwrap()
+    )
+    .is_ok());
+}
+
+#[test]
+fn local_agent_activity_cache_removes_retired_members_without_redating_proof() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut view = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let activity = view.local_agent_activity.as_mut().unwrap();
+    activity
+        .agents
+        .as_mut()
+        .unwrap()
+        .push(gwt::LocalAgentActivityAgentView {
+            window_id: "tab-1::retired".into(),
+            session_id: "retired-session".into(),
+            runtime_incarnation: 17,
+            issue_number: Some(4777),
+            is_pm: false,
+        });
+    let observed_at = activity.observed_at.clone();
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert("tab-1".into(), view);
+    let patch = runtime
+        .cached_active_work_projection_broadcast_for_tab("tab-1")
+        .unwrap();
+    let wire = serde_json::to_value(patch.event).unwrap();
+    assert_eq!(
+        wire["projection"]["local_agent_activity"]["agents"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        wire["projection"]["local_agent_activity"]["observed_at"],
+        observed_at
+    );
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_none());
+    assert!(!runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_payload_cache
+        .borrow()
+        .contains_key("tab-1"));
+}
+
+#[test]
 fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

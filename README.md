@@ -538,6 +538,12 @@ the requested `numbers` from every terminal queue saved in this machine's projec
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
 
+Active cards have an agent process observed on this terminal. The Active badge
+counts agents, including PM, and separately shows distinct Issue and PM counts;
+two agents on one Issue produce one card. `Active —` means runtime observation
+is pending. Historical activity is marked **Recorded work**, and a foreign
+claim is marked **Claimed elsewhere**; neither proves a local live agent.
+
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
 a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
