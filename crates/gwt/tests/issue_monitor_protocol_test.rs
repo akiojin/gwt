@@ -285,6 +285,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             update_drain_release: None,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,

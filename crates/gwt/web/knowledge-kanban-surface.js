@@ -943,13 +943,19 @@ export function createKnowledgeKanbanSurface({
             ? agent.placement.issue_number : agent?.linked_issue_number;
           const runtime = Object.hasOwn(catalog?.runtimeStates || {}, confirmed.window_id)
             ? catalog.runtimeStates[confirmed.window_id] : agent?.status;
+          const currentSession = !agentActivityModel || agentActivityModel.read().byIssue[issueNumber]?.some(item =>
+            item.window_id === confirmed.window_id && item.session_id === agent?.session_id);
           // Display normalization maps unknown to running; evidence must use the raw state.
-          if (agent && Number(linkedIssue) === issueNumber
+          if (agent && currentSession && Number(linkedIssue) === issueNumber
               && (agent.linked_issue_number == null || Number(agent.linked_issue_number) === issueNumber)
               && runtime === "running") {
             chips.push({ kind: "tier", key: "tier-running", label: `Running tier ${confirmed.tier}`,
               explanation: `Acknowledged launch tier ${confirmed.tier} (zero-based tiers); the matching agent window currently reports running.` });
           }
+        }
+        if (!chips.length && isTier(facts.next_launch?.tier) && facts.next_launch.tier < facts.tier_count) {
+          chips.push({ kind: "tier", key: "tier-next", label: `Next tier ${facts.next_launch.tier}`,
+            explanation: "Current automatic selection (zero-based tiers). Launch-time checks may select another candidate." });
         }
         if (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier)) return chips;
         if (isTier(facts.minimum_tier_override)) {
@@ -966,6 +972,46 @@ export function createKnowledgeKanbanSurface({
               : "The next automatic minimum tier has not been reported."}` });
         }
         return chips;
+      }
+
+      function renderIssueTierControls(issueNumber) {
+        const status = issueMonitorModel.read().status;
+        const facts = status.tier_facts?.find(item => item.issue_number === issueNumber);
+        if (!facts) return null;
+        const section = createNode("section", "issue-detail-tier knowledge-section");
+        section.setAttribute("aria-label", `Tier for Issue #${issueNumber}`);
+        const profileLabel = profile => profile
+          ? `${profile.agent_id} / ${profile.model || "model not reported"} / ${profile.reasoning || "effort not reported"}`
+          : "Profile not reported";
+        const running = issueTierChips(issueNumber).find(chip => chip.key === "tier-running");
+        if (running) section.appendChild(createNode("div", "knowledge-detail-subtitle",
+          `${running.label} · ${profileLabel(facts.confirmed_launch.profile)}`));
+        const next = facts.next_launch;
+        const hasNext = Number.isInteger(next?.tier) && next.tier >= 0 && next.tier < facts.tier_count;
+        section.appendChild(createNode("div", "knowledge-detail-subtitle", hasNext
+          ? `Next tier ${next.tier} · ${profileLabel(next)}`
+          : `Next tier unavailable: ${facts.next_launch_unavailable_reason || "Automatic selection has not been reported."}`));
+        if (hasNext) section.appendChild(createNode("p", "knowledge-detail-subtitle",
+          "Current automatic selection; launch-time checks may select another candidate."));
+        const baseTier = Math.max(next?.tier ?? 0, running ? facts.confirmed_launch.tier : 0,
+          facts.minimum_tier_override ?? 0);
+        const highest = hasNext && baseTier + 1 >= facts.tier_count;
+        const reason = highest ? "Highest configured tier; no higher tier is available."
+          : !hasNext ? facts.next_launch_unavailable_reason || "Wait for automatic tier selection."
+          : !status.tier_config_token ? "Refresh tier settings before changing the next launch."
+          : "Raise the minimum tier for this Issue's next launch. A running agent keeps its current profile.";
+        const button = createNode("button", "wizard-button is-compact", "Raise one tier");
+        button.type = "button";
+        button.dataset.action = "raise-issue-tier";
+        button.setAttribute("aria-label", `Raise one tier for Issue #${issueNumber}`);
+        button.disabled = highest || !hasNext || !status.tier_config_token;
+        explainIssueControl(button, reason, `raise-issue-tier-${issueNumber}`);
+        button.addEventListener("click", () => {
+          if (!button.disabled) send({ kind: "set_issue_monitor_tier", issue_number: issueNumber,
+            tier: baseTier + 1, expected_config_token: status.tier_config_token });
+        });
+        section.append(button, createNode("p", "knowledge-detail-subtitle", reason));
+        return section;
       }
 
       function issueStateExplanation(primary, entry) {
@@ -1109,6 +1155,7 @@ export function createKnowledgeKanbanSurface({
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const knowledgeBoardViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
+      const issueDetailTierRenderKeys = new WeakMap();
       // Receive publishes invalidation; the view owns projection/layout reads.
       const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
@@ -1389,6 +1436,7 @@ export function createKnowledgeKanbanSurface({
           effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
           // Empty facts are omitted on the wire; never retain an older snapshot.
           tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
+          tier_config_token: nextStatus?.tier_config_token ?? null,
           // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
           agent_blackout: nextStatus?.agent_blackout ?? null,
           update_drain: nextStatus?.update_drain ?? null,
@@ -4035,9 +4083,31 @@ export function createKnowledgeKanbanSurface({
             windowRoleBadgeLabel?.(target) || target.agent_id,
           ] : null),
         ]);
-        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) return;
+        const tierKey = JSON.stringify([
+          issueMonitorModel.read().status.tier_facts?.find(item => item.issue_number === Number(number)),
+          issueMonitorModel.read().status.tier_config_token, issueTierChips(Number(number)),
+        ]);
+        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) {
+          if (issueDetailTierRenderKeys.get(detailPane) !== tierKey) {
+            const previous = detailPane.querySelector(".issue-detail-tier");
+            const focused = previous?.contains(document.activeElement);
+            const tiers = renderIssueTierControls(Number(number));
+            if (previous) {
+              if (tiers) previous.replaceWith(tiers);
+              else previous.remove();
+            } else if (tiers && !detailPane.hidden) {
+              const header = detailPane.querySelector(".issue-detail-header");
+              if (header) header.insertBefore(tiers, header.querySelector(".issue-detail-actions"));
+              else detailPane.insertBefore(tiers, detailPane.querySelector(".issue-detail-tabs")?.nextSibling || null);
+            }
+            if (focused) tiers?.querySelector('[data-action="raise-issue-tier"]:not(:disabled)')?.focus();
+            issueDetailTierRenderKeys.set(detailPane, tierKey);
+          }
+          return;
+        }
         renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
         issueDetailRenderKeys.set(detailPane, key);
+        issueDetailTierRenderKeys.set(detailPane, tierKey);
       }
 
       function renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview = true } = {}) {
@@ -4070,6 +4140,8 @@ export function createKnowledgeKanbanSurface({
           detailPane.appendChild(tabs);
         }
         if (agentPreview && state.issueDetailView === "output") {
+          const tiers = renderIssueTierControls(state.selectedNumber);
+          if (tiers) detailPane.appendChild(tiers);
           const preview = agentPreview && state.selectedNumber != null
             ? renderIssueAgentPreview(windowId, state) : null;
           if (preview) detailPane.appendChild(preview);
@@ -4174,6 +4246,8 @@ export function createKnowledgeKanbanSurface({
           status.appendChild(createNode("span", "knowledge-chip", label));
         }
         header.appendChild(status);
+        const tiers = renderIssueTierControls(number);
+        if (tiers) header.appendChild(tiers);
         if (entry.queued_by) {
           const source = entry.queued_by === "auto-refill" ? "Auto-refill"
             : entry.queued_by === "urgent" ? "Urgent label" : "Operator";

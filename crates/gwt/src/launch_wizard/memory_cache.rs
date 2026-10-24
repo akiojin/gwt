@@ -215,6 +215,23 @@ impl LaunchWizardMemoryCache {
         }
     }
 
+    /// Read a completed detection snapshot without waiting or probing providers.
+    /// Status projections stay unavailable while the worker or its lock is busy.
+    pub fn ready_agent_options(&self) -> Option<Vec<crate::AgentOption>> {
+        let mut slot = self.agent_options.try_lock().ok()?;
+        if let AgentOptionsSlot::Loading(handle) = &mut *slot {
+            if !handle.as_ref()?.is_finished() {
+                return None;
+            }
+            let options = handle.take()?.join().ok()?;
+            *slot = AgentOptionsSlot::Ready(options);
+        }
+        match &*slot {
+            AgentOptionsSlot::Ready(options) => Some(options.clone()),
+            AgentOptionsSlot::Loading(_) => None,
+        }
+    }
+
     /// Settings shows the entire built-in catalog while the wizard still
     /// offers only installed agents. Reuse its existing detection snapshot.
     pub fn supported_agents(&self) -> Vec<crate::protocol::SupportedAgentView> {
@@ -309,6 +326,14 @@ impl LaunchWizardMemoryCache {
 
     pub fn session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
         self.sessions()
+            .iter()
+            .find(|session| session.id == session_id)
+    }
+
+    /// Read only an already-resolved ledger; never join or load it on a status path.
+    pub fn ready_session_by_id(&self, session_id: &str) -> Option<&gwt_agent::Session> {
+        self.sessions
+            .get()?
             .iter()
             .find(|session| session.id == session_id)
     }
@@ -433,6 +458,52 @@ mod fr001_capability_cache_tests {
 #[cfg(test)]
 mod lazy_session_ledger_tests {
     use crate::launch_wizard::LaunchWizardMemoryCache;
+
+    #[test]
+    fn tier_projection_cache_reads_pending_and_ready_snapshots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut cache = LaunchWizardMemoryCache::load_with_agent_options(dir.path(), Vec::new());
+        let session =
+            gwt_agent::Session::new(dir.path(), "work/issue-4499", gwt_agent::AgentId::Codex);
+        let session_id = session.id.clone();
+        let (release_session, wait_session) = std::sync::mpsc::channel();
+        cache.pending_sessions =
+            std::sync::Arc::new(std::sync::Mutex::new(Some(std::thread::spawn(move || {
+                wait_session.recv().unwrap();
+                vec![session]
+            }))));
+        let (release_agents, wait_agents) = std::sync::mpsc::channel();
+        cache.agent_options = std::sync::Arc::new(std::sync::Mutex::new(
+            super::AgentOptionsSlot::Loading(Some(std::thread::spawn(move || {
+                wait_agents.recv().unwrap();
+                Vec::new()
+            }))),
+        ));
+        assert!(cache.ready_agent_options().is_none());
+        assert!(cache.ready_session_by_id(&session_id).is_none());
+        release_agents.send(()).unwrap();
+        while !matches!(
+            &*cache.agent_options.lock().unwrap(),
+            super::AgentOptionsSlot::Loading(Some(worker)) if worker.is_finished()
+        ) {
+            std::thread::yield_now();
+        }
+        assert!(cache.ready_agent_options().unwrap().is_empty());
+        let guard = cache.agent_options.lock().unwrap();
+        assert!(
+            cache.ready_agent_options().is_none(),
+            "contention must not block a status update"
+        );
+        drop(guard);
+        release_session.send(()).unwrap();
+        cache.sessions();
+        assert_eq!(
+            cache
+                .ready_session_by_id(&session_id)
+                .map(|session| &session.id),
+            Some(&session_id)
+        );
+    }
 
     /// Issue #4377 (AC-1 / AC-3): the Session ledger is parsed off the
     /// constructor (and so off `AppRuntime::new`); the first wizard read

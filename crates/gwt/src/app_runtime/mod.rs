@@ -9262,6 +9262,53 @@ impl AppRuntime {
         )
     }
 
+    fn issue_monitor_tier_set_result_events(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &str,
+        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
+        issue_number: u64,
+        tier: u8,
+        expected_config_token: &str,
+    ) -> Vec<OutboundEvent> {
+        let outcome = match publication {
+            Ok(()) => Ok(None),
+            Err(error) if error.allows_local_fallback() => {
+                Self::try_commit_local_issue_monitor_control_with_timeout(
+                    &context.project_root,
+                    self.issue_monitor_fallback_commit_timeout,
+                    |monitor| {
+                        let mut prefs = monitor.prefs();
+                        prefs.apply_issue_minimum_launch_tier(
+                            issue_number,
+                            tier,
+                            Some(expected_config_token),
+                        )?;
+                        monitor.rebase_gui_observer_prefs(&prefs);
+                        Ok(())
+                    },
+                )
+                .map(|(monitor, ())| Some(monitor))
+            }
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(None) => Vec::new(),
+            Ok(Some(monitor)) => self.issue_monitor_snapshot_events_for(
+                Some(client_id),
+                Some(&context.project_root),
+                monitor,
+            ),
+            Err(error) => self.issue_monitor_control_error_events(
+                Some(&context.project_root),
+                Some(client_id),
+                error,
+                "tier-set",
+                Some(issue_number),
+            ),
+        }
+    }
+
     fn issue_monitor_control_result_events_with_queue_result(
         &mut self,
         context: &ProjectContext,
@@ -10924,6 +10971,7 @@ impl AppRuntime {
             &now,
             standing_durable_work,
         ));
+        self.apply_issue_monitor_tier_status(&mut status, Some(&project_root));
         self.remember_issue_monitor_status(Some(&project_root), &status);
         events.push(OutboundEvent::project(
             context.project_key.clone(),
@@ -11039,6 +11087,7 @@ impl AppRuntime {
         mut status: Box<gwt::IssueMonitorStatusView>,
     ) -> Vec<OutboundEvent> {
         self.retain_missing_issue_monitor_capacity(project_root, &mut status);
+        self.apply_issue_monitor_tier_status(&mut status, Some(project_root));
         if let Some(drain) = status.update_drain.as_mut() {
             self.enrich_update_drain_blockers(drain);
         }
@@ -11215,6 +11264,7 @@ impl AppRuntime {
             status.max_active_agents = limit;
             status.max_active_agents_override = manual;
         }
+        self.apply_issue_monitor_tier_status(&mut status, Some(&context.project_root));
         state
             .issue_monitor_status_revision
             .set(state.issue_monitor_status_revision.get().wrapping_add(1));
@@ -11336,6 +11386,145 @@ impl AppRuntime {
             project_root,
             &self.launch_wizard_cache,
         );
+        self.apply_issue_monitor_confirmed_tier_profiles(status, project_root);
+    }
+
+    fn apply_issue_monitor_tier_status(
+        &self,
+        status: &mut gwt::IssueMonitorStatusView,
+        project_root: Option<&Path>,
+    ) {
+        Self::apply_issue_monitor_tier_selection_from_cache(status, &self.launch_wizard_cache);
+        self.apply_issue_monitor_confirmed_tier_profiles(status, project_root);
+    }
+
+    fn apply_issue_monitor_tier_selection_from_cache(
+        status: &mut gwt::IssueMonitorStatusView,
+        cache: &launch::LaunchWizardMemoryCache,
+    ) {
+        if status.launch_tiers.is_empty() || status.tier_facts.is_empty() {
+            return;
+        }
+        let Some(options) = cache.ready_agent_options() else {
+            for facts in &mut status.tier_facts {
+                facts.next_launch = None;
+                if facts.next_minimum_tier.is_some() && facts.is_spec.is_some() {
+                    facts.next_launch_unavailable_reason =
+                        Some("Cached agent availability snapshot is not ready".to_string());
+                }
+            }
+            return;
+        };
+        let available = options
+            .into_iter()
+            .filter(|agent| agent.available)
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>();
+        let mut prefs = gwt::IssueMonitorPrefs {
+            launch_auto: true,
+            launch_tiers: status.launch_tiers.clone(),
+            provider_quota_holds: status
+                .provider_quota_holds
+                .iter()
+                .map(|hold| (hold.provider.clone(), hold.reset_at.clone()))
+                .collect(),
+            ..Default::default()
+        };
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        for facts in &mut status.tier_facts {
+            facts.next_launch = None;
+            let (Some(floor), Some(is_spec)) = (facts.next_minimum_tier, facts.is_spec) else {
+                continue;
+            };
+            // The domain already combined failures, history and operator minimum.
+            // Feed that floor into the same selector used by the launch worker.
+            prefs.tier_overrides.insert(facts.issue_number, floor);
+            let selection = wizard::select_issue_monitor_automatic_profile(
+                &prefs,
+                &available,
+                facts.issue_number,
+                is_spec,
+                None,
+                &now,
+            );
+            match selection {
+                Some(selection) => {
+                    facts.next_launch =
+                        Some(gwt::issue_monitor::IssueMonitorTierSelectionProjection {
+                            tier: selection.tier,
+                            agent_id: selection.profile.agent_id,
+                            model: selection.profile.model,
+                            reasoning: selection.profile.reasoning,
+                        });
+                    facts.next_launch_unavailable_reason = None;
+                }
+                None => {
+                    facts.next_launch_unavailable_reason = Some(
+                        "No eligible installed agent is available at or above the minimum tier"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_issue_monitor_confirmed_tier_profiles(
+        &self,
+        status: &mut gwt::IssueMonitorStatusView,
+        project_root: Option<&Path>,
+    ) {
+        let owner = project_root.and_then(|root| {
+            self.tabs
+                .iter()
+                .find(|tab| tab.project_root == root)
+                .and_then(|tab| self.project_context(&tab.id))
+        });
+        for facts in &mut status.tier_facts {
+            let issue_number = facts.issue_number;
+            let Some(confirmed) = facts.confirmed_launch.as_mut() else {
+                continue;
+            };
+            confirmed.profile = None;
+            let profile = (|| {
+                let owner = owner.as_ref()?;
+                let address = self.window_lookup.get(&confirmed.window_id)?;
+                let context = self.project_context(&address.tab_id)?;
+                if context.project_key != owner.project_key
+                    || !self.issue_monitor_window_is_live(&confirmed.window_id)
+                {
+                    return None;
+                }
+                let active = self.active_agent_sessions.get(&confirmed.window_id)?;
+                if active.tab_id != address.tab_id || active.window_id != confirmed.window_id {
+                    return None;
+                }
+                let window = self
+                    .tab(&address.tab_id)?
+                    .workspace
+                    .window(&address.raw_id)?;
+                if window
+                    .session_id
+                    .as_deref()
+                    .is_some_and(|id| id != active.session_id)
+                {
+                    return None;
+                }
+                let session = self
+                    .launch_wizard_cache
+                    .ready_session_by_id(&active.session_id)?;
+                if session.linked_issue_number != Some(issue_number)
+                    || session.worktree_path != active.worktree_path
+                {
+                    return None;
+                }
+                Some(gwt::issue_monitor::IssueMonitorTierProfileProjection {
+                    agent_id: session.agent_id.command().to_string(),
+                    model: session.model.clone(),
+                    reasoning: session.reasoning_level.clone(),
+                })
+            })();
+            confirmed.profile = profile;
+        }
     }
 
     pub(super) fn apply_issue_monitor_launch_profile_status_from_cache(
@@ -11343,6 +11532,7 @@ impl AppRuntime {
         project_root: Option<&Path>,
         cache: &launch::LaunchWizardMemoryCache,
     ) {
+        Self::apply_issue_monitor_tier_selection_from_cache(status, cache);
         if status.launch_profile_source == gwt::IssueMonitorLaunchProfileSource::Saved {
             return;
         }
@@ -12500,6 +12690,7 @@ impl AppRuntime {
             | FrontendEvent::IssueMonitorQueueRemove { .. }
             | FrontendEvent::IssueMonitorQueueMove { .. }
             | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+            | FrontendEvent::SetIssueMonitorTier { .. }
             | FrontendEvent::SetIssueMonitorAllowedLabels { .. }
             | FrontendEvent::IssueMonitorRequeue { .. }
             | FrontendEvent::IssueMonitorConfigureIssue { .. }
@@ -12860,6 +13051,7 @@ impl AppRuntime {
                 | FrontendEvent::IssueMonitorQueueRemove { .. }
                 | FrontendEvent::IssueMonitorQueueMove { .. }
                 | FrontendEvent::SetIssueMonitorAutoRefill { .. }
+                | FrontendEvent::SetIssueMonitorTier { .. }
                 | FrontendEvent::IssueMonitorLaunchNow { .. }
                 | FrontendEvent::IssueMonitorRequeue { .. }
         ) {
@@ -13657,6 +13849,28 @@ impl AppRuntime {
                     |monitor| {
                         monitor.set_terminal_queue_auto_refill(enabled, limit);
                     },
+                )
+            }
+            FrontendEvent::SetIssueMonitorTier {
+                issue_number,
+                tier,
+                expected_config_token,
+            } => {
+                let publication = self.publish_project_issue_monitor_control(
+                    context,
+                    serde_json::json!({"tier_set": {
+                        "number": issue_number,
+                        "tier": tier,
+                        "expected_config_token": expected_config_token,
+                    }}),
+                );
+                self.issue_monitor_tier_set_result_events(
+                    context,
+                    &client_id,
+                    publication,
+                    issue_number,
+                    tier,
+                    &expected_config_token,
                 )
             }
             FrontendEvent::ListIssueMonitor => self.list_issue_monitor_events_with_reader(

@@ -219,6 +219,7 @@ impl AppRuntime {
                     inbox = state.issue_monitor_inbox_cache.borrow().clone();
                 }
                 self.retain_missing_issue_monitor_capacity(&context.project_root, &mut status);
+                self.apply_issue_monitor_tier_status(&mut status, Some(&context.project_root));
                 if let Some(drain) = status.update_drain.as_mut() {
                     self.enrich_update_drain_blockers(drain);
                 }
