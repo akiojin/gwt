@@ -962,6 +962,11 @@ status for zero declarations and omit resolved or unknown blockers. No usable ob
 returns null; a supplied empty inbox returns []. Keep the Monitor source, scan time and
 coverage limits when interpreting this partial snapshot. It does not establish a fresh
 project-wide graph, bundle completeness, priority, milestone health or launch permission.
+Each milestone's `dependency_observations` selects these rows for its effective member
+Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
+Row order, repeats and missing dependency data remain visible; absent Monitor yields null,
+while no matching rows yields []. Keep `unobserved_issues` and Monitor coverage limits;
+this join does not prove transitive delay, critical path or milestone health.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied

@@ -1123,6 +1123,10 @@ mod tests {
             serde_json::json!([7, 9])
         );
         assert_eq!(
+            status["policy"]["milestones"][0].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
             status["policy"]["milestones"][0].get("target_date_observation"),
             Some(&serde_json::json!({
                 "scan_date_utc":null, "days_past_target_at_scan":null,
