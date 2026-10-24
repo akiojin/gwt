@@ -196,9 +196,9 @@ test("Issue #6141 Active metric follows the displayed cards and errors explain t
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   fixture.surface.applyIssueMonitorStatus({ active_count: 7, max_active_agents: 8 });
   applyEntries(fixture.surface, fixture.load, [knowledgeEntry(6141, { state: "closed" })]);
-  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1 issues");
+  assert.equal(fixture.body.querySelector('[data-queue-column="active"] h3').textContent, "Active · 1 issue");
   const metric = fixture.body.querySelector('[data-metric="active"]');
-  assert.equal(metric.textContent, "Active 1 · 1 issues · PM 0");
+  assert.equal(metric.textContent, "Active 1 · 1 issue · PM 0");
   assert.match(metric.dataset.issueExplanation, /capacity.*7\/8/i);
   runtimeStates.live = "error";
   fixture.setLiveAgents([]);

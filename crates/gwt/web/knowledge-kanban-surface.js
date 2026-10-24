@@ -1324,7 +1324,7 @@ export function createKnowledgeKanbanSurface({
         if (active) {
           const activity = agentActivityModel?.read();
           active.textContent = activity?.count == null ? "Active —"
-            : `Active ${activity.count} · ${activity.issueCount} issues · PM ${activity.pmCount}`;
+            : `Active ${activity.count} · ${activity.issueCount} ${activity.issueCount === 1 ? "issue" : "issues"} · PM ${activity.pmCount}`;
           explainIssueControl(active, `Live agents on this terminal, including PM. ${activity?.count == null ? "Runtime observation pending." : `Observed ${activity.snapshot.observed_at}.`} Monitor agent capacity: ${issueMonitorModel.read().status.active_count || 0}/${maxActive}.`);
         }
         const queue = bar.querySelector('[data-metric="queue"]');
@@ -3273,7 +3273,7 @@ export function createKnowledgeKanbanSurface({
             body = createNode("div", "issue-queue-items");
             column.append(heading, body);
           }
-          const headingText = `${label} · ${items.length}${phase === "active" ? " issues" : ""}`;
+          const headingText = `${label} · ${items.length}${phase === "active" ? (items.length === 1 ? " issue" : " issues") : ""}`;
           if (heading.textContent !== headingText) heading.textContent = headingText;
           explainIssueControl(heading, explanations[phase], `column-${phase}`);
           reconcileKnowledgeList(body, items, {

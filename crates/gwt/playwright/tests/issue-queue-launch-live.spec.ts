@@ -36,7 +36,7 @@ test.describe("Issue queue real backend launch", () => {
       const activity = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .filter((item: any) => item.payload.projection?.local_agent_activity)
         .at(-1)?.payload.projection.local_agent_activity);
-      await expect(metric).toHaveText("Active 1 · 1 issues · PM 0", { timeout: 60_000 });
+      await expect(metric).toHaveText("Active 1 · 1 issue · PM 0", { timeout: 60_000 });
       const live = await activity();
       const agent = live.agents.find((agent: any) => agent.session_id === launch.gwt_session_id);
       expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });

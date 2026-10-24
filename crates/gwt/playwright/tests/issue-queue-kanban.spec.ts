@@ -113,7 +113,7 @@ test("AC34 launch-failed and queued stale windows never advertise a live pane", 
       { window_id: "tab-queue::agent-4777", session_id: "session-4777", runtime_incarnation: 1, issue_number: 4777, is_pm: false },
     ]);
   });
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 2 · 1 issues · PM 1");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 2 · 1 issue · PM 1");
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
   await expect(column(page, "active").locator('[data-issue-number="4777"]')).toHaveCount(1);
   for (const number of [4499, 5016]) {
@@ -568,7 +568,7 @@ test("Issue #5415 failed initial startup requeues once and releases its Active s
   await confirm(page, [3, 4], { enabled: true, state: "active", active_count: 1 });
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launched" }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issues · PM 0");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
   await page.evaluate(() => (window as any).__queueActivity([]));
   await confirm(page, [5, 3, 4], { state: "active", active_count: 0, last_error: null });
   await page.evaluate(diagnosis => (window as any).__queueInbox([
@@ -706,11 +706,11 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
       { issue: { number: 44 }, state: "launching" },
     ]);
   });
-  await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issues");
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issue");
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
   await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issues · PM 0");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
 });
 
@@ -729,13 +729,13 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
       fixture.__queueAgentState(status);
     }, status);
     await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
-    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issues");
+    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issue");
     await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
     await expect(column(page, "done").locator('[data-issue-number="5"]')).toHaveCount(0);
     await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText(label);
     await expect(row(page, 5).locator('[data-key="closed"]')).toHaveText("Closed");
     await expect(row(page, 5)).toContainText("Session cleanup pending");
-    await expect(activeMetric).toHaveText("Active 1 · 1 issues · PM 0");
+    await expect(activeMetric).toHaveText("Active 1 · 1 issue · PM 0");
   }
   await activeMetric.hover();
   await expect(popup).toBeVisible();
@@ -1103,7 +1103,7 @@ test("Monitor list bursts render once while controls remain synchronous", async 
       window.cancelAnimationFrame = originalCancel;
     }
   });
-  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 1 · 1 issues · PM 0" }, rows: 1, active: false,
+  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 1 · 1 issue · PM 0" }, rows: 1, active: false,
     latest: "Min tier 49", request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
   const select = row(page, 3).locator(".knowledge-row-select");
   await select.focus();
