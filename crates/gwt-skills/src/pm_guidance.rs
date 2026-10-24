@@ -209,6 +209,17 @@ Keep the enclosing Monitor source, scan time and coverage limits. A reported cyc
 Monitor's observed verdict, not a fresh project-wide graph assessment; bundle declarations
 do not prove bundle completeness. Never recompute readiness or change priority, health or launches
 from these observations.
+Each milestone's `dependency_observations` selects only its effective member Issues:
+direct references plus roadmap links resolved through a unique nonempty milestone ID.
+It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
+Use `unobserved_issues` for missing member rows and keep the enclosing coverage limits;
+this membership join does not establish transitive delay, critical path or milestone health.
+Each Goal's `dependency_observations` selects only its existing roadmap member Issues,
+resolved through an exact unique nonempty Goal ID, including invalid links as reference facts.
+Milestone-only, category-only and other-Goal references do not add members.
+The same row order, repeats, missingness and null/[] semantics apply; keep `unobserved_issues`
+and the enclosing Monitor provenance. These observations do not prove Goal achievement,
+metric attainment, critical path or readiness, and authorize no priority or launch changes.
 
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
@@ -4483,6 +4494,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`pm.plan.apply`",
             "`policy.dependency_observations` preserves every supplied inbox row",
             "Neither absent nor empty dependency status proves readiness",
+            "Each milestone's `dependency_observations` selects only its effective member Issues",
+            "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",

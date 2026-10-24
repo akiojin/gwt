@@ -2863,23 +2863,58 @@ fn record_issue_monitor_gui_spawn_phase(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum IssueMonitorAdmissionFileVersion {
+    Metadata(Option<(std::time::SystemTime, u64)>),
+    /// Issue #6096: Issue Monitor prefs are fenced by admission-relevant
+    /// content, because the daemon rewrites observation-only keys every few
+    /// seconds on every host project.
+    IssueMonitorPrefs(Option<super::IssueMonitorPrefsStamp>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
-    version: Option<(std::time::SystemTime, u64)>,
+    version: IssueMonitorAdmissionFileVersion,
 }
 
 impl IssueMonitorAdmissionFileStamp {
     fn read(path: &Path) -> std::io::Result<Self> {
-        let version = match std::fs::metadata(path) {
-            Ok(metadata) => Some((metadata.modified()?, metadata.len())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error),
+        let version = if is_issue_monitor_prefs_path(path) {
+            IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(
+                super::IssueMonitorPrefsStamp::read(path)?,
+            )
+        } else {
+            IssueMonitorAdmissionFileVersion::Metadata(match std::fs::metadata(path) {
+                Ok(metadata) => Some((metadata.modified()?, metadata.len())),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            })
         };
         Ok(Self {
             path: path.to_path_buf(),
             version,
         })
     }
+
+    fn is_current(&self) -> bool {
+        match &self.version {
+            IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(expected) => {
+                super::IssueMonitorPrefsStamp::matches_current(expected.as_ref(), &self.path)
+            }
+            IssueMonitorAdmissionFileVersion::Metadata(_) => {
+                Self::read(&self.path).is_ok_and(|current| current == *self)
+            }
+        }
+    }
+}
+
+fn is_issue_monitor_prefs_path(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == "issue-monitor.json")
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|parent| parent == "project-state")
 }
 
 #[derive(Debug, Clone)]
@@ -2905,10 +2940,7 @@ impl PreparedIssueMonitorSpawnAdmission {
                 .dependencies
                 .iter()
                 .filter(|expected| expected.path != capacity_path)
-                .all(|expected| {
-                    IssueMonitorAdmissionFileStamp::read(&expected.path)
-                        .is_ok_and(|current| current == *expected)
-                })
+                .all(IssueMonitorAdmissionFileStamp::is_current)
     }
 
     /// Metadata checks preserve worker admission when another project or the
@@ -2918,10 +2950,10 @@ impl PreparedIssueMonitorSpawnAdmission {
             && self.capacity_expires_at.is_none_or(|expires| {
                 chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
             })
-            && self.dependencies.iter().all(|expected| {
-                IssueMonitorAdmissionFileStamp::read(&expected.path)
-                    .is_ok_and(|current| current == *expected)
-            })
+            && self
+                .dependencies
+                .iter()
+                .all(IssueMonitorAdmissionFileStamp::is_current)
     }
 }
 

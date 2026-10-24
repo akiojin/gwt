@@ -65,7 +65,12 @@ export function createBoardLogsSurface({
       // synchronous, including stale-scope reloads and equal-valued errors.
       const logResponseModel = createUiStateStore(null);
       logResponseModel.subscribe(response => response, response => {
-        if (!response || !finishLogRequest(response.windowId)) return;
+        if (!response) return;
+        if (response.kind === "log_entry_appended") {
+          appendLiveLogEntry(response.entry);
+          return;
+        }
+        if (!finishLogRequest(response.windowId)) return;
         const state = ensureLogState(response.windowId);
         state.loading = false;
         if (response.kind === "log_error") {
@@ -90,6 +95,9 @@ export function createBoardLogsSurface({
         if (!snapshot) return;
         const state = ensureBoardState(snapshot.windowId);
         state.entries = snapshot.entries;
+        if (snapshot.mentionEntry) {
+          showBoardMentionNotification(snapshot.mentionEntry, snapshot.windowId);
+        }
         renderBoard(snapshot.windowId);
         if (state.error) return;
         if (state.pendingLatestReload) {
@@ -1867,13 +1875,14 @@ export function createBoardLogsSurface({
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            let mentionEntry = null;
             if (
               addressedEntry &&
               addressedEntry.id !== state.lastNotifiedMentionEntryId
             ) {
               state.forYouUnread += 1;
               state.lastNotifiedMentionEntryId = addressedEntry.id;
-              showBoardMentionNotification(addressedEntry, event.id);
+              mentionEntry = addressedEntry;
             }
             state.loading = false;
             state.error = unconfirmedSubmit
@@ -1882,7 +1891,7 @@ export function createBoardLogsSurface({
             if (completedSubmit && state.hasNewerEntries) {
               state.pendingLatestReload = true;
             }
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
+            boardModel.update(() => ({ windowId: event.id, entries: state.entries, mentionEntry }));
             break;
           }
           case "board_history_page": {
@@ -1909,7 +1918,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_entry_appended":
-            appendLiveLogEntry(event.entry);
+            logResponseModel.update(() => ({ kind: event.kind, entry: event.entry }));
             break;
           case "board_error": {
             const state = ensureBoardState(event.id);

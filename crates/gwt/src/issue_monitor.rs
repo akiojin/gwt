@@ -2120,8 +2120,13 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
     fn from(repr: IssueMonitorLaunchProfileRepr) -> Self {
         let legacy_fast_mode = repr.codex_fast_mode
             && normalize_issue_monitor_provider(&repr.agent_id).as_deref() == Some("codex");
+        // Validation resolves aliases and trims IDs; selection uses those IDs.
+        let agent_id = match gwt_agent::resolve_agent_id(&repr.agent_id) {
+            Some(agent) => agent.command().to_string(),
+            None => repr.agent_id,
+        };
         Self {
-            agent_id: repr.agent_id,
+            agent_id,
             model: repr.model,
             reasoning: repr.reasoning,
             version: repr.version,
@@ -7403,7 +7408,17 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
             }
             Err(error) => return Err(error),
         };
+        // Issue #6096: a clean load whose mutation changed nothing must not
+        // rewrite the file. Unconditional saves bumped the prefs mtime every
+        // few seconds and kept every prepared Monitor launch admission stale.
+        let before = recovery
+            .is_none()
+            .then(|| path.exists().then(|| prefs.clone()))
+            .flatten();
         let result = mutation(&mut prefs)?;
+        if before.as_ref().is_some_and(|before| *before == prefs) {
+            return Ok((prefs, result));
+        }
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
@@ -12006,7 +12021,14 @@ impl IssueMonitorState {
                     })
                 });
             self.prefs()
-                .select_auto_launch_profile(issue_number, is_spec, None, select)
+                .select_auto_launch_profile(issue_number, is_spec, None, |pool| {
+                    let work_tags = vec![if is_spec {
+                        "kind:spec".to_string()
+                    } else {
+                        "kind:issue".to_string()
+                    }];
+                    select_launch_profile(pool, &holds, &work_tags, None, now)
+                })
         } else {
             None
         };
@@ -29029,7 +29051,11 @@ mod tests {
         assert_eq!(prefs.launch_profile.as_ref(), Some(&codex));
         assert_eq!(prefs.launch_profiles, vec![codex.clone(), claude.clone()]);
 
-        let json = serde_json::to_string(&prefs).expect("serialize pool prefs");
+        let mut saved = serde_json::to_value(&prefs).expect("serialize pool prefs");
+        saved["launch_profile"]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][0]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][1]["agent_id"] = serde_json::json!("ClaudeCode");
+        let json = serde_json::to_string(&saved).expect("serialize accepted aliases");
         let reloaded: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload pool prefs");
         assert_eq!(reloaded.launch_profile_pool(), vec![codex.clone(), claude]);
         assert_eq!(
@@ -29041,6 +29067,19 @@ mod tests {
         prefs.set_launch_profile_pool(Vec::new());
         assert!(prefs.launch_profile.is_none());
         assert!(prefs.launch_profiles.is_empty());
+    }
+
+    #[test]
+    fn launch_profile_decode_preserves_custom_case_and_empty_agent_ids() {
+        for (agent_id, expected) in [
+            (" My-Custom-Agent ", "My-Custom-Agent"),
+            ("", ""),
+            ("  ", "  "),
+        ] {
+            let profile: IssueMonitorLaunchProfile =
+                serde_json::from_value(serde_json::json!({"agent_id": agent_id})).unwrap();
+            assert_eq!(profile.agent_id, expected);
+        }
     }
 
     #[test]
@@ -29555,20 +29594,28 @@ mod tests {
         let mut prefs = IssueMonitorPrefs {
             launch_auto: true,
             launch_tiers: vec![
-                vec![test_launch_profile("codex")],
-                vec![test_launch_profile("claude")],
+                vec![test_launch_profile(" CODEX ")],
+                vec![test_launch_profile("claude-code")],
             ],
             ..Default::default()
         };
+        for tier in &prefs.launch_tiers {
+            crate::cli::issue::validate_monitor_profiles_set(tier, None).unwrap();
+        }
+        prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
+        let available = vec!["codex".to_string(), "claude".to_string()];
         let holds = BTreeMap::from([("codex".to_string(), "2026-09-30T00:00:00Z".to_string())]);
         let select = |pool: &[IssueMonitorLaunchProfile]| {
             select_launch_profile(pool, &holds, &[], None, "2026-09-29T00:00:00Z")
         };
         let choice = prefs
-            .select_auto_launch_profile(42, false, None, select)
+            .select_auto_launch_profile(42, false, Some(&available), select)
             .unwrap();
         assert_eq!(choice.tier, 1);
         assert_eq!(choice.profile.agent_id, "claude");
+        let previous =
+            crate::LaunchWizardPreviousProfiles::from_profile(Some(choice.profile.into()));
+        assert!(previous.profile_for("claude").is_some());
         prefs.record_tier_launch(42, choice.tier);
         let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.record_attempt(42);
@@ -33208,6 +33255,50 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
             "the unreadable bytes are still quarantined for diagnosis"
+        );
+    }
+
+    /// Issue #6096: a recovering transaction that changes nothing (for
+    /// example the daemon's windowless-launch expiry with nothing expired)
+    /// must not rewrite the prefs, or every prepared launch admission that
+    /// fences the file goes stale.
+    #[test]
+    fn issue6096_noop_recovering_mutation_does_not_rewrite_prefs() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[(3873, "project-a::agent-2")]);
+        monitor.set_autonomous_mode(true);
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit prefs");
+        let bytes = fs::read(&path).unwrap();
+        // Backdate the file so any rewrite would observably move its mtime.
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let (unchanged, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("no-op transaction");
+        assert_eq!(unchanged.launched_issues.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        let (changed, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |prefs| prefs.autonomous_mode = false,
+        )
+        .expect("changing transaction");
+        assert!(!changed.autonomous_mode);
+        assert!(
+            !load_issue_monitor_prefs(&path).unwrap().autonomous_mode,
+            "a real change still commits"
         );
     }
 

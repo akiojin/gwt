@@ -3814,9 +3814,125 @@ pub(crate) struct PreparedScheduledIssueMonitorScan {
     standing_durable_work: bool,
 }
 
-fn issue_monitor_prefs_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+/// Metadata fence for scheduled-scan projections, which publish observational
+/// fields such as `last_scan_at` and therefore must see every rewrite.
+fn issue_monitor_prefs_metadata_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
+}
+
+/// Issue #6096: top-level prefs keys that only record observations (control
+/// receipt dedupe, scan heartbeat/driver). Launch admission, capacity and the
+/// update drain never read them, yet the daemon rewrites them every few
+/// seconds, so a metadata fence over them kept every prepared launch stale.
+const ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS: [&str; 3] =
+    ["last_control_receipt", "last_scan_at", "last_scan_driver"];
+
+/// Content digest of Issue Monitor prefs bytes that ignores observation-only
+/// churn. `open_pr_observations` keeps only each Issue's non-null `hold`
+/// (launch admission reads the hold; `observed_at` only orders merges).
+/// Unparsable bytes hash raw so any byte change still invalidates.
+pub(super) fn issue_monitor_prefs_content_digest(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            for key in ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS {
+                map.remove(key);
+            }
+            match map.remove("open_pr_observations") {
+                Some(serde_json::Value::Object(observations)) => {
+                    let holds = observations
+                        .into_iter()
+                        .filter_map(|(issue, observation)| {
+                            observation
+                                .get("hold")
+                                .filter(|hold| !hold.is_null())
+                                .cloned()
+                                .map(|hold| (issue, hold))
+                        })
+                        .collect::<serde_json::Map<_, _>>();
+                    if !holds.is_empty() {
+                        map.insert(
+                            "open_pr_observations".to_string(),
+                            serde_json::Value::Object(holds),
+                        );
+                    }
+                }
+                Some(other) => {
+                    map.insert("open_pr_observations".to_string(), other);
+                }
+                None => {}
+            }
+            hasher.update(b"json:");
+            hasher.update(serde_json::to_vec(&serde_json::Value::Object(map)).unwrap_or_default());
+        }
+        _ => {
+            hasher.update(b"raw:");
+            hasher.update(bytes);
+        }
+    }
+    hasher.finalize().into()
+}
+
+/// Freshness fence for Issue Monitor prefs consumed by launch preparation.
+/// Metadata is read before the content, so an unchanged metadata pair always
+/// still describes the digested bytes; a metadata change falls back to the
+/// content digest so observation-only rewrites keep prepared facts current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IssueMonitorPrefsStamp {
+    metadata: (u64, std::time::SystemTime),
+    content: [u8; 32],
+}
+
+impl IssueMonitorPrefsStamp {
+    pub(super) fn read(path: &Path) -> std::io::Result<Option<Self>> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => (metadata.len(), metadata.modified()?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(Self {
+            metadata,
+            content: issue_monitor_prefs_content_digest(&bytes),
+        }))
+    }
+
+    /// True when `path` still carries the same admission-relevant content.
+    /// Unchanged metadata needs no read; otherwise compare the digest.
+    pub(super) fn matches_current(expected: Option<&Self>, path: &Path) -> bool {
+        let metadata = std::fs::metadata(path);
+        let Some(expected) = expected else {
+            return matches!(
+                metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            );
+        };
+        let unchanged_metadata = metadata.is_ok_and(|metadata| {
+            metadata
+                .modified()
+                .is_ok_and(|modified| (metadata.len(), modified) == expected.metadata)
+        });
+        unchanged_metadata
+            || std::fs::read(path)
+                .is_ok_and(|bytes| issue_monitor_prefs_content_digest(&bytes) == expected.content)
+    }
+}
+
+fn issue_monitor_prefs_stamp(path: &Path) -> Option<IssueMonitorPrefsStamp> {
+    IssueMonitorPrefsStamp::read(path).ok().flatten()
+}
+
+fn issue_monitor_prefs_stamp_is_current(
+    path: &Path,
+    expected: &Option<IssueMonitorPrefsStamp>,
+) -> bool {
+    IssueMonitorPrefsStamp::matches_current(expected.as_ref(), path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10563,7 +10679,7 @@ impl AppRuntime {
     ) -> PreparedScheduledIssueMonitorScan {
         // Stamp before reading: a concurrent control change during preparation
         // invalidates this projection at the GUI boundary too.
-        let prefs_stamp = issue_monitor_prefs_stamp(&prefs_path);
+        let prefs_stamp = issue_monitor_prefs_metadata_stamp(&prefs_path);
         let latest = gwt::load_issue_monitor_prefs(&prefs_path);
         let (monitor, error, publish) = match &source {
             Ok(ScheduledIssueMonitorScanOutcome::Applied(scanned)) => match latest {
@@ -10646,7 +10762,7 @@ impl AppRuntime {
         {
             return Vec::new();
         }
-        if issue_monitor_prefs_stamp(&prefs_path) != prefs_stamp {
+        if issue_monitor_prefs_metadata_stamp(&prefs_path) != prefs_stamp {
             return self.issue_monitor_scheduled_scan_complete_events(
                 &project_root,
                 &prefs_path,

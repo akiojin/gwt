@@ -14116,8 +14116,14 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("openclaw", &[])],
-                vec![pool_profile("claude", &["kind:spec"])],
+                vec![
+                    pool_profile("codex", &[]),
+                    pool_profile("openclaw", &["kind:issue"]),
+                ],
+                vec![
+                    pool_profile("openclaw", &[]),
+                    pool_profile("claude", &["kind:spec"]),
+                ],
             ]),
             &mut out,
         )
@@ -14348,7 +14354,7 @@ command = "my-agent-cli"
             &env,
             Some(&repo),
             None,
-            vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
+            vec![pool_patch("codex", &[]), pool_patch(" my-agent ", &[])],
             None,
             &mut String::new(),
         )

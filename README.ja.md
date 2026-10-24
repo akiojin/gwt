@@ -876,6 +876,18 @@ Monitor は宣言がない場合に診断を省略し、解消済み・不明の
 なければ null、供給された inbox が空なら [] です。取得元・スキャン時刻・観測範囲を
 併せて確認してください。この部分観測はプロジェクト全体の最新グラフ、bundle の充足、
 優先順位・マイルストーン health・起動許可を証明しません。
+各 milestone の `dependency_observations` は、直接参照した Issue と、一意な非空
+milestone ID で解決した roadmap 所属 Issue の行を抽出します。供給順・重複・依存情報の
+欠測を保持し、Monitor 不在は null、一致行がなければ [] です。`unobserved_issues` と
+Monitor の coverage 制約も確認してください。この所属照合は推移的な遅延・critical path・
+milestone health を証明しません。
+各 Goal の `dependency_observations` は、一意な非空 Goal ID への完全一致で解決した
+既存 roadmap 所属 Issue の行を抽出します。不正なリンクも参照の事実として扱い、
+milestone のみ・category のみ・他 Goal の参照から所属を広げません。供給順・重複・
+依存情報の欠測を保持し、Monitor 不在は null、一致行がなければ [] です。
+`unobserved_issues` と Monitor の取得元・観測範囲も確認してください。この観測は
+Goal や指標の達成・critical path・起動可能性を証明せず、優先順位や起動の変更を
+許可しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
