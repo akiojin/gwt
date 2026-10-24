@@ -3825,8 +3825,21 @@ fn issue_monitor_prefs_metadata_stamp(path: &Path) -> Option<(u64, std::time::Sy
 /// receipt dedupe, scan heartbeat/driver). Launch admission, capacity and the
 /// update drain never read them, yet the daemon rewrites them every few
 /// seconds, so a metadata fence over them kept every prepared launch stale.
-const ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS: [&str; 3] =
-    ["last_control_receipt", "last_scan_at", "last_scan_driver"];
+const ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS: [&str; 4] = [
+    "last_control_receipt",
+    "last_scan_at",
+    "last_scan_driver",
+    // Claim readback evidence; never an arbitration input.
+    "claim_diagnostics",
+];
+
+/// Issue #6096: per-record fields that every scan re-stamps without a
+/// lifecycle change. `closure_records[].generation` advances on each
+/// same-state re-observation; state and revision floor still fence.
+const ISSUE_MONITOR_PREFS_OBSERVATIONAL_RECORD_FIELDS: [(&str, &str); 2] = [
+    ("closure_records", "generation"),
+    ("autonomous_records", "last_heartbeat"),
+];
 
 /// Content digest of Issue Monitor prefs bytes that ignores observation-only
 /// churn. `open_pr_observations` keeps only each Issue's non-null `hold`
@@ -3839,6 +3852,18 @@ pub(super) fn issue_monitor_prefs_content_digest(bytes: &[u8]) -> [u8; 32] {
         Ok(serde_json::Value::Object(mut map)) => {
             for key in ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS {
                 map.remove(key);
+            }
+            for (key, field) in ISSUE_MONITOR_PREFS_OBSERVATIONAL_RECORD_FIELDS {
+                if let Some(serde_json::Value::Array(records)) = map.get_mut(key) {
+                    for record in records.iter_mut() {
+                        if let serde_json::Value::Object(record) = record {
+                            record.remove(field);
+                        }
+                    }
+                }
+            }
+            if let Some(serde_json::Value::Object(reclaim)) = map.get_mut("generation_reclaim") {
+                reclaim.remove("recorded_at");
             }
             match map.remove("open_pr_observations") {
                 Some(serde_json::Value::Object(observations)) => {

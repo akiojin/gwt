@@ -4224,6 +4224,50 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
 }
 
 #[test]
+fn issue6096_scan_restamped_record_fields_do_not_change_prefs_digest() {
+    let digest = |value: serde_json::Value| {
+        super::super::issue_monitor_prefs_content_digest(&serde_json::to_vec(&value).unwrap())
+    };
+    let prefs = |generation: u64, heartbeat: &str, recorded_at: &str, attempt: &str| {
+        serde_json::json!({
+            "closure_records": [
+                {"issue_number": 7, "generation": generation, "state": "reopened"}
+            ],
+            "autonomous_records": [{"issue_number": 7, "last_heartbeat": heartbeat}],
+            "generation_reclaim": {"recorded_at": recorded_at, "stranded": [7]},
+            "claim_diagnostics": {"7": {"last_attempt_at": attempt}},
+        })
+    };
+    let base = digest(prefs(
+        1,
+        "2026-10-24T00:00:00Z",
+        "2026-10-24T00:00:00Z",
+        "a",
+    ));
+    assert_eq!(
+        base,
+        digest(prefs(
+            60,
+            "2026-10-24T00:05:00Z",
+            "2026-10-24T00:05:00Z",
+            "b"
+        )),
+        "per-scan re-stamps must not stale admission"
+    );
+
+    let mut closed = prefs(1, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z", "a");
+    closed["closure_records"][0]["state"] = serde_json::json!("closed");
+    assert_ne!(
+        base,
+        digest(closed),
+        "a closure state change must still stale"
+    );
+    let mut stranded = prefs(1, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z", "a");
+    stranded["generation_reclaim"]["stranded"] = serde_json::json!([8]);
+    assert_ne!(base, digest(stranded), "reclaim content must still stale");
+}
+
+#[test]
 fn issue3165_spawn_admission_revalidates_hydrated_comment_sources() {
     let _env_lock = env_test_lock()
         .lock()
