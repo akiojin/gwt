@@ -14354,7 +14354,7 @@ command = "my-agent-cli"
             &env,
             Some(&repo),
             None,
-            vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
+            vec![pool_patch("codex", &[]), pool_patch(" my-agent ", &[])],
             None,
             &mut String::new(),
         )

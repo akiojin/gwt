@@ -2120,8 +2120,13 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
     fn from(repr: IssueMonitorLaunchProfileRepr) -> Self {
         let legacy_fast_mode = repr.codex_fast_mode
             && normalize_issue_monitor_provider(&repr.agent_id).as_deref() == Some("codex");
+        // Validation resolves aliases and trims IDs; selection uses those IDs.
+        let agent_id = match gwt_agent::resolve_agent_id(&repr.agent_id) {
+            Some(agent) => agent.command().to_string(),
+            None => repr.agent_id,
+        };
         Self {
-            agent_id: repr.agent_id,
+            agent_id,
             model: repr.model,
             reasoning: repr.reasoning,
             version: repr.version,
@@ -29036,7 +29041,11 @@ mod tests {
         assert_eq!(prefs.launch_profile.as_ref(), Some(&codex));
         assert_eq!(prefs.launch_profiles, vec![codex.clone(), claude.clone()]);
 
-        let json = serde_json::to_string(&prefs).expect("serialize pool prefs");
+        let mut saved = serde_json::to_value(&prefs).expect("serialize pool prefs");
+        saved["launch_profile"]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][0]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][1]["agent_id"] = serde_json::json!("ClaudeCode");
+        let json = serde_json::to_string(&saved).expect("serialize accepted aliases");
         let reloaded: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload pool prefs");
         assert_eq!(reloaded.launch_profile_pool(), vec![codex.clone(), claude]);
         assert_eq!(
@@ -29048,6 +29057,19 @@ mod tests {
         prefs.set_launch_profile_pool(Vec::new());
         assert!(prefs.launch_profile.is_none());
         assert!(prefs.launch_profiles.is_empty());
+    }
+
+    #[test]
+    fn launch_profile_decode_preserves_custom_case_and_empty_agent_ids() {
+        for (agent_id, expected) in [
+            (" My-Custom-Agent ", "My-Custom-Agent"),
+            ("", ""),
+            ("  ", "  "),
+        ] {
+            let profile: IssueMonitorLaunchProfile =
+                serde_json::from_value(serde_json::json!({"agent_id": agent_id})).unwrap();
+            assert_eq!(profile.agent_id, expected);
+        }
     }
 
     #[test]
@@ -29562,20 +29584,28 @@ mod tests {
         let mut prefs = IssueMonitorPrefs {
             launch_auto: true,
             launch_tiers: vec![
-                vec![test_launch_profile("codex")],
-                vec![test_launch_profile("claude")],
+                vec![test_launch_profile(" CODEX ")],
+                vec![test_launch_profile("claude-code")],
             ],
             ..Default::default()
         };
+        for tier in &prefs.launch_tiers {
+            crate::cli::issue::validate_monitor_profiles_set(tier, None).unwrap();
+        }
+        prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
+        let available = vec!["codex".to_string(), "claude".to_string()];
         let holds = BTreeMap::from([("codex".to_string(), "2026-09-30T00:00:00Z".to_string())]);
         let select = |pool: &[IssueMonitorLaunchProfile]| {
             select_launch_profile(pool, &holds, &[], None, "2026-09-29T00:00:00Z")
         };
         let choice = prefs
-            .select_auto_launch_profile(42, false, None, select)
+            .select_auto_launch_profile(42, false, Some(&available), select)
             .unwrap();
         assert_eq!(choice.tier, 1);
         assert_eq!(choice.profile.agent_id, "claude");
+        let previous =
+            crate::LaunchWizardPreviousProfiles::from_profile(Some(choice.profile.into()));
+        assert!(previous.profile_for("claude").is_some());
         prefs.record_tier_launch(42, choice.tier);
         let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.record_attempt(42);
