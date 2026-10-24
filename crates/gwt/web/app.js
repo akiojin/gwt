@@ -5088,6 +5088,20 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         if (snapshot) workspaceOverviewSurface.applyRemoteStartWorkBranches(snapshot);
       });
 
+      const branchEntriesViewModel = createUiStateStore(null);
+      function renderBranchEntries(completion) {
+        if (!completion) return;
+        const { windowId } = completion;
+        const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(windowId);
+        frontendUnits.branchesFileTreeSurface.renderBranches(windowId);
+        // Read the post-ingest state and retain the guarded Status Strip path.
+        const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
+        applyOperatorTelemetryCounts({
+          branches: branchesCount,
+        });
+      }
+      branchEntriesViewModel.subscribe(state => state, renderBranchEntries);
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5250,16 +5264,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
             const { applied } = applyBranchEntriesEvent(state, event);
             if (applied) {
               syncBranchSelectionState(state);
-              frontendUnits.branchesFileTreeSurface.renderBranches(event.id);
-              // SPEC-2356 — feed branch count into the Operator Status Strip WK
-              // cell via develop's guarded telemetry helper. The dead Sidebar
-              // Layers `git` counter was removed in the operator chrome cleanup,
-              // so only `branches` is forwarded now. Count from state.entries so
-              // the telemetry reflects the post-ingest list (FR-065 carry-over).
-              const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
-              applyOperatorTelemetryCounts({
-                branches: branchesCount,
-              });
+              branchEntriesViewModel.update(() => ({ windowId: event.id }));
             }
             break;
           }
