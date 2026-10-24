@@ -5480,7 +5480,7 @@ export function createKnowledgeKanbanSurface({
             if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
-            renderKnowledgeBridge(event.id);
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
             break;
           }
           case "knowledge_detail": {
