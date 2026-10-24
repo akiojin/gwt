@@ -33664,14 +33664,17 @@ exit 1
             assert!(message.contains("execution.adopt"), "{message}");
             assert!(!message.contains("network"), "{message}");
 
-            // The Stop gate keeps failing open on the same malformed state.
-            assert_eq!(
-                crate::cli::hook::execution_control_stop_check::handle_with_input(
-                    dir.path(),
-                    "{}",
-                    Some("sess-health"),
-                ),
-                crate::cli::hook::HookOutput::Silent
+            // The Stop gate warns while failing open on the same malformed state.
+            let output = crate::cli::hook::execution_control_stop_check::handle_with_input(
+                dir.path(),
+                "{}",
+                Some("sess-health"),
+            );
+            assert!(
+                matches!(&output, crate::cli::hook::HookOutput::SystemMessage(message)
+                    if message.contains("Execution control record is unreadable")
+                        && message.contains("Stop is not blocked")),
+                "{output:?}"
             );
         }
 
