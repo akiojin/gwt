@@ -1,3 +1,4 @@
+import { isContainedPlacement } from "./agent-kanban-surface.js";
 import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 import { createUiStateStore } from "./ui-state-store.js";
 import { renderUiContent } from "./ui-content.js";
@@ -24,7 +25,7 @@ import { renderUiContent } from "./ui-content.js";
 // - focusWindowLocally(windowId) / sendWindowFocus(windowId): focus paths.
 // - focusOrSpawnPreset(preset): focus-or-spawn used by drawer actions.
 // - openIssueLaunchWizard(windowId, issueNumber): launch wizard entry.
-// - visibleBounds(): current canvas bounds for resume placement.
+
 // - launchPending: shared Resume/Launch pending controller.
 import { createFocusTrap } from "/focus-trap.js";
 import { createLaunchOperationId } from "./launch-pending-controller.js";
@@ -197,7 +198,7 @@ export function monitorStateView(value) {
 }
 
 // SPEC-3671 FR-011: an auto-launched agent that errors or waits for a human ruling
-// announces itself through this badge. It never opens a canvas window.
+// announces itself through this badge. It never opens an agent view.
 const ISSUE_PREVIEW_STATUS_VIEWS = Object.freeze({
   running: Object.freeze({ label: "Running", tone: "active" }),
   starting: Object.freeze({ label: "Starting", tone: "active" }),
@@ -375,9 +376,9 @@ function issueEntryHasLabel(entry, name) {
   return labels.some((label) => String(label || "").trim().toLowerCase() === name);
 }
 
-function issueRowPrimaryView({ entry, attention, inlineWindow, canvasWindow }) {
+function issueRowPrimaryView({ entry, attention, inlineWindow, surfaceWindow }) {
   if (issueStopReason(entry) !== null) return { key: "monitor:held", label: "Held", tone: "idle" };
-  const live = inlineWindow || canvasWindow;
+  const live = inlineWindow || surfaceWindow;
   if (live) {
     const view = issuePreviewStatusView(live);
     if (ISSUE_ROW_LIVE_AGENT_STATUSES.has(view.status)) {
@@ -409,7 +410,7 @@ function legacyMonitorExclusionReason(entry) {
     ? "This exclusion was reported by an older monitor. Refresh to confirm queue membership." : "";
 }
 
-function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, canvasWindow }) {
+function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow, surfaceWindow }) {
   const items = [];
   if (issueEntryStateKey(entry) === "closed" && primary.key !== "issue:closed") {
     items.push({ kind: "chip", key: "closed", label: "Closed" });
@@ -423,7 +424,7 @@ function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow,
   const attentionReason =
     attention?.lane === "needs_attention" ? String(attention.reason || "").trim() : "";
   const cleanupPending = (issueEntryStateKey(entry) === "closed" || ["merged", "released"].includes(entry?.monitor_state)) &&
-    issueQueueColumn(entry, work, inlineWindow || canvasWindow) === "active";
+    issueQueueColumn(entry, work, inlineWindow || surfaceWindow) === "active";
   const reason = cleanupPending ? "Session cleanup pending"
     : stopReason ?? (entry?.readiness_diagnosis || failureReason || exclusion || attentionReason);
   if (reason) {
@@ -460,13 +461,13 @@ function issueRowSecondaryItems({ entry, work, attention, primary, inlineWindow,
   return items.slice(0, ISSUE_ROW_SECONDARY_LIMIT);
 }
 
-function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindow }) {
+function issueRowActionOrder({ entry, work, attention, inlineWindow, surfaceWindow }) {
   const workActions = ["continue-work", "resume-work", "cleanup-work"];
   // SPEC #3885 FR-015: stopping the agent is always last and always in the
   // overflow menu, so a live run is never one stray click away from ending.
-  if (canvasWindow) {
+  if (surfaceWindow) {
     return {
-      order: ["focus-canvas-window", "configure-issue", ...workActions, "stop-agent"],
+      order: ["focus-surface-window", "configure-issue", ...workActions, "stop-agent"],
       limit: 1,
     };
   }
@@ -523,11 +524,11 @@ function issueRowActionOrder({ entry, work, attention, inlineWindow, canvasWindo
   };
 }
 
-function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, canvasWindow }) {
+function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, surfaceWindow }) {
   const monitor = monitorStateView(entry?.monitor_state);
   switch (action) {
     case "stop-agent": {
-      const live = inlineWindow || canvasWindow;
+      const live = inlineWindow || surfaceWindow;
       return (
         Boolean(live) &&
         ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(live).status)
@@ -552,7 +553,7 @@ function issueRowActionAvailable(action, { entry, work, queue, inlineWindow, can
     case "cleanup-work":
       return Boolean(work && (work.cleanup_candidate || work.cleanup_blocked_reason));
     case "open-window":
-      return Boolean(inlineWindow || canvasWindow);
+      return Boolean(inlineWindow || surfaceWindow);
     case "move-to-top":
       return Boolean(queue) && Number.isFinite(queue.index) && queue.index >= 0;
     case "open-pr":
@@ -567,10 +568,10 @@ export function issueRowStateModel({
   work = null,
   attention = null,
   inlineWindow = null,
-  canvasWindow = null,
+  surfaceWindow = null,
   queue = null,
 } = {}) {
-  const context = { entry, work, attention, inlineWindow, canvasWindow, queue };
+  const context = { entry, work, attention, inlineWindow, surfaceWindow, queue };
   const primary = issueRowPrimaryView(context);
   const secondary = issueRowSecondaryItems({ ...context, primary });
   const { order, limit = ISSUE_ROW_ACTION_LIMIT } = issueRowActionOrder(context);
@@ -604,11 +605,11 @@ export function issueAcceptanceProgress(markdown) {
 // state falls back to the row's own order. Only actions the row model would
 // allow are offered, so the band never shows a button that cannot act.
 const ISSUE_DETAIL_ACTION_LIMIT = 3;
-const ISSUE_DETAIL_TERMINAL_ACTIONS = new Set(["windowize-issue-preview", "focus-canvas-window"]);
+const ISSUE_DETAIL_TERMINAL_ACTIONS = new Set(["windowize-issue-preview", "focus-surface-window"]);
 
-function issueDetailPhase({ entry, inlineWindow, canvasWindow }) {
+function issueDetailPhase({ entry, inlineWindow, surfaceWindow }) {
   const monitor = monitorStateView(entry?.monitor_state)?.state;
-  if (inlineWindow || canvasWindow || monitor === "launching" || monitor === "launched") {
+  if (inlineWindow || surfaceWindow || monitor === "launching" || monitor === "launched") {
     return "running";
   }
   if (monitor === "queued") return "queue";
@@ -645,11 +646,11 @@ export function issueDetailActionModel(context = {}) {
   return { phase, actions, overflow };
 }
 
-// SPEC #3885 T-005 / FR-003a: the canvas face of a Windowized agent. The link back
+// SPEC #3885 T-005 / FR-003a: the Agents view of a Windowized agent. The link back
 // to the Issue comes from the Work projection's agent rows (window id or session
-// id) or from the ids this surface itself Windowized; only windows that are on
-// the canvas count, so a preview that returned to the row is never doubled.
-export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, issueNumber) {
+// id) or from the ids this surface itself Windowized; only windows shown in
+// Agents count, so a preview that returned to the row is never doubled.
+export function issueSurfaceAgentWindowsForIssue(windows, work, rememberedIds, issueNumber) {
   const list = Array.isArray(windows) ? windows : [];
   const agents = Array.isArray(work?.agents) ? work.agents : [];
   const windowIds = new Set(agents.map((agent) => agent?.window_id).filter(Boolean));
@@ -659,13 +660,12 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, is
   const wanted = Number(issueNumber);
   return list.filter((windowData) => {
     if (!windowData?.id) return false;
-    const kind = windowData.placement?.kind || "canvas";
-    if (kind !== "canvas") return false;
+    if (isContainedPlacement(windowData)) return false;
     // SPEC #3885 FR-011: a Windowized agent carries its Issue durably, so a
-    // window that names a different Issue is never this row's canvas face. The
-    // Work-projection and remembered-id paths below only prove "this agent is on
-    // the canvas", not which Issue owns it, and without this fence one Windowize
-    // gives every Issue without an agent the same canvas face.
+    // window that names a different Issue is never this row's Agents view. The
+    // Work-projection and remembered-id paths below only prove "this agent is shown in
+    // Agents", not which Issue owns it, and without this fence one Windowize
+    // gives every Issue without an agent the same Agents view.
     const linked = Number(windowData.linked_issue_number);
     if (Number.isFinite(linked) && Number.isFinite(wanted) && linked !== wanted) {
       return false;
@@ -676,10 +676,10 @@ export function issueCanvasAgentWindowsForIssue(windows, work, rememberedIds, is
   });
 }
 
-// SPEC #3885 Phase 2b (T-015 / FR-011): the canvas face of a Windowized agent is one
+// SPEC #3885 Phase 2b (T-015 / FR-011): the Agents view of a Windowized agent is one
 // composite piece — an Issue header above the interactive terminal — not a bare
 // terminal window. The header reuses the row's own badge and secondary vocabulary so
-// the same agent reads identically in the list and on the canvas.
+// the same agent reads identically in the list and in Agents.
 const ISSUE_WINDOW_HEADER_ACTION_LIMIT = 2;
 
 const ISSUE_WINDOW_HEADER_ACTIONS = Object.freeze([
@@ -700,14 +700,14 @@ export function issueWindowHeaderModel({
   if (windowData?.is_pm || windowData?.preset === "shell") return null;
   const issueNumber = Number(windowData?.linked_issue_number);
   if (!Number.isFinite(issueNumber) || issueNumber <= 0) return null;
-  // The header is the canvas face only; in the list the same agent is the row's
+  // The header is the Agents view only; in the list the same agent is the row's
   // read-only status row, and two headers for one agent would double the controls.
-  if ((windowData?.placement?.kind || "canvas") !== "canvas") return null;
+  if (isContainedPlacement(windowData)) return null;
   const primary = issueRowPrimaryView({
     entry,
     attention,
     inlineWindow: null,
-    canvasWindow: windowData,
+    surfaceWindow: windowData,
   });
   return {
     issueNumber,
@@ -804,11 +804,10 @@ export function createKnowledgeKanbanSurface({
   sendWindowFocus,
   focusOrSpawnPreset,
   openIssueLaunchWizard,
-  visibleBounds,
   launchPending,
   // SPEC-3671 FR-007 / FR-008 / FR-010: the Issue preview pane. The terminal
   // runtime factory is the shared one from app.js; `readOnly` keeps every input
-  // path unattached. `windowizeIssuePreviewWindow` performs the Canvas handoff.
+  // path unattached. `windowizeIssuePreviewWindow` performs the Agents handoff.
   createTerminalRuntime,
   isAgentsSurfaceMounted = () => false,
   windowDisplayTitle,
@@ -829,7 +828,6 @@ export function createKnowledgeKanbanSurface({
   continueWork,
   openWorkspaceResumePicker,
   openWorkspaceCleanup,
-  getResumeBounds,
   // SPEC #3206 FR-017: surface errors (Issue Monitor last_error, Issue window
   // load/search failures) are reported to the notification center as error
   // rows; the bell + drawer are the single place diagnostic text is read.
@@ -2960,10 +2958,6 @@ export function createKnowledgeKanbanSurface({
         if (!sessionId) {
           return false;
         }
-        const bounds = typeof visibleBounds === "function" ? visibleBounds() : null;
-        if (!bounds) {
-          return false;
-        }
         const operationId = createLaunchOperationId("resume");
         if (
           launchPending
@@ -2980,7 +2974,6 @@ export function createKnowledgeKanbanSurface({
           operation_id: operationId,
           session_id: sessionId,
           agent_session_id: session?.agent_session_id || null,
-          bounds,
         });
         return true;
       }
@@ -3237,7 +3230,7 @@ export function createKnowledgeKanbanSurface({
       function issueQueueColumnForEntry(entry, windowId) {
         const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
         const faces = issueRowFaces(windowId, entry, work);
-        const live = faces.inlineWindow || faces.canvasWindow;
+        const live = faces.inlineWindow || faces.surfaceWindow;
         const owned = live?.linked_issue_number == null || Number(live.linked_issue_number) === entry.number;
         return issueQueueColumn(entry, work, owned ? live : null);
       }
@@ -3320,7 +3313,7 @@ export function createKnowledgeKanbanSurface({
                   }
                   const output = renderIssueAgentStatusRow(windowId, state, entry,
                     target.placement?.kind === "issue_preview"
-                      ? { inlineWindow: target } : { canvasWindow: target });
+                      ? { inlineWindow: target } : { surfaceWindow: target });
                   output.classList.add("issue-card-output");
                   output.setAttribute("role", "group");
                   const title = windowDisplayTitle?.(target) || target.title || target.id;
@@ -3657,11 +3650,11 @@ export function createKnowledgeKanbanSurface({
         explainIssueControl(badge, issueStateExplanation({ key: `agent:${statusView.status}`, label: statusView.label }, entry), `preview-state-${target.id}`);
         header.appendChild(badge);
 
-        const action = faces.canvasWindow ? "focus-canvas-window" : "windowize-issue-preview";
-        const windowize = createNode("button", "wizard-button", faces.canvasWindow ? "Focus window" : "Windowize");
+        const action = faces.surfaceWindow ? "focus-surface-window" : "windowize-issue-preview";
+        const windowize = createNode("button", "wizard-button", faces.surfaceWindow ? "Focus window" : "Windowize");
         windowize.type = "button";
         windowize.dataset.action = action;
-        windowize.setAttribute("aria-label", faces.canvasWindow ? "Focus existing Issue window" : "Windowize agent preview");
+        windowize.setAttribute("aria-label", faces.surfaceWindow ? "Focus existing Issue window" : "Windowize agent preview");
         windowize.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -3690,11 +3683,11 @@ export function createKnowledgeKanbanSurface({
       // shows a "Shown in Agents" face (FR-012) that offers focus, never a second
       // input face for the PTY.
       function renderIssueAgentStatusRow(windowId, state, entry, faces) {
-        const target = faces.inlineWindow || faces.canvasWindow;
+        const target = faces.inlineWindow || faces.surfaceWindow;
         if (!target) {
           return null;
         }
-        const onCanvas = !faces.inlineWindow;
+        const inAgents = !faces.inlineWindow;
         const row = createNode("div", "issue-agent-status");
         row.dataset.windowId = target.id;
         // Not `data-issue-number`: that attribute identifies the Issue row / card
@@ -3715,14 +3708,14 @@ export function createKnowledgeKanbanSurface({
           createNode(
             "div",
             "issue-agent-status-meta",
-            onCanvas ? `${meta} · Shown in Agents` : meta,
+            inAgents ? `${meta} · Shown in Agents` : meta,
           ),
         );
         row.appendChild(titleWrap);
 
         const context = { windowId, state, entry, target };
-        if (onCanvas) {
-          row.classList.add("is-on-canvas");
+        if (inAgents) {
+          row.classList.add("is-in-agents");
           row.appendChild(
             createNode(
               "div",
@@ -3730,7 +3723,7 @@ export function createKnowledgeKanbanSurface({
               "Shown in Agents. Input goes to the Agents tab.",
             ),
           );
-          row.appendChild(issueRowActionButton("focus-canvas-window", context));
+          row.appendChild(issueRowActionButton("focus-surface-window", context));
           return row;
         }
 
@@ -3744,10 +3737,10 @@ export function createKnowledgeKanbanSurface({
         row.appendChild(elapsed);
 
         const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
-        const existingCanvas = issueRowFaces(windowId, entry, work).canvasWindow;
+        const existingSurface = issueRowFaces(windowId, entry, work).surfaceWindow;
         row.appendChild(issueRowActionButton(
-          existingCanvas ? "focus-canvas-window" : "windowize-issue-preview",
-          existingCanvas ? { ...context, target: existingCanvas } : context,
+          existingSurface ? "focus-surface-window" : "windowize-issue-preview",
+          existingSurface ? { ...context, target: existingSurface } : context,
         ));
 
         // Last in DOM order: the activity line spans the full width on its own
@@ -3771,7 +3764,7 @@ export function createKnowledgeKanbanSurface({
         const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
         const attention = work ? workAttentionFor?.(work) || null : null;
         const faces = issueRowFaces(windowId, entry, work);
-        const target = faces.inlineWindow || faces.canvasWindow;
+        const target = faces.inlineWindow || faces.surfaceWindow;
         if (!target) {
           return null;
         }
@@ -3780,7 +3773,7 @@ export function createKnowledgeKanbanSurface({
           work,
           attention,
           inlineWindow: faces.inlineWindow,
-          canvasWindow: faces.canvasWindow,
+          surfaceWindow: faces.surfaceWindow,
         });
         const context = { windowId, state, entry, work, queue: null, target, ...faces };
         const pair = createNode("div", "issue-split-pair");
@@ -3840,9 +3833,9 @@ export function createKnowledgeKanbanSurface({
         pair.appendChild(output);
 
         if (!faces.inlineWindow) {
-          // FR-003a / US-4: the agent is on the canvas, so this face is a status
+          // FR-003a / US-4: the agent is in Agents, so this face is a status
           // face only — a second terminal would double the input path.
-          pair.classList.add("is-on-canvas");
+          pair.classList.add("is-in-agents");
           pair.appendChild(
             createNode(
               "div",
@@ -4029,7 +4022,7 @@ export function createKnowledgeKanbanSurface({
           relatedActions,
           agentPreview && state.issueDetailView === "output" && Boolean(isAgentsSurfaceMounted()),
           queue.findIndex(item => item.number === entry?.number), queue.length,
-          [faces.inlineWindow, faces.canvasWindow].map(target => target ? [
+          [faces.inlineWindow, faces.surfaceWindow].map(target => target ? [
             target.id, target.status, windowDisplayTitle?.(target) || target.title,
             windowRoleBadgeLabel?.(target) || target.agent_id,
           ] : null),
@@ -4075,12 +4068,12 @@ export function createKnowledgeKanbanSurface({
           else {
             const entry = issueDetailEntry(state, state.selectedNumber);
             const work = entry ? issueWorkRowForEntry(getActiveWorkProjection?.(), entry) : null;
-            const canvasWindow = entry ? issueRowFaces(windowId, entry, work).canvasWindow : null;
-            if (canvasWindow) {
+            const surfaceWindow = entry ? issueRowFaces(windowId, entry, work).surfaceWindow : null;
+            if (surfaceWindow) {
               detailPane.appendChild(createNode("div", "knowledge-detail-empty issue-preview-empty",
                 "Shown in Agents. Use Focus window to view the agent output."));
-              detailPane.appendChild(issueRowActionButton("focus-canvas-window", {
-                windowId, state, entry, work, canvasWindow, target: canvasWindow,
+              detailPane.appendChild(issueRowActionButton("focus-surface-window", {
+                windowId, state, entry, work, surfaceWindow, target: surfaceWindow,
               }));
               return;
             }
@@ -4134,8 +4127,8 @@ export function createKnowledgeKanbanSurface({
           attention,
           queue,
           inlineWindow: faces.inlineWindow,
-          canvasWindow: faces.canvasWindow,
-          target: faces.inlineWindow || faces.canvasWindow,
+          surfaceWindow: faces.surfaceWindow,
+          target: faces.inlineWindow || faces.surfaceWindow,
         };
         const row = issueRowStateModel(context);
 
@@ -4506,7 +4499,7 @@ export function createKnowledgeKanbanSurface({
           label: "Windowize",
           aria: "Open the agent terminal in an Agents tab for",
         }),
-        "focus-canvas-window": Object.freeze({
+        "focus-surface-window": Object.freeze({
           label: "Focus window",
           aria: "Focus the Agents tab for",
         }),
@@ -4534,14 +4527,14 @@ export function createKnowledgeKanbanSurface({
       // action group.
       const ISSUE_ROW_TERMINAL_ACTIONS = new Set([
         "windowize-issue-preview",
-        "focus-canvas-window",
+        "focus-surface-window",
       ]);
       // Ids this surface Windowized, so the row keeps its "Shown in Agents" face
       // even before the Work projection reports the agent's window id.
       const windowizedAgentWindowIds = new Set();
 
-      function runIssueRowAction(action, { windowId, state, entry, work, target, inlineWindow, canvasWindow }) {
-        if (action === "focus-canvas-window" && canvasWindow) target = canvasWindow;
+      function runIssueRowAction(action, { windowId, state, entry, work, target, inlineWindow, surfaceWindow }) {
+        if (action === "focus-surface-window" && surfaceWindow) target = surfaceWindow;
         switch (action) {
           case "launch-now":
             send({
@@ -4579,15 +4572,15 @@ export function createKnowledgeKanbanSurface({
             moveQueuedKnowledgeEntryToTop(windowId, state, entry.number);
             return;
           // The detail pane's single "Open window": Windowize an inline
-          // preview, or focus the agent that is already on the canvas.
+          // preview, or focus the agent that is already in Agents.
           case "open-window":
             runIssueRowAction(
-              !canvasWindow && inlineWindow ? "windowize-issue-preview" : "focus-canvas-window",
-              { windowId, state, entry, work, target, canvasWindow },
+              !surfaceWindow && inlineWindow ? "windowize-issue-preview" : "focus-surface-window",
+              { windowId, state, entry, work, target, surfaceWindow },
             );
             return;
           case "continue-work":
-            continueWork?.(work.id, getResumeBounds?.());
+            continueWork?.(work.id);
             return;
           case "resume-work":
             openWorkspaceResumePicker?.(work.id);
@@ -4606,7 +4599,7 @@ export function createKnowledgeKanbanSurface({
               windowizeIssuePreviewWindow?.(target.id);
             }
             return;
-          case "focus-canvas-window":
+          case "focus-surface-window":
             if (target?.id) {
               focusWindowLocally(target.id);
               sendWindowFocus(target.id);
@@ -4700,14 +4693,14 @@ export function createKnowledgeKanbanSurface({
       function issueRowFaces(windowId, entry, work) {
         const windows = issueProjectWindows(windowId);
         const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
-        const canvas = issueCanvasAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
+        const surfaceWindows = issueSurfaceAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
         const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
-        const liveCanvas = canvas.find(isLive);
-        if (liveCanvas) return { inlineWindow: null, canvasWindow: liveCanvas };
+        const liveSurface = surfaceWindows.find(isLive);
+        if (liveSurface) return { inlineWindow: null, surfaceWindow: liveSurface };
         const inlineWindow = inline.find(isLive) || null;
-        if (inlineWindow) return { inlineWindow, canvasWindow: canvas[0] || null };
-        if (canvas[0]) return { inlineWindow: null, canvasWindow: canvas[0] };
-        return { inlineWindow: inline[0] || null, canvasWindow: null };
+        if (inlineWindow) return { inlineWindow, surfaceWindow: surfaceWindows[0] || null };
+        if (surfaceWindows[0]) return { inlineWindow: null, surfaceWindow: surfaceWindows[0] };
+        return { inlineWindow: inline[0] || null, surfaceWindow: null };
       }
 
       function renderIssueRow(windowId, state, entry) {
@@ -4734,7 +4727,7 @@ export function createKnowledgeKanbanSurface({
           work,
           attention,
           inlineWindow: faces.inlineWindow,
-          canvasWindow: faces.canvasWindow,
+          surfaceWindow: faces.surfaceWindow,
           queue,
         });
         const context = {
@@ -4743,7 +4736,7 @@ export function createKnowledgeKanbanSurface({
           entry,
           work,
           queue,
-          target: faces.inlineWindow || faces.canvasWindow,
+          target: faces.inlineWindow || faces.surfaceWindow,
           ...faces,
         };
 
@@ -4810,7 +4803,7 @@ export function createKnowledgeKanbanSurface({
           row.appendChild(actions);
         }
         // Issue #3884 AC-6: the agent's read-only status row (or its "Shown on
-        // canvas" face), shown whether or not the row is selected, outside the
+        // Agents" face), shown whether or not the row is selected, outside the
         // select button.
         const agentStatus = renderIssueAgentStatusRow(windowId, state, entry, faces);
         if (agentStatus) {
@@ -5671,9 +5664,9 @@ export function createKnowledgeKanbanSurface({
         }
       }
 
-      // SPEC #3885 FR-011: the Windowized agent lives on the canvas, but its header
+      // SPEC #3885 FR-011: the Windowized agent lives in Agents, but its header
       // still shows the Issue. This is the one place that answers "what do we know
-      // about Issue #N right now" so the canvas never re-derives Issue state.
+      // about Issue #N right now" so the terminal header never re-derives Issue state.
       function issueContextForNumber(issueNumber) {
         const number = Number(issueNumber);
         if (!Number.isFinite(number)) return null;

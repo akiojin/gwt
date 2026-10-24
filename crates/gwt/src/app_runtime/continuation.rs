@@ -127,7 +127,7 @@ use super::{
     non_empty_workspace_text, AppRuntime, BackendEvent, CachedContinueWorkOutcome,
     ContinueWorkReadinessWatch, LaunchPaneDisposition, OutboundEvent, PendingContinueWork,
     PendingContinueWorkExecution, PendingFreshExecutionLaunch, ReadinessDeadlineDecision,
-    WindowGeometry, WindowProcessStatus, WorkspaceResumeContext,
+    WindowProcessStatus, WorkspaceResumeContext,
 };
 use regex::Regex;
 
@@ -5594,7 +5594,6 @@ impl AppRuntime {
         client_id: &str,
         operation_id: String,
         work_id: String,
-        bounds: WindowGeometry,
         target: &ContinueWorkTarget,
         attempt: DurableContinueWorkAttempt,
     ) -> Vec<OutboundEvent> {
@@ -5733,7 +5732,6 @@ impl AppRuntime {
                                     client_id,
                                     operation_id,
                                     work_id,
-                                    bounds,
                                     target,
                                     latest,
                                 )
@@ -6046,7 +6044,7 @@ impl AppRuntime {
                 ),
             );
         }
-        let mut events = self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+        let mut events = self.focus_existing_live_work_agent_events(&window_id);
         let cached_outcome = CachedContinueWorkOutcome {
             work_id,
             outcome,
@@ -6077,7 +6075,6 @@ impl AppRuntime {
         client_id: &str,
         operation_id: String,
         work_id: String,
-        bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if !self.project_context_is_current(context) {
             return Vec::new();
@@ -6150,7 +6147,7 @@ impl AppRuntime {
                         .or_default()
                         .insert(client_id.to_string());
                 }
-                return self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+                return self.focus_existing_live_work_agent_events(&window_id);
             }
         }
         if self
@@ -6340,7 +6337,6 @@ impl AppRuntime {
                 client_id,
                 operation_id,
                 work_id,
-                bounds,
                 &target,
                 attempt,
             );
@@ -6397,8 +6393,7 @@ impl AppRuntime {
                             &current,
                             durable,
                         ) {
-                            let mut events = self
-                                .focus_existing_live_work_agent_events(&window_id, Some(bounds));
+                            let mut events = self.focus_existing_live_work_agent_events(&window_id);
                             self.cache_continue_work_outcome(
                                 context,
                                 operation_id.clone(),
@@ -6748,7 +6743,6 @@ impl AppRuntime {
         match self.spawn_continue_work_window(
             &target.tab_id,
             config,
-            bounds,
             target.resume_context,
             pending,
         ) {

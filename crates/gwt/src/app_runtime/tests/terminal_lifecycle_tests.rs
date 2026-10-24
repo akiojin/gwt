@@ -323,7 +323,7 @@ fn planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_block
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -3049,7 +3049,7 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
             .branch("work/issue-5351-test")
             .build();
         runtime
-            .spawn_agent_window("target", config, canvas_bounds(), None)
+            .spawn_agent_window("target", config, None)
             .expect("an applied drain must not hold another project's launch");
         prefs.update_drain = None;
         assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
@@ -3160,7 +3160,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             .branch("work/issue-5062-test")
             .build()
     };
-    let result = runtime.spawn_agent_window("target", config(), canvas_bounds(), None);
+    let result = runtime.spawn_agent_window("target", config(), None);
     assert!(
         result
             .as_ref()
@@ -3178,7 +3178,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     prefs.update_drain = None;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
     runtime
-        .spawn_agent_window("target", config(), canvas_bounds(), None)
+        .spawn_agent_window("target", config(), None)
         .expect("spawn after release");
     assert_eq!(
         runtime
@@ -3240,7 +3240,7 @@ fn issue_5062_update_drain_holds_direct_agent_presets_in_other_projects() {
         .windows
         .clone();
     for window in windows {
-        let events = runtime.start_window("target", &window.id, window.preset, window.geometry);
+        let events = runtime.start_window("target", &window.id, window.preset);
         assert!(
             events.iter().any(|event| matches!(
                 &event.event,
@@ -3275,10 +3275,10 @@ fn app_runtime_spawn_agent_window_dedupes_inflight_launch_for_same_work() {
     };
 
     runtime
-        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .spawn_agent_window("tab-1", build_config(), None)
         .expect("first spawn");
     runtime
-        .spawn_agent_window("tab-1", build_config(), canvas_bounds(), None)
+        .spawn_agent_window("tab-1", build_config(), None)
         .expect("second spawn");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -3322,7 +3322,6 @@ fn resume_workspace_agent_replies_started_ack_to_requesting_client() {
         "resume-operation-7".to_string(),
         session.id.clone(),
         None,
-        canvas_bounds(),
     );
 
     let ack = events
@@ -4084,10 +4083,9 @@ fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission(
         "tab-1",
         config,
-        canvas_bounds(),
         None,
         feedback,
         prepared.clone(),

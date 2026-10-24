@@ -63,10 +63,10 @@ use super::continuation::{
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    finalize_docker_agent_launch_config_with_binding, geometry_to_pty_size,
-    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
-    launch_output_mirror, mark_auto_resume_source_completed, next_window_runtime_incarnation,
-    normalize_branch_name, prepare_docker_runtime_for_launch,
+    finalize_docker_agent_launch_config_with_binding, install_launch_gwt_bin_env,
+    intake_hook_config_is_disposable, is_ephemeral_worktree_path, launch_output_mirror,
+    mark_auto_resume_source_completed, next_window_runtime_incarnation, normalize_branch_name,
+    prepare_docker_runtime_for_launch,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
     resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
@@ -74,8 +74,8 @@ use super::{
     save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
     AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BlockingTaskSpawner, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
-    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowPreset, WindowProcessStatus,
+    WindowRuntime, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -1744,7 +1744,7 @@ struct LaunchCompletionInput {
     generation: u64,
     tab_id: String,
     project_root: PathBuf,
-    geometry: Option<WindowGeometry>,
+    had_window: bool,
     sessions_dir: PathBuf,
     session_cache: LaunchWizardMemoryCache,
     issue_link_cache_dir: PathBuf,
@@ -2278,7 +2278,7 @@ fn prepare_agent_launch_inner(
         runtime_target,
         tab_id: input.tab_id.clone(),
     };
-    let geometry = input.geometry.as_ref().ok_or_else(|| {
+    input.had_window.then_some(()).ok_or_else(|| {
         let Some(genesis) = genesis.as_ref() else {
             return "Window not found".to_string();
         };
@@ -2372,7 +2372,8 @@ fn prepare_agent_launch_inner(
         "spawn_pty",
         &launch_argv_summary(&process_launch.args),
     );
-    let (cols, rows) = geometry_to_pty_size(geometry);
+    // Bootstrap a standard grid; the mounted terminal sends UpdateTerminalGrid.
+    let (cols, rows) = (80, 24);
     let initial_prompt_file = process_launch.initial_prompt_file;
     let spawn_config = gwt_terminal::pty::SpawnConfig {
         command: process_launch.command,
@@ -2823,20 +2824,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
-#[derive(Debug, Clone)]
-enum AgentWindowPlacement {
-    Centered(WindowGeometry),
-    Exact(WindowGeometry),
-}
-
-impl AgentWindowPlacement {
-    fn bounds(&self) -> WindowGeometry {
-        match self {
-            Self::Centered(bounds) | Self::Exact(bounds) => bounds.clone(),
-        }
-    }
-}
-
 /// Disk and process inputs captured before the GUI accepts a Monitor launch.
 #[derive(Debug, Clone)]
 pub(super) struct IssueMonitorSpawnAdmissionInput {
@@ -3187,7 +3174,6 @@ fn prepare_host_update_drain_launch_hold(
 #[derive(Debug, Clone)]
 struct AgentWindowSpawnOptions {
     inherited_agent_name: Option<String>,
-    placement: AgentWindowPlacement,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
     agent_kanban_target: Option<AgentKanbanLaunchTarget>,
@@ -4651,7 +4637,7 @@ impl AppRuntime {
             self.tab(&address.tab_id)
                 .and_then(|tab| tab.workspace.window(&address.raw_id))
         });
-        let geometry = window.map(|window| window.geometry.clone());
+        let had_window = window.is_some();
         let prior_session_id = window.and_then(|window| window.session_id.clone());
         let generation = next_window_runtime_incarnation();
         let current = Arc::new(AtomicBool::new(true));
@@ -4666,7 +4652,7 @@ impl AppRuntime {
                     .get(&window_id)
                     .map(|runtime| runtime.incarnation),
                 prior_session_id,
-                had_window: geometry.is_some(),
+                had_window,
                 started_at: self
                     .inflight_launches
                     .values()
@@ -4719,7 +4705,7 @@ impl AppRuntime {
             generation,
             tab_id: address.map(|address| address.tab_id).unwrap_or_default(),
             project_root,
-            geometry,
+            had_window,
             sessions_dir: self.sessions_dir.clone(),
             session_cache: self.launch_wizard_cache.clone(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
@@ -5227,14 +5213,13 @@ impl AppRuntime {
                         None,
                     );
                 };
-                let Some(window) = tab.workspace.window(&address.raw_id) else {
+                let Some(_window) = tab.workspace.window(&address.raw_id) else {
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
                         None,
                     );
                 };
-                let geometry = window.geometry.clone();
 
                 // SPEC-2809 (revised) — second Launch Wizard exit path
                 // emits the same launch banner sequence as the primary
@@ -5254,7 +5239,6 @@ impl AppRuntime {
                 );
                 match self.spawn_process_window_with_console_kind(
                     &window_id,
-                    geometry,
                     process_launch,
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
@@ -5329,7 +5313,6 @@ impl AppRuntime {
         tab_id: &str,
         raw_id: &str,
         preset: WindowPreset,
-        geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
@@ -5511,7 +5494,6 @@ impl AppRuntime {
         }
         match self.spawn_process_window_with_console_kind(
             &window_id,
-            geometry,
             ProcessLaunch {
                 initial_prompt_file: None,
                 command: launch.command,
@@ -5550,11 +5532,11 @@ impl AppRuntime {
     pub(crate) fn spawn_process_window_with_console_kind(
         &mut self,
         id: &str,
-        geometry: WindowGeometry,
         launch: ProcessLaunch,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
-        let (cols, rows) = geometry_to_pty_size(&geometry);
+        // Bootstrap a standard grid; xterm fit owns subsequent resizing.
+        let (cols, rows) = (80, 24);
         let resource_policy = launch.resource_policy;
         let spawn_config = gwt_terminal::pty::SpawnConfig {
             command: launch.command,
@@ -5711,15 +5693,13 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5733,39 +5713,14 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: LaunchFeedbackContext,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
-                workspace_resume_context,
-                launch_feedback_context: Some(launch_feedback_context),
-                agent_kanban_target: None,
-                continuation: None,
-                prepared_monitor_admission: None,
-            },
-        )
-    }
-
-    pub(crate) fn spawn_agent_window_with_feedback_at_geometry(
-        &mut self,
-        tab_id: &str,
-        config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
-        workspace_resume_context: Option<WorkspaceResumeContext>,
-        launch_feedback_context: LaunchFeedbackContext,
-    ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
-            tab_id,
-            config,
-            AgentWindowSpawnOptions {
-                inherited_agent_name: None,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
@@ -5776,21 +5731,19 @@ impl AppRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+    pub(super) fn spawn_agent_window_with_prepared_monitor_admission(
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: LaunchFeedbackContext,
         prepared: PreparedIssueMonitorSpawnAdmission,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
@@ -5804,17 +5757,15 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: Option<LaunchFeedbackContext>,
         target: AgentKanbanLaunchTarget,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context,
                 agent_kanban_target: Some(target),
@@ -5824,20 +5775,18 @@ impl AppRuntime {
         )
     }
 
-    pub(crate) fn spawn_agent_window_at_geometry(
+    pub(crate) fn spawn_agent_window_with_identity(
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         inherited_agent_name: Option<String>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5851,16 +5800,14 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: WorkspaceResumeContext,
         continuation: PendingContinueWork,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context: Some(workspace_resume_context),
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5905,9 +5852,8 @@ impl AppRuntime {
     pub(crate) fn focus_existing_live_work_agent_events(
         &mut self,
         window_id: &str,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let events = self.focus_window_events(window_id, bounds);
+        let events = self.focus_window_events(window_id);
         if events.is_empty() {
             self.window_lookup
                 .get(window_id)
@@ -5951,7 +5897,7 @@ impl AppRuntime {
         }
     }
 
-    fn spawn_agent_window_with_placement(
+    fn spawn_agent_window_with_options(
         &mut self,
         tab_id: &str,
         mut config: gwt_agent::LaunchConfig,
@@ -5967,7 +5913,6 @@ impl AppRuntime {
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
             inherited_agent_name,
-            placement,
             workspace_resume_context,
             launch_feedback_context,
             agent_kanban_target,
@@ -6028,8 +5973,7 @@ impl AppRuntime {
                             .then(|| window_id.clone())
                     })
             {
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+                return Ok(self.focus_existing_live_work_agent_events(&window_id));
             }
         }
         if continuation.is_none() && !issue_monitor_launch {
@@ -6038,8 +5982,7 @@ impl AppRuntime {
                 config.branch.as_deref(),
                 config.working_dir.as_deref(),
             ) {
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+                return Ok(self.focus_existing_live_work_agent_events(&window_id));
             }
         }
         // SPEC-2359 W-17 (FR-398, Issue #3034): the live-window check above
@@ -6061,10 +6004,7 @@ impl AppRuntime {
             if let Some(key) = inflight_key.as_deref() {
                 if let Some((window_id, _)) = self.inflight_launches.get(key) {
                     let window_id = window_id.clone();
-                    return Ok(self.focus_existing_live_work_agent_events(
-                        &window_id,
-                        Some(placement.bounds()),
-                    ));
+                    return Ok(self.focus_existing_live_work_agent_events(&window_id));
                 }
             }
         }
@@ -6118,7 +6058,7 @@ impl AppRuntime {
                 return Err(format!("Issue Monitor pending execution cleanup must finish before launching Issue #{issue_number} again"));
             }
             // Delivery admission may predate a cap change or the last census.
-            // Check the current canvas before creating any Monitor pane.
+            // Check the current window catalog before creating any Monitor pane.
             let (mut monitor, host_started_at) = match prepared_monitor_admission.take() {
                 Some(prepared) => {
                     if prepared.project_root != project_root_path
@@ -6268,15 +6208,9 @@ impl AppRuntime {
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        let window = match placement {
-            AgentWindowPlacement::Centered(bounds) => {
-                tab.workspace
-                    .add_window_with_title(WindowPreset::Agent, title, true, bounds)
-            }
-            AgentWindowPlacement::Exact(geometry) => tab
-                .workspace
-                .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
-        };
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Agent, title, true);
         if let Some(name) = agent_name {
             tab.workspace.set_agent_name(&window.id, Some(name));
         }
@@ -6302,9 +6236,8 @@ impl AppRuntime {
             );
         } else if let Some(issue_number) = issue_monitor_issue_number {
             // SPEC-3671 FR-002: an Issue Monitor launch is mirrored inside the Issue
-            // window instead of opening a canvas window. FR-003 keeps every manual
-            // launch (Start Work / Launch Agent) on the canvas, and a tab with no
-            // Issue window keeps the canvas fallback so the agent is never invisible.
+            // window while retaining the same Agent pane. Manual launches and tabs
+            // without an Issue host expose their pane on the Agents surface.
             if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,

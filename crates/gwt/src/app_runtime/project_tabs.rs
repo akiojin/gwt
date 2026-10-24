@@ -33,7 +33,7 @@ use super::{
     OutboundEvent, PreparedMigrationSnapshot, PreparedProjectOpen, ProjectContext,
     ProjectIncarnation, ProjectNavigationPayload, ProjectNavigationPrepared,
     ProjectNavigationRequest, ProjectNavigationSource, ProjectOpenTarget, ProjectTabRuntime,
-    UserEvent, Uuid, WindowCanvasState,
+    UserEvent, Uuid, WindowRegistry,
 };
 
 #[derive(Clone, Copy)]
@@ -810,7 +810,7 @@ impl AppRuntime {
                 title: prepared.target.title.clone(),
                 project_root: prepared.target.project_root.clone(),
                 kind: prepared.target.kind,
-                workspace: WindowCanvasState::from_persisted(prepared.workspace),
+                workspace: WindowRegistry::from_persisted(prepared.workspace),
                 migration_pending: prepared.target.needs_migration,
                 main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
             });

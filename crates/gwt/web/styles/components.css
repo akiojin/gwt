@@ -32,7 +32,7 @@ body {
 
    gwt is primarily a long-form coding conversation workspace. These
    primitives define the shared, opaque grammar for readable content
-   blocks while leaving decorative Canvas/backdrop layers outside of the
+   blocks while leaving decorative backdrop layers outside of the
    text contract.
    ============================================================ */
 
@@ -156,7 +156,7 @@ body::after {
   height: 100%;
   display: grid;
   /* SPEC-3038 US-1: the Command Rail is grid-docked so it is always visible
-     and never overlays canvas windows. Issue 4777 T-1 widens it to 64px so
+     and never overlays surface windows. Issue 4777 T-1 widens it to 64px so
      each surface entry carries a visible label under its icon. */
   grid-template-columns: 64px 1fr;
   grid-template-rows: 44px 1fr 28px;
@@ -682,7 +682,7 @@ body::after {
   padding: var(--space-3) 0;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
-  /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
+  /* Flyout chips + popovers (window list, update CTA) extend over the workspace. */
   overflow: visible;
   z-index: var(--z-rail);
 }
@@ -881,7 +881,7 @@ body::after {
 }
 
 /* Issue 4777 T-1 — at 860px and below the rail becomes a strip across the
-   top of the canvas. Groups wrap instead of scrolling so the popovers
+   top of the workspace. Groups wrap instead of scrolling so the popovers
    anchored to rail items (window list, PM gear) are never clipped. */
 @media (max-width: 860px) {
   #app {
@@ -1056,7 +1056,7 @@ button.op-status-strip__cell {
 }
 
 /* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
-   that live as inline terminals in the Issue window rather than on the canvas.
+   that live as inline terminals in the Issue window rather than in Agents.
    Quieter than the value so the total still reads first. */
 .op-status-strip__sub {
   margin-left: var(--space-1);
@@ -5738,7 +5738,7 @@ button.workspace-board-ref:focus-visible {
 .workspace-window[data-pm="true"] {
   /* 3px read as "hard to notice" against the dark window chrome in review
      (2026-08-05); the bar has to be legible at a glance from across the
-     canvas, not only when the window is already in focus. */
+     workspace, not only when the window is already in focus. */
   border-left: 6px solid var(--color-role-pm);
 }
 
@@ -6002,7 +6002,7 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* Issue 4777 T-4: an equal grid, independent of canvas coordinates. */
+/* Issue 4777 T-4: an equal grid owned by the Agents surface. */
 .agents-surface {
   display: flex;
   flex-direction: column;

@@ -310,28 +310,28 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     for wrapper in [
         "spawn_agent_window",
         "spawn_agent_window_with_feedback",
-        "spawn_agent_window_with_feedback_at_geometry",
+        "spawn_agent_window_with_prepared_monitor_admission",
         "spawn_agent_window_in_agent_kanban",
-        "spawn_agent_window_at_geometry",
+        "spawn_agent_window_with_identity",
         "spawn_continue_work_window",
     ] {
         assert!(
-            function_source(&launch, wrapper).contains("spawn_agent_window_with_placement("),
-            "{wrapper} must converge on the shared placement transaction"
+            function_source(&launch, wrapper).contains("spawn_agent_window_with_options("),
+            "{wrapper} must converge on the shared launch transaction"
         );
     }
-    let placement = function_source(&launch, "spawn_agent_window_with_placement");
-    let claim = placement
+    let transaction = function_source(&launch, "spawn_agent_window_with_options");
+    let claim = transaction
         .find("claim_prepared_manual_successor_launch(")
         .expect("prepared manual successor is claimed before pane creation");
-    let pane = placement
+    let pane = transaction
         .find(".add_window_with_title(")
-        .expect("shared placement transaction creates the pane");
+        .expect("shared launch transaction creates the pane");
     assert!(
         claim < pane,
         "durable successor claim must precede pane creation"
     );
-    assert!(placement.contains("Self::spawn_agent_window_async_with_claim("));
+    assert!(transaction.contains("Self::spawn_agent_window_async_with_claim("));
     let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
     for boundary in [
         "resolve_host_runner_health_checked(&mut config)",

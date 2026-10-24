@@ -3,7 +3,7 @@ import { bindControlExplanations, setControlExplanation } from "./control-explan
 import { normalizeWindowRuntimeState, windowRuntimeLabel, windowRuntimeDescription } from "./window-runtime-state.js";
 
 // The grid owns presentation only. Sessions and terminal runtimes remain shared
-// with the existing window model; column changes never persist canvas geometry.
+// with the existing window model; column changes are owned by the Agents layout.
 export function createAgentsSurface({ document, windowCatalogModel, getWindows, windowDisplayTitle,
   isMounted = () => true, mountTerminal, mountPreview, onLayout,
   onFocus = () => {}, onPreviewFocus = onFocus }) {

@@ -1406,7 +1406,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
         .tab_mut("tab-1")
         .expect("project tab")
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+        .add_window(WindowPreset::Agent);
     assert_ne!(fresh.id, "agent-51", "the second specimen uses a fresh id");
     runtime.register_window("tab-1", &fresh.id);
     runtime.set_window_status("tab-1", &fresh.id, WindowProcessStatus::Running);

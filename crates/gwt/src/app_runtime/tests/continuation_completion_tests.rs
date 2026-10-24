@@ -867,7 +867,7 @@ fn launch_complete_workers_preserve_other_launches_when_finishing_out_of_order()
         .tab_mut("tab-1")
         .unwrap()
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+        .add_window(WindowPreset::Agent);
     let second_window = combined_window_id("tab-1", &second_window.id);
     runtime.rebuild_window_lookup();
     let mut second_result = first_result.clone();
@@ -1010,9 +1010,7 @@ fn issue_5642_old_launch_completion_cannot_replace_another_issue_reusing_its_win
 
     runtime.close_window_after_issue_monitor_finalize_events(&window_id);
     drain_queued_blocking_tasks(&tasks);
-    let new_window = runtime.tabs[0]
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let new_window = runtime.tabs[0].workspace.add_window(WindowPreset::Agent);
     assert_eq!(combined_window_id("tab-1", &new_window.id), window_id);
     runtime.register_window("tab-1", &new_window.id);
     let mut new_session =
@@ -1173,7 +1171,7 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

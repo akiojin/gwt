@@ -277,23 +277,7 @@ async function installTabbedAgentsBackend(page) {
           for (const data of windows) data.tab_group_active = data.id === message.id;
           this.emit(workspaceState);
         }
-        if (message.kind === "dock_window_tab") {
-          const target = windows.find(data => data.id === message.target_id);
-          for (const data of windows) {
-            data.tab_group_id = "grp-1";
-            data.tab_group_active = data.id === message.id;
-            data.geometry = { ...target.geometry };
-          }
-          this.emit(workspaceState);
-        }
-        if (message.kind === "detach_window_tab") {
-          for (const data of windows) {
-            data.tab_group_id = null;
-            data.tab_group_active = false;
-            if (data.id === message.id) data.geometry = { ...message.geometry };
-          }
-          this.emit(workspaceState);
-        }
+
       }
 
       close() {

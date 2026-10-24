@@ -1726,6 +1726,8 @@ an entry removes its copied policy on the next refresh.
 - Use **Close split** to keep the active surface in one pane.
 - In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
 
+Workspaces saved with the former free-placement layout restore their windows and sessions into the current surfaces; obsolete positions, sizes, and camera settings are discarded on save.
+
 ## Agent Navigation
 
 Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual

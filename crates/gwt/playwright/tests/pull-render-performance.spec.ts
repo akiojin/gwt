@@ -827,7 +827,7 @@ function createWireCounter() {
     'workspace_state', 'window_state', 'window_list', 'active_work_projection',
     'active_work_projection_patch', 'runtime_health', 'provider_usage', 'issue_monitor_status',
     'issue_monitor_inbox', 'hub_state', 'pm_status', 'system_status', 'project_index_status',
-    'load_pm_reports', 'update_window_geometry', 'update_terminal_grid', 'terminal_input', 'other', 'binary'];
+    'load_pm_reports', 'update_terminal_grid', 'terminal_input', 'other', 'binary'];
   const counters: Record<'received' | 'sent', Record<string, { bytes: number; frames: number }>> = {
     received: Object.fromEntries(kinds.map(kind => [kind, { bytes: 0, frames: 0 }])),
     sent: Object.fromEntries(kinds.map(kind => [kind, { bytes: 0, frames: 0 }])),
@@ -988,7 +988,7 @@ async function launchWorkload(page: Page, branch: string, index: number): Promis
   const action = async (value: any) => {
     const after = await cursor();
     await sendLiveGwtEvent(page, { kind: 'launch_wizard_action', action: value,
-      bounds: { x: 30, y: 50, width: 440, height: 350 } });
+      });
     return waitWizard(after, value.kind === 'set_agent' ? { agent: value.agent_id }
       : value.kind === 'set_runtime_target' ? { runtime: 'host' }
         : value.kind === 'set_branch_name' ? { branch: value.value }
@@ -1019,9 +1019,8 @@ async function launchWorkload(page: Page, branch: string, index: number): Promis
   await sendLiveGwtEvent(page, { kind: 'list_windows' });
   const id = await page.waitForFunction(agent => (window as any).__gwtPullRenderWindows?.[agent]?.id,
     `pull-render-${index}`, { timeout: 30_000 }).then(handle => handle.jsonValue());
-  const geometry = { x: 30 + (index % 3) * 470, y: 50 + Math.floor(index / 3) * 400, width: 440, height: 350 };
-  await sendLiveGwtEvent(page, { kind: 'undock_agent_window', id, geometry });
-  await sendLiveGwtEvent(page, { kind: 'update_window_geometry', id, geometry, cols: 50, rows: 16 });
+  await sendLiveGwtEvent(page, { kind: 'undock_agent_window', id });
+  await sendLiveGwtEvent(page, { kind: 'update_terminal_grid', id, cols: 50, rows: 16 });
   await expect(page.locator(`.workspace-window[data-id="${id}"] .xterm-rows`)).toBeVisible();
   return id;
 }

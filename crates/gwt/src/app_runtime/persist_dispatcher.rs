@@ -29,7 +29,7 @@ use super::BlockingTaskSpawner;
 pub(crate) struct PersistSnapshot {
     pub(crate) session_path: PathBuf,
     pub(crate) session: gwt::PersistedSessionState,
-    pub(crate) workspaces: Vec<(PathBuf, gwt::PersistedWindowCanvasState)>,
+    pub(crate) workspaces: Vec<(PathBuf, gwt::PersistedWindowRegistry)>,
 }
 
 #[derive(Default)]
@@ -56,7 +56,7 @@ struct DispatcherState {
 struct DurableWorkspaceRequest {
     generation: u64,
     path: PathBuf,
-    workspace: gwt::PersistedWindowCanvasState,
+    workspace: gwt::PersistedWindowRegistry,
     completion: mpsc::SyncSender<Result<(), String>>,
     ready: mpsc::Receiver<()>,
 }
@@ -228,7 +228,7 @@ impl PersistDispatcher {
     pub(crate) fn reserve_workspace_durable(
         &self,
         path: PathBuf,
-        workspace: gwt::PersistedWindowCanvasState,
+        workspace: gwt::PersistedWindowRegistry,
     ) -> std::io::Result<DurableWorkspaceBarrier> {
         let (completion, completed) = mpsc::sync_channel(1);
         let (authorize, ready) = mpsc::channel();
@@ -265,7 +265,7 @@ impl PersistDispatcher {
     pub(crate) fn flush_workspace_durable(
         &self,
         path: PathBuf,
-        workspace: gwt::PersistedWindowCanvasState,
+        workspace: gwt::PersistedWindowRegistry,
     ) -> std::io::Result<()> {
         self.reserve_workspace_durable(path, workspace)?
             .allow_and_wait()

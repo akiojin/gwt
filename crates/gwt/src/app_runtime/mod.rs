@@ -126,9 +126,7 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
     match event {
         UserEvent::ProjectCompletion { event, .. } => user_event_priority(event),
         UserEvent::Frontend { event, .. } => match event {
-            FrontendEvent::ArrangeWindows { .. }
-            | FrontendEvent::UpdateWindowGeometry { .. }
-            | FrontendEvent::UpdateTerminalGrid { .. } => AppEventPriority::Layout,
+            FrontendEvent::UpdateTerminalGrid { .. } => AppEventPriority::Layout,
             FrontendEvent::LoadKnowledgeBridge { .. }
             | FrontendEvent::CheckKnowledgeRevision { .. } => AppEventPriority::Background,
             _ => AppEventPriority::Foreground,
@@ -940,7 +938,7 @@ pub fn build_frontend_sync_events(
 ) -> Vec<OutboundEvent> {
     let mut events = vec![OutboundEvent::reply(
         client_id,
-        BackendEvent::WindowCanvasState { workspace },
+        BackendEvent::WorkspaceState { workspace },
     )];
 
     for (id, status, detail) in terminal_statuses {
@@ -995,7 +993,7 @@ pub struct ProjectTabRuntime {
     pub(crate) title: String,
     pub(crate) project_root: PathBuf,
     pub(crate) kind: gwt::ProjectKind,
-    pub(crate) workspace: WindowCanvasState,
+    pub(crate) workspace: WindowRegistry,
     /// SPEC-1934 US-6: in-memory flag set when the tab was opened on a Normal
     /// Git layout that we want to migrate. The frontend sees a
     /// [`BackendEvent::MigrationDetected`] until the user picks Migrate /
@@ -1049,7 +1047,7 @@ pub struct LaunchWizardSession {
     pub(crate) wizard: LaunchWizardState,
     pub(crate) workspace_resume_context: Option<WorkspaceResumeContext>,
     pub(crate) agent_kanban_target: Option<AgentKanbanLaunchTarget>,
-    pub(crate) auto_submit_after_runtime_resolution: Option<WindowGeometry>,
+    pub(crate) auto_submit_after_runtime_resolution: bool,
     pub(crate) issue_monitor_profile_save: Option<IssueMonitorProfileSaveContext>,
     pub(crate) issue_monitor_launch_issue_number: Option<u64>,
     /// Typed front door for the wizard. Manual holder arbitration is allowed
@@ -1473,7 +1471,7 @@ impl IssueMonitorLaunchClaimInput {
         })
     }
 
-    fn observe_canvas(&self, monitor: &mut gwt::IssueMonitorState, host_started_at: Option<u64>) {
+    fn observe_windows(&self, monitor: &mut gwt::IssueMonitorState, host_started_at: Option<u64>) {
         if let Some(snapshot) = self.snapshot.as_ref() {
             if let Some(started) = host_started_at {
                 monitor.record_window_snapshot_from_host(
@@ -1506,7 +1504,7 @@ impl IssueMonitorLaunchClaimInput {
         {
             preflight.record_candidate(issue);
         }
-        self.observe_canvas(&mut preflight, host_started_at);
+        self.observe_windows(&mut preflight, host_started_at);
         preflight.claim_launch_delivery(
             self.issue_number,
             &self.delivery_id,
@@ -1610,7 +1608,7 @@ impl IssueMonitorLaunchClaimInput {
                         if let Some(source) = source {
                             monitor.record_candidate(source);
                         }
-                        self.observe_canvas(monitor, host_started_at);
+                        self.observe_windows(monitor, host_started_at);
                         monitor.claim_launch_delivery(
                             issue_number,
                             delivery_id,
@@ -1919,7 +1917,7 @@ pub(crate) struct ProjectNavigationRequest {
 pub(crate) struct PreparedProjectOpen {
     pub(crate) target: ProjectOpenTarget,
     pub(crate) project_key: gwt_core::repo_hash::ProjectKey,
-    pub(crate) workspace: gwt::PersistedWindowCanvasState,
+    pub(crate) workspace: gwt::PersistedWindowRegistry,
     pub(crate) window_restores: Vec<PreparedProjectWindowRestore>,
     pub(crate) recent_path: PathBuf,
     pub(crate) migration: Option<PreparedMigrationSnapshot>,
@@ -1931,12 +1929,10 @@ pub(crate) enum PreparedProjectWindowRestore {
         window_id: String,
         session: Box<gwt_agent::Session>,
         workspace_resume_context: Option<WorkspaceResumeContext>,
-        fallback_geometry: WindowGeometry,
     },
     Process {
         window_id: String,
         preset: WindowPreset,
-        geometry: WindowGeometry,
     },
 }
 
@@ -2204,12 +2200,12 @@ pub struct AppRuntime {
     /// identity, so the instant is parked here instead.
     pub(crate) project_open_started: Option<(u64, std::time::Instant)>,
     /// SPEC-3431 FR-002: tabs whose PM ensure was queued at bootstrap and
-    /// runs once the frontend reports canvas bounds (same deferral rule as
-    /// startup auto-resume — agent panes never spawn before the canvas is
+    /// runs once the frontend reports its initial surfaces ready (same deferral rule as
+    /// startup auto-resume — agent panes never spawn before the frontend is
     /// ready).
     pub(crate) pending_startup_pm_tabs: Vec<String>,
     /// Issue #4378 / Issue #4804: hold deliveries until the generation reaper
-    /// finishes and canvas-ready registers the startup restore inventory.
+    /// finishes and surface readiness registers the startup restore inventory.
     pub(crate) deferred_issue_monitor_launches: Option<Vec<DeferredIssueMonitorLaunch>>,
     pub(crate) startup_generation_reaper_pending: bool,
     /// Issue #4398 AC-3: each project's worktree listing from bootstrap, held
@@ -2229,10 +2225,10 @@ pub struct AppRuntime {
     /// lands with #4037; this is the seam it reads.
     pub(crate) update_drain_released_projects: Vec<String>,
     /// Issue #4038 (AC-4 / AC-5): `(level, message)` recorded into the
-    /// notification center once the frontend canvas is ready.
+    /// notification center once the frontend surfaces are ready.
     pub(crate) pending_update_resume_notice: Option<(String, String)>,
     pub(crate) pending_auto_resume_sources: HashMap<String, String>,
-    /// Startup restore decisions taken before the canvas was ready. The drain
+    /// Startup restore decisions taken before frontend readiness. The drain
     /// picks them up and emits one summary once the asynchronous spawns have
     /// settled (Issue #4305 AC-5).
     pub(crate) pending_startup_restore_log: Option<startup::RestoreAdmissionLog>,
@@ -2465,14 +2461,14 @@ pub struct AppRuntime {
 impl ProjectTabRuntime {
     pub(crate) fn from_persisted(
         tab: gwt::PersistedSessionTabState,
-        workspace: gwt::PersistedWindowCanvasState,
+        workspace: gwt::PersistedWindowRegistry,
     ) -> Self {
         Self {
             id: tab.id,
             title: tab.title,
             project_root: tab.project_root,
             kind: tab.kind,
-            workspace: WindowCanvasState::from_persisted(workspace),
+            workspace: WindowRegistry::from_persisted(workspace),
             // Re-detected at startup via resolve_project_target; persistence
             // does not carry the flag.
             migration_pending: false,
@@ -4221,6 +4217,8 @@ fn run_scheduled_issue_monitor_scan(
 /// pipe, Issue #3526) and takes scan authority there, so it classified every
 /// scan against no canvas at all — and a launch whose pane an auto-update
 /// restart killed held its slot until a PM stopped it by hand.
+// Monitor APIs retain historical `canvas` census names for live pane observations.
+// They contain process/session identity, never window geometry, camera or layout.
 fn publish_issue_monitor_window_snapshot(
     project_root: &Path,
     snapshot: &gwt::IssueMonitorWindowSnapshot,
@@ -12370,16 +12368,13 @@ impl AppRuntime {
             | FrontendEvent::QuitMigration { tab_id } => Some(tab_id.as_str()),
             FrontendEvent::StartupTerminalReady { id, .. }
             | FrontendEvent::FocusWindow { id, .. }
-            | FrontendEvent::DockWindowTab { id, .. }
             | FrontendEvent::ActivateWindowTab { id, .. }
-            | FrontendEvent::DetachWindowTab { id, .. }
             | FrontendEvent::PlaceAgentWindowInKanban { id, .. }
             | FrontendEvent::MoveAgentKanbanCard { id, .. }
             | FrontendEvent::UndockAgentWindow { id, .. }
             | FrontendEvent::DockAgentWindowToIssue { id, .. }
             | FrontendEvent::SetAgentKanbanCardCollapsed { id, .. }
             | FrontendEvent::UpdateTerminalGrid { id, .. }
-            | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
             | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
@@ -12445,7 +12440,6 @@ impl AppRuntime {
             | FrontendEvent::OpenActiveWorkLaunchWizard { .. }
             | FrontendEvent::RunWorkspaceCleanup { .. }
             | FrontendEvent::CycleFocus { .. }
-            | FrontendEvent::ArrangeWindows { .. }
             | FrontendEvent::StopAllWindows { .. }
             | FrontendEvent::SaveUiTrace { .. }
             | FrontendEvent::OpenPmAgent { .. }
@@ -12729,12 +12723,10 @@ impl AppRuntime {
             FrontendEvent::StartupTerminalReady { id, .. }
             | FrontendEvent::FocusWindow { id, .. }
             | FrontendEvent::ActivateWindowTab { id, .. }
-            | FrontendEvent::DetachWindowTab { id, .. }
             | FrontendEvent::UndockAgentWindow { id, .. }
             | FrontendEvent::DockAgentWindowToIssue { id, .. }
             | FrontendEvent::SetAgentKanbanCardCollapsed { id, .. }
             | FrontendEvent::UpdateTerminalGrid { id, .. }
-            | FrontendEvent::UpdateWindowGeometry { id, .. }
             | FrontendEvent::CloseWindow { id, .. }
             | FrontendEvent::CloseFleetPane { id, .. }
             | FrontendEvent::RecoverRestoredWindow { id, .. }
@@ -12778,9 +12770,7 @@ impl AppRuntime {
             FrontendEvent::PmPaneSendInput { window_id, .. } => owns_window(window_id),
             FrontendEvent::OpenStartWorkInAgentKanban { board_id, .. }
             | FrontendEvent::OpenAgentKanbanLaunchWizard { board_id, .. } => owns_window(board_id),
-            FrontendEvent::DockWindowTab { id, target_id } => {
-                owns_window(id) && owns_window(target_id)
-            }
+
             FrontendEvent::PlaceAgentWindowInKanban { id, board_id, .. }
             | FrontendEvent::MoveAgentKanbanCard { id, board_id, .. } => {
                 owns_window(id) && owns_window(board_id)
@@ -12916,12 +12906,12 @@ impl AppRuntime {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
-            FrontendEvent::StartupAutoResumeReady { bounds } => {
+            FrontendEvent::StartupAutoResumeReady {} => {
                 if self.agent_maintenance.busy {
-                    self.agent_maintenance.deferred_startup_bounds = Some(bounds);
+                    self.agent_maintenance.deferred_startup_ready = true;
                     Vec::new()
                 } else {
-                    self.startup_auto_resume_ready_events(bounds)
+                    self.startup_auto_resume_ready_events()
                 }
             }
             FrontendEvent::StartupFirstFrame { navigation_ms } => {
@@ -12935,13 +12925,9 @@ impl AppRuntime {
             }
             // SPEC-3431 FR-018/FR-019: one click always lands the user on the
             // PM — existing pane gets framed, a missing one is started first.
-            FrontendEvent::OpenPmAgent { bounds } => {
+            FrontendEvent::OpenPmAgent {} => {
                 let tab_id = context.tab_id.clone();
-                self.ensure_pm_agent_for_tab_with_bounds(
-                    &tab_id,
-                    bounds,
-                    pm::PmEnsureTrigger::Explicit,
-                )
+                self.ensure_pm_agent_for_tab(&tab_id, pm::PmEnsureTrigger::Explicit)
             }
             // SPEC-3431 FR-026/FR-132: PM settings. The three writes never touch the
             // running pane; only the explicit restart does.
@@ -12982,26 +12968,13 @@ impl AppRuntime {
                 .unwrap_or_default(),
             FrontendEvent::CreateWindow {
                 preset,
-                bounds,
                 surface_owner,
-            } => self.create_window_events(context, preset, bounds, surface_owner),
-            FrontendEvent::FocusWindow { id, bounds } => self.focus_window_events(&id, bounds),
-            FrontendEvent::CycleFocus { direction, bounds } => {
-                self.cycle_focus_events(context, direction, bounds)
-            }
-            FrontendEvent::UpdateViewport { viewport } => {
-                self.update_viewport_events(context, viewport)
-            }
-            FrontendEvent::ArrangeWindows { mode, bounds } => {
-                self.arrange_windows_events(context, mode, bounds)
-            }
-            FrontendEvent::DockWindowTab { id, target_id } => {
-                self.dock_window_tab_events(&id, &target_id)
-            }
+            } => self.create_window_events(context, preset, surface_owner),
+            FrontendEvent::FocusWindow { id } => self.focus_window_events(&id),
+            FrontendEvent::CycleFocus { direction } => self.cycle_focus_events(context, direction),
+
             FrontendEvent::ActivateWindowTab { id } => self.activate_window_tab_events(&id),
-            FrontendEvent::DetachWindowTab { id, geometry } => {
-                self.detach_window_tab_events(&id, geometry)
-            }
+
             FrontendEvent::PlaceAgentWindowInKanban {
                 id,
                 board_id,
@@ -13014,9 +12987,7 @@ impl AppRuntime {
                 lane_id,
                 order,
             } => self.move_agent_kanban_card_events(&id, &board_id, lane_id, order),
-            FrontendEvent::UndockAgentWindow { id, geometry } => {
-                self.undock_agent_window_events(&id, geometry)
-            }
+            FrontendEvent::UndockAgentWindow { id } => self.undock_agent_window_events(&id),
             FrontendEvent::DockAgentWindowToIssue { id } => {
                 self.dock_agent_window_to_issue_events(&id)
             }
@@ -13033,19 +13004,7 @@ impl AppRuntime {
                 )]
             }
             FrontendEvent::ListFleetPanes => Vec::new(),
-            FrontendEvent::UpdateWindowGeometry {
-                id,
-                geometry,
-                cols,
-                rows,
-                base_geometry_revision,
-            } => self.update_window_geometry_events(
-                &id,
-                geometry,
-                cols,
-                rows,
-                base_geometry_revision,
-            ),
+
             FrontendEvent::CloseWindow { id, .. } => self.close_window_events(&id),
             FrontendEvent::CloseFleetPane { request_id, id, .. } => vec![OutboundEvent::reply(
                 client_id,
@@ -13332,8 +13291,7 @@ impl AppRuntime {
             FrontendEvent::OpenBoardOriginAgent {
                 id,
                 origin_session_id,
-                bounds,
-            } => self.open_board_origin_agent_events(&client_id, &id, &origin_session_id, bounds),
+            } => self.open_board_origin_agent_events(&client_id, &id, &origin_session_id),
             FrontendEvent::SelectProfile { id, profile_name } => {
                 self.select_profile_events(&client_id, &id, &profile_name)
             }
@@ -13384,25 +13342,20 @@ impl AppRuntime {
                 operation_id,
                 session_id,
                 agent_session_id,
-                bounds,
             } => self.resume_workspace_agent_events(
                 context,
                 &client_id,
                 operation_id,
                 session_id,
                 agent_session_id,
-                bounds,
             ),
             FrontendEvent::ContinueWork {
                 operation_id,
                 work_id,
-                bounds,
-            } => self.continue_work_events(context, &client_id, operation_id, work_id, bounds),
-            FrontendEvent::ResumeBranchLatestAgent {
-                id,
-                branch_name,
-                bounds,
-            } => self.resume_branch_latest_agent_events(&client_id, &id, &branch_name, bounds),
+            } => self.continue_work_events(context, &client_id, operation_id, work_id),
+            FrontendEvent::ResumeBranchLatestAgent { id, branch_name } => {
+                self.resume_branch_latest_agent_events(&client_id, &id, &branch_name)
+            }
             FrontendEvent::OpenLaunchWizard {
                 id,
                 branch_name,
@@ -13417,8 +13370,9 @@ impl AppRuntime {
                 &branch_name,
                 linked_issue_number,
             ),
-            FrontendEvent::LaunchWizardAction { action, bounds } => self
-                .handle_launch_wizard_action_for_client(context, Some(&client_id), action, bounds),
+            FrontendEvent::LaunchWizardAction { action } => {
+                self.handle_launch_wizard_action_for_client(context, Some(&client_id), action)
+            }
             FrontendEvent::SetIssueMonitorEnabled { enabled } => {
                 if enabled {
                     let has_launch_profile = Some(context.project_root.as_path())
@@ -14890,7 +14844,7 @@ impl AppRuntime {
             // pane.list/read. Never expose it on the agent capability route.
             recent_projects: Vec::new(),
         };
-        OutboundEvent::reply(client_id, BackendEvent::WindowCanvasState { workspace })
+        OutboundEvent::reply(client_id, BackendEvent::WorkspaceState { workspace })
     }
 
     pub(crate) fn frontend_sync_events(&mut self, client_id: &str) -> Vec<OutboundEvent> {
@@ -15390,7 +15344,6 @@ impl AppRuntime {
         worktree_form_projection: WorktreeFormProjection,
     ) -> gwt::WorkspaceView {
         gwt::WorkspaceView {
-            viewport: tab.workspace.persisted().viewport.clone(),
             windows: tab
                 .workspace
                 .persisted()
@@ -15455,7 +15408,7 @@ impl AppRuntime {
                                 issue_number,
                             };
                         }
-                        gwt::WindowPlacement::Canvas => {}
+                        gwt::WindowPlacement::Surface => {}
                     }
                     if let Some(status) = self.window_status(&window.id) {
                         window.status = status;
@@ -15470,7 +15423,7 @@ impl AppRuntime {
     pub(crate) fn workspace_state_broadcast(&self, context: &ProjectContext) -> OutboundEvent {
         OutboundEvent::project(
             context.project_key.clone(),
-            BackendEvent::WindowCanvasState {
+            BackendEvent::WorkspaceState {
                 workspace: self
                     .project_state_view(context)
                     .expect("workspace producer owns a current project"),
@@ -15551,10 +15504,7 @@ impl AppRuntime {
         ))
     }
 
-    fn persistable_workspace_state(
-        &self,
-        tab: &ProjectTabRuntime,
-    ) -> gwt::PersistedWindowCanvasState {
+    fn persistable_workspace_state(&self, tab: &ProjectTabRuntime) -> gwt::PersistedWindowRegistry {
         let mut state = tab.workspace.persistable_state();
         for window in &mut state.windows {
             let window_id = combined_window_id(&tab.id, &window.id);
@@ -15858,7 +15808,7 @@ impl AppRuntime {
         self.window_details.clear();
         // SPEC-1921 Phase 65 (T337): classify restored Agent-family
         // placeholders before seeding details. An exact auto-resume candidate
-        // resumes as soon as the frontend canvas is ready, so labeling it with
+        // resumes as soon as the frontend surfaces are ready, so labeling it with
         // the generic paused message would flash a wrong state; an agent
         // placeholder without an exact provider session id stays stopped and
         // must explain why instead of implying a plain paused terminal.

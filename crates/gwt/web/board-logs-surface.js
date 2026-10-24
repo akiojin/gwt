@@ -21,7 +21,7 @@
 // - focusOrSpawnPreset(preset): focus-or-spawn for Board origin jumps.
 // - activeWorkspace() / activeProjectTab(): workspace accessors.
 // - projectWindowContextById(windowId): owning project for per-window Logs.
-// - visibleBounds(): canvas bounds payload helper.
+
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
 import {
@@ -54,7 +54,6 @@ export function createBoardLogsSurface({
   activeWorkspace,
   activeProjectTab,
   projectWindowContextById,
-  visibleBounds,
   getActiveWorkProjection,
 }) {
       const boardStateMap = new Map();
@@ -660,7 +659,6 @@ export function createBoardLogsSurface({
           kind: "open_board_origin_agent",
           id: windowId,
           origin_session_id: originSessionId,
-          bounds: visibleBounds(),
         });
         onOpenOriginAgent?.(originSessionId);
       }

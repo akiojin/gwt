@@ -12,7 +12,7 @@ import {
   findAgentKanbanDropTargetAtPoint,
   isAgentKanbanEligible,
   isAgentKanbanPlacement,
-  isOffCanvasPlacement,
+  isContainedPlacement,
   moveAgentKanbanCardMessage,
   placeAgentWindowMessage,
   setAgentKanbanCardCollapsedMessage,
@@ -51,23 +51,23 @@ test("Agent Kanban groups contained agent windows by stable lane order", () => {
   );
 });
 
-// SPEC-3671 P1 / T-001: `isOffCanvasPlacement()` is the single seam that decides
+// SPEC-3671 P1 / T-001: `isContainedPlacement()` is the single seam that decides
 // whether a window is drawn on the canvas. At this phase it must stay behaviourally
 // identical to `isAgentKanbanPlacement()` so the P1 refactor is provably inert.
-test("off-canvas placement predicate matches Agent Kanban containment", () => {
+test("terminal containment predicate matches Agent Kanban membership", () => {
   const windows = sampleWindows();
 
   for (const windowData of [...windows, undefined, null, {}, { placement: {} }]) {
     assert.equal(
-      isOffCanvasPlacement(windowData),
+      isContainedPlacement(windowData),
       isAgentKanbanPlacement(windowData),
       `off-canvas predicate must agree with agent_kanban containment for ${JSON.stringify(windowData)}`,
     );
   }
 
-  assert.equal(isOffCanvasPlacement({ placement: { kind: "agent_kanban" } }), true);
-  assert.equal(isOffCanvasPlacement({ placement: { kind: "canvas" } }), false);
-  assert.equal(isOffCanvasPlacement({ preset: "agent" }), false);
+  assert.equal(isContainedPlacement({ placement: { kind: "agent_kanban" } }), true);
+  assert.equal(isContainedPlacement({ placement: { kind: "canvas" } }), false);
+  assert.equal(isContainedPlacement({ preset: "agent" }), false);
 });
 
 test("Agent Kanban surface renders lanes, card terminals, and card controls", () => {
@@ -265,7 +265,7 @@ test("Agent Kanban pending placement consumes only newly launched eligible agent
   assert.equal(controller.consumePlacementMessage([{ id: "agent-later", preset: "agent" }]), null);
 });
 
-test("Agent Kanban app wiring maps preset, hides contained windows, reparents terminals, and sends grid updates", () => {
+test("Agent Kanban app wiring maps preset, reparents terminals, and sends grid updates", () => {
   assert.match(
     appSource,
     /from\s+"\/agent-kanban-surface\.js"/,
@@ -275,11 +275,6 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
     extractFunctionBody(appSource, "presetSurface"),
     /preset\s*===\s*"agent_kanban"[\s\S]*return\s+"agent-kanban"/,
     "agent_kanban preset must mount as the Agent Kanban surface",
-  );
-  assert.match(
-    extractFunctionBody(appSource, "visibleWindowData"),
-    /isOffCanvasPlacement\(windowData\)[\s\S]*return\s+false/,
-    "contained Agent Kanban cards must not remain visible as top-level windows",
   );
   assert.match(
     extractFunctionBody(appSource, "createTerminalRuntime"),
@@ -295,23 +290,13 @@ test("Agent Kanban app wiring maps preset, hides contained windows, reparents te
 });
 
 // SPEC-3671 P1 / T-002 + T-003: every "is this window drawn on the canvas?" check in
-// app.js must route through `isOffCanvasPlacement()`. Lane-membership checks, which
+// app.js must route through `isContainedPlacement()`. Lane-membership checks, which
 // read `placement.board_id` / `placement.lane_id`, deliberately keep using
 // `isAgentKanbanPlacement()` because they ask a different question.
-test("canvas-visibility checks route through the off-canvas seam", () => {
-  for (const name of ["visibleWindowData", "canRefreshTerminalViewport"]) {
-    const body = extractFunctionBody(appSource, name);
-    assert.match(
-      body,
-      /isOffCanvasPlacement\(/,
-      `${name} decides canvas rendering and must use isOffCanvasPlacement()`,
-    );
-    assert.doesNotMatch(
-      body,
-      /isAgentKanbanPlacement\(/,
-      `${name} must not re-introduce a direct agent_kanban canvas check`,
-    );
-  }
+test("terminal containment and visible DOM have separate owners", () => {
+  const refresh = extractFunctionBody(appSource, "canRefreshTerminalViewport");
+  assert.match(refresh, /elementHasLayoutBox\(terminalHost\)/);
+  assert.doesNotMatch(refresh, /isContainedPlacement|placement|geometry/);
 
   // Lane membership keeps the Kanban-specific predicate: it is scoped by board_id.
   const renderKeyBody = extractFunctionBody(appSource, "agentKanbanBodyRenderKey");

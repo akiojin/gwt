@@ -81,8 +81,7 @@ test.describe("Closed Issue retirement (live backend)", () => {
       await expect(windows.first()).toBeVisible();
       await expect(windows.first().locator('[data-settings-panel="issues"]')).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
-      await sendLiveGwtEvent(page, { kind: "update_window_geometry", id: windowId,
-        geometry: { x: 50, y: 40, width: 1150, height: 850 }, cols: 100, rows: 28 });
+      await page.setViewportSize({ width: 1280, height: 1020 });
       await expect.poll(() => windows.first().evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(800);
       const before = await cli("issue.monitor.status");
       expect(before.enabled).toBe(false);

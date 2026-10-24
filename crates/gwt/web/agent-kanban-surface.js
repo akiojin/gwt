@@ -12,18 +12,11 @@ export function isAgentKanbanPlacement(windowData) {
   return windowData?.placement?.kind === "agent_kanban";
 }
 
-// SPEC-3671 FR-004: the single seam that answers "is this window drawn on the
-// canvas?". Callers that ask about Kanban *lane membership* (board_id / lane_id)
-// keep using `isAgentKanbanPlacement()`; callers that decide canvas rendering use
-// this predicate so a new off-canvas placement only has to be added here.
-export function isOffCanvasPlacement(windowData) {
+// A contained terminal is mounted by its Issue preview or Kanban card host.
+// This describes terminal ownership, independent of window coordinates.
+export function isContainedPlacement(windowData) {
   const kind = windowData?.placement?.kind;
   return kind === "agent_kanban" || kind === "issue_preview";
-}
-
-function isCanvasPlacement(windowData) {
-  const kind = windowData?.placement?.kind;
-  return !kind || kind === "canvas";
 }
 
 function isAgentWindow(windowData) {
@@ -34,7 +27,7 @@ export function isAgentKanbanEligible(windowData) {
   return Boolean(
     windowData?.id &&
       isAgentWindow(windowData) &&
-      isCanvasPlacement(windowData),
+      !isContainedPlacement(windowData),
   );
 }
 
@@ -334,7 +327,7 @@ export function createAgentKanbanSurface({
     const issueNumber = Number(windowData.linked_issue_number);
     const existingIssueWindow = () => Number.isInteger(issueNumber) && issueNumber > 0
       ? (activeWorkspace?.()?.windows || []).find(candidate => candidate.id !== windowData.id
-        && isAgentWindow(candidate) && isCanvasPlacement(candidate)
+        && isAgentWindow(candidate) && !isContainedPlacement(candidate)
         && Number(candidate.linked_issue_number) === issueNumber)
       : null;
     const focusesExisting = Boolean(existingIssueWindow());

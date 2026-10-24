@@ -893,7 +893,6 @@ test.describe("Issue Related Work Resume", () => {
     expect(first).toBeTruthy();
     expect(Object.keys(first).sort()).toEqual([
       "agent_session_id",
-      "bounds",
       "kind",
       "operation_id",
       "session_id",
@@ -902,10 +901,6 @@ test.describe("Issue Related Work Resume", () => {
     expect(first.operation_id).not.toBe("");
     expect(first.session_id).toBe("related-gwt-session");
     expect(first.agent_session_id).toBe("related-conversation");
-    expect(first.bounds).toEqual(expect.objectContaining({
-      width: expect.any(Number),
-      height: expect.any(Number),
-    }));
 
     // Bypass the native disabled guard once so the shared pending controller
     // must also reject a duplicate event for the same Session.

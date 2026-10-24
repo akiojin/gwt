@@ -205,8 +205,8 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-running", counts.running ?? 0);
   // Issue #3884 AC-3: break out the running agents that live as inline
   // terminals in the Issue window (SPEC-3671 `issue_preview` placement), so
-  // "RUNNING 6" next to an empty canvas explains itself. Hidden when every
-  // running agent is on the canvas, and for callers that omit the breakdown.
+  // "RUNNING 6" next to an empty Agents view explains itself. Hidden when every
+  // running agent is in Agents, and for callers that omit the breakdown.
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
@@ -1091,7 +1091,7 @@ function wireMissionBriefing({ doc, win }) {
 
   // SPEC-2356 — let the user dismiss the splash early by pressing any
   // key or clicking through it. The splash is purely decorative and
-  // shouldn't block users who want to get into the canvas immediately.
+  // shouldn't block users who want to get into the workspace immediately.
   let exited = false;
   const exitNow = () => {
     if (exited) return;

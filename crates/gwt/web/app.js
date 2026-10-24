@@ -32,7 +32,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         createAgentKanbanSurface,
         isAgentKanbanEligible,
         isAgentKanbanPlacement,
-        isOffCanvasPlacement,
+        isContainedPlacement,
         undockAgentWindowMessage,
         updateTerminalGridMessage,
       } from "/agent-kanban-surface.js";
@@ -89,7 +89,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // moved to /knowledge-kanban-surface.js.
       import {
         createKnowledgeKanbanSurface,
-        // SPEC #3885 FR-011: the canvas face of a Windowized agent is an Issue
+        // SPEC #3885 FR-011: the Agents view of a Windowized agent is an Issue
         // header above the interactive terminal, built from the Issue surface's
         // own badge/action vocabulary so both faces read identically.
         issueWindowHeaderModel,
@@ -101,7 +101,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome
       // (project tabs + close-tab confirm modal + tab cues, recent projects,
       // open-project menu, picker/onboarding renderers, action availability,
-      // window list dropdown, maximized-window viewport sync, open/clone
+      // window list dropdown, open/clone
       // project modal glue, migration modal glue) moved to
       // /project-shell-surface.js.
       import { createProjectShellSurface } from "/project-shell-surface.js";
@@ -137,7 +137,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         applyBranchEntriesEvent,
       } from "/branch-list-state.js";
 
-      // SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap carrier.
 
       // Issue #4777 T-1: the rail picks Issues / Agents / Board / Settings.
       import {
@@ -437,7 +436,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       let reconnectTimer = null;
       let focusedId = null;
 
-      // The Fleet Minimap mounts once and subscribes to the catalog and camera.
 
       // SPEC-3064 Phase 3 (E5): the wizard state (launchWizard /
       // launchWizardOpenError / launchWizardOpening / branch draft /
@@ -451,8 +449,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
       // Window List visibility stays in the shell; its snapshot gate lives in
       // the shared catalog model below.
-      // SPEC-2008 camera-focus: titlebarClickState (the double-click maximize
-      // detector) was removed; a titlebar click now always frames the window.
       let appState = {
         app_version: "",
         tabs: [],
@@ -462,7 +458,6 @@ import { createUiStateStore } from "/ui-state-store.js";
       const windowCatalogModel = createUiStateStore({
         catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
         listEntries: [],
-        bounds: { x: 0, y: 0, width: 1, height: 1 },
       });
       let reconcilingWindowCatalog = false;
 
@@ -529,7 +524,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       let renderedOperatorTelemetryKey = "";
       // SPEC-3064 Phase 3 (E7): the rendered-key slots for the moved chrome
       // renderers (recent projects, window list, picker, onboarding, action
-      // availability) and maximizedViewportSyncFrame moved to
+      // availability) moved to
       // /project-shell-surface.js.
 
       // SPEC-3064 Phase 3 (E7): recentProjectsRenderKey moved to
@@ -542,7 +537,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       function appendWindowPlacementRenderKey(parts, windowData) {
         const placement = windowData?.placement || {};
         appendRenderKeyPart(parts, "placement_kind");
-        appendRenderKeyPart(parts, placement.kind || "canvas");
+        appendRenderKeyPart(parts, placement.kind || "surface");
         appendRenderKeyPart(parts, "placement_board");
         appendRenderKeyPart(parts, placement.board_id || "");
         appendRenderKeyPart(parts, "placement_lane");
@@ -738,7 +733,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         for (const windowData of windows) {
           const issueNumber = Number(windowData.linked_issue_number);
-          if (!isAgentWindowPreset(windowData.preset) || isOffCanvasPlacement(windowData)
+          if (!isAgentWindowPreset(windowData.preset) || isContainedPlacement(windowData)
               || !linkedIssues.has(issueNumber)) continue;
           appendRenderKeyPart(parts, "existing_issue_window");
           appendRenderKeyPart(parts, windowData.id || "");
@@ -1167,9 +1162,8 @@ import { createUiStateStore } from "/ui-state-store.js";
           handleKnowledgeTransportChange(connected);
         }
         // SPEC-3038 US-4: the Status Strip (plus the SPEC-2359 W-17 full-
-        // screen overlay above) is the home for connection state — the
-        // permanent canvas hint bar is retired. The class is set on the strip
-        // element and consumed via CSS.
+        // screen overlay above) is the home for connection state. The class
+        // is set on the strip element and consumed via CSS.
         const strip = document.getElementById("op-status-strip");
         const connectionStatusLabel = strip?.querySelector(
           "[data-role='connection-label']",
@@ -1498,7 +1492,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function emptyWorkspace() {
         return {
-          viewport: { x: 0, y: 0, zoom: 1 },
           windows: [],
         };
       }
@@ -1562,13 +1555,6 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function workspaceWindowElement(windowId) {
         return windowMap.get(windowId) || null;
-      }
-
-      function visibleWindowData(windowData) {
-        if (isOffCanvasPlacement(windowData)) {
-          return false;
-        }
-        return true;
       }
 
       // SPEC-3064 Phase 3 (E7): sendOpenProjectDialog, the clone-project
@@ -1767,11 +1753,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3064 Phase 3 (E7): the Window List dropdown
-      // (requestWindowList / renderWindowList / toggleWindowList) and the
-      // maximized-window viewport sync (geometryMatches /
-      // syncMaximizedWindowsToViewport /
-      // scheduleMaximizedWindowsToViewportSync /
-      // workspaceHasVisibleMaximizedWindow) moved to
+      // (requestWindowList / renderWindowList / toggleWindowList) lives in
       // /project-shell-surface.js.
 
       // SPEC-3064 Phase 3 (E7): renderProjectTabs, the close-project-tab
@@ -1974,11 +1956,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      function visibleBounds() {
-        const area = document.querySelector(".surface-area");
-        return { x: 0, y: 0, width: area.clientWidth, height: area.clientHeight };
-      }
-
       // Every window entry point selects the rail host. Saved geometry is ignored.
       function frameWindow(windowId, { notifyFocus = true } = {}) {
         const data = workspaceWindowById(windowId);
@@ -2016,7 +1993,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           const windowData = workspaceWindowById(windowId);
           if (
             windowData &&
-            visibleWindowData(windowData) &&
             windowMap.has(windowId)
           ) {
             pendingFrameWindowId = null;
@@ -2047,7 +2023,6 @@ import { createUiStateStore } from "/ui-state-store.js";
           if (routeProjectMissing || generation !== socketReceiveDispatcherGeneration) return;
           send({
             kind: "startup_auto_resume_ready",
-            bounds: visibleBounds(),
           });
         };
         // Background tabs may suspend frames; readiness must still reach the backend.
@@ -2057,7 +2032,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       function cycleFocus(direction) {
         // SPEC #4777 T-10: cycle the existing Agents tabs in runtime-priority
-        // order without changing canvas geometry or saved window groups.
+        // order while preserving each surface selection.
         const windows = activeWorkspace().windows || [];
         const nextWindowId = selectNextAgentFocusWindowId(
           windows,
@@ -2125,20 +2100,11 @@ import { createUiStateStore } from "/ui-state-store.js";
       // `terminal-viewport-reflow.js` so the host resize controller and
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
-        const workspaceWindow = workspaceWindowById(windowId);
         if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
         if (agentsHost === document.querySelector(".surface-area")) return false;
-        if (splitSurfaces?.hasLayout && !isOffCanvasPlacement(workspaceWindow)) {
-          return splitSurfaces.containsWindow(windowId);
-        }
-        if (isOffCanvasPlacement(workspaceWindow)) {
-          const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
-          return elementHasLayoutBox(terminalHost);
-        }
-        return viewportEligibleForRefresh({
-          element: windowMap.get(windowId),
-          workspaceWindow,
-        });
+        const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
+        if (terminalHost) return elementHasLayoutBox(terminalHost);
+        return viewportEligibleForRefresh({ element: windowMap.get(windowId) });
       }
 
       // SPEC-2008 Phase 26.A regression fix (Issue #2832): completeInitialFitHandshake
@@ -2627,7 +2593,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         const counts = {
           running: 0,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
-          // them off the canvas — they live inside the Issue window.
+          // them inside their owning surface — they live inside the Issue window.
           running_inline: 0,
           idle: 0,
           // FR-039 (anshin): waiting is its own LOUD telemetry state for
@@ -2905,7 +2871,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           return;
         }
         // SPEC #3885 FR-015: the Issue controls exist exactly when the window is
-        // the canvas face of an Issue — the same condition that gives it an
+        // the Agents view of an Issue — the same condition that gives it an
         // Issue header. FR-013's bare terminal shows neither.
         const isIssueWindow = Boolean(issueWindowHeaderModelFor(windowData));
         openIssueButton.hidden = !isIssueWindow;
@@ -2956,7 +2922,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         splitSurfaces?.focusWindow(windowId);
         const targetElement = windowMap.get(windowId);
         if (focusedId === windowId && targetElement?.classList.contains("focused")) {
-          raiseWindowElementLocally(targetElement);
           return;
         }
         const previousFocusedId = focusedId;
@@ -2968,7 +2933,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         if (targetElement) {
           targetElement.classList.add("focused");
-          raiseWindowElementLocally(targetElement);
         }
         syncSurfaceRail();
       }
@@ -3002,43 +2966,18 @@ import { createUiStateStore } from "/ui-state-store.js";
         syncSurfaceRail();
       });
 
-      function numericZIndex(value) {
-        const numeric = Number.parseInt(value || "0", 10);
-        return Number.isFinite(numeric) ? numeric : 0;
-      }
-
-      function raiseWindowElementLocally(targetElement) {
-        if (!targetElement) {
-          return;
-        }
-        const targetZ = numericZIndex(targetElement.style.zIndex);
-        let maxPeerZ = 0;
-        for (const element of windowMap.values()) {
-          if (element === targetElement) {
-            continue;
-          }
-          maxPeerZ = Math.max(maxPeerZ, numericZIndex(element.style.zIndex));
-        }
-        if (targetZ <= maxPeerZ) {
-          targetElement.style.zIndex = String(maxPeerZ + 1);
-        }
-      }
-
       // Focus is independent of persisted geometry.
       function focusWindowRemotely(windowId) {
         focusWindowLocally(windowId);
         send({ kind: "focus_window", id: windowId });
       }
 
-      // SPEC-2008 camera-focus: toggleMinimizeWindow / toggleMaximizeWindow
-      // were removed. Maximize/minimize/restore no longer exist; focusing a
-      // window flies the camera to frame it in place (see frameWindow).
 
       // SPEC-3038 US-3: Close Guard — every window close (titlebar x and
       // tab x) confirms through one modal regardless of agent state
       // (user-confirmed decision, 2026-06-10).
       // SPEC-2356 Anshin Addendum (FR-042): STOP ALL halts every live agent
-      // runtime, leaving windows on the canvas. Count the live agent windows so
+      // runtime, leaving windows in Agents. Count the live agent windows so
       // the confirm is specific, and no-op when nothing is running.
       function countRunningAgentWindows() {
         let count = 0;
@@ -3069,12 +3008,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
       }
 
-      // SPEC-2008 camera-focus (UX fix): focus and camera move are SEPARATE.
-      // A single titlebar click only focuses the window (front + highlight +
-      // input routing) and never moves the camera/zoom. A DOUBLE click is the
-      // deliberate "fly the camera to frame this window" gesture. Focus fires
-      // immediately on the first click (no delay); a second click on the same
-      // window within the threshold upgrades to framing.
       let lastTitlebarClick = null;
       const TITLEBAR_DOUBLE_CLICK_MS = 300;
 
@@ -3211,7 +3144,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       }
 
       // SPEC-3671 FR-008: the single place that flips a runtime between the
-      // interactive canvas terminal and the read-only Issue preview mirror.
+      // interactive Agents terminal and the read-only Issue preview mirror.
       function applyTerminalReadOnly(runtime, readOnly) {
         if (!runtime) return;
         runtime.readOnly = readOnly === true;
@@ -3244,7 +3177,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         requestAnimationFrame(() => {
           // SPEC-3671: a runtime created inside a hidden host never completed its
           // initial fit handshake, and nothing else retries it for a window that is
-          // never revealed on the canvas. Reparenting into a laid-out container IS
+          // never revealed in Agents. Reparenting into a laid-out container IS
           // the reveal, so retry the handshake here; it is idempotent once ready.
           completeInitialFitHandshake(windowId);
           scheduleTerminalFit(windowId, true);
@@ -3563,7 +3496,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             return {
               heading: "Environment",
               rows: [
-                ["Theme", "Canvas"],
+                ["Theme", "Operator"],
                 ["Agents", "Claude / Codex"],
                 ["Transport", "Local server"],
               ],
@@ -3583,7 +3516,7 @@ import { createUiStateStore } from "/ui-state-store.js";
               rows: [
                 ["Work", "synced"],
                 ["Transport", "connected"],
-                ["Canvas", "ready"],
+                ["Surfaces", "ready"],
               ],
             };
           case "issue":
@@ -3609,8 +3542,8 @@ import { createUiStateStore } from "/ui-state-store.js";
             return {
               heading: "Work",
               rows: [
-                ["Canvas", "ready"],
-                ["Windows", "floating"],
+                ["Surfaces", "ready"],
+                ["Windows", "tabbed"],
                 ["Transport", "shared"],
               ],
             };
@@ -3768,7 +3701,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         sendWindowFocus: requestWindowFrame,
         focusOrSpawnPreset,
         openIssueLaunchWizard,
-        visibleBounds,
         launchPending,
         // SPEC-3671 FR-007 / FR-008: the Issue preview mounts the shared terminal
         // runtime read-only, so the live output streams but no input path exists.
@@ -3796,11 +3728,10 @@ import { createUiStateStore } from "/ui-state-store.js";
         renderOtherWork: (parent, windowId, options) =>
           workspaceOverviewSurface.renderInto(parent, windowId, options),
         formatWorkLifecycleLabel: formatLifecycleStateLabel,
-        continueWork: (workId, bounds) => continueWorkDispatcher.dispatch(workId, bounds),
+        continueWork: (workId) => continueWorkDispatcher.dispatch(workId),
         // Lazy: the Branches & cleanup surface is constructed after this factory.
         openWorkspaceCleanup: (candidate, sourceWindowId) =>
           openWorkspaceCleanup(candidate, sourceWindowId),
-        getResumeBounds: () => visibleBounds(),
         // SPEC #3206 FR-017: surface errors become notification-center error
         // rows (dedup by key, occurrence count, auto-read on resolve). Lazy:
         // the center is constructed after this factory.
@@ -3870,7 +3801,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         focusOrSpawnPreset,
         activeWorkspace,
         activeProjectTab,
-        visibleBounds,
         getActiveWorkProjection: () => activeWorkProjection,
         projectWindowContextById,
       });
@@ -3895,7 +3825,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         const message = {
           kind: "launch_wizard_action",
           action,
-          bounds: visibleBounds(),
         };
         if (queueIfDisconnected) {
           return send(message);
@@ -3936,8 +3865,8 @@ import { createUiStateStore } from "/ui-state-store.js";
 
       // SPEC-2356 Anshin Addendum (FR-040), now on the shared alerts stack
       // (SPEC #3206): in-app attention toast that surfaces even while the
-      // operator is present. Activation flies the camera to the window
-      // (frameWindow). ERROR is sticky so a failure is never missed; quieter
+      // operator is present. Activation selects the window in its surface.
+      // ERROR is sticky so a failure is never missed; quieter
       // flavors auto-hide. Deduped per window so a window never doubles up.
       function showAttentionToast(notice) {
         const flavor = notice.flavor || "needs_input";
@@ -3992,7 +3921,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         dialogEl: document.querySelector("#workspace-resume-picker-modal .modal-shell"),
         createNode,
         send,
-        getResumeBounds: () => visibleBounds(),
         launchPending,
       });
 
@@ -4064,7 +3992,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         branchCleanupModal,
         branchCleanupDialog,
         launchPending,
-        visibleBounds,
         getActiveWorkProjection: () => activeWorkProjection,
         renderWorkspaceWindows: () => workspaceOverviewSurface.renderWindows(),
       });
@@ -4082,10 +4009,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         windowMap,
         workspaceWindowById,
         focusBoardEntry,
-        getResumeBounds: () => visibleBounds(),
         launchPending,
-        continueWork: (workId, bounds) =>
-          continueWorkDispatcher.dispatch(workId, bounds),
+        continueWork: (workId) =>
+          continueWorkDispatcher.dispatch(workId),
         branchesFileTreeSurface: {
           ensureBranchListState: (...a) => ensureBranchListState(...a),
           requestBranches: (...a) => requestBranches(...a),
@@ -4215,8 +4141,8 @@ import { createUiStateStore } from "/ui-state-store.js";
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
       // (project tabs + close-tab confirm modal + tab cues, Recent Projects,
       // Open Project split-button menu, picker/onboarding renderers, action
-      // availability, Window List dropdown + render key, maximized-window
-      // viewport sync, open/clone project modal glue, migration modal glue,
+      // availability, Window List dropdown + render key, open/clone project
+      // modal glue, migration modal glue,
       // the window_list / clone_* / migration_* receive bodies, and the
       // project-shell chrome listeners) moved to /project-shell-surface.js.
       // app.js keeps renderAppState (the central render orchestrator), the
@@ -4257,14 +4183,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         windowTitleTooltip,
         windowRoleBadgeLabel,
         shouldShowRuntimeStatus,
-        visibleWindowData,
         presetSurface,
         focusWindowRemotely,
-        // SPEC-2008 camera-focus: window-list rows fly the camera to a window
-        // via frameWindow (teleport) instead of maximizing/restoring it.
+        // Window-list rows select the live view in its surface.
         frameWindow,
         scheduleTerminalFit,
-        visibleBounds,
         addButton,
 
         cloneProjectModal,
@@ -4432,7 +4355,7 @@ import { createUiStateStore } from "/ui-state-store.js";
         for (const windowData of activeWorkspace()?.windows || []) {
           if (onlyWindowId !== null && windowData.id !== onlyWindowId) continue;
           const view = pmChatViews.get(windowData.id);
-          if (windowData.is_pm && visibleWindowData(windowData) && view && view.logHost.hidden) {
+          if (windowData.is_pm && view && view.logHost.hidden) {
             const request = requestPmReports(windowData.id, resync);
             if (request) send(request);
           }
@@ -4487,11 +4410,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             event.stopPropagation();
             void copyTerminalOverlayMessage(windowData.id);
           });
-          // SPEC-2008 camera-focus (UX fix): clicking a terminal focuses only —
-          // front + highlight + input routing — and never moves the camera
-          // (focusWindowRemotely omits center, so no bounds/zoom change). The
-          // camera only moves on the deliberate double-click / minimap / cycle
-          // framing gestures.
+          // Overlay interaction focuses the same live terminal.
           overlay.addEventListener("mousedown", () => {
             focusWindowRemotely(windowData.id);
           });
@@ -4506,11 +4425,11 @@ import { createUiStateStore } from "/ui-state-store.js";
             const runtime = terminalMap.get(windowData.id);
             runtime?.terminal.focus();
           });
-          // SPEC-3671 FR-004: an off-canvas window's terminal belongs to the
+          // SPEC-3671 FR-004: a contained window's terminal belongs to the
           // surface that hosts it (Agent Kanban card / Issue preview pane), not to
-          // this hidden canvas body. Mounting it here would steal the live terminal
+          // this inactive surface body. Mounting it here would steal the live terminal
           // away from the visible host.
-          if (!isOffCanvasPlacement(windowData)) {
+          if (!isContainedPlacement(windowData)) {
             frontendUnits.terminalHost.createRuntime(windowData.id, terminalRoot);
           }
           // SPEC #3885 FR-011: an Issue-bound agent gets its Issue header above the
@@ -4581,8 +4500,7 @@ import { createUiStateStore } from "/ui-state-store.js";
           </div>
         `;
         const scroll = body.querySelector(".mock-scroll");
-        // SPEC-2008 camera-focus (UX fix): body click focuses only, no camera
-        // move (focusWindowRemotely without center).
+        // Body interaction focuses the existing live terminal.
         body.addEventListener("mousedown", () => {
           focusWindowRemotely(windowData.id);
         });
@@ -4724,9 +4642,9 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         syncPmChat(windowData, element);
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
-        // to the canvas without changing its preset, so `mountWindowBody` does not
+        // into Agents without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
-        if (surface === "terminal" && !isOffCanvasPlacement(windowData) && !agentsHost) {
+        if (surface === "terminal" && !isContainedPlacement(windowData) && !agentsHost) {
           const terminalRoot = element.querySelector(".window-body .terminal-root");
           if (
             terminalRoot &&
@@ -4878,8 +4796,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     windowMap.delete(windowId);
                   });
 
-                  // SPEC-2008 Phase 24 / T-188: detect hidden -> visible transitions
-                  // for tab-grouped terminal windows so the newly visible terminal
+                  // Detect project-window reveal transitions so the visible terminal
                   // gets fit + viewport refresh + focus on the same animation frame
                   // cycle. Without this, scrollback wheel input requires a manual
                   // OS-level resize before xterm picks up the new measurement. The
@@ -4892,7 +4809,7 @@ import { createUiStateStore } from "/ui-state-store.js";
                     if (!element) return;
                     applyVisibilityTransition({
                       element,
-                      shouldHide: !visibleWindowData(windowData),
+                      shouldHide: false,
                       hasTerminal: terminalMap.has(windowData.id),
                       onReveal: () => activateTerminalOnReveal(windowData.id),
                     });
@@ -5201,7 +5118,7 @@ import { createUiStateStore } from "/ui-state-store.js";
             frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
             projectPageMetadata.setProjectName(activeProjectTab()?.title);
             // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
-            // floating CTA in step with every canvas render.
+            // floating CTA in step with every surface render.
             updatePmLauncher(activeWorkspace());
             // FR-019: `windowMap` is current now, so a frame requested for a
             // window that had not been mounted yet can finally run.
@@ -5771,7 +5688,7 @@ import { createUiStateStore } from "/ui-state-store.js";
 
         openSurface: (surface) => {
           const preset = surface === "issues" ? "settings" : surface;
-          send({ kind: "create_window", preset, bounds: visibleBounds() });
+          send({ kind: "create_window", preset });
         },
         onChange: () => {
           syncSurfaceRail();
@@ -5832,9 +5749,11 @@ import { createUiStateStore } from "/ui-state-store.js";
         }
         if (!tabId || initialSurfaceSelected) return;
         const windows = catalogActiveWindows(catalog);
+        const latest = windows.reduce((latest, data) => !latest || data.z_index > latest.z_index ? data : latest, null);
+        // Inline content restores its owning surface; explicit navigation still wins.
+        const ownerId = latest?.placement?.issue_window_id || latest?.placement?.board_id;
         const initial = windows.find(data => data.id === catalog.focusedId)
-          || windows.filter(data => !isOffCanvasPlacement(data))
-            .reduce((latest, data) => !latest || data.z_index > latest.z_index ? data : latest, null);
+          || windows.find(data => data.id === ownerId) || latest;
         if (initial && windowMap.has(initial.id)) {
           initialSurfaceSelected = true;
           frameWindow(initial.id, { notifyFocus: false });
@@ -5907,7 +5826,7 @@ import { createUiStateStore } from "/ui-state-store.js";
       });
       // SPEC-2008 Phase 24 / T-187: host resize must fan out `fitTerminal
       // (persist=true)` to every visible terminal so xterm cols/rows stay
-      // aligned with the viewport and `UpdateWindowGeometry` reaches the
+      // aligned with the viewport and `UpdateTerminalGrid` reaches the
       // backend PTY. The fan-out lives in `terminal-viewport-reflow.js`
       // so the behavior is exercised by linkedom unit tests rather than
       // only source-string contract.
@@ -6003,7 +5922,6 @@ import { createUiStateStore } from "/ui-state-store.js";
         const message = {
           kind: "create_window",
           preset,
-          bounds: visibleBounds(),
         };
         if (surfaceOwner) message.surface_owner = surfaceOwner;
         windowCatalogModel.update(state => ({ ...state, pendingSurface: {

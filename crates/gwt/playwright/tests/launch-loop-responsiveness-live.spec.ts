@@ -1,4 +1,4 @@
-/** #5015: exercise real LaunchComplete deliveries while the canvas has 60 windows. */
+/** #5015: exercise real LaunchComplete deliveries while the catalog has 60 windows. */
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -61,32 +61,27 @@ test.describe("launch-loop responsiveness (live backend)", () => {
       for (let index = initial.length; index < 60; index += 1) {
         windows.push({
           kind: "create_window", preset: "logs",
-          bounds: { x: index * 8, y: index * 8, width: 480, height: 280 },
-        });
+          });
       }
       await sendBurst(page, windows);
       await expect(page.locator(".workspace-window")).toHaveCount(60, { timeout: 60_000 });
-      const canvas = await ids(page);
+      const catalog = await ids(page);
       const workBefore = await ids(page);
       await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "work",
-        bounds: { x: 32, y: 32, width: 880, height: 520 },
-      });
+        });
       const workId = await newWindow(page, workBefore);
       // The probe agent itself runs the authenticated gwtd pane.list operation
       // 20 times at 3.5 second intervals using its own injected capability.
       // No credential or production pane endpoint is copied by this test.
       for (let iteration = 0; iteration < 20; iteration += 1) {
         launched.push(await launch(page, workId, `feature/launch-loop-${info.project.name}-${iteration}`));
-        await sendBurst(page, [{
-          kind: "arrange_windows", mode: "tile",
-          bounds: { x: 0, y: 0, width: 1440, height: 900 },
-        }, ...canvas.map(id => ({
-          kind: "update_window_geometry", id,
-          geometry: { x: iteration, y: iteration, width: 480, height: 280 },
-          cols: 80, rows: 24,
-        }))]);
-        samples.push(await pmRoundtrip(page, canvas[0]));
+        // Resize the real surface host so xterm's existing fit path sends grids.
+        await page.setViewportSize({ width: 1440 - iteration % 2 * 80, height: 900 - iteration % 2 * 40 });
+        await sendBurst(page, catalog.map(id => ({
+          kind: "update_terminal_grid", id, cols: 80, rows: 24,
+        })));
+        samples.push(await pmRoundtrip(page, catalog[0]));
         // Keep launching across the full pane.list observation interval.
         await page.waitForTimeout(3_500);
       }
@@ -203,7 +198,7 @@ async function wizardRequest(page: Page, detail: unknown, requireOpen = false): 
 
 async function wizardAction(page: Page, action: unknown): Promise<any> {
   return wizardRequest(page, { kind: "launch_wizard_action", action,
-    bounds: { x: 32, y: 32, width: 880, height: 520 } });
+    });
 }
 
 async function pmRoundtrip(page: Page, id: string): Promise<number> {

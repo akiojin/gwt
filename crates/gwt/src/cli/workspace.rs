@@ -11514,13 +11514,15 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let project_dir = tmp.path().join("viewport-only-canvas-state");
         std::fs::create_dir_all(&project_dir).expect("project dir");
-        let mut state = crate::empty_workspace_state();
-        state.viewport.x = 24.0;
-        state.viewport.y = 36.0;
-        state.viewport.zoom = 1.5;
-        state.next_z_index = 8;
-        crate::save_workspace_state(&project_dir.join("workspace.json"), &state)
-            .expect("save viewport-only workspace state");
+        // Preserve the legacy on-disk fixture even though new registries have no viewport.
+        let mut state = serde_json::to_value(crate::empty_workspace_state()).unwrap();
+        state["viewport"] = serde_json::json!({"x": 24.0, "y": 36.0, "zoom": 1.5});
+        state["next_z_index"] = serde_json::json!(8);
+        std::fs::write(
+            project_dir.join("workspace.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .expect("save viewport-only legacy workspace state");
 
         let mut out = String::new();
         let code = run_projection_prune_with_scan_root(

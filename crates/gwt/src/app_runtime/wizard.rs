@@ -23,7 +23,7 @@ use chrono::Utc;
 use gwt::{
     knowledge_launch_target_branch_name, KnowledgeKind, LaunchWizardCompletion,
     LaunchWizardContext, LaunchWizardHydration, LaunchWizardLaunchPath, LaunchWizardLaunchRequest,
-    LaunchWizardState, LaunchWizardView, LinkedIssueKind, WindowGeometry,
+    LaunchWizardState, LaunchWizardView, LinkedIssueKind,
 };
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -192,16 +192,6 @@ fn manual_holder_operation_id(
     format!("manual-launch-successor:{kind}:{fingerprint}")
 }
 
-fn issue_monitor_auto_launch_geometry(index: usize) -> WindowGeometry {
-    let offset = ((index % 8) as f64) * 24.0;
-    WindowGeometry {
-        x: 96.0 + offset,
-        y: 96.0 + offset,
-        width: 860.0,
-        height: 520.0,
-    }
-}
-
 /// SPEC #3914 FR-007: the profile chosen for one silent launch, plus the
 /// candidates ranked ahead of it that were passed over (empty for the head).
 #[derive(Debug, Clone)]
@@ -322,7 +312,7 @@ fn build_knowledge_launch_wizard_session_from_inputs(
         wizard,
         workspace_resume_context,
         agent_kanban_target: None,
-        auto_submit_after_runtime_resolution: None,
+        auto_submit_after_runtime_resolution: false,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
         origin: super::LaunchWizardOrigin::Knowledge,
@@ -1767,7 +1757,7 @@ impl AppRuntime {
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
             origin,
@@ -1872,7 +1862,7 @@ impl AppRuntime {
 
         let project_root = tab.project_root.clone();
         if let Some(window_id) = self.live_agent_window_for_work(&tab_id, Some(branch_name), None) {
-            return self.focus_existing_live_work_agent_events(&window_id, None);
+            return self.focus_existing_live_work_agent_events(&window_id);
         }
         match self.open_launch_wizard_for_branch(
             &tab_id,
@@ -2109,7 +2099,7 @@ impl AppRuntime {
                 if let Some(window_id) =
                     self.live_agent_window_for_work(&tab_id, Some(&branch_name), None)
                 {
-                    return self.focus_existing_live_work_agent_events(&window_id, None);
+                    return self.focus_existing_live_work_agent_events(&window_id);
                 }
                 let linked_issue_number =
                     workspace_resume_owner_issue_number(resume_context.owner.as_deref());
@@ -2169,7 +2159,6 @@ impl AppRuntime {
         operation_id: String,
         session_id: String,
         agent_session_id: Option<String>,
-        bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         if !self.project_context_is_current(context) {
             return Vec::new();
@@ -2254,13 +2243,8 @@ impl AppRuntime {
                     .unwrap_or_else(|| format!("work-session-{}", linked_session.id));
             let branch =
                 (!linked_session.branch.trim().is_empty()).then(|| linked_session.branch.clone());
-            let mut events = self.continue_work_events(
-                context,
-                client_id,
-                operation_id.clone(),
-                work_id,
-                bounds,
-            );
+            let mut events =
+                self.continue_work_events(context, client_id, operation_id.clone(), work_id);
             let failure = events.iter().find_map(|outbound| match &outbound.event {
                 BackendEvent::ContinueWorkOutcome {
                     outcome: gwt::ContinueWorkOutcomeKind::Failed,
@@ -2307,7 +2291,7 @@ impl AppRuntime {
                     "This Work is currently running a different conversation; stop it before resuming an older Session.".to_string(),
                 );
             }
-            let mut events = self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            let mut events = self.focus_existing_live_work_agent_events(&window_id);
             events.push(started_ack(&session_id, None));
             return events;
         }
@@ -2346,7 +2330,7 @@ impl AppRuntime {
                 );
                 }
             }
-            let mut events = self.focus_existing_live_work_agent_events(&window_id, Some(bounds));
+            let mut events = self.focus_existing_live_work_agent_events(&window_id);
             events.push(started_ack(
                 &session_id,
                 (!session.branch.trim().is_empty()).then(|| session.branch.clone()),
@@ -2433,7 +2417,7 @@ impl AppRuntime {
             &session.worktree_path,
         ));
 
-        match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
+        match self.spawn_agent_window(&tab_id, config, workspace_resume_context) {
             Ok(mut events) => {
                 events.push(started_ack(
                     &session_id,
@@ -2475,7 +2459,6 @@ impl AppRuntime {
         client_id: &str,
         id: &str,
         branch_name: &str,
-        bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let branch_error = |message: String| {
             vec![OutboundEvent::reply(
@@ -2542,8 +2525,7 @@ impl AppRuntime {
                 .get(&window_id)
                 .map(|session| session.session_id.clone())
                 .unwrap_or_default();
-            let mut events =
-                self.focus_existing_live_work_agent_events(&window_id, Some(bounds.clone()));
+            let mut events = self.focus_existing_live_work_agent_events(&window_id);
             events.push(started_ack(live_session_id, normalized_branch_name.clone()));
             return events;
         }
@@ -2564,7 +2546,7 @@ impl AppRuntime {
             if !self.window_lookup.contains_key(&window_id) {
                 return branch_error(format!("Agent window not found for session {}", session.id));
             }
-            let mut events = self.focus_window_events(&window_id, Some(bounds));
+            let mut events = self.focus_window_events(&window_id);
             if events.is_empty() {
                 events.push(self.workspace_state_broadcast(&context));
             }
@@ -2598,7 +2580,7 @@ impl AppRuntime {
             &session.worktree_path,
         ));
 
-        match self.spawn_agent_window(&tab_id, config, bounds, workspace_resume_context) {
+        match self.spawn_agent_window(&tab_id, config, workspace_resume_context) {
             Ok(mut events) => {
                 events.push(started_ack(
                     session.id.clone(),
@@ -2840,7 +2822,7 @@ impl AppRuntime {
             wizard,
             workspace_resume_context,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
             origin: super::LaunchWizardOrigin::StartWork,
@@ -3280,7 +3262,7 @@ impl AppRuntime {
             wizard,
             workspace_resume_context: None,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: None,
@@ -5268,7 +5250,7 @@ impl AppRuntime {
                     .then_some(resume)
             });
             // An answer must follow its asking conversation even when another
-            // pane linked to the Issue appears first in the canvas.
+            // pane linked to the Issue appears first in the window catalog.
             let claim_window_id = if let Some(resume) = prepared_answer {
                 self.issue_monitor_native_conversation_holder(&resume.session)
             } else {
@@ -5723,18 +5705,7 @@ impl AppRuntime {
             issue_number,
             correlation_delivery_id.as_deref(),
         );
-        let launch_index = self
-            .tab(&session.tab_id)
-            .map(|tab| {
-                tab.workspace
-                    .persisted()
-                    .windows
-                    .iter()
-                    .filter(|window| window.preset == WindowPreset::Agent)
-                    .count()
-            })
-            .unwrap_or(0);
-        let geometry = issue_monitor_auto_launch_geometry(launch_index);
+
         let issue_monitor_session_mode = match &launch_request {
             LaunchWizardLaunchRequest::Agent(config) => Some(config.session_mode),
             LaunchWizardLaunchRequest::Shell(_) => None,
@@ -5755,19 +5726,16 @@ impl AppRuntime {
         };
         let mut events = match launch_request {
             LaunchWizardLaunchRequest::Agent(config) => match prepared_admission.take() {
-                Some(prepared) => self
-                    .spawn_agent_window_with_prepared_monitor_admission_at_geometry(
-                        &session.tab_id,
-                        *config,
-                        geometry,
-                        session.workspace_resume_context.clone(),
-                        feedback,
-                        prepared?,
-                    )?,
-                None => self.spawn_agent_window_with_feedback_at_geometry(
+                Some(prepared) => self.spawn_agent_window_with_prepared_monitor_admission(
                     &session.tab_id,
                     *config,
-                    geometry,
+                    session.workspace_resume_context.clone(),
+                    feedback,
+                    prepared?,
+                )?,
+                None => self.spawn_agent_window_with_feedback(
+                    &session.tab_id,
+                    *config,
                     session.workspace_resume_context.clone(),
                     feedback,
                 )?,
@@ -6172,18 +6140,7 @@ impl AppRuntime {
             None
         };
         let workspace_resume_context = Some(workspace_resume_context);
-        let launch_index = self
-            .tab(tab_id)
-            .map(|tab| {
-                tab.workspace
-                    .persisted()
-                    .windows
-                    .iter()
-                    .filter(|window| window.preset == WindowPreset::Agent)
-                    .count()
-            })
-            .unwrap_or(0);
-        let geometry = issue_monitor_auto_launch_geometry(launch_index);
+
         let feedback = LaunchFeedbackContext {
             client_id: "__issue_monitor__".to_string(),
             title: "Issue Monitor".to_string(),
@@ -6197,18 +6154,16 @@ impl AppRuntime {
         };
         let had_prepared_admission = prepared_admission.is_some();
         let launch = match prepared_admission {
-            Some(prepared) => self.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+            Some(prepared) => self.spawn_agent_window_with_prepared_monitor_admission(
                 tab_id,
                 config,
-                geometry,
                 workspace_resume_context,
                 feedback,
                 prepared?,
             ),
-            None => self.spawn_agent_window_with_feedback_at_geometry(
+            None => self.spawn_agent_window_with_feedback(
                 tab_id,
                 config,
-                geometry,
                 workspace_resume_context,
                 feedback,
             ),
@@ -6413,9 +6368,8 @@ impl AppRuntime {
         &mut self,
         context: &super::ProjectContext,
         action: gwt::LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        self.handle_launch_wizard_action_for_client(context, None, action, bounds)
+        self.handle_launch_wizard_action_for_client(context, None, action)
     }
 
     fn manual_launch_generation_disposition(
@@ -6786,7 +6740,6 @@ impl AppRuntime {
         context: &super::ProjectContext,
         client_id: Option<&str>,
         action: gwt::LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
         if !self.project_context_is_current(context) {
             return Vec::new();
@@ -6886,7 +6839,7 @@ impl AppRuntime {
                     self.store_launch_wizard(session);
                     return vec![self.launch_wizard_state_outbound(context)];
                 }
-                let mut events = self.focus_existing_live_work_agent_events(window_id, bounds);
+                let mut events = self.focus_existing_live_work_agent_events(window_id);
                 events.push(self.launch_wizard_state_broadcast(context, None));
                 return events;
             }
@@ -6894,20 +6847,6 @@ impl AppRuntime {
                 fingerprint,
                 window_id,
             } => {
-                if bounds.is_none() {
-                    let error = "Viewport bounds are required before stopping the current holder"
-                        .to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        action_stage,
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.store_launch_wizard(session);
-                    return vec![self.launch_wizard_state_outbound(context)];
-                }
                 let mut fixed_wizard = session.wizard.clone();
                 fixed_wizard.holder_decision = None;
                 fixed_wizard.error = None;
@@ -7192,7 +7131,7 @@ impl AppRuntime {
                     self.store_launch_wizard(session);
                     return vec![self.launch_wizard_state_outbound(context)];
                 };
-                if !tab.workspace.focus_window(&address.raw_id, None) {
+                if !tab.workspace.focus_window(&address.raw_id) {
                     let error = "The selected session window is no longer available".to_string();
                     Self::log_launch_wizard_error(
                         &session,
@@ -7256,19 +7195,6 @@ impl AppRuntime {
                         *config,
                     );
                 }
-                let Some(bounds) = bounds else {
-                    let error = "Viewport bounds are required to launch a window".to_string();
-                    Self::log_launch_wizard_error(
-                        &session,
-                        "launch_bounds",
-                        action_label,
-                        requested_agent_id.as_deref(),
-                        &error,
-                    );
-                    session.wizard.error = Some(error);
-                    self.store_launch_wizard(session);
-                    return vec![self.launch_wizard_state_outbound(context)];
-                };
                 session
                     .wizard
                     .mark_launch_materialization_pending("Preparing worktree...");
@@ -7281,7 +7207,6 @@ impl AppRuntime {
                         wizard_id: session.wizard_id.clone(),
                         client_id: client_id.map(str::to_string),
                         config,
-                        bounds,
                     });
                 self.store_launch_wizard(session);
                 vec![self.launch_wizard_state_outbound(context)]
@@ -7298,7 +7223,6 @@ impl AppRuntime {
         wizard_id: String,
         client_id: Option<String>,
         config: LaunchWizardLaunchRequest,
-        bounds: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         let Some(pending_session) = self.project_states.values_mut().find_map(|state| {
             state
@@ -7353,7 +7277,6 @@ impl AppRuntime {
                         runtime.spawn_agent_window_in_agent_kanban(
                             &session.tab_id,
                             *config,
-                            bounds,
                             workspace_resume_context,
                             launch_feedback_context,
                             target,
@@ -7362,7 +7285,6 @@ impl AppRuntime {
                         runtime.spawn_agent_window_with_feedback(
                             &session.tab_id,
                             *config,
-                            bounds,
                             workspace_resume_context,
                             launch_feedback_context,
                         )
@@ -7370,14 +7292,13 @@ impl AppRuntime {
                         runtime.spawn_agent_window(
                             &session.tab_id,
                             *config,
-                            bounds,
                             workspace_resume_context,
                         )
                     }
                 },
             ),
             LaunchWizardLaunchRequest::Shell(config) => {
-                match self.spawn_wizard_shell_window(&session.tab_id, *config, bounds) {
+                match self.spawn_wizard_shell_window(&session.tab_id, *config) {
                     Ok(mut events) => {
                         if owns_visible_slot {
                             events.insert(0, self.launch_wizard_state_broadcast(&context, None));
@@ -7853,14 +7774,13 @@ impl AppRuntime {
                         .map(|profiles| profiles.with_repo_local(Some(open_set.clone().into())));
                 }
                 session.wizard.apply_runtime_context(hydration);
-                let auto_submit_bounds = session.auto_submit_after_runtime_resolution.take();
+                let auto_submit = std::mem::take(&mut session.auto_submit_after_runtime_resolution);
                 self.store_launch_wizard(session);
-                if let Some(bounds) = auto_submit_bounds {
+                if auto_submit {
                     return self.handle_launch_wizard_action_for_client(
                         &context,
                         None,
                         gwt::LaunchWizardAction::Submit,
-                        Some(bounds),
                     );
                 }
                 vec![self.launch_wizard_state_outbound(&context)]
@@ -7957,7 +7877,6 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: ShellLaunchConfig,
-        bounds: WindowGeometry,
     ) -> Result<Vec<OutboundEvent>, String> {
         let context = self
             .project_context(tab_id)
@@ -7974,7 +7893,7 @@ impl AppRuntime {
         );
         let window = tab
             .workspace
-            .add_window_with_title(WindowPreset::Shell, title, false, bounds);
+            .add_window_with_title(WindowPreset::Shell, title, false);
         tab.workspace
             .set_surface_owner(&window.id, Some(gwt::WindowSurfaceOwner::Agents));
         self.register_window(tab_id, &window.id);

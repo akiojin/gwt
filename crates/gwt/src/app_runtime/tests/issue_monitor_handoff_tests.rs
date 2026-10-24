@@ -33,7 +33,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     );
     let raw_id = fixture.runtime.tabs[0]
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds())
+        .add_window(WindowPreset::Agent)
         .id;
     let window_id = combined_window_id("tab-1", &raw_id);
     fixture.runtime.register_window("tab-1", &raw_id);
@@ -3121,7 +3121,7 @@ fn app_runtime_late_writer_conflict_preserves_known_holder_window_id() {
     );
     let source_raw_id = fixture.runtime.tabs[0]
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds())
+        .add_window(WindowPreset::Agent)
         .id;
     assert!(fixture.runtime.tabs[0]
         .workspace
@@ -3825,21 +3825,18 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         LaunchWizardAction::SetModel {
             model: "gpt-5.5".to_string(),
         },
-        None,
     );
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
         },
-        None,
     );
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetSkipPermissions { enabled: true },
-        None,
     );
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
         "issue monitor settings runtime resolution",
         &recorded_events,
@@ -3869,11 +3866,8 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    let confirm_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let confirm_events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let confirm_view = confirm_events
         .iter()
         .find_map(|event| match &event.event {
@@ -3887,11 +3881,8 @@ fn app_runtime_issue_monitor_configure_recovers_malformed_prefs_without_launchin
 
     // Recovery content must not depend on completing fsync inside the GUI budget.
     let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
-    let saved_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let saved_events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     assert!(
         saved_events.iter().any(|event| {
@@ -4566,7 +4557,6 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetFastMode { enabled: true },
-        None,
     );
     let view = events
         .iter()
@@ -4598,7 +4588,7 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     );
     let previewed_summary = impact.resulting_summary.clone();
 
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
         "issue monitor settings runtime resolution",
         &recorded_events,
@@ -4628,15 +4618,11 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let saved_events = {
         // Saved content must not depend on completing fsync inside the GUI budget.
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
-        runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            None,
-        )
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit)
     };
 
     assert!(

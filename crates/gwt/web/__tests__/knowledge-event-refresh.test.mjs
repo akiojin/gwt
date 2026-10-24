@@ -9,6 +9,8 @@ async function surfaceModule() {
       'from "data:text/javascript,export function createFocusTrap(){return()=>{}}"')
     .replace('from "./launch-pending-controller.js"',
       `from "${new URL("../launch-pending-controller.js", import.meta.url).href}"`)
+    .replace('from "./agent-kanban-surface.js"',
+      `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`)
     .replace('from "./control-explanations.js"',
       `from "${new URL("../control-explanations.js", import.meta.url).href}"`)
     .replace('from "./ui-state-store.js"',

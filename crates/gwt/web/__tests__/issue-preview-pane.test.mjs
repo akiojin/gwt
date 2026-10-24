@@ -27,7 +27,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22preview-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -107,7 +107,6 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime: (id, root, options) => {
       terminalMounts.push({ id, root, options });
@@ -352,7 +351,7 @@ test("Windowize hands the mirrored agent back to the canvas", async (t) => {
   fixture.surface.renderKnowledgeBridge("win-1");
   const detail = fixture.body.querySelector(".knowledge-detail-pane");
   assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
-  assert.ok(detail.querySelector('[data-action="focus-canvas-window"]'));
+  assert.ok(detail.querySelector('[data-action="focus-surface-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
 });
 
