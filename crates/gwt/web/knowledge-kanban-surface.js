@@ -5695,10 +5695,10 @@ export function createKnowledgeKanbanSurface({
               ) {
                 // Legacy/untyped semantic failures are deliberately silent
                 // and never start the typed indefinite retry ladder.
-                renderKnowledgeStatusOnly(event.id, state);
+                knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "status" }));
               } else {
                 state.error = event.message;
-                renderKnowledgeBridge(event.id);
+                knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
               }
               break;
             }
@@ -5737,10 +5737,9 @@ export function createKnowledgeKanbanSurface({
             state.searching = false;
             state.detailLoading = false;
             if (matchesLoadRequest) {
-              renderKnowledgeBridge(event.id);
+              knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
             } else {
-              renderKnowledgeStatusOnly(event.id, state);
-              renderKnowledgeDetailOnly(event.id, state);
+              knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "detail" }));
             }
             break;
           }
@@ -5797,9 +5796,14 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion }) => {
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (errorCompletion) {
+          renderKnowledgeStatusOnly(windowId, state);
+          if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);
+          return;
+        }
         if (detailCompletion) {
           renderKnowledgeSelection(windowId, state, previousNumber);
           // SPEC-2017 US-9 — refresh the Drawer body when the detail

@@ -1410,6 +1410,20 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       assert.equal(element.querySelector(".knowledge-detail-title").textContent, ROW_B.title);
       assert.equal(originalRow.classList.contains("selected"), true);
 
+      assert.ok(element.querySelector(".knowledge-detail-pane").textContent.includes("Loading detail"));
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: state.detailRequestId, message: "Detail refresh failed",
+      });
+      assert.equal(state.detailLoading, false, "detail error settles synchronously");
+      assert.equal(state.error, "Detail refresh failed");
+      assert.equal(element.querySelector('[data-issue-number="2"]'), originalRow,
+        "detail error must not rebuild the list");
+      assert.equal(state.selectedNumber, ROW_B.number);
+      assert.ok(!element.querySelector(".knowledge-detail-pane").textContent.includes("Loading detail"));
+      assert.ok(element.querySelector(".knowledge-detail-pane .knowledge-notification-badge"));
+      state.error = "";
+
       const drawer = document.getElementById("kanban-drawer");
       drawer.focus = () => {};
       surface.openKanbanDrawer({ windowId: "win-1", kind: "issue", number: ROW_B.number });
@@ -1491,6 +1505,22 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       assert.ok(element.querySelector('[data-issue-number="2"]') === semanticRow,
         "an in-flight search must not redraw the list");
       assert.equal(state.queuedSearchIntent, null, "the in-flight search must not be duplicated");
+      const searchRequest = sent.at(-1);
+      const silentRow = element.querySelector('[data-issue-number="1"]');
+      assert.ok(silentRow);
+      const detailBeforeError = element.querySelector(".knowledge-detail-title");
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
+        request_id: searchRequest.request_id, query: searchRequest.query, message: "Silent semantic failure",
+      });
+      assert.equal(state.searchInFlight, false);
+      assert.equal(state.searching, false);
+      assert.equal(state.error, "");
+      assert.equal(element.querySelector('[data-issue-number="1"]'), silentRow,
+        "silent errors must preserve list nodes");
+      assert.equal(element.querySelector(".knowledge-detail-title"), detailBeforeError,
+        "silent errors must preserve detail nodes");
+
       surface.clearKnowledgeBridgeState("win-1");
     });
   } finally {
