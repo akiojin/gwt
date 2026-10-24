@@ -14,14 +14,84 @@ test.describe("Recovery Center", () => {
     viewport: { width: 1440, height: 900 },
   });
 
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, info) => {
     page.on("pageerror", (error) => { throw error; });
     page.on("console", (message) => {
       if (message.type() === "error") throw new Error(message.text());
     });
-    await installEmbeddedRoutes(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
     await installRecoveryCenterBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(base ? new URL(new URL(APP_URL).pathname, base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  });
+
+  test("shared state recovers and rejects stale or closed responses", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await runPaletteCommand(page, "Open Recovery Center");
+    const modal = page.locator("#recovery-center-modal");
+    const rows = modal.locator(".recovery-center-row");
+    await expect(rows).toHaveCount(2);
+    const request = (await fixtureMessages(page)).find(message => message.kind === "load_recovery_center")!;
+    const stateFilter = modal.locator("#recovery-center-state-filter");
+    const formFilter = modal.locator("#recovery-center-worktree-filter");
+    await stateFilter.selectOption("all");
+    await formFilter.selectOption("branch-backed");
+    await formFilter.focus();
+    const emit = (event: Record<string, unknown>) => page.evaluate(event => {
+      (window as any).__recoveryCenterFixtureSocket.emit(event);
+    }, event);
+    const response = { kind: "recovery_center_state", request_id: request.request_id, generation: 42 };
+    await emit({ ...response, status: "error", items: [] });
+    await expect(modal.getByRole("alert")).toHaveText("Recovery deliveries could not be loaded.");
+    await expect(rows).toHaveCount(0);
+    await expect(formFilter).toBeFocused();
+    const title = '<img src=x onerror="window.__recoveryStateExecuted=true"> Recovered delivery';
+    await emit({ ...response, status: "ready", items: [{
+      action_handle: "recovered", state: "acknowledged", worktree_form: "branch-backed", title,
+    }] });
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toContainText(title);
+    await expect(rows.locator("img")).toHaveCount(0);
+    await expect(stateFilter).toHaveValue("all");
+    await expect(formFilter).toHaveValue("branch-backed");
+    await expect(formFilter).toBeFocused();
+    await expect(modal.locator(".recovery-center-status")).toBeHidden();
+
+    // A different receiver is the FIFO marker: it cannot repair a stale
+    // Recovery response before we assert that the response had no effect.
+    const marker = async (count: number) => {
+      await emit({ kind: "branch_entries", id: "recovery-marker", load_id: count, phase: "hydrated",
+        entries: Array.from({ length: count }, (_, index) => ({ name: `work/marker-${index}`, scope: "local" })),
+      });
+      await expect(page.locator("#op-strip-branches")).toHaveText(String(count));
+    };
+    await page.keyboard.press("Escape");
+    await emit({ ...response, status: "ready", items: [{
+      action_handle: "closed-sentinel", state: "pending", worktree_form: "branch-backed", title: "Closed response must stay absent",
+    }] });
+    await marker(6);
+    await expect(modal).not.toHaveClass(/\bopen\b/);
+    await expect(rows).toHaveCount(0);
+    await runPaletteCommand(page, "Open Recovery Center");
+    await expect(rows).toHaveCount(2);
+    const current = (await fixtureMessages(page)).filter(message => message.kind === "load_recovery_center").at(-1)!;
+    expect(current.request_id).not.toBe(request.request_id);
+    await stateFilter.focus();
+    await emit({ ...response, status: "error", items: [] });
+    await marker(7);
+    await expect(rows).toHaveCount(2);
+    await expect(modal.locator(".recovery-center-status")).toBeHidden();
+    await expect(stateFilter).toHaveValue("attention");
+    await expect(formFilter).toHaveValue("all");
+    await expect(stateFilter).toBeFocused();
+    expect(await page.evaluate(() => (window as any).__recoveryStateExecuted)).toBeUndefined();
+    await info.attach("recovery-state", { body: await modal.screenshot(), contentType: "image/png" });
+    expect(errors).toEqual([]);
   });
 
   test("filters independently and resets both filters when reopened", async ({ page }) => {
@@ -201,6 +271,7 @@ async function installRecoveryCenterBackend(page: any): Promise<void> {
 
       constructor(url: string) {
         super();
+        (window as any).__recoveryCenterFixtureSocket = this;
         (this as any).url = url;
         (this as any).readyState = FixtureWebSocket.CONNECTING;
         setTimeout(() => {
