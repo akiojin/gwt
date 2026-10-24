@@ -3842,8 +3842,42 @@ const ISSUE_MONITOR_PREFS_OBSERVATIONAL_RECORD_FIELDS: [(&str, &str); 2] = [
 /// (launch admission reads the hold; `observed_at` only orders merges).
 /// Unparsable bytes hash raw so any byte change still invalidates.
 pub(super) fn issue_monitor_prefs_content_digest(bytes: &[u8]) -> [u8; 32] {
+    issue_monitor_prefs_digests(bytes).0
+}
+
+/// The content digest plus per top-level key digests of the admission
+/// projection. The key digests only name, in diagnostics, which keys a stale
+/// launch saw rewritten; the content digest is derived from them in one pass.
+fn issue_monitor_prefs_digests(
+    bytes: &[u8],
+) -> ([u8; 32], std::collections::BTreeMap<String, [u8; 32]>) {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
+    let mut keys = std::collections::BTreeMap::new();
+    match issue_monitor_prefs_admission_map(bytes) {
+        Some(map) => {
+            hasher.update(b"json:");
+            for (key, value) in map {
+                let digest: [u8; 32] =
+                    Sha256::digest(serde_json::to_vec(&value).unwrap_or_default()).into();
+                hasher.update(serde_json::to_vec(&key).unwrap_or_default());
+                hasher.update(digest);
+                keys.insert(key, digest);
+            }
+        }
+        None => {
+            hasher.update(b"raw:");
+            hasher.update(bytes);
+        }
+    }
+    (hasher.finalize().into(), keys)
+}
+
+/// The prefs object without observation-only churn, or `None` when the bytes
+/// are not a JSON object.
+fn issue_monitor_prefs_admission_map(
+    bytes: &[u8],
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     match serde_json::from_slice::<serde_json::Value>(bytes) {
         Ok(serde_json::Value::Object(mut map)) => {
             for key in ISSUE_MONITOR_PREFS_OBSERVATIONAL_KEYS {
@@ -3885,15 +3919,10 @@ pub(super) fn issue_monitor_prefs_content_digest(bytes: &[u8]) -> [u8; 32] {
                 }
                 None => {}
             }
-            hasher.update(b"json:");
-            hasher.update(serde_json::to_vec(&serde_json::Value::Object(map)).unwrap_or_default());
+            Some(map)
         }
-        _ => {
-            hasher.update(b"raw:");
-            hasher.update(bytes);
-        }
+        _ => None,
     }
-    hasher.finalize().into()
 }
 
 /// Freshness fence for Issue Monitor prefs consumed by launch preparation.
@@ -3904,6 +3933,7 @@ pub(super) fn issue_monitor_prefs_content_digest(bytes: &[u8]) -> [u8; 32] {
 pub(crate) struct IssueMonitorPrefsStamp {
     metadata: (u64, std::time::SystemTime),
     content: [u8; 32],
+    keys: std::collections::BTreeMap<String, [u8; 32]>,
 }
 
 impl IssueMonitorPrefsStamp {
@@ -3918,10 +3948,30 @@ impl IssueMonitorPrefsStamp {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
+        let (content, keys) = issue_monitor_prefs_digests(&bytes);
         Ok(Some(Self {
             metadata,
-            content: issue_monitor_prefs_content_digest(&bytes),
+            content,
+            keys,
         }))
+    }
+
+    /// Issue #6096 diagnostics: the admission-relevant top-level keys whose
+    /// content differs between `expected` and the current file.
+    pub(super) fn changed_keys(expected: Option<&Self>, path: &Path) -> Vec<String> {
+        let current = std::fs::read(path)
+            .map(|bytes| issue_monitor_prefs_digests(&bytes).1)
+            .unwrap_or_default();
+        let empty = std::collections::BTreeMap::new();
+        let expected = expected.map_or(&empty, |stamp| &stamp.keys);
+        expected
+            .keys()
+            .chain(current.keys())
+            .filter(|key| expected.get(*key) != current.get(*key))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// True when `path` still carries the same admission-relevant content.

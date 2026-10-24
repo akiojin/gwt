@@ -408,6 +408,58 @@ fn is_bare_repository(path: &Path) -> bool {
         && path.join("refs").is_dir()
 }
 
+/// The `origin` URL Git would report for `repo_root`, read from its config
+/// files (includes and `url.*.insteadOf` rewrites applied) without spawning
+/// `git`. `None` when the layout cannot be resolved this way, or when the
+/// config chain declares other than exactly one `remote.origin.url`: Git then
+/// reports the first value while routing metadata prefers the last, so only
+/// Git itself can answer.
+pub fn configured_origin_url(repo_root: &Path) -> Option<String> {
+    let git_dir = resolve_git_dir(repo_root)?;
+    let common_dir = resolve_common_git_dir(&git_dir);
+    let mut configs = read_git_config_chain(
+        &common_dir.join("config"),
+        repo_root,
+        &git_dir,
+        &mut HashSet::new(),
+        0,
+    );
+    configs.extend(read_user_git_config_contents(repo_root, &git_dir));
+    let declared = configs
+        .iter()
+        .map(|config| count_origin_urls_in_git_config(config))
+        .sum::<usize>();
+    (declared == 1)
+        .then(|| origin_url_from_git_config(repo_root))
+        .flatten()
+}
+
+fn count_origin_urls_in_git_config(config: &str) -> usize {
+    let mut in_origin_remote = false;
+    let mut count = 0;
+    for raw_line in config.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if let Some(section) = line
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            in_origin_remote = is_origin_remote_section(section.trim());
+            continue;
+        }
+        if in_origin_remote
+            && line
+                .split_once('=')
+                .is_some_and(|(key, _)| key.trim().eq_ignore_ascii_case("url"))
+        {
+            count += 1;
+        }
+    }
+    count
+}
+
 fn origin_url_from_git_config(repo_root: &Path) -> Option<String> {
     let git_dir = resolve_git_dir(repo_root)?;
     let common_dir = resolve_common_git_dir(&git_dir);

@@ -440,6 +440,43 @@ fn prepare_issue_monitor_handoff_delivery(
     Ok(preparation)
 }
 
+/// Issue #6096: re-evaluate a prepared launch against the current prefs,
+/// provider usage and capacity. Launch facts survive when the prefs-derived
+/// inputs and the admission decision are unchanged; otherwise the delivery is
+/// marked stale so the GUI prepares it again from scratch.
+fn revalidate_issue_monitor_launch_prepared(
+    prepared: &mut IssueMonitorLaunchPrepared,
+    input: &super::launch::IssueMonitorSpawnAdmissionInput,
+    previous: &super::launch::PreparedIssueMonitorSpawnAdmission,
+    cache: &LaunchWizardMemoryCache,
+    provider_usage: &[gwt_core::usage::ProviderUsage],
+    profile_config_path: &Result<PathBuf, String>,
+) {
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&prepared.request.project_root);
+    // Answered handoffs carry no source facts: they keep their original prefs
+    // stamp and only refresh the admission, as before Issue #6096.
+    if let Some(expected) = prepared.source_facts.as_ref() {
+        // Stamp before reading, so a rewrite during the reads is seen as newer.
+        prepared.prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
+        let current = IssueMonitorLaunchSourceFacts::read(
+            cache,
+            provider_usage,
+            &prepared.request,
+            profile_config_path,
+        );
+        if current != *expected {
+            prepared.delivery.result =
+                Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
+            prepared.delivery.admission = None;
+            return;
+        }
+        if let Ok(prefs) = gwt::load_issue_monitor_prefs(&prefs_path) {
+            prepared.delivery.autonomous_mode = prefs.autonomous_mode;
+        }
+    }
+    prepared.delivery.admission = Some(input.refresh(previous));
+}
+
 fn issue_monitor_prepared_prefs_path(context: &super::ProjectContext) -> PathBuf {
     gwt_core::paths::gwt_project_dir(&context.project_key).join("project-state/issue-monitor.json")
 }
@@ -661,6 +698,11 @@ pub(crate) struct IssueMonitorLaunchPrepared {
     prefs_stamp: Option<super::IssueMonitorPrefsStamp>,
     provider_usage: Vec<gwt_core::usage::ProviderUsage>,
     delivery: PreparedIssueMonitorDelivery,
+    /// Prefs-derived launch inputs, kept for a worker re-evaluation.
+    source_facts: Option<IssueMonitorLaunchSourceFacts>,
+    /// Issue #6096: a worker already re-evaluated these facts and admission
+    /// against newer prefs, provider usage and capacity and found them equal.
+    revalidated: bool,
 }
 
 pub(crate) type IssueMonitorLaunchPreparationKey = (String, u64, u64, Option<String>, bool);
@@ -708,6 +750,53 @@ fn issue_monitor_resume_handoff(
         issue_number,
     )
     .map_err(|error| format!("failed to read the autonomous handoff answer: {error}"))
+}
+
+/// Issue #6096: the prefs-derived inputs a prepared launch consumed (profile
+/// selection/tier and autonomous handoff). Rechecking these, instead of the
+/// whole prefs file, lets a busy project's unrelated rewrites keep the launch.
+#[derive(Debug, Clone, PartialEq)]
+struct IssueMonitorLaunchSourceFacts {
+    selection: Result<Option<(gwt::LaunchWizardPreviousProfiles, Option<u8>)>, String>,
+    handoff: IssueMonitorResumeHandoff,
+}
+
+impl IssueMonitorLaunchSourceFacts {
+    fn read(
+        cache: &LaunchWizardMemoryCache,
+        provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
+        request: &super::DeferredIssueMonitorLaunch,
+        profile_config_path: &Result<PathBuf, String>,
+    ) -> Self {
+        let issue_number = request.issue_number;
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
+        let selection = gwt::load_issue_monitor_prefs(&prefs_path)
+            .map_err(|error| error.to_string())
+            .and_then(|prefs| {
+                if prefs.launch_auto
+                    && prefs.autonomous_handoffs.iter().any(|handoff| {
+                        handoff.issue_number == issue_number
+                            && handoff.state
+                                == gwt::autonomous_handoff::AutonomousHandoffState::Resumed
+                            && handoff.delivered_at.is_none()
+                    })
+                {
+                    Ok(None)
+                } else {
+                    issue_monitor_preparation_choice(
+                        cache,
+                        provider_usage_accounts,
+                        request,
+                        profile_config_path,
+                    )
+                    .map(|choice| choice.map(|choice| (choice.profiles, choice.tier)))
+                }
+            });
+        Self {
+            selection,
+            handoff: issue_monitor_resume_handoff(&request.project_root, issue_number),
+        }
+    }
 }
 
 // None means an automatic answer must return to its asking Session, before
@@ -3893,17 +3982,11 @@ impl AppRuntime {
             record_issue_monitor_worker_phase("monitor_tier_record", &mut phase_started);
             // Revalidate selection on the worker after all expensive preparation and our own writes.
             // Keep the stamp from before that read, so an edit during either read or admission fails closed.
+            // Issue #6096: a prefs rewrite during these reads is not itself stale. The GUI
+            // compares this stamp and lets a worker re-evaluate the same source facts.
             let source_prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
-            let current_selection = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string()).and_then(|prefs| {
-                if prefs.launch_auto && prefs.autonomous_handoffs.iter().any(|handoff| handoff.issue_number == issue_number && handoff.state == gwt::autonomous_handoff::AutonomousHandoffState::Resumed && handoff.delivered_at.is_none()) {
-                    Ok(None)
-                } else {
-                    issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path).map(|choice| choice.map(|choice| (choice.profiles, choice.tier)))
-                }
-            });
-            if selection != current_selection || handoff != issue_monitor_resume_handoff(&request.project_root, issue_number)
-                || !super::issue_monitor_prefs_stamp_is_current(&prefs_path, &source_prefs_stamp)
-            {
+            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff };
+            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path) {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
             record_issue_monitor_worker_phase("monitor_source_revalidation", &mut phase_started);
@@ -3916,6 +3999,7 @@ impl AppRuntime {
             proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(IssueMonitorLaunchPrepared {
                 context, request, prefs_stamp, provider_usage,
                 delivery: PreparedIssueMonitorDelivery { result, claim, admission, existing_window, answered_handoff_pending, autonomous_mode, failure: None },
+                source_facts: Some(source_facts), revalidated: false,
             })));
         }) {
             self.issue_monitor_launch_preparations.remove(&key);
@@ -4012,6 +4096,8 @@ impl AppRuntime {
                         autonomous_mode: false,
                         failure: None,
                     },
+                    source_facts: None,
+                    revalidated: false,
                 },
             )));
         }) {
@@ -4234,6 +4320,8 @@ impl AppRuntime {
                         autonomous_mode: false,
                         failure: Some(failure),
                     },
+                    source_facts: None,
+                    revalidated: false,
                 },
             )));
         }) {
@@ -4266,6 +4354,8 @@ impl AppRuntime {
             prefs_stamp,
             provider_usage,
             mut delivery,
+            source_facts,
+            revalidated,
         } = prepared;
         let mut phase_started = IssueMonitorGuiPhases::new(self.blocking_tasks.clone());
         let correlation_delivery_id = request.delivery_id.clone();
@@ -4408,14 +4498,22 @@ impl AppRuntime {
             correlation_delivery_id.as_deref(),
             Some(prefs_stamp_elapsed_ms),
         );
-        // A five-second host sample renewal must not restart Git/base/prompt
-        // preparation. Recheck admission on its worker while all other facts
-        // retain their original freshness/claim fences on the returned event.
-        if admission_stale
+        // Issue #6096: a worker re-evaluation already accepted newer prefs and
+        // provider usage. Only strict admission fences and session/source
+        // changes can still refuse it, so a host slower than the prefs and
+        // capacity rewrite cadence converges instead of re-preparing forever.
+        let facts_revalidated = revalidated && source_facts.is_some();
+        let prefs_changed = prefs_changed && !facts_revalidated;
+        let provider_changed = provider_changed && !facts_revalidated;
+        // A five-second host sample renewal or an unrelated prefs/provider
+        // rewrite must not restart Git/base/prompt preparation. Re-evaluate the
+        // admission decision and the prefs-derived launch inputs on a worker;
+        // the claim and session keep their original fences.
+        if (admission_stale || prefs_changed || provider_changed)
+            && !revalidated
             && !session_changed
             && !source_changed
-            && !prefs_changed
-            && !provider_changed
+            && (source_facts.is_some() || (!prefs_changed && !provider_changed))
             && delivery.unsubmitted_handoff_attempt().is_none()
             && delivery.claim.as_ref().is_none_or(|(window_id, _)| {
                 self.tab(&context.tab_id).is_some_and(|tab| {
@@ -4431,7 +4529,7 @@ impl AppRuntime {
                 .admission
                 .as_ref()
                 .and_then(|admission| admission.as_ref().ok())
-                .filter(|admission| admission.can_refresh_capacity(&roots))
+                .filter(|admission| admission.can_revalidate(&roots))
             {
                 let previous = previous.clone();
                 let branch = knowledge_launch_target_branch_name(
@@ -4443,20 +4541,43 @@ impl AppRuntime {
                     request.issue_number,
                     &branch,
                 );
+                let cache = self.launch_wizard_cache.clone();
+                let profile_config_path = self.profile_config_path();
+                let current_provider_usage = self.provider_usage_accounts.clone();
                 let mut refreshed = IssueMonitorLaunchPrepared {
                     context: context.clone(),
                     request: request.clone(),
                     prefs_stamp,
-                    provider_usage: provider_usage.clone(),
+                    provider_usage: current_provider_usage.clone(),
                     delivery: delivery.clone(),
+                    source_facts: source_facts.clone(),
+                    revalidated: true,
                 };
                 let proxy = self.proxy.clone();
                 let span = tracing::Span::current();
+                let prefs_path = issue_monitor_prepared_prefs_path(&context);
                 self.issue_monitor_launch_preparations.insert(key.clone());
                 let scheduled = self.blocking_tasks.try_spawn(move || {
                     let _span = span.enter();
+                    let changed_prefs_keys = if prefs_changed {
+                        super::IssueMonitorPrefsStamp::changed_keys(
+                            refreshed.prefs_stamp.as_ref(),
+                            &prefs_path,
+                        )
+                        .join(",")
+                    } else {
+                        String::new()
+                    };
+                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_revalidate", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), admission_stale, prefs_changed, provider_changed, changed_prefs_keys = %changed_prefs_keys, thread = "worker", "Issue Monitor launch facts re-evaluated against newer inputs");
                     let mut started = std::time::Instant::now();
-                    refreshed.delivery.admission = Some(input.refresh(&previous));
+                    revalidate_issue_monitor_launch_prepared(
+                        &mut refreshed,
+                        &input,
+                        &previous,
+                        &cache,
+                        &current_provider_usage,
+                        &profile_config_path,
+                    );
                     record_issue_monitor_worker_phase("monitor_admission_refresh", &mut started);
                     proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(refreshed)));
                 });
@@ -4480,9 +4601,16 @@ impl AppRuntime {
             }
             let captured_at = Utc::now();
             let span = tracing::Span::current();
+            let prefs_path = issue_monitor_prepared_prefs_path(&context);
             let _ = self.blocking_tasks.try_spawn(move || {
                 span.in_scope(|| {
-                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
+                    let changed_prefs_keys = if prefs_changed {
+                        super::IssueMonitorPrefsStamp::changed_keys(prefs_stamp.as_ref(), &prefs_path)
+                            .join(",")
+                    } else {
+                        String::new()
+                    };
+                    tracing::info!(target: "gwt.launch.timing", phase = "monitor_gui_reprepare", issue_number = correlation_issue_number, delivery_id = correlation_delivery_id.as_deref().unwrap_or("none"), session_changed, source_changed, admission_stale, prefs_changed, provider_changed, revalidated, changed_prefs_keys = %changed_prefs_keys, captured_at = %captured_at.to_rfc3339(), thread = "gui", emitter = "worker", "Issue Monitor launch facts require revalidation");
                 });
             });
             let reusable = (!session_changed && provider_usage == self.provider_usage_accounts)

@@ -10871,24 +10871,43 @@ impl IssueMonitorState {
     }
 
     pub fn effective_max_active_agents(&self) -> usize {
+        self.effective_max_active_agents_under(&self.agent_capacity)
+    }
+
+    /// Issue #6096: the slot limit this state would derive from `capacity`,
+    /// without applying it. Launch admission compares this decision instead
+    /// of the capacity snapshot bytes, which the sampler rewrites every ~5s.
+    pub fn effective_max_active_agents_under(&self, capacity: &AgentCapacity) -> usize {
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
                 .config
                 .max_active
                 .max(1)
                 .saturating_sub(
-                    self.agent_capacity
+                    capacity
                         .other_live_agents
-                        .saturating_sub(self.agent_capacity.other_pm_agents),
+                        .saturating_sub(capacity.other_pm_agents),
                 )
-                .saturating_sub(self.agent_capacity.own_untracked_workers),
+                .saturating_sub(capacity.own_untracked_workers),
             IssueMonitorMaxActiveMode::Auto
-                if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
+                if capacity.measurement_complete && capacity.is_fresh() =>
             {
-                self.agent_capacity.recommended_worker_limit
+                capacity.recommended_worker_limit
             }
             IssueMonitorMaxActiveMode::Auto => self.config.max_active,
         }
+    }
+
+    /// The slot limit the current machine capacity snapshot grants
+    /// `project_root`, observed the same way [`Self::refresh_agent_capacity`]
+    /// does but without mutating this state.
+    pub fn project_capacity_limit_now(&self, project_root: &Path) -> usize {
+        let capacity = crate::agent_capacity::project_capacity(
+            project_root,
+            &BTreeSet::new(),
+            self.review_windows.len(),
+        );
+        self.effective_max_active_agents_under(&capacity)
     }
 
     fn apply_agent_capacity_limit(&mut self) {
