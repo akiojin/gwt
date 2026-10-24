@@ -831,6 +831,29 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Logs live receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const live = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('log_entry_appended'));
+  assert.deepEqual(live(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(live(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_entry_appended":',
+    'case "log_entry_appended": renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(live(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(live(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const appBypass = app.replace('case "log_entry_appended":',
+    'case "log_entry_appended": document.body.textContent = event.kind;');
+  assert.notEqual(appBypass, app);
+  assert.ok(live(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("Logs snapshot receipts commit shared data and reject direct rendering", () => {
   const file = 'crates/gwt/web/board-logs-surface.js';
   const appFile = 'crates/gwt/web/app.js';

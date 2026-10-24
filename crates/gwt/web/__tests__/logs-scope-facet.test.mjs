@@ -165,6 +165,7 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     severity: "info",
     source: "gwt",
     message: "project event",
+    fields: { nested: { value: "original" } },
   };
   const otherProjectEntry = {
     ...projectEntry,
@@ -192,6 +193,21 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     [globalEntry],
     "Global mode accepts only entries without project_scope",
   );
+  projectEntry.fields.nested.value = "mutated";
+  assert.equal(projectState.entries[0].fields.nested.value, "original",
+    "live receipts must detach nested payload data");
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: globalEntry });
+  assert.equal(globalState.entries.length, 2, "equal-valued live receipts still append");
+
+  surface.requestLogs("logs-project");
+  const pendingScope = projectState.pendingScope;
+  projectState.error = "retained error";
+  projectState.selectedEntryId = projectEntry.id;
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: projectEntry });
+  assert.equal(projectState.loading, true, "live receipts do not settle snapshot requests");
+  assert.equal(projectState.pendingScope, pendingScope);
+  assert.equal(projectState.error, "retained error");
+  assert.equal(projectState.selectedEntryId, projectEntry.id);
 });
 
 test("a Project reload refreshes the window scope after project migration", async () => {
