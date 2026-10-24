@@ -14116,8 +14116,14 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("openclaw", &[])],
-                vec![pool_profile("claude", &["kind:spec"])],
+                vec![
+                    pool_profile("codex", &[]),
+                    pool_profile("openclaw", &["kind:issue"]),
+                ],
+                vec![
+                    pool_profile("openclaw", &[]),
+                    pool_profile("claude", &["kind:spec"]),
+                ],
             ]),
             &mut out,
         )
