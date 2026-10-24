@@ -81,6 +81,60 @@ test("AC34 local agent census separates five live agents from eighteen recorded 
   await expect(metric).toHaveText("Active 1 · 0 issues · PM 1");
   await expect(column(page,"active").locator(".knowledge-row")).toHaveCount(0);
 });
+test("AC34 launch-failed and queued stale windows never advertise a live pane", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    const numbers = [4499, 5016, 4777];
+    fixture.__queueSetEntries(numbers.map(number => ({ number, title: `Issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{ id: `work-${number}` }] })));
+    fixture.__queueStatus({ active_count: 19, max_active_agents: 4,
+      terminal_queue: [{ number: 5016, queued_by: "operator" }], queue_len: 1 });
+    fixture.__queueInbox([
+      { issue: { number: 4499 }, state: "launch_failed", error_message: "Machine agent Manual admission cannot start" },
+      { issue: { number: 5016 }, state: "queued", queue_position: 1 },
+      { issue: { number: 4777 }, state: "launched" },
+    ]);
+    const workspace = fixture.__queueWorkspace;
+    workspace.tabs[0].workspace.windows.push(...numbers.map(number => ({
+      id: `tab-queue::agent-${number}`, session_id: `session-${number}`, title: `Issue ${number} agent`,
+      preset: "agent", agent_id: "codex", status: "idle", persist: true, minimized: false, maximized: false,
+      geometry: { x: 80, y: 80, width: 900, height: 600 }, z_index: 2,
+      placement: { kind: "surface" },
+    })));
+    fixture.__queueEvent({ kind: "workspace_state", workspace });
+    fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "queue-fixture", active_works:
+      [...numbers, ...Array.from({ length: 16 }, (_, index) => 6000 + index)].map(number => ({
+        id: `work-${number}`, linked_issue_numbers: [number], active_agents: 1,
+        lifecycle_state: "active", status_category: "active", works: [], agents: [{
+          window_id: `tab-queue::agent-${number}`, session_id: `session-${number}`, agent_id: "codex",
+        }] })) } });
+    fixture.__queueActivity([
+      { window_id: "tab-queue::pm", session_id: "pm", runtime_incarnation: 1, is_pm: true },
+      { window_id: "tab-queue::agent-4777", session_id: "session-4777", runtime_incarnation: 1, issue_number: 4777, is_pm: false },
+    ]);
+  });
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 2 · 1 issues · PM 1");
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
+  await expect(column(page, "active").locator('[data-issue-number="4777"]')).toHaveCount(1);
+  for (const number of [4499, 5016]) {
+    await expect(row(page, number)).not.toContainText("Shown in Agents");
+    await expect(row(page, number).locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+    await expect(column(page, "active").locator(`[data-issue-number="${number}"]`)).toHaveCount(0);
+    await row(page, number).locator(".knowledge-row-select").click();
+    await expect(page.locator(".knowledge-detail-pane")).not.toContainText("Shown in Agents");
+    await expect(page.locator('.knowledge-detail-pane [data-action="open-window"]')).toHaveCount(0);
+  }
+  await expect(row(page, 4777)).toContainText("Shown in Agents");
+  await expect(row(page, 4777).locator('[data-action="focus-surface-window"]')).toHaveCount(1);
+  await page.evaluate(() => (window as any).__queueActivity([
+    { window_id: "tab-queue::pm", session_id: "pm", runtime_incarnation: 1, is_pm: true },
+  ]));
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 0 issues · PM 1");
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
+  await expect(row(page, 4777)).not.toContainText("Shown in Agents");
+  await expect(row(page, 4777).locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+});
+
 async function confirm(page: Page, numbers: number[], extra = {}) {
   await page.evaluate(({numbers, extra}) => (window as any).__queueConfirm(numbers, extra), {numbers, extra});
 }

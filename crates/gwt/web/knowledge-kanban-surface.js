@@ -3287,9 +3287,7 @@ export function createKnowledgeKanbanSurface({
                 work ? workAttentionFor?.(work) : null,
                 issueTierChips(entry.number), queuePositions.has(entry.number) ? [queuePositions.get(entry.number), queued.length] : null,
                 agentActivityModel?.read().byIssue[entry.number],
-                phase === "active" ? issueProjectWindows(windowId).filter(target =>
-                  target.agent_id && (Number(target.linked_issue_number ?? target.placement?.issue_number) === entry.number ||
-                    work?.agents?.some(agent => agent.window_id === target.id || (target.session_id && agent.session_id === target.session_id)))) : null]);
+                phase === "active" ? issueCurrentAgentWindows(issueProjectWindows(windowId), entry) : null]);
             },
             update: (row, entry) => {
               row.classList.toggle("selected", state.selectedNumber === entry.number);
@@ -3303,9 +3301,8 @@ export function createKnowledgeKanbanSurface({
             render: entry => {
               const row = renderIssueRow(windowId, state, entry);
               if (phase === "active") {
-                const windows = issueProjectWindows(windowId);
+                const windows = issueCurrentAgentWindows(issueProjectWindows(windowId), entry);
                 for (const target of windows) {
-                  if (!agentActivityModel?.read().byIssue[entry.number]?.some(agent => agent.window_id === target.id)) continue;
                   if (!row.classList.contains("has-live-output")) {
                     row.querySelector(".issue-agent-status")?.remove();
                     row.classList.add("has-live-output");
@@ -4691,10 +4688,17 @@ export function createKnowledgeKanbanSurface({
         return windows.filter(window => ids.has(window.id));
       }
 
+      function issueCurrentAgentWindows(windows, entry) {
+        const agents = agentActivityModel?.read().byIssue[entry.number] || [];
+        return windows.filter(target => agents.some(agent =>
+          agent.window_id === target.id && agent.session_id === target.session_id));
+      }
+
       function issueRowFaces(windowId, entry, work) {
         const windows = issueProjectWindows(windowId);
-        const inline = issuePreviewWindowsForIssue(windows, windowId, entry.number);
-        const surfaceWindows = issueSurfaceAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number);
+        const inline = issueCurrentAgentWindows(issuePreviewWindowsForIssue(windows, windowId, entry.number), entry);
+        const surfaceWindows = issueCurrentAgentWindows(
+          issueSurfaceAgentWindowsForIssue(windows, work, windowizedAgentWindowIds, entry.number), entry);
         const isLive = candidate => ISSUE_ROW_STOPPABLE_AGENT_STATUSES.has(issuePreviewStatusView(candidate).status);
         const liveSurface = surfaceWindows.find(isLive);
         if (liveSurface) return { inlineWindow: null, surfaceWindow: liveSurface };
@@ -5187,7 +5191,7 @@ export function createKnowledgeKanbanSurface({
             if (windowCatalogModel && state.kind === "issue") {
               state.monitorSubscriptions.push(windowCatalogModel.subscribeFrame(model =>
                 JSON.stringify(model.catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || [])
-                  .map(windowData => [windowData.id, windowData.linked_issue_number,
+                  .map(windowData => [windowData.id, windowData.session_id, windowData.linked_issue_number,
                     windowData.placement?.kind === "issue_preview" ? windowData.placement.issue_number : null,
                     Object.hasOwn(model.catalog.runtimeStates, windowData.id)
                       ? model.catalog.runtimeStates[windowData.id] : windowData.status])), () => {

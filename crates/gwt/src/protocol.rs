@@ -1830,7 +1830,10 @@ pub struct LocalAgentActivityView {
     pub project_key: String,
     pub host_id: String,
     pub observed_at: String,
-    pub agents: Vec<LocalAgentActivityAgentView>,
+    /// `None` is an attempted observation with unknown membership; an empty
+    /// vector is an observed zero, not missing census data.
+    #[serde(default)]
+    pub agents: Option<Vec<LocalAgentActivityAgentView>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4872,9 +4875,50 @@ mod tests {
             Some(false),
             "Work cleanup must default to local-only deletion"
         );
-        let BackendEvent::ActiveWorkProjection { projection } = event else {
+        let BackendEvent::ActiveWorkProjection { mut projection } = event else {
             unreachable!("constructed full projection")
         };
+        assert!(
+            serde_json::to_value(&projection)
+                .unwrap()
+                .get("local_agent_activity")
+                .is_none(),
+            "non-observing producers omit the census"
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:unknown",
+                "observed_at": "2026-10-24T00:00:00Z",
+                "agents": null
+            }))
+            .expect("an Unknown observation retains its metadata"),
+        );
+        let unknown = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            unknown.pointer("/local_agent_activity/agents"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            unknown
+                .pointer("/local_agent_activity/host_id")
+                .and_then(Value::as_str),
+            Some("123:unknown")
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:456",
+                "observed_at": "2026-10-24T00:00:01Z",
+                "agents": []
+            }))
+            .expect("an observed zero remains distinct from Unknown"),
+        );
+        let zero = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            zero.pointer("/local_agent_activity/agents"),
+            Some(&serde_json::json!([]))
+        );
         let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
             .expect("serialize bounded active work projection patch");
         assert_eq!(

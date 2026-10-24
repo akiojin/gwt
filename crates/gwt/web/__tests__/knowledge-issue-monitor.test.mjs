@@ -1245,10 +1245,10 @@ test("Issue #4862 a live inbox stop replaces stale cached activity outside the t
 });
 
 test("Issue #4862 an actual same-owner running pane outranks a stale failed inbox state", async (t) => {
-  const pane = { id: "agent-42", preset: "agent", agent_id: "codex", status: "running",
+  const pane = { id: "agent-42", session_id: "session-42", preset: "agent", agent_id: "codex", status: "running",
     placement: { kind: "issue_preview", issue_window_id: "win-1", issue_number: 42 } };
   const { body, surface, load, setLiveAgents } = await makeFixture({ getWorkspaceWindows: () => [pane] });
-  setLiveAgents([{ window_id: pane.id, issue_number: 42 }]);
+  setLiveAgents([{ window_id: pane.id, session_id: pane.session_id, issue_number: 42 }]);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
     entries: [knowledgeEntry(42, "launched")], refresh_enabled: true });
@@ -1260,7 +1260,7 @@ test("Issue #4862 an actual same-owner running pane outranks a stale failed inbo
 });
 
 test("Issue #4862 a live pane wins over an earlier terminal preview", async (t) => {
-  const terminal = { id: "old-agent", preset: "agent", agent_id: "codex", status: "error",
+  const terminal = { id: "old-agent", session_id: "old-session", preset: "agent", agent_id: "codex", status: "error",
     placement: { kind: "issue_preview", issue_window_id: "win-1", issue_number: 42 } };
   const live = { ...terminal, id: "live-agent", status: "running", linked_issue_number: 42 };
   const { body, surface, load, setLiveAgents } = await makeFixture({
@@ -1270,7 +1270,7 @@ test("Issue #4862 a live pane wins over an earlier terminal preview", async (t) 
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue", request_id: load.request_id,
     entries: [{ ...knowledgeEntry(42, "launched"), related_work_refs: [{ id: "work-42" }] }], refresh_enabled: true });
-  setLiveAgents([{ window_id: live.id, issue_number: 42 }]);
+  setLiveAgents([{ window_id: live.id, session_id: live.session_id, issue_number: 42 }]);
   for (const placement of [terminal.placement, { kind: "canvas" }]) {
     live.placement = placement;
     surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "launch_failed", error_message: `old failed attempt: ${placement.kind}` }]);

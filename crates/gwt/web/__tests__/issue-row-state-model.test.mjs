@@ -153,6 +153,43 @@ test("AC34 Active counts local agents once and separates recorded and foreign wo
   assert.equal(fixture.body.querySelectorAll('[data-queue-column="active"] .knowledge-row').length, 0);
 });
 
+test("AC34 stale Issue windows cannot offer Focus or agent faces in row, detail or split", async t => {
+  const stale = [agentWindow("old-4499", 4499, { status: "idle", linked_issue_number: 4499,
+    placement: { kind: "canvas" } }), agentWindow("old-5016", 5016, { status: "idle" })];
+  const live = agentWindow("live-4777", 4777);
+  const fixture = await makeFixture({ workspaceWindows: [...stale, live], localAgents: [live],
+    projection: { active_works: [workRow({ id: "old-work", active_agents: 19,
+      agents: stale.map(target => ({ window_id: target.id })) })] } });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [
+    knowledgeEntry(4499, { monitor_state: "launch_failed", related_work_refs: [{ id: "old-work" }] }),
+    knowledgeEntry(5016, { monitor_state: "queued", queue_position: 1, related_work_refs: [{ id: "old-work" }] }),
+    knowledgeEntry(4777),
+  ]);
+  for (const number of [4499, 5016]) {
+    const row = fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+    assert.ok(!row.querySelector('[data-action="focus-surface-window"], [data-action="windowize-issue-preview"]'),
+      `Issue ${number} has no current local pane to focus or windowize`);
+    assert.equal(row.querySelector(".issue-agent-status"), null);
+    fixture.surface.requestKnowledgeDetail("win-1", "issue", number);
+    fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+    const detail = fixture.body.querySelector(".knowledge-detail-pane");
+    assert.equal(detail.querySelector('[data-action="open-window"], [data-action="focus-surface-window"]'), null);
+    assert.doesNotMatch(detail.textContent, /Shown in Agents|Read-only preview/);
+  }
+  fixture.setLiveAgents([live, { ...stale[0], id: "absent-4499" },
+    { ...stale[1], session_id: "successor-5016" }]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  for (const number of [4499, 5016]) {
+    const row = fixture.body.querySelector(`.knowledge-row[data-issue-number="${number}"]`);
+    assert.ok(!row.querySelector(".issue-agent-status, .issue-card-output"),
+      "census membership also requires the same actual window and Session");
+  }
+  fixture.body.querySelector('[data-issue-view="split"]').click();
+  assert.deepEqual([...fixture.body.querySelectorAll(".issue-split-pair")]
+    .map(pair => Number(pair.dataset.issueNumber)), [4777]);
+});
+
 test("Issue #6141 Active metric follows the displayed cards and errors explain their cause", async t => {
   const runtimeStates = {};
   const fixture = await makeFixture({ workspaceWindows: [agentWindow("live", 6141)], runtimeStates });
@@ -235,6 +272,7 @@ function workRow(overrides = {}) {
 function agentWindow(id, issueNumber, overrides = {}) {
   return {
     id,
+    session_id: `session-${id}`,
     preset: "agent",
     title: `Agent ${id}`,
     agent_id: "codex",
@@ -276,7 +314,7 @@ async function makeFixture({ workspaceWindows = [], otherProjectWindows = [], pr
   const setLiveAgents = (agents) => activity.applyAgentActivitySnapshot({
     project_key: "project-1", host_id: "test-host",
     observed_at: new Date(1792840000000 + observation++).toISOString(),
-    agents: agents.map(target => ({ window_id: target.id, session_id: `session-${target.id}`,
+    agents: agents.map(target => ({ window_id: target.id, session_id: target.session_id ?? `session-${target.id}`,
       runtime_incarnation: 1, is_pm: Boolean(target.is_pm),
       issue_number: target.linked_issue_number ?? target.placement?.issue_number ?? null })),
   });

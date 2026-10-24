@@ -40,13 +40,17 @@ fn local_agent_activity_cache_removes_retired_members_without_redating_proof() {
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .unwrap();
     let activity = view.local_agent_activity.as_mut().unwrap();
-    activity.agents.push(gwt::LocalAgentActivityAgentView {
-        window_id: "tab-1::retired".into(),
-        session_id: "retired-session".into(),
-        runtime_incarnation: 17,
-        issue_number: Some(4777),
-        is_pm: false,
-    });
+    activity
+        .agents
+        .as_mut()
+        .unwrap()
+        .push(gwt::LocalAgentActivityAgentView {
+            window_id: "tab-1::retired".into(),
+            session_id: "retired-session".into(),
+            runtime_incarnation: 17,
+            issue_number: Some(4777),
+            is_pm: false,
+        });
     let observed_at = activity.observed_at.clone();
     runtime
         .project_state_for_tab("tab-1")

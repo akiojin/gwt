@@ -21,8 +21,11 @@ test.describe("Issue queue real backend launch", () => {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings" });
-      const issues = page.locator('[data-settings-panel="issues"]');
+      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      await expect(issueWindow).toBeVisible();
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
+      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
+      const issues = issueWindow.locator('[data-settings-panel="issues"]');
       const metric = issues.locator('[data-metric="active"]');
       await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
       const row = issues.locator(`[data-issue-number="${fixture.issueNumber}"]`);
@@ -40,6 +43,15 @@ test.describe("Issue queue real backend launch", () => {
       expect(agent.runtime_incarnation).toBeGreaterThan(0);
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
       await info.attach(`local-live-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const main = page.getByRole("region", { name: "Main pane", exact: true });
+      await expect(main).toHaveAttribute("data-surface", "agents");
+      await expect(main.locator(`.agent-tile[data-agent-id="${agent.window_id}"] .xterm`)).toBeVisible();
+      const currentSurface = info.outputPath(`current-agent-surface-${theme}.png`);
+      await page.screenshot({ path: currentSurface });
+      await info.attach(`current-agent-surface-${theme}`, { path: currentSurface, contentType: "image/png" });
+      await page.locator('.op-rail__surface[data-surface="issues"]').click();
+      await expect(issueWindow).toBeVisible();
       await sendLiveGwtEvent(page, { kind: "terminal_input", id: agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
       await expect.poll(() => {
         try { process.kill(launch.pid, 0); return false; } catch { return true; }
@@ -48,6 +60,8 @@ test.describe("Issue queue real backend launch", () => {
       expect((await activity()).agents).toEqual([]);
       await expect(issues.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
       await expect(row).toBeVisible();
+      await expect(row.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+      await expect(row).not.toContainText("Shown in Agents");
       expect(errors, "zero console/page errors across the real child exit").toEqual([]);
       await info.attach("local-live-exit", { body: JSON.stringify({ before: live, after: await activity(), launch }, null, 2), contentType: "application/json" });
     } finally {

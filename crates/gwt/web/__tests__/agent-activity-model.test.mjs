@@ -30,3 +30,17 @@ test("AC34 one shared census counts agents, distinct issues and PM independently
   applyAgentActivitySnapshot(snapshot([]));
   assert.equal(model.read().count, 0, "an observed empty census is a measured zero");
 });
+
+test("AC34 unmeasured projections preserve the census and observed unknown keeps its watermark", () => {
+  const { model, applyAgentActivitySnapshot } = createAgentActivityModel("project");
+  const agents = [agent("one", 4777)];
+  applyAgentActivitySnapshot(snapshot(agents));
+  applyAgentActivitySnapshot(undefined);
+  assert.equal(model.read().count, 1, "a cleanup producer without a census cannot erase measured activity");
+  applyAgentActivitySnapshot(snapshot(null, { observed_at: "2026-10-24T14:00:02Z" }));
+  assert.equal(model.read().count, null, "an unavailable observation is unknown, not zero");
+  applyAgentActivitySnapshot(snapshot(agents, { observed_at: "2026-10-24T14:00:01Z" }));
+  assert.equal(model.read().count, null, "an older positive cannot replace an unavailable observation");
+  applyAgentActivitySnapshot(snapshot([], { observed_at: "2026-10-24T14:00:03Z" }));
+  assert.equal(model.read().count, 0, "a fresh empty observation is a measured zero");
+});

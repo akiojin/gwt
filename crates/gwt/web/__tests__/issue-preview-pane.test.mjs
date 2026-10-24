@@ -62,6 +62,7 @@ function createNode(document, tagName, className, text) {
 function previewWindow(id, issueNumber, overrides = {}) {
   return {
     id,
+    session_id: `session-${id}`,
     preset: "agent",
     title: `Agent ${id}`,
     agent_id: "codex",
@@ -92,7 +93,7 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
   let windows = [issueWindow, ...workspaceWindows];
   const activity = createAgentActivityModel("fixture");
   activity.applyAgentActivitySnapshot({ project_key: "fixture", host_id: "host", observed_at: new Date().toISOString(),
-    agents: workspaceWindows.map(target => ({ window_id: target.id, session_id: `session-${target.id}`,
+    agents: workspaceWindows.map(target => ({ window_id: target.id, session_id: target.session_id ?? `session-${target.id}`,
       runtime_incarnation: 1, issue_number: target.placement?.issue_number, is_pm: false })) });
   const surface = mod.createKnowledgeKanbanSurface({
     agentActivityModel: activity.model,
@@ -204,6 +205,22 @@ test("issuePreviewWindowsForIssue binds previews to their host Issue window", as
   );
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", null), []);
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", 9999), []);
+});
+
+test("AC34 census filtering preserves an existing preview host before adopting its orphan", async t => {
+  const agent = previewWindow("agent-other-host", 3671, {
+    placement: { kind: "issue_preview", issue_window_id: "win-2", issue_number: 3671 },
+  });
+  const fixture = await makeFixture({ workspaceWindows: [{ id: "win-2", preset: "issue" }, agent] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
+  fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+  assert.ok(!fixture.body.querySelector(".issue-preview"),
+    "a proven agent still belongs to its existing Issue host");
+  fixture.setWindows([agent]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  assert.equal(fixture.body.querySelector(".issue-preview")?.dataset.windowId, agent.id,
+    "removing its host lets this Issue window adopt the same proven agent");
 });
 
 test("Issue #5321: selection opens preview, close restores full width and selecting reopens", async (t) => {

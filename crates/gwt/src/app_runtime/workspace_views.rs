@@ -127,8 +127,19 @@ fn observe_local_agent_activity(
 ) -> Option<gwt::LocalAgentActivityView> {
     let host_pid = std::process::id();
     let host_started_at =
-        gwt::process::host_process_start_time(host_pid).filter(|start| *start > 0)?;
+        gwt::process::host_process_start_time(host_pid).filter(|start| *start > 0);
     let observed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut activity = gwt::LocalAgentActivityView {
+        project_key: context.project_key.to_string(),
+        host_id: host_started_at
+            .map(|started| format!("{host_pid}:{started}"))
+            .unwrap_or_else(|| format!("{host_pid}:unknown")),
+        observed_at,
+        agents: None,
+    };
+    let Some(host_started_at) = host_started_at else {
+        return Some(activity);
+    };
     let inventory = if candidates.is_empty() {
         gwt::session_inventory::SessionInventory::default()
     } else {
@@ -139,7 +150,7 @@ fn observe_local_agent_activity(
         .iter()
         .any(|uncertainty| uncertainty.session_id.is_none())
     {
-        return None;
+        return Some(activity);
     }
     let mut agents = Vec::new();
     let mut seen_processes = HashSet::new();
@@ -200,12 +211,8 @@ fn observe_local_agent_activity(
             .cmp(&left.is_pm)
             .then_with(|| left.window_id.cmp(&right.window_id))
     });
-    Some(gwt::LocalAgentActivityView {
-        project_key: context.project_key.to_string(),
-        host_id: format!("{host_pid}:{host_started_at}"),
-        observed_at,
-        agents,
-    })
+    activity.agents = Some(agents);
+    Some(activity)
 }
 
 #[derive(Clone)]
@@ -4095,14 +4102,16 @@ impl AppRuntime {
         {
             return None;
         }
-        let candidates = self.local_agent_activity_candidates(tab_id);
-        activity.agents.retain(|agent| {
-            candidates.iter().any(|candidate| {
-                candidate.window_id == agent.window_id
-                    && candidate.session_id == agent.session_id
-                    && candidate.runtime_incarnation == agent.runtime_incarnation
-            })
-        });
+        if let Some(agents) = activity.agents.as_mut() {
+            let candidates = self.local_agent_activity_candidates(tab_id);
+            agents.retain(|agent| {
+                candidates.iter().any(|candidate| {
+                    candidate.window_id == agent.window_id
+                        && candidate.session_id == agent.session_id
+                        && candidate.runtime_incarnation == agent.runtime_incarnation
+                })
+            });
+        }
         Some(activity)
     }
 
@@ -5374,11 +5383,17 @@ impl AppRuntime {
         state
             .workspace_projection_requested_revision
             .set(state.workspace_projection_revision.get());
-        let cached = state
+        let mut cached = state
             .active_work_projection_cache
             .borrow()
             .get(&context.tab_id)
             .map(bounded_active_work_projection_snapshot);
+        if let Some(cached) = cached.as_mut() {
+            cached.local_agent_activity = self.retain_current_local_agent_activity(
+                &context.tab_id,
+                cached.local_agent_activity.take(),
+            );
+        }
         let windows = self.workspace_projection_title_windows();
         let input = watcher::WorkspaceProjectionPatchInput {
             revision: state.workspace_projection_revision.get(),
@@ -5446,6 +5461,16 @@ impl AppRuntime {
                     prepared.context.clone(),
                 );
             }
+            return None;
+        }
+        if self.retain_current_local_agent_activity(
+            &prepared.context.tab_id,
+            prepared.projection.local_agent_activity.clone(),
+        ) != prepared.projection.local_agent_activity
+        {
+            // Revision fences Work membership; runtime identity can retire
+            // independently while this already serialized watcher is queued.
+            self.schedule_active_work_projection_refresh(&prepared.context.project_root, None);
             return None;
         }
         let tab_id = prepared.context.tab_id.clone();
@@ -5893,13 +5918,13 @@ mod bounded_cache_merge_tests {
             project_key: context.project_key.to_string(),
             host_id: format!("{}:old-runtime", std::process::id()),
             observed_at: "2026-10-24T00:00:00Z".into(),
-            agents: vec![gwt::LocalAgentActivityAgentView {
+            agents: Some(vec![gwt::LocalAgentActivityAgentView {
                 window_id: "tab-1::retired".into(),
                 session_id: "retired-session".into(),
                 runtime_incarnation: 7,
                 issue_number: Some(4777),
                 is_pm: false,
-            }],
+            }]),
         });
         let payload: Arc<str> = Arc::from(
             serde_json::to_string(&BackendEvent::ActiveWorkProjection {
@@ -5983,6 +6008,100 @@ mod bounded_cache_merge_tests {
     }
 
     #[test]
+    fn local_agent_activity_current_revision_watcher_cannot_revive_a_retired_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, context, view, _) = retired_activity_fixture(temp.path());
+        let (spawner, tasks) = super::super::BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let revision = runtime
+            .project_state_for_tab("tab-1")
+            .unwrap()
+            .workspace_projection_revision
+            .get();
+        let prepared =
+            watcher::prepare_workspace_projection_patch(watcher::WorkspaceProjectionPatchInput {
+                context: context.clone(),
+                revision,
+                cached: Some(view),
+                fresh: Box::new(
+                    gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+                        &context.project_root,
+                    ),
+                ),
+                sessions: Vec::new(),
+                windows: HashMap::new(),
+                agent_names: HashMap::new(),
+                window_generations: HashMap::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            prepared
+                .projection
+                .local_agent_activity
+                .as_ref()
+                .unwrap()
+                .agents
+                .as_ref()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            runtime.apply_workspace_projection_patch(prepared).is_none(),
+            "a current-revision watcher must not republish the retired child's positive census"
+        );
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            1,
+            "recapture on the existing worker"
+        );
+    }
+
+    #[test]
+    fn local_agent_activity_watcher_capture_subtracts_retired_members_without_redating_proof() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, context, view, _) = retired_activity_fixture(temp.path());
+        let observed_at = view.local_agent_activity.unwrap().observed_at;
+        let (proxy, events) = super::super::AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let (spawner, tasks) = super::super::BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let fresh = gwt_core::workspace_projection::WorkspaceProjection::default_for_project(
+            &context.project_root,
+        );
+        runtime.handle_workspace_projection_changed_events(&context.project_root, &fresh);
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+        let event = events.lock().unwrap().pop().unwrap();
+        let event = match event {
+            UserEvent::ProjectCompletion { event, .. } => *event,
+            event => event,
+        };
+        let UserEvent::WorkspaceProjectionPatchPrepared(prepared) = event else {
+            panic!("expected a prepared watcher patch");
+        };
+        let activity = prepared.projection.local_agent_activity.as_ref().unwrap();
+        assert!(activity.agents.as_ref().unwrap().is_empty());
+        assert_eq!(activity.observed_at, observed_at);
+        let dispatch = runtime.apply_workspace_projection_patch(*prepared).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&dispatch.payload).unwrap();
+        assert_eq!(
+            wire["projection"]["local_agent_activity"]["agents"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            wire["projection"]["local_agent_activity"]["observed_at"],
+            observed_at
+        );
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "the current watcher patch is accepted"
+        );
+    }
+
+    #[test]
     fn local_agent_activity_requires_current_child_host_and_incarnation() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -6025,29 +6144,58 @@ mod bounded_cache_merge_tests {
                 .unwrap()
         };
         let measured = observe(&candidate);
-        assert_eq!(measured.agents.len(), 1, "an unbound PM is a live agent");
-        assert!(measured.agents[0].is_pm);
-        assert_eq!(measured.agents[0].issue_number, Some(4777));
+        assert_eq!(
+            measured.agents.as_ref().unwrap().len(),
+            1,
+            "an unbound PM is a live agent"
+        );
+        assert!(measured.agents.as_ref().unwrap()[0].is_pm);
+        assert_eq!(
+            measured.agents.as_ref().unwrap()[0].issue_number,
+            Some(4777)
+        );
         candidate.runtime_incarnation = 8;
-        assert!(observe(&candidate).agents.is_empty(), "stale incarnation");
+        assert!(
+            observe(&candidate).agents.as_ref().unwrap().is_empty(),
+            "stale incarnation"
+        );
         candidate.runtime_incarnation = 7;
         sidecar.host_started_at = Some(started_at + 1);
         sidecar.save(&path).unwrap();
         assert!(
-            observe(&candidate).agents.is_empty(),
+            observe(&candidate).agents.as_ref().unwrap().is_empty(),
             "another host incarnation"
         );
         sidecar.host_started_at = Some(started_at);
         sidecar.child_started_at = Some(started_at + 1);
         sidecar.save(&path).unwrap();
         assert!(
-            observe(&candidate).agents.is_empty(),
+            observe(&candidate).agents.as_ref().unwrap().is_empty(),
             "a recycled child PID"
         );
         std::fs::remove_file(path).unwrap();
         assert!(
-            observe(&candidate).agents.is_empty(),
+            observe(&candidate).agents.as_ref().unwrap().is_empty(),
             "restored metadata alone"
+        );
+        // A census-wide read failure is Unknown, never an observed zero or an
+        // omitted update that would leave a previous positive measurement live.
+        std::fs::remove_dir_all(sessions_dir.join("runtime")).unwrap();
+        std::fs::write(
+            sessions_dir.join("runtime"),
+            b"unreadable runtime inventory",
+        )
+        .unwrap();
+        let unknown = observe(&candidate);
+        assert!(unknown.agents.is_none());
+        assert_eq!(unknown.project_key, context.project_key.to_string());
+        assert!(!unknown.host_id.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&unknown.observed_at).is_ok());
+        let (runtime, _, _, _) = retired_activity_fixture(temp.path());
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(unknown.clone())),
+            Some(unknown),
+            "retention must preserve Unknown rather than fabricate zero"
         );
     }
 
