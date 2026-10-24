@@ -1062,3 +1062,45 @@ test("Knowledge detail completions commit shared state and reject direct renderi
     assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
   }
 });
+
+test("Knowledge error completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_error'));
+  const local = text => errors(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => errors(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Search dispatch and load recovery stay synchronous, including the
+  // recovery timer's model update; only direct receiver rendering moves.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ].sort();
+  const directRender = finding => /(?:^|>)applyKnowledgeReceiveEvent>renderKnowledge(?:Bridge|StatusOnly)(?:>|$)/.test(finding.path);
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call' && !directRender(finding)));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  for (const call of ['renderKnowledgeBridge(event.id);', 'document.body.textContent = event.message;']) {
+    const bypass = source.replace('case "knowledge_error": {', `case "knowledge_error": { ${call}`);
+    assert.notEqual(bypass, source);
+    for (const findings of [local(bypass), delegated(app, bypass)]) {
+      assert.ok(findings.some(finding => finding.kind.startsWith('dom-') || directRender(finding)));
+    }
+  }
+  for (const label of ['knowledge_error']) {
+    const bypass = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(bypass, app);
+    assert.ok(delegated(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
