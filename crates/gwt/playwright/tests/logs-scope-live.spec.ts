@@ -191,6 +191,26 @@ test("Logs Project and Global isolate snapshots and live events", async ({ page 
     await expect(root.locator(".logs-status")).toHaveText("1 visible / 1 total");
     await expect(root.locator(".logs-status")).not.toHaveClass(/error/);
     await expect(search).toBeFocused();
+    // SPEC #5016 LOGSNAP: equal-valued snapshots settle each reload and
+    // retain the selected entry even when a newer entry becomes available.
+    for (let receipt = 0; receipt < 2; receipt++) {
+      await root.getByRole("button", { name: "Refresh logs", exact: true }).click();
+      await search.focus();
+      await page.evaluate(({ id, marker }) => {
+        (window as any).__logsScopeSocket.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ kind: "log_entries", id, entries: [10001003, 10001004].map(entryId => ({
+            id: entryId, timestamp: "2026-10-24T00:00:00Z", severity: "info",
+            source: "gwt.playwright.scope", message: `${marker}-retained-${entryId}`, fields: {},
+          })) }),
+        }));
+      }, { id: windowId, marker });
+      await expect(rows).toHaveCount(2);
+      await expect(root.locator('.logs-entry[aria-current="true"]')).toContainText(`${marker}-retained-10001003`);
+      await expect(root.locator(".logs-status")).toHaveText("2 visible / 2 total");
+      await expect(search).toHaveValue(`${marker}-retained-`);
+      await expect(search).toBeFocused();
+      await expect(selector).toHaveValue("global");
+    }
     await search.hover();
     await page.screenshot({ path: testInfo.outputPath("logs-scope.png") });
     expect(errors, "console and page errors").toEqual([]);
