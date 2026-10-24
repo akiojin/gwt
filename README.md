@@ -987,6 +987,13 @@ row order, repeats and missing dependency data; absent Monitor yields null, whil
 matching rows yields []. Keep `unobserved_issues` and the Monitor provenance. These
 observations do not prove Goal achievement, metric attainment, critical path or readiness,
 and authorize no priority or launch changes.
+Each roadmap item's `dependency_observations` selects only that row's directly saved
+Issues, retaining supplied row order, repeats and missing dependency data. Empty or
+duplicate IDs and invalid links keep independent membership; it never expands through
+a Goal, milestone or another row. Absent Monitor yields null even for empty membership;
+supplied snapshots without matching rows yield []. Keep `unobserved_issues` and the
+Monitor source, scan time and coverage limits. This join does not establish a complete
+graph, critical path, readiness, priority or health.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied
@@ -994,7 +1001,7 @@ inbox order without duplicates. Empty or duplicate IDs and invalid traces keep
 separate rows. Membership never expands through a Goal, Milestone or another row.
 Queue/active membership alone supplies no inbox state. Without a Monitor snapshot,
 all direct Issues are unobserved; degraded observations retain their provenance.
-Empty membership yields empty arrays. These observations do not establish health,
+Empty membership yields empty state and unobserved arrays. These observations do not establish health,
 completion, priority or permission to launch work.
 Milestone `target_date_observation` compares an exact `YYYY-MM-DD` target with the
 recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or on
