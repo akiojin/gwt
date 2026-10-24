@@ -697,32 +697,31 @@ fn handle_stop(
             }),
         ),
     ];
-    let mut board_read_warning = None;
+    let mut stop_warnings = Vec::new();
     for (handler, check) in stop_checks {
         let output = run_value(event, handler, check);
-        if handler == "board-read-stop-check" {
-            if let HookOutput::SystemMessage(warning) = &output {
-                board_read_warning = Some(warning.clone());
-            }
+        if let HookOutput::SystemMessage(warning) = &output {
+            stop_warnings.push(warning.clone());
         }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
                 crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
             })?;
-            return Ok(append_stop_warning(output, board_read_warning));
+            return Ok(append_stop_warning(output, stop_warnings));
         }
     }
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;
 
-    Ok(append_stop_warning(reminder, board_read_warning))
+    Ok(append_stop_warning(reminder, stop_warnings))
 }
 
-fn append_stop_warning(output: HookOutput, warning: Option<String>) -> HookOutput {
-    let Some(warning) = warning else {
+fn append_stop_warning(output: HookOutput, warnings: Vec<String>) -> HookOutput {
+    if warnings.is_empty() {
         return output;
-    };
+    }
+    let warning = warnings.join("\n\n");
     match output {
         HookOutput::SystemMessage(text) => {
             HookOutput::system_message(format!("{text}\n\n{warning}"))
