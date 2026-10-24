@@ -23,8 +23,6 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       try {
         const id = await createShell(page, created);
         const focusedId = await createShell(page, created);
-        await page.locator('.op-rail__surface[data-surface="agents"]').click();
-        await page.getByRole("tab", { name: "All agents", exact: true }).click();
         const target = page.locator(`.agent-tile[data-agent-id="${id}"]`);
         const focusedTerminal = page.locator(`.agent-tile[data-agent-id="${focusedId}"] .xterm-helper-textarea`);
         await focusedTerminal.focus();
@@ -270,6 +268,9 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
 });
 
 async function createShell(page: Page, created: string[]): Promise<string> {
+  // The first terminal fit releases output only after its surface has a layout box.
+  await page.locator('.op-rail__surface[data-surface="agents"]').click();
+  await page.getByRole("tab", { name: "All agents", exact: true }).click();
   const before = new Set(await page.locator(".workspace-window").evaluateAll(nodes =>
     nodes.map(node => (node as HTMLElement).dataset.id)));
   await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell",
