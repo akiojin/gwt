@@ -4685,15 +4685,13 @@ fn apply_monitor_tier_set(
             "tier is outside the configured launch tiers",
         ));
     }
-    let current = prefs
-        .tier_overrides
-        .get(&number)
-        .copied()
-        .unwrap_or_default();
     prefs
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.tier_overrides.insert(number, current.max(tier));
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.set_issue_minimum_launch_tier(number, tier);
+    *prefs = monitor.prefs();
     Ok(())
 }
 
@@ -14108,6 +14106,7 @@ mod tests {
                 .unwrap(),
             );
         }
+        let initial_prefs = prefs.clone();
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -14184,6 +14183,49 @@ mod tests {
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);
+
+        // An Issue-only override can change the effective provider too.
+        // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
+        let mut override_prefs = initial_prefs;
+        override_prefs.launch_auto = true;
+        override_prefs.launch_tiers = vec![
+            vec![pool_profile("claude", &[])],
+            vec![pool_profile("openclaw", &[])],
+            vec![pool_profile("claude", &[])],
+        ];
+        override_prefs.tier_overrides.insert(43, 2);
+        crate::save_issue_monitor_prefs(&path, &override_prefs).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 44, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 0, &mut out).unwrap();
+        let override_prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(override_prefs.tier_overrides[&42], 1);
+        assert_eq!(
+            override_prefs.pending_launch_deliveries, prefs.pending_launch_deliveries,
+            "the Issue override must cancel only its unowned unsupported delivery"
+        );
+        assert_eq!(override_prefs.launching_issues, prefs.launching_issues);
+        assert_eq!(override_prefs.pending_effects.len(), 1);
+        assert_eq!(
+            override_prefs.pending_effects[0].payload,
+            prefs.pending_effects[0].payload
+        );
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            override_prefs,
+        );
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
     }
 
     /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored
