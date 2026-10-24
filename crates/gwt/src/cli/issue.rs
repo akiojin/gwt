@@ -200,35 +200,9 @@ pub(super) fn run<E: CliEnv>(
         )?,
         IssueCommand::Comment { number, file } => {
             let body = env.read_file(&file).map_err(super::io_as_api_error)?;
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
+            run_issue_comment(env, number, &body, out)?
         }
-        IssueCommand::CommentBody { number, body } => {
-            let comment = env.client().create_comment(IssueNumber(number), &body)?;
-            super::intake_outcome::auto_record_issue_operation(
-                env.repo_path(),
-                "issue.comment",
-                super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
-                number,
-            );
-            let _ = refresh_issue_cache(env, IssueNumber(number))?;
-            out.push_str(&format!(
-                "created comment {} on #{}\n",
-                comment.id.0, number
-            ));
-            0
-        }
+        IssueCommand::CommentBody { number, body } => run_issue_comment(env, number, &body, out)?,
         IssueCommand::MonitorReviewVerdict {
             issue_number,
             reviewed_sha,
@@ -286,11 +260,13 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             expected_queue_order,
             issue_numbers,
+            all_terminals,
         } => run_monitor_queue_remove(
             env,
             project_root.as_deref(),
             expected_queue_order.as_deref(),
             &issue_numbers,
+            all_terminals,
             out,
         )?,
         IssueCommand::MonitorQueueMove {
@@ -2113,6 +2089,7 @@ fn run_monitor_queue_remove<E: CliEnv>(
     project_root: Option<&std::path::Path>,
     expected_queue_order: Option<&[u64]>,
     numbers: &[u64],
+    all_terminals: bool,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let root = issue_monitor_project_root(env, project_root)?;
@@ -2124,7 +2101,11 @@ fn run_monitor_queue_remove<E: CliEnv>(
             crate::IssueMonitorConfig::default(),
             prefs.clone(),
         );
-        monitor.terminal_queue_remove(numbers, &now);
+        if all_terminals {
+            monitor.terminal_queue_remove_all_terminals(numbers, &now);
+        } else {
+            monitor.terminal_queue_remove(numbers, &now);
+        }
         *prefs = monitor.prefs();
         Ok(())
     })
@@ -4663,8 +4644,10 @@ fn apply_monitor_tiers_set(
     prefs
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.launch_auto = auto;
-    prefs.launch_tiers = tiers.unwrap_or_default();
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.set_launch_tiers(auto, tiers.unwrap_or_default());
+    *prefs = monitor.prefs();
     Ok(())
 }
 
@@ -4702,15 +4685,13 @@ fn apply_monitor_tier_set(
             "tier is outside the configured launch tiers",
         ));
     }
-    let current = prefs
-        .tier_overrides
-        .get(&number)
-        .copied()
-        .unwrap_or_default();
     prefs
         .advance_effect_authority_epoch()
         .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.tier_overrides.insert(number, current.max(tier));
+    let mut monitor =
+        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+    monitor.set_issue_minimum_launch_tier(number, tier);
+    *prefs = monitor.prefs();
     Ok(())
 }
 
@@ -6227,6 +6208,44 @@ fn cache_resource_is_fresh(path: &Path) -> bool {
         .is_some_and(|age| age < crate::issue_cache::ISSUE_CACHE_TTL)
 }
 
+/// Once GitHub has created the comment, a failed local projection must not
+/// turn success into a refusal that invites a duplicate POST (Issue #4171).
+fn run_issue_comment<E: CliEnv>(
+    env: &mut E,
+    number: u64,
+    body: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let comment = env.client().create_comment(IssueNumber(number), body)?;
+    super::intake_outcome::auto_record_issue_operation(
+        env.repo_path(),
+        "issue.comment",
+        super::intake_outcome::IntakeOutcomeKind::IssueUpdated,
+        number,
+    );
+    out.push_str(&format!(
+        "created comment {} on #{}\n",
+        comment.id.0, number
+    ));
+    if let Err(error) = refresh_issue_cache(env, IssueNumber(number)) {
+        let message = format!(
+            "comment {} on #{} was created; postprocessing cache refresh failed: {error}",
+            comment.id.0, number
+        );
+        super::operation_warnings::push("issue_comment_postprocessing_failed", &message);
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            message,
+            gwt_core::error_ledger::ErrorTarget {
+                issue: Some(number),
+                project_root: Some(env.repo_path().display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+    }
+    Ok(0)
+}
+
 pub(super) fn refresh_issue_cache<E: CliEnv>(
     env: &mut E,
     number: IssueNumber,
@@ -6440,10 +6459,9 @@ where
         // PM and let the index catch up through its own fingerprint check.
         if let Err(error) = rebuild_issue_index(env.repo_path()) {
             let message = format!("rebuild issue index: {error}");
-            tracing::warn!(
-                issue = number.0,
-                %message,
-                "issue cache written; index rebuild failed"
+            super::operation_warnings::push(
+                "issue_cache_index_refresh_failed",
+                format!("issue #{} cache written; {message}", number.0),
             );
             gwt_core::error_ledger::record_fail_open(
                 gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
@@ -7324,10 +7342,10 @@ mod tests {
     fn a_held_row_with_a_live_session_still_reports_the_disagreement() {
         let mut inbox = vec![mismatch_row(
             4777,
-            crate::MonitorInboxState::HoldExcluded,
+            crate::MonitorInboxState::SourceExcluded,
             None,
         )];
-        inbox[0].exclusion_reason = Some("matched label: hold".to_string());
+        inbox[0].exclusion_reason = Some("Untrusted source; PM triage required".to_string());
         let sessions = vec![mismatch_session(Some(4777))];
 
         let output = mismatch_status(&inbox, &sessions);
@@ -7341,7 +7359,7 @@ mod tests {
         let reason = output["inbox"][0]["exclusion_reason"]
             .as_str()
             .expect("existing hold and live-session mismatch are both explained");
-        assert!(reason.starts_with("matched label: hold"));
+        assert!(reason.starts_with("Untrusted source; PM triage required"));
         assert!(reason.contains("working_without_active_row"));
     }
 
@@ -8063,6 +8081,37 @@ mod tests {
             comments: vec![],
         });
         (tmp, env)
+    }
+
+    #[test]
+    fn issue_comment_from_file_refreshes_cache_after_success() {
+        let (tmp, mut env) = seeded_edit_env(&[]);
+        let _home = ScopedGwtHome::set(tmp.path().join("gwt-home"));
+        let file = "comment.md".to_string();
+        env.files.insert(file.clone(), "evidence".into());
+        super::super::operation_warnings::take();
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                IssueCommand::Comment { number: 7, file },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let comments = env.client.comments(IssueNumber(7));
+        assert_eq!(comments.len(), 1);
+        assert_eq!(out, format!("created comment {} on #7\n", comments[0].id.0));
+        assert_eq!(
+            Cache::new(env.cache_root())
+                .load_entry(IssueNumber(7))
+                .unwrap()
+                .snapshot
+                .comments,
+            comments
+        );
+        assert!(super::super::operation_warnings::take().is_empty());
     }
 
     fn fetched(env: &crate::cli::TestEnv, number: u64) -> IssueSnapshot {
@@ -10148,6 +10197,48 @@ mod tests {
         assert_eq!(
             monitor_queue_reply(&unrelated, Some("another-host"))["urgent_queue_token"],
             token
+        );
+    }
+
+    #[test]
+    fn issue_monitor_queue_remove_all_terminals_preserves_unrelated_entries() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        let mut monitor = crate::IssueMonitorState::new(Default::default());
+        monitor.terminal_queue_push(&[1, 2, 3], "operator", "2026-10-22T00:00:00Z");
+        let mut prefs = monitor.prefs();
+        let remote = prefs.terminal_queues[&crate::process::current_hostname()].clone();
+        prefs
+            .terminal_queues
+            .insert("orphan-host".into(), remote.clone());
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo.clone());
+        let super::super::CliCommand::Issue(command) = super::super::json_envelope::parse_operation(
+            "issue.monitor.queue.remove",
+            &serde_json::json!({"numbers":[1,3,4], "all_terminals":true, "expected_queue_order":[1,2,3]}),
+        ).unwrap() else { panic!("expected Issue command") };
+        run(&mut env, command, &mut String::new()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        for (host, queue) in &saved.terminal_queues {
+            assert_eq!(
+                queue
+                    .entries
+                    .iter()
+                    .map(|entry| entry.number)
+                    .collect::<Vec<_>>(),
+                vec![2]
+            );
+            assert_eq!(
+                saved.terminal_queue_exclusions[host],
+                [1, 3, 4].into_iter().collect()
+            );
+        }
+        assert_eq!(
+            saved.terminal_queues["orphan-host"].last_seen_at,
+            remote.last_seen_at
         );
     }
 
@@ -13995,6 +14086,27 @@ mod tests {
         let mut prefs = crate::IssueMonitorPrefs::default();
         prefs.set_launch_profile_pool(vec![pool_profile("claude", &[])]);
         let saved_pool = prefs.launch_profile_pool();
+        // All three claims were confirmed on the supported manual profile.
+        // The cold settings writer must use each delivery's saved Issue kind.
+        for (number, kind) in [(42, "issue"), (43, "spec"), (44, "issue")] {
+            prefs
+                .launching_issues
+                .push(crate::issue_monitor::IssueMonitorLaunchingIssue {
+                    issue_number: number,
+                    claimed_at: Some("2026-07-02T00:00:10Z".into()),
+                });
+            prefs.pending_launch_deliveries.push(
+                serde_json::from_value(serde_json::json!({
+                    "delivery_id": format!("pending-{number}"), "issue_number": number,
+                    "branch_name": format!("work/issue-{number}"), "linked_issue_kind": kind,
+                    "claim_id": format!("claim-{number}"), "claim_owner": "host:1",
+                    "materializer_id": (number == 44).then_some("gui"),
+                    "created_at": "2026-07-02T00:00:10Z"
+                }))
+                .unwrap(),
+            );
+        }
+        let initial_prefs = prefs.clone();
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -14004,7 +14116,7 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("codex", &[])],
+                vec![pool_profile("openclaw", &[])],
                 vec![pool_profile("claude", &["kind:spec"])],
             ]),
             &mut out,
@@ -14017,6 +14129,44 @@ mod tests {
         assert!(prefs.launch_auto);
         assert_eq!(prefs.tier_overrides[&4774], 1);
         assert_eq!(prefs.effective_launch_tiers().len(), 2);
+        assert_eq!(
+            prefs
+                .pending_launch_deliveries
+                .iter()
+                .map(|delivery| delivery.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44],
+            "cancel only the unowned unsupported Issue; keep the cold SPEC and owned delivery"
+        );
+        assert_eq!(
+            prefs
+                .launching_issues
+                .iter()
+                .map(|launch| launch.issue_number)
+                .collect::<Vec<_>>(),
+            vec![43, 44]
+        );
+        assert_eq!(prefs.pending_effects.len(), 1);
+        assert!(matches!(&prefs.pending_effects[0].payload,
+            crate::issue_monitor::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 42, claim_id, owner }
+                if claim_id == "claim-42" && owner == "host:1"));
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            prefs.clone(),
+        );
+        assert!(restored.inbox_item(43).is_none());
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
         let before = fs::read(&path).unwrap();
         assert!(run_monitor_tier_set(&env, None, None, 4774, 2, &mut out).is_err());
         assert!(run_monitor_tiers_set(&env, None, None, true, Some(vec![]), &mut out).is_err());
@@ -14033,6 +14183,49 @@ mod tests {
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);
+
+        // An Issue-only override can change the effective provider too.
+        // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
+        let mut override_prefs = initial_prefs;
+        override_prefs.launch_auto = true;
+        override_prefs.launch_tiers = vec![
+            vec![pool_profile("claude", &[])],
+            vec![pool_profile("openclaw", &[])],
+            vec![pool_profile("claude", &[])],
+        ];
+        override_prefs.tier_overrides.insert(43, 2);
+        crate::save_issue_monitor_prefs(&path, &override_prefs).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 44, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 0, &mut out).unwrap();
+        let override_prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(override_prefs.tier_overrides[&42], 1);
+        assert_eq!(
+            override_prefs.pending_launch_deliveries, prefs.pending_launch_deliveries,
+            "the Issue override must cancel only its unowned unsupported delivery"
+        );
+        assert_eq!(override_prefs.launching_issues, prefs.launching_issues);
+        assert_eq!(override_prefs.pending_effects.len(), 1);
+        assert_eq!(
+            override_prefs.pending_effects[0].payload,
+            prefs.pending_effects[0].payload
+        );
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            override_prefs,
+        );
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
     }
 
     /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored
@@ -17283,6 +17476,7 @@ command = "my-agent-cli"
     /// and the next read is a warm hit instead of another fetch plus rebuild.
     #[test]
     fn index_rebuild_failure_publishes_receipt_and_records_the_failure() {
+        super::super::operation_warnings::take();
         let temp = TempDir::new().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path().join("home"));
         let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
@@ -17339,6 +17533,10 @@ command = "my-agent-cli"
             rows[0].message
         );
         assert_eq!(rows[0].target.issue, Some(42));
+        let warnings = super::super::operation_warnings::take();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "issue_cache_index_refresh_failed");
+        assert!(warnings[0].message.contains("injected rebuild failure"));
     }
 
     #[test]

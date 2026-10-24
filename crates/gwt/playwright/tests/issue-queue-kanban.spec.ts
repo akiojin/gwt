@@ -18,7 +18,7 @@ test.beforeEach(async ({ page }, info) => {
   page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
     info.project.name.includes("light") ? "light" : "dark");
-  if (info.title.includes("Issue catalog bursts")) {
+  if ((info.title.includes("Issue catalog bursts") || info.title.includes("Monitor list bursts"))) {
     await page.addInitScript(() => { (window as any).__gwtPlaywrightTestBridge = true; });
   }
   const narrowSettings = info.title.includes("Settings integrates");
@@ -956,6 +956,69 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
   expect(controls, "reading and dismissing facts sends no controls").toEqual([]);
 });
 
+test("Monitor list bursts render once while controls remain synchronous", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const board = document.querySelector(".issue-queue-board")!;
+    const originalRaf = window.requestAnimationFrame;
+    const originalCancel = window.cancelAnimationFrame;
+    const frames = new Map<number, FrameRequestCallback>();
+    let next = 0;
+    window.requestAnimationFrame = run => { frames.set(++next, run); return next; };
+    window.cancelAnimationFrame = id => { frames.delete(id); };
+    const observer = new MutationObserver(() => {});
+    observer.observe(board, { childList: true, subtree: true });
+    const rowAdds = () => observer.takeRecords().reduce((count, record) => count +
+      [...record.addedNodes].filter(node => node instanceof Element && node.matches('.knowledge-row[data-issue-number="3"]')).length, 0);
+    const inject = (detail: unknown) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
+    try {
+      const initialRow = board.querySelector('[data-issue-number="3"]');
+      for (let index = 0; index < 50; index++) {
+        inject({ kind: "issue_monitor_status", status: { queue_len: index, autonomous_mode: true,
+          tier_facts: [{ issue_number: 3, recorded_launch_tier: 0, minimum_tier_override: index }],
+        } });
+        inject({ kind: "issue_monitor_inbox", items: [{ issue: { number: 3 }, state: index % 2 ? "launched" : "queued" }] });
+      }
+      const before = { rows: rowAdds(), same: initialRow === board.querySelector('[data-issue-number="3"]'),
+        queue: document.querySelector('[data-metric="queue"]')!.textContent,
+        active: document.querySelector('[data-metric="active"]')!.textContent };
+      (document.querySelector('[data-action="monitor-autonomous"]') as HTMLElement).click();
+      const request = (window as any).__queueMessages.filter((message: any) => message.kind === "set_issue_monitor_autonomous_mode").at(-1);
+      for (const [id, run] of [...frames]) { frames.delete(id); run(performance.now()); }
+      return { before, rows: rowAdds(), active: !!board.querySelector('[data-queue-column="active"] [data-issue-number="3"]'),
+        latest: board.querySelector('[data-issue-number="3"] [data-key="tier-minimum"]')?.textContent, request };
+    } finally {
+      observer.disconnect();
+      window.requestAnimationFrame = originalRaf;
+      window.cancelAnimationFrame = originalCancel;
+    }
+  });
+  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 2/1" }, rows: 1, active: true,
+    latest: "Min tier 49", request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
+  const select = row(page, 3).locator(".knowledge-row-select");
+  await select.focus();
+  await page.evaluate(() => {
+    (window as any).__imframeRaf = window.requestAnimationFrame;
+    window.requestAnimationFrame = () => 0;
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {
+      kind: "issue_monitor_inbox", items: [{ issue: { number: 3 }, state: "queued" }],
+    } }));
+  });
+  try {
+    await expect(column(page, "queued").locator('[data-issue-number="3"]')).toBeVisible({ timeout: 1000 });
+    await expect(select).toBeFocused();
+    await select.click();
+    await expect(page.locator(".knowledge-detail-pane")).toContainText("Description for #3");
+  } finally {
+    await page.evaluate(() => {
+      window.requestAnimationFrame = (window as any).__imframeRaf;
+      delete (window as any).__imframeRaf;
+      delete (document as any).visibilityState;
+    });
+  }
+});
+
 test("T-7b.2b.2: Issue catalog bursts render once without delaying local selection", async ({ page }) => {
   await confirm(page, [3, 4], { tier_facts: [{ issue_number: 5,
     confirmed_launch: { tier: 0, window_id: "tab-queue::agent-5", delivery_id: "delivery-5" },
@@ -1153,11 +1216,51 @@ test("bulk drag and reorder wait for confirmation, forbidden and rejected change
   expect((await messages(page)).length).toBe(before);
   await drag(page,2,column(page,"queued").locator("h3"));
   await page.evaluate(() => (window as any).__queueEvent({kind:"issue_monitor_queue_result",
-    operation:"push",issue_numbers:[2],error:"Queue change rejected: issue is on hold"}));
+    operation:"push",issue_numbers:[2],error:"Queue change rejected: queue is unavailable"}));
   await expect(column(page,"backlog").locator('[data-issue-number="2"]')).toHaveCount(1);
-  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toHaveText("Issue #2: Queue change rejected: queue is unavailable");
   await confirm(page,[3,4,1]);
-  await expect(page.locator(".issue-queue-feedback")).toContainText("issue is on hold");
+  await expect(page.locator(".issue-queue-feedback")).toContainText("queue is unavailable");
+});
+
+test("Issue #4499 hold labels preserve queue controls while source exclusions explain triage", async ({ page }) => {
+  const reason = "untrusted feedback; PM triage required; use a separate curated execution owner";
+  await page.evaluate(reason => (window as any).__queueSetEntries([
+    { number: 1, title: "Hold-labeled backlog issue", state: "open", labels: ["hold"] },
+    { number: 3, title: "Hold-labeled queued issue", state: "open", labels: ["hold"], monitor_state: "queued" },
+    { number: 7, title: "Raw feedback awaiting triage", state: "open", labels: ["gwt-feedback"],
+      monitor_state: "source_excluded", exclusion_reason: reason },
+  ]), reason);
+  await confirm(page, [3]);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
+  await expect(row(page, 7)).toContainText(reason);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-issue-explanation", /source.*trust.*triage/i);
+  await page.evaluate(() => (window as any).__queueInbox([
+    { issue: { number: 7 }, state: "hold_excluded", exclusion_reason: "hold label: hold" },
+  ]));
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  const staleReason = "This exclusion was reported by an older monitor. Refresh to confirm queue membership.";
+  await expect(row(page, 7)).toContainText(staleReason);
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveAttribute("data-issue-explanation", staleReason);
+  await expect(row(page, 7)).not.toContainText("hold label: hold");
+  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 7 }, state: "hold_excluded" }]));
+  await expect(row(page, 7).locator(".knowledge-row-badge")).toHaveText("Needs triage");
+  await expect(row(page, 7)).toContainText("Source trust review is required before automatic launches.");
+  await expect(row(page, 7)).not.toContainText(/On hold|Unknown/);
+
+  await expect(row(page, 1).locator(".knowledge-row-badge")).toHaveText("Open");
+  await expect(row(page, 3).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await drag(page, 1, column(page, "queued").locator("h3"));
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({ kind: "issue_monitor_queue_push", issue_numbers: [1] });
+  await confirm(page, [3, 1]);
+  await expect(column(page, "queued").locator('[data-issue-number="1"]')).toBeVisible();
+  await expect(row(page, 1).locator(".knowledge-row-badge")).toHaveText("Queued");
+  await drag(page, 3, column(page, "backlog").locator("h3"));
+  await expect.poll(async () => (await messages(page)).at(-1)).toEqual({ kind: "issue_monitor_queue_remove", issue_numbers: [3] });
+  await confirm(page, [1]);
+  await expect(column(page, "backlog").locator('[data-issue-number="3"]')).toBeVisible();
+  await expect(row(page, 3).locator(".knowledge-row-badge")).toHaveText("Open");
 });
 
 test("Issue #4499 a card missing at drop time explains why it cannot move", async ({ page }) => {

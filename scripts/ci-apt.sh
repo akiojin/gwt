@@ -226,6 +226,10 @@ CONF
 # GitHub's runner includes unrelated Microsoft feeds that can return 403 or
 # expired signatures. Keep Ubuntu entries, including mixed .list files and
 # deb822 files. Local installs do not modify the user's source configuration.
+# Issue #6080: the runner's Azure HTTP mirror can trickle data without hitting
+# the per-connection timeout, then lose all three install attempts. Cold caches
+# must bypass that route too: use Ubuntu's direct HTTPS archives in CI, keeping
+# the suites, components and signing keys from the runner image.
 sanitize_ci_sources() {
   # An injected apt binary is a test fixture and must not edit host sources.
   [[ ( "${GITHUB_ACTIONS:-}" == "true" && -z "${GWT_APT_GET:-}" ) || -n "${GWT_APT_ETC_DIR:-}" ]] || return 0
@@ -233,12 +237,32 @@ sanitize_ci_sources() {
   local source filtered
   for source in "${apt_dir}/sources.list" "${apt_dir}/sources.list.d/"*.list "${apt_dir}/sources.list.d/"*.sources; do
     [[ -f "${source}" ]] || continue
-    grep -qi 'packages\.microsoft\.com' "${source}" || continue
     filtered="$(mktemp)"
-    if [[ "${source}" == *.sources ]]; then
+    if ! grep -qi 'packages\.microsoft\.com' "${source}"; then
+      cat "${source}" >"${filtered}"
+    elif [[ "${source}" == *.sources ]]; then
       awk 'BEGIN { RS=""; ORS="\n\n" } tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
     else
       awk 'tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
+    fi
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      sed -i \
+        -e 's|mirror+file:/etc/apt/apt-mirrors-security.txt|https://security.ubuntu.com/ubuntu/|g' \
+        -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|g' \
+        -e 's|http[s]\?://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security\.ubuntu\.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        "${filtered}"
+    fi
+    if cmp -s "${source}" "${filtered}"; then
+      rm -f "${filtered}"
+      continue
+    fi
+    if grep -qi 'packages\.microsoft\.com' "${source}"; then
+      log "source-filter=removed-microsoft source=${source}"
+    fi
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && grep -q 'https://.*ubuntu.com/ubuntu' "${filtered}"; then
+      log "source-mirror=ubuntu-https source=${source}"
     fi
     if [[ -w "${source}" ]]; then
       cat "${filtered}" >"${source}"
@@ -246,7 +270,6 @@ sanitize_ci_sources() {
       run_as_root tee "${source}" <"${filtered}" >/dev/null
     fi
     rm -f "${filtered}"
-    log "source-filter=removed-microsoft source=${source}"
   done
 }
 

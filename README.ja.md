@@ -498,9 +498,18 @@ Queued 内では順序を変更でき、複数選択の移動は 1 回のキュ�
 Active と Done は実行ライフサイクルに従うため、ドラッグでは変更できません。
 Queued には `auto-refill` などの追加元も表示されます。
 
+このホストの自動起動キューから除外するには、Issue を Backlog に移動します。
+`hold` ラベルはキューへの追加・準備状態・依存関係・起動に影響しません。
+未整理のフィードバックや信頼されていない作成者の Issue は引き続き source triage が必要で、
+行には **Needs triage** と除外理由を表示します。
+
+保守用の `issue.monitor.queue.remove` に `all_terminals:true` を指定すると、このマシンの
+project store に保存された全端末のキューから `numbers` を外し、自動補充の手動除外も記録します。
+省略時はこのホストだけが対象です。別マシンの独立した project store は変更しません。
+
 前提 Issue の完了を待つには、Issue 本文に `Blocked-by: #123 #456` のような行を追加します。
-Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号
-（hold 中なら `(hold)`）を表示して、次の実行可能な Issue を起動します。
+Monitor はキュー内の位置を維持し、**Blocked by dependency** と未解決の Issue 番号を
+表示して、次の実行可能な Issue を起動します。
 前提 Issue の close または作業の完了を確認すると待機を解除します。
 前提の情報が無い場合や判定できない場合は依存待機を適用せず、循環は警告を表示して
 循環する辺だけを無効にします。マーカーを削除した場合も次の scan で待機を解除します。
@@ -859,6 +868,14 @@ harness の空き枠が不明な場合は、自身の補助枠が空いている
 診断を返します。Monitor の観測には取得元とスキャン時刻が付き、取得不能・不完全な
 観測から全件の確認済みとは判断しません。記入済みの health / confidence も、裏付け
 証拠が接続されるまでは検証済みとして扱いません。
+`policy.dependency_observations` は供給された Monitor inbox の全行を、同じ Issue の
+重複も含めて保持し、状態と正本の blocker・cycle・bundle 参照を返します。
+型付き診断がなければ null とし、`dependency_status` を不足情報として示します。
+Monitor は宣言がない場合に診断を省略し、解消済み・不明の blocker も省略するため、
+診断の欠落や空データから依存関係なし・起動可能とは判断できません。利用可能な観測が
+なければ null、供給された inbox が空なら [] です。取得元・スキャン時刻・観測範囲を
+併せて確認してください。この部分観測はプロジェクト全体の最新グラフ、bundle の充足、
+優先順位・マイルストーン health・起動許可を証明しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。

@@ -61,6 +61,29 @@ export function createBoardLogsSurface({
       const maxBoardEntries = 1000;
       const logStateMap = new Map();
       const maxLogEntries = 1000;
+      // Retain only the latest plain-data receipt. Request settlement stays
+      // synchronous, including stale-scope reloads and equal-valued errors.
+      const logResponseModel = createUiStateStore(null);
+      logResponseModel.subscribe(response => response, response => {
+        if (!response || !finishLogRequest(response.windowId)) return;
+        const state = ensureLogState(response.windowId);
+        state.loading = false;
+        if (response.kind === "log_error") {
+          state.error = response.message;
+        } else {
+          // Live appends still own a mutable local array; the receipt stays
+          // immutable and detached from the caller's nested entry data.
+          state.entries = [...response.entries];
+          state.error = "";
+          state.unreadAlerts = 0;
+          state.unreadEntryId = null;
+          if (!state.selectedEntryId || !state.entries.some((entry) => entry.id === state.selectedEntryId)) {
+            state.selectedEntryId =
+              state.entries.length > 0 ? state.entries[state.entries.length - 1].id : null;
+          }
+        }
+        renderLogs(response.windowId);
+      });
       let pendingBoardEntryFocusId = null;
       const boardModel = createUiStateStore(null);
       boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
@@ -1881,18 +1904,8 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_entries": {
-            if (!finishLogRequest(event.id)) break;
-            const state = ensureLogState(event.id);
-            state.entries = (event.entries || []).slice(-maxLogEntries);
-            state.loading = false;
-            state.error = "";
-            state.unreadAlerts = 0;
-            state.unreadEntryId = null;
-            if (!state.selectedEntryId || !state.entries.some((entry) => entry.id === state.selectedEntryId)) {
-              state.selectedEntryId =
-                state.entries.length > 0 ? state.entries[state.entries.length - 1].id : null;
-            }
-            renderLogs(event.id);
+            logResponseModel.update(() => ({ kind: event.kind, windowId: event.id,
+              entries: (event.entries || []).slice(-maxLogEntries) }));
             break;
           }
           case "log_entry_appended":
@@ -1911,11 +1924,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_error": {
-            if (!finishLogRequest(event.id)) break;
-            const state = ensureLogState(event.id);
-            state.loading = false;
-            state.error = event.message;
-            renderLogs(event.id);
+            logResponseModel.update(() => ({ kind: event.kind, windowId: event.id, message: event.message }));
             break;
           }
           default:

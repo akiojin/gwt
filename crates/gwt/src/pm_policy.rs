@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 
 use crate::{
-    issue_monitor::IssueMonitorInboxCoverage,
+    issue_monitor::{IssueMonitorDependencyStatus, IssueMonitorInboxCoverage},
     pm_planning::{
         Goal, PlanningAction, PlanningChangeImpact, PlanningFieldChange, PmPlanningState,
         RoadmapHorizon, RoadmapItem,
@@ -177,6 +177,7 @@ pub struct PlanningAssessment {
     pub monitor: MonitorEvidence,
     pub capacity: CapacityObservation,
     pub missing_inputs: Vec<&'static str>,
+    pub dependency_observations: Option<Vec<DependencyObservation>>,
     pub issue_traces: Vec<IssueTrace>,
     pub roadmap: RoadmapHorizons,
     pub roadmap_items: Vec<RoadmapDiagnostic>,
@@ -188,6 +189,15 @@ pub struct PlanningAssessment {
     pub forecasts: Vec<ForecastObservation>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
+}
+
+/// Supplied Monitor diagnostics are not a complete graph or permission to launch.
+#[derive(Debug, Serialize)]
+pub struct DependencyObservation {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    pub dependency: Option<IssueMonitorDependencyStatus>,
+    pub missing_inputs: Vec<&'static str>,
 }
 
 /// Authored metadata presence is not a risk assessment or action permission.
@@ -1219,6 +1229,22 @@ pub fn assess_planning(
             inbox_coverage: monitor.and_then(|status| status.inbox_coverage.clone()),
         },
         missing_inputs,
+        dependency_observations: monitor.map(|status| {
+            status
+                .inbox
+                .iter()
+                .map(|row| DependencyObservation {
+                    issue_number: row.issue_number,
+                    state: row.state,
+                    dependency: row.dependency.clone(),
+                    missing_inputs: if row.dependency.is_none() {
+                        vec!["dependency_status"]
+                    } else {
+                        vec![]
+                    },
+                })
+                .collect()
+        }),
         issue_traces,
         roadmap,
         roadmap_items,
@@ -1437,6 +1463,51 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
+    fn dependency_observations_preserve_canonical_facts_without_evaluating_readiness() {
+        let state = PmPlanningState::default();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":9,"state":"blocked_by_dependency","attempts":0,
+             "dependency":{"blocked_by":[{"number":3}],"cycle":true,"bundle_with":[7,5]},
+             "error_message":"private diagnostic","claim_id":"private claim"},
+            {"issue_number":9,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}},
+            {"issue_number":4,"state":"blocked_by_dependency","attempts":0},
+            {"issue_number":5,"state":"released","attempts":0}
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let expected = json!([
+            {"issue_number":9,"state":"blocked_by_dependency",
+             "dependency":{"blocked_by":[{"number":3}],"cycle":true,"bundle_with":[7,5]},
+             "missing_inputs":[]},
+            {"issue_number":9,"state":"queued",
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+            {"issue_number":4,"state":"blocked_by_dependency","dependency":null,
+             "missing_inputs":["dependency_status"]},
+            {"issue_number":5,"state":"released","dependency":null,
+             "missing_inputs":["dependency_status"]}
+        ]);
+        assert_eq!(report.get("dependency_observations"), Some(&expected));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["dependency_observations"], expected);
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert!(degraded["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("complete_monitor_coverage")));
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty.get("dependency_observations"), Some(&json!([])));
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent.get("dependency_observations"), Some(&Value::Null));
+    }
+
+    #[test]
     fn terminal_queue_residency_preserves_supplied_rows_without_claiming_wait_time() {
         let state = PmPlanningState::default();
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
@@ -1570,7 +1641,7 @@ mod tests {
         monitor.active_launches = vec![3, 3, 5];
         monitor.inbox = serde_json::from_value(json!([
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
-            {"issue_number":2,"state":"hold_excluded","attempts":0},
+            {"issue_number":2,"state":"source_excluded","attempts":0},
             {"issue_number":2,"state":"needs_human","attempts":0},
             {"issue_number":4,"state":"blocked_by_claim","attempts":0},
             {"issue_number":5,"state":"agent_failed","attempts":0},
@@ -1603,7 +1674,7 @@ mod tests {
         assert_eq!(row(&report, 1)["observed_inbox_states"], json!([]));
         assert_eq!(
             row(&report, 2)["observed_inbox_states"],
-            json!(["needs_human", "hold_excluded"])
+            json!(["needs_human", "source_excluded"])
         );
         assert_eq!(
             row(&report, 4)["observed_inbox_states"],
@@ -1646,7 +1717,7 @@ mod tests {
             {"issue_number":1,"state":"launched","attempts":0},
             {"issue_number":1,"state":"needs_human","attempts":0},
             {"issue_number":1,"state":"launched","attempts":0},
-            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":3,"state":"source_excluded","attempts":0},
             {"issue_number":5,"state":"merged","attempts":0}
         ]))
         .unwrap();
@@ -1657,7 +1728,7 @@ mod tests {
             rows[0]["observed_issue_states"],
             json!([
                 {"issue_number":1,"states":["launched","needs_human"]},
-                {"issue_number":3,"states":["hold_excluded"]}
+                {"issue_number":3,"states":["source_excluded"]}
             ])
         );
         assert_eq!(rows[0]["unobserved_issues"], json!([2]));
@@ -2225,7 +2296,7 @@ mod tests {
             {"issue_number":1,"state":"blocked_by_claim","attempts":0},
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
             {"issue_number":2,"state":"needs_human","attempts":0},
-            {"issue_number":2,"state":"hold_excluded","attempts":0},
+            {"issue_number":2,"state":"source_excluded","attempts":0},
             {"issue_number":3,"state":"queued","attempts":0},
             {"issue_number":4,"state":"merged","attempts":0},
             {"issue_number":5,"state":"released","attempts":0},
@@ -2241,7 +2312,7 @@ mod tests {
             milestone["observed_issue_states"],
             json!([
                 {"issue_number":1,"states":["blocked_by_claim"]},
-                {"issue_number":2,"states":["needs_human","hold_excluded"]},
+                {"issue_number":2,"states":["needs_human","source_excluded"]},
                 {"issue_number":3,"states":["queued"]},
                 {"issue_number":4,"states":["merged"]},
                 {"issue_number":5,"states":["released"]},
@@ -2292,7 +2363,7 @@ mod tests {
             {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
             {"issue_number":2,"state":"needs_human","attempts":0},
             {"issue_number":2,"state":"merged","attempts":0},
-            {"issue_number":3,"state":"hold_excluded","attempts":0},
+            {"issue_number":3,"state":"source_excluded","attempts":0},
             {"issue_number":99,"state":"released","attempts":0}
         ]))
         .unwrap();
@@ -2305,7 +2376,7 @@ mod tests {
                 "observed_issue_states":[
                     {"issue_number":1,"states":["queued"]},
                     {"issue_number":2,"states":["needs_human","merged"]},
-                    {"issue_number":3,"states":["hold_excluded"]}
+                    {"issue_number":3,"states":["source_excluded"]}
                 ],
                 "unobserved_issues":[5], "missing_inputs":["metric_evidence",
                     "outcome","metric","target","horizon","owner","status"]

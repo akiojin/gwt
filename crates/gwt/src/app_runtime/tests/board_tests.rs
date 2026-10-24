@@ -1029,7 +1029,7 @@ fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::HoldExcluded);
+    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::SourceExcluded);
     held.exclusion_reason = Some("Excluded by label: hold".to_string());
     let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
     monitor.terminal_queue_push(&[42, 43], "operator", "2026-07-28T00:00:00Z");
@@ -1088,7 +1088,7 @@ fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
             entry(44).exclusion_reason.as_deref(),
         ),
         (
-            Some(gwt::MonitorInboxState::HoldExcluded),
+            Some(gwt::MonitorInboxState::SourceExcluded),
             None,
             Some("Excluded by label: hold"),
         ),

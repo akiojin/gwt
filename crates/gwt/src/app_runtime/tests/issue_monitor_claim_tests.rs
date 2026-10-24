@@ -1726,7 +1726,8 @@ fn app_runtime_local_claim_result_cannot_revive_candidate_excluded_after_attempt
     assert!(monitor.mark_pending_effect_attempting(&key));
     let attempting = monitor.pending_effects()[0].clone();
 
-    issue.labels.push("hold".to_string());
+    issue.labels.push("gwt-spec".to_string());
+    issue.readiness = gwt::IssueMonitorReadiness::NotReady;
     monitor.record_candidate(issue);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("persist excluded state");
 

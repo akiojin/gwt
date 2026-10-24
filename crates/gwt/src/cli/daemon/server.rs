@@ -22583,7 +22583,8 @@ exit 1
         assert!(monitor.mark_pending_effect_attempting(&key));
         let attempting = monitor.pending_effects()[0].clone();
 
-        issue.labels.push("hold".to_string());
+        issue.labels.push("gwt-spec".to_string());
+        issue.readiness = crate::IssueMonitorReadiness::NotReady;
         monitor.terminal_queue_push(&[issue.number], "test", "2026-07-27T00:00:00Z");
         monitor.record_candidate(issue);
         crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
@@ -22631,8 +22632,8 @@ exit 1
         for (exclusion, outcome_kind) in [
             ("not-ready", "blocked"),
             ("not-ready", "lost"),
-            ("hold", "blocked"),
-            ("hold", "lost"),
+            ("source", "blocked"),
+            ("source", "lost"),
         ] {
             let temp = TempDir::new().expect("tempdir");
             let prefs_path = temp.path().join("issue-monitor.json");
@@ -22641,6 +22642,8 @@ exit 1
                 ..crate::IssueMonitorConfig::default()
             });
             let mut issue = sample_issue_monitor_issue(42);
+            monitor.set_source_repository(Some(("akiojin", "gwt")));
+            issue.author_login = Some("akiojin".into());
             issue.labels.push("gwt-spec".to_string());
             issue.readiness = crate::IssueMonitorReadiness::Ready;
             monitor.terminal_queue_push(&[issue.number], "test", "2026-07-27T00:00:00Z");
@@ -22663,8 +22666,8 @@ exit 1
             crate::save_issue_monitor_prefs(&prefs_path, &monitor.prefs())
                 .expect("seed attempting journal");
 
-            if exclusion == "hold" {
-                issue.labels.push("hold".to_string());
+            if exclusion == "source" {
+                issue.author_login = Some("external-reporter".into());
             } else {
                 issue.readiness = crate::IssueMonitorReadiness::NotReady;
             }
@@ -22726,8 +22729,8 @@ exit 1
                 },
             ));
 
-            let expected = if exclusion == "hold" {
-                crate::MonitorInboxState::HoldExcluded
+            let expected = if exclusion == "source" {
+                crate::MonitorInboxState::SourceExcluded
             } else {
                 crate::MonitorInboxState::NotReady
             };

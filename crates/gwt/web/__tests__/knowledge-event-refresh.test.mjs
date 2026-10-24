@@ -50,6 +50,7 @@ async function harness(count = 1) {
   const sent = [];
   const windowMap = new Map();
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send(message) {
       sent.push(message);
       if (message.kind === "load_knowledge_bridge") surface.applyKnowledgeReceiveEvent({

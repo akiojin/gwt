@@ -831,6 +831,49 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Logs snapshot receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const snapshots = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('log_entries'));
+  assert.deepEqual(snapshots(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(snapshots(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_entries": {', 'case "log_entries": { renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(snapshots(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(snapshots(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  for (const kind of ['log_entries', 'log_entry_appended']) {
+    const appBypass = app.replace(`case "${kind}":`, `case "${kind}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(snapshots(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+      .some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Logs error receipts commit shared data and reject direct rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding => /(?:\/|\|)log_error$/.test(finding.context));
+  assert.deepEqual(errors(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' })), []);
+  assert.deepEqual(errors(scanModule(app, appFile, { modules: new Map([[file, source]]) })), []);
+  const bypass = source.replace('case "log_error": {', 'case "log_error": { renderLogs(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(errors(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  assert.ok(errors(scanModule(app, appFile, { modules: new Map([[file, bypass]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+  const appBypass = app.replace('case "log_error":', 'case "log_error": document.body.textContent = event.message;');
+  assert.notEqual(appBypass, app);
+  assert.ok(errors(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
 
 test("Close Project receiver commits shared data and rejects direct rendering", () => {
   const file = 'crates/gwt/web/close-project-confirm-modal.js';

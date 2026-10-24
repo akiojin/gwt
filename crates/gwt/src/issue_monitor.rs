@@ -2709,7 +2709,6 @@ pub fn parse_issue_monitor_dependencies(body: &str, issue_number: u64) -> IssueM
 struct IssueMonitorDependencyFacts {
     declarations: IssueMonitorDependencies,
     state: IssueMonitorIssueState,
-    hold: bool,
     updated_at: Option<String>,
     source_hash: String,
 }
@@ -2753,7 +2752,6 @@ impl IssueMonitorDependencyObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorDependencyBlocker {
     pub number: u64,
-    pub hold: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2796,9 +2794,9 @@ pub enum MonitorInboxState {
     /// A design-required Issue is missing a usable plan or tasks artifact.
     /// This is re-evaluated on every scan and is therefore non-terminal.
     NotReady,
-    /// An operator excluded the Issue from automatic execution with a hold
-    /// label. This is re-evaluated on every scan and is therefore non-terminal.
-    HoldExcluded,
+    /// The source is untrusted and requires PM triage. Re-evaluated each scan.
+    #[serde(alias = "hold_excluded")]
+    SourceExcluded,
     Launching,
     Launched,
     /// Current Issue generation is complete. The GitHub Issue may still be
@@ -5425,16 +5423,6 @@ fn issue_monitor_candidate_exclusion(
     if let Some(exclusion) = issue_monitor_source_exclusion(issue, source_repository) {
         return Some(exclusion);
     }
-    if let Some(label) = issue
-        .labels
-        .iter()
-        .find(|label| label.eq_ignore_ascii_case("hold"))
-    {
-        return Some((
-            MonitorInboxState::HoldExcluded,
-            format!("hold label: {label}"),
-        ));
-    }
     if issue
         .labels
         .iter()
@@ -5464,7 +5452,7 @@ fn issue_monitor_source_exclusion(
                 .is_some_and(|body| body.to_ascii_lowercase().contains("<!-- gwt-feedback:")))
     {
         return Some((
-            MonitorInboxState::HoldExcluded,
+            MonitorInboxState::SourceExcluded,
             "untrusted feedback; PM triage required; use a separate curated execution owner"
                 .to_string(),
         ));
@@ -5490,7 +5478,7 @@ fn issue_monitor_source_exclusion(
             .iter()
             .any(|trusted| author.eq_ignore_ascii_case(trusted))
         {
-            return Some((MonitorInboxState::HoldExcluded, "untrusted external Issue; PM triage required; use a separate curated execution owner".to_string()));
+            return Some((MonitorInboxState::SourceExcluded, "untrusted external Issue; PM triage required; use a separate curated execution owner".to_string()));
         }
     }
     None
@@ -11376,7 +11364,26 @@ impl IssueMonitorState {
     /// [`IssueMonitorPrefs::set_launch_profile_pool`]).
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
         self.launch_profiles = dedupe_launch_profile_pool(pool);
-        self.compensate_permission_blocked_launch_deliveries();
+        self.compensate_permission_blocked_launch_deliveries(false);
+    }
+
+    /// Re-evaluate unowned deliveries when the effective tier policy changes.
+    pub(crate) fn set_launch_tiers(
+        &mut self,
+        auto: bool,
+        tiers: Vec<Vec<IssueMonitorLaunchProfile>>,
+    ) {
+        self.launch_auto = auto;
+        self.launch_tiers = tiers;
+        self.compensate_permission_blocked_launch_deliveries(true);
+    }
+
+    pub(crate) fn set_issue_minimum_launch_tier(&mut self, number: u64, tier: u8) {
+        let minimum = self.tier_overrides.entry(number).or_default();
+        *minimum = (*minimum).max(tier);
+        if self.launch_auto {
+            self.compensate_permission_blocked_launch_deliveries(true);
+        }
     }
 
     pub fn launch_usage_threshold_percent(&self) -> u8 {
@@ -11774,13 +11781,17 @@ impl IssueMonitorState {
         let profile = profile.clone();
         self.launch_profiles =
             dedupe_launch_profile_pool(std::mem::take(&mut self.launch_profiles));
-        self.compensate_permission_blocked_launch_deliveries();
+        self.compensate_permission_blocked_launch_deliveries(false);
         Ok(profile)
     }
 
     /// Profile writers commit this compensation under the prefs lock, before
     /// publication can replay an unusable unowned delivery to a GUI.
-    fn compensate_permission_blocked_launch_deliveries(&mut self) {
+    fn compensate_permission_blocked_launch_deliveries(&mut self, reevaluate_auto: bool) {
+        // Manual profile writers leave Auto's effective tiers unchanged.
+        if self.launch_auto && !reevaluate_auto {
+            return;
+        }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let blocked = self
             .pending_launch_deliveries
@@ -11986,7 +11997,14 @@ impl IssueMonitorState {
         let automatic = if self.launch_auto {
             let is_spec = self
                 .inbox_item(issue_number)
-                .is_some_and(|item| has_gwt_spec_label(&item.issue.labels));
+                .map(|item| has_gwt_spec_label(&item.issue.labels))
+                .unwrap_or_else(|| {
+                    // Cold settings writers have only the durable delivery.
+                    self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == issue_number
+                            && delivery.linked_issue_kind == LinkedIssueKind::Spec
+                    })
+                });
             self.prefs()
                 .select_auto_launch_profile(issue_number, is_spec, None, select)
         } else {
@@ -12582,7 +12600,7 @@ impl IssueMonitorState {
                         item.state,
                         MonitorInboxState::Skipped
                             | MonitorInboxState::NotReady
-                            | MonitorInboxState::HoldExcluded
+                            | MonitorInboxState::SourceExcluded
                             | MonitorInboxState::BlockedByClaim
                     )
             })
@@ -13350,10 +13368,6 @@ impl IssueMonitorState {
                 issue.number,
             ),
             state: issue.state,
-            hold: issue
-                .labels
-                .iter()
-                .any(|label| label.eq_ignore_ascii_case("hold")),
             updated_at: issue.updated_at.clone(),
             source_hash: IssueMonitorDependencyObservation::new(issue, None).source_hash,
         };
@@ -13542,16 +13556,15 @@ impl IssueMonitorState {
             {
                 continue;
             }
-            let Some(blocker_facts) = self.dependency_facts.get(&blocker) else {
+            let Some(_) = self.dependency_facts.get(&blocker) else {
                 continue; // Unknown dependencies retain the specified fail-open policy.
             };
             if self.dependency_reaches(blocker, number, delivery) {
                 status.cycle = true;
             } else {
-                status.blocked_by.push(IssueMonitorDependencyBlocker {
-                    number: blocker,
-                    hold: blocker_facts.hold,
-                });
+                status
+                    .blocked_by
+                    .push(IssueMonitorDependencyBlocker { number: blocker });
             }
         }
         Some(status)
@@ -13600,13 +13613,7 @@ impl IssueMonitorState {
                 status
                     .blocked_by
                     .iter()
-                    .map(|blocker| {
-                        format!(
-                            "#{}{}",
-                            blocker.number,
-                            if blocker.hold { " (hold)" } else { "" }
-                        )
-                    })
+                    .map(|blocker| format!("#{}", blocker.number))
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -15879,7 +15886,7 @@ impl IssueMonitorState {
         if self.inbox_item(number).is_some_and(|item| {
             matches!(
                 item.state,
-                MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+                MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded
             )
         }) {
             return EligibilityDecision::HumanGate(
@@ -17336,7 +17343,7 @@ impl IssueMonitorState {
                 Some(MonitorInboxState::Released)
                 | Some(MonitorInboxState::Merged)
                 | Some(MonitorInboxState::NotReady)
-                | Some(MonitorInboxState::HoldExcluded)
+                | Some(MonitorInboxState::SourceExcluded)
                 | Some(MonitorInboxState::Skipped)
                 | None => MonitorInboxState::Queued,
                 Some(other) => other,
@@ -17394,7 +17401,7 @@ impl IssueMonitorState {
         };
         if matches!(
             state,
-            MonitorInboxState::NotReady | MonitorInboxState::HoldExcluded
+            MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded
         ) {
             self.clear_provisional_implementation(issue_number);
             revoke_uncommitted_claims_for_issue(
@@ -17790,6 +17797,29 @@ impl IssueMonitorState {
             self.cancel_pending_review_dispatch(*issue_number);
         }
         self.reconcile_terminal_queue();
+    }
+
+    /// Explicit maintenance of every terminal saved in this project store.
+    /// Remote liveness timestamps remain observations, not mutation timestamps.
+    pub fn terminal_queue_remove_all_terminals(&mut self, issue_numbers: &[u64], now: &str) {
+        self.terminal_queue_remove(issue_numbers, now);
+        let hosts = self
+            .terminal_queues
+            .keys()
+            .chain(self.terminal_queue_exclusions.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for host in hosts {
+            self.terminal_queue_exclusions
+                .entry(host.clone())
+                .or_default()
+                .extend(issue_numbers.iter().copied());
+            if let Some(queue) = self.terminal_queues.get_mut(&host) {
+                queue
+                    .entries
+                    .retain(|entry| !issue_numbers.contains(&entry.number));
+            }
+        }
     }
 
     pub fn terminal_queue_move(&mut self, number: u64, position: usize, now: &str) -> bool {
@@ -24909,7 +24939,7 @@ pub fn scan_issue_monitor_candidates(
             matches!(
                 item.state,
                 MonitorInboxState::NotReady
-                    | MonitorInboxState::HoldExcluded
+                    | MonitorInboxState::SourceExcluded
                     | MonitorInboxState::Skipped
             )
         }) {
@@ -25794,7 +25824,7 @@ mod tests {
             &[server, tools, client, held],
             "2026-10-06T00:00:00Z",
         );
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2]);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 2, 4]);
         assert!(monitor.inbox_item(3).is_none());
         let status = serde_json::to_value(monitor.agent_status()).unwrap();
         assert_eq!(
@@ -26104,7 +26134,7 @@ mod tests {
             monitor.record_candidate(report);
 
             let row = monitor.inbox_item(42).unwrap();
-            assert_eq!(row.state, MonitorInboxState::HoldExcluded);
+            assert_eq!(row.state, MonitorInboxState::SourceExcluded);
             assert!(row
                 .exclusion_reason
                 .as_deref()
@@ -26157,7 +26187,7 @@ mod tests {
                 if author.is_none() {
                     MonitorInboxState::NotReady
                 } else {
-                    MonitorInboxState::HoldExcluded
+                    MonitorInboxState::SourceExcluded
                 }
             );
             assert!(row
@@ -26508,7 +26538,7 @@ mod tests {
         });
         let candidate = issue(42);
         monitor.record_candidate(candidate.clone());
-        monitor.set_inbox_state(42, MonitorInboxState::HoldExcluded);
+        monitor.set_inbox_state(42, MonitorInboxState::SourceExcluded);
 
         assert!(!monitor.record_blocked_by_claim(
             candidate,
@@ -26522,7 +26552,7 @@ mod tests {
         );
         assert_eq!(
             monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::HoldExcluded)
+            Some(MonitorInboxState::SourceExcluded)
         );
     }
 
@@ -32799,9 +32829,8 @@ mod tests {
     /// Issue #4862 AC-3/AC-4, the live case: #4777 was working in its window while
     /// its row read `hold_excluded` with no bound window at all, so the card sat
     /// outside Active and the slot accounting under-counted by one
-    /// (`active_session_count` 4 against `occupied_slot_count` 2). A `hold` label
-    /// is an admission decision about launching new work; it must not unbind a
-    /// launch that is already running.
+    /// (`active_session_count` 4 against `occupied_slot_count` 2). The retired
+    /// `hold` label must not affect a launch that is already running either.
     #[test]
     fn a_hold_label_must_not_unbind_a_launch_that_is_already_running() {
         let mut held = issue(4777);
@@ -32816,7 +32845,7 @@ mod tests {
                 .inbox_item(4777)
                 .and_then(|item| item.launched_window_id.clone()),
             Some("project-a::agent-1343".to_string()),
-            "AC-3: a hold decides admission, not whether the running window is bound"
+            "AC-3: a retired hold label cannot unbind the running window"
         );
         assert_eq!(
             monitor.active_count(),
@@ -39737,6 +39766,75 @@ mod tests {
     }
 
     #[test]
+    fn markerless_scan_claim_and_launch_preserve_legacy_behavior() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        let now = "2026-10-24T00:00:00Z";
+        let mut baseline = None;
+        for body in [None, Some("Ordinary issue text referencing #43.")] {
+            let client = FakeIssueClient::new();
+            let mut candidates = [issue(42), issue(43)];
+            for candidate in &mut candidates {
+                candidate.body = body.map(str::to_string);
+                client.seed(IssueSnapshot {
+                    author_login: None,
+                    number: IssueNumber(candidate.number),
+                    title: candidate.title.clone(),
+                    body: candidate.body.clone().unwrap_or_default(),
+                    labels: candidate.labels.clone(),
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("t1"),
+                    comments: Vec::new(),
+                });
+            }
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.set_gui_connected(true);
+            let scan = scan_queued_candidates(&mut monitor, &candidates, now);
+            assert_eq!((scan.scanned, scan.claimed, scan.blocked), (2, 0, 0));
+            assert!(client.call_log().is_empty(), "scanning never claims");
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [42, 43]);
+            assert_eq!(monitor.claim_probe_plan(1), (1, vec![42, 43]));
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.inbox_view_at(now).iter().all(|item| {
+                item.state == MonitorInboxState::Queued && item.dependency.is_none()
+            }));
+
+            let probes = std::cell::RefCell::new(Vec::new());
+            let launches =
+                monitor.claim_next_launch_requests_with_probe(&client, "owner", now, 1, |number| {
+                    probes.borrow_mut().push(number);
+                    false
+                });
+            assert_eq!(*probes.borrow(), [42]);
+            assert_eq!(launches.len(), 1);
+            assert_eq!(launches[0].issue_number, 42);
+            assert_eq!(launches[0].branch_name, "work/issue-42");
+            assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+            assert!(client.comments(IssueNumber(43)).is_empty());
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [43]);
+            assert_eq!(monitor.active_count(), 1);
+            let observed = (
+                scan,
+                launches,
+                client.call_log(),
+                client.comments(IssueNumber(42)),
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(
+                    &observed, expected,
+                    "ordinary prose retains marker-less behavior"
+                );
+            } else {
+                baseline = Some(observed);
+            }
+        }
+    }
+
+    #[test]
     fn dependency_markers_ignore_examples_self_references_and_malformed_lines() {
         let declarations = parse_issue_monitor_dependencies(
             "Blocked-by: #44 #42 #43 #44\nBundle-with: #47 #42\n\
@@ -39817,7 +39915,7 @@ mod tests {
     }
 
     #[test]
-    fn dependency_cycles_disable_only_cyclic_edges_and_preserve_external_holds() {
+    fn dependency_cycles_disable_only_cyclic_edges_and_preserve_external_blockers() {
         let now = "2026-10-23T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig {
             enabled: true,
@@ -39838,10 +39936,7 @@ mod tests {
         assert_eq!(a.state, MonitorInboxState::BlockedByDependency);
         assert_eq!(
             a.dependency.as_ref().unwrap().blocked_by,
-            vec![IssueMonitorDependencyBlocker {
-                number: 44,
-                hold: true
-            }]
+            vec![IssueMonitorDependencyBlocker { number: 44 }]
         );
         assert!(a.dependency.as_ref().unwrap().cycle);
         assert_eq!(
@@ -45766,17 +45861,49 @@ mod tests {
     }
 
     #[test]
-    fn terminal_queue_auto_refill_skips_existing_readiness_exclusions() {
+    fn hold_label_uses_queue_membership_for_admission() {
+        let now = "2026-10-23T00:00:00Z";
+        let mut monitor = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        monitor.set_gui_connected(true);
+        let mut held = issue(1);
+        held.labels.push("HoLd".into());
+        monitor.terminal_queue_push(&[1], "operator", now);
+        scan_issue_monitor_candidates(&mut monitor, &[held.clone(), issue(2)], now);
+        assert_eq!(monitor.next_launch_request(now).unwrap().issue_number, 1);
+        assert!(monitor.next_launch_request(now).is_none());
+
+        let mut backlog = test_monitor(IssueMonitorConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        backlog.set_gui_connected(true);
+        scan_issue_monitor_candidates(&mut backlog, &[held, issue(2)], now);
+        assert!(backlog.claim_probe_plan(1).1.is_empty());
+        assert!(backlog.next_launch_request(now).is_none());
+    }
+
+    #[test]
+    fn legacy_hold_exclusion_reads_as_source_exclusion() {
+        let state: MonitorInboxState = serde_json::from_str("\"hold_excluded\"").unwrap();
+        assert_eq!(serde_json::to_value(state).unwrap(), "source_excluded");
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn terminal_queue_auto_refill_ignores_hold_but_preserves_readiness_exclusions() {
         let now = "2026-09-10T00:00:00Z";
         let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.set_terminal_queue_auto_refill(true, 1);
+        monitor.set_terminal_queue_auto_refill(true, 2);
         let mut held = issue(1);
         held.labels.push("hold".to_string());
         let mut not_ready = issue(2);
         not_ready.labels.push("gwt-spec".to_string());
         not_ready.readiness = IssueMonitorReadiness::NotReady;
         scan_issue_monitor_candidates(&mut monitor, &[held, not_ready, issue(3)], now);
-        assert_eq!(monitor.local_terminal_queue_numbers(), vec![3]);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![1, 3]);
     }
 
     #[test]

@@ -233,6 +233,30 @@ for (const responseKind of ["log_entries", "log_error"]) {
 
     surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries: [] });
     assert.equal(state.loading, false);
+    if (responseKind === "log_error") {
+      const message = '<img src=x onerror="window.unexpected = true">';
+      const search = body.querySelector(".logs-search-input");
+      state.query = "retained query";
+      state.entries = [{ id: 8, severity: "info", message: "retained query", fields: {} }];
+      state.selectedEntryId = 8;
+      const entries = state.entries;
+      for (let receipt = 0; receipt < 2; receipt++) {
+        surface.requestLogs("logs-1");
+        surface.applyBoardLogsReceiveEvent({ kind: "log_error", id: "logs-1", message });
+        assert.equal(state.loading, false);
+        assert.equal(state.error, message, "same-valued errors still settle each request");
+        assert.equal(body.querySelector(".logs-status").textContent, message);
+        assert.equal(body.querySelector(".logs-status img"), null, "error text is never HTML");
+        assert.equal(state.entries, entries);
+        assert.equal(state.selectedEntryId, 8);
+        assert.equal(state.scope, "global");
+        assert.equal(body.querySelector(".logs-search-input"), search);
+        assert.equal(search.value, "retained query");
+      }
+      surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
+      assert.equal(state.error, "");
+      assert.equal(body.querySelector(".logs-status").textContent, "1 visible / 1 total");
+    }
   });
 }
 
@@ -311,10 +335,15 @@ test("Logs snapshots and live appends retain the latest 1000 entries without ext
   const entries = Array.from({ length: 1002 }, (_, id) => ({
     id, project_scope: "project-alpha", severity: "info", message: `log-${id}`,
   }));
+  entries.at(-1).fields = { context: { label: "original" } };
   surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
   const state = surface.ensureLogState("logs-1");
   assert.equal(state.entries.length, 1000);
   assert.deepEqual(state.entries.map(entry => entry.id), entries.slice(2).map(entry => entry.id));
+  entries.at(-1).message = "changed by caller";
+  entries.at(-1).fields.context.label = "changed by caller";
+  assert.equal(state.entries.at(-1).message, "log-1001");
+  assert.equal(state.entries.at(-1).fields.context.label, "original");
 
   surface.applyBoardLogsReceiveEvent({
     kind: "log_entry_appended",

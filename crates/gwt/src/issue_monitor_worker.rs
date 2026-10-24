@@ -5668,6 +5668,51 @@ pub(crate) mod tests {
         assert!(monitor.claim_launch_delivery(42, &delivery, "gui", 123, "tab::agent-42", |_| true));
     }
 
+    #[test]
+    fn permission_readiness_manual_profile_writes_preserve_auto_spec_deliveries() {
+        let now = "2026-07-02T00:00:10Z";
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        prefs.launch_auto = true;
+        prefs.launch_tiers = vec![
+            vec![unsupported_launch_profile("openclaw")],
+            vec![unsupported_launch_profile("codex")],
+        ];
+        let mut monitor = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        monitor.terminal_queue_push(&[42], "test", now);
+        monitor.record_candidate(IssueMonitorIssue {
+            labels: vec!["gwt-spec".into()],
+            readiness: IssueMonitorReadiness::Ready,
+            ..issue(42)
+        });
+        assert!(monitor.apply_confirmed_claim(42, "claim", "host:1", "effect", now));
+        let delivery = monitor.pending_launch_delivery_id(42).unwrap();
+        let original = monitor.prefs();
+
+        // Cold profile writers have no inbox. Saving the unused manual pool
+        // must not misclassify this SPEC as a tier-0 Issue and release its claim.
+        for replace_pool in [false, true] {
+            let mut cold =
+                test_monitor_with_prefs(crate::IssueMonitorConfig::default(), original.clone());
+            assert!(cold.inbox_item(42).is_none());
+            if replace_pool {
+                cold.set_launch_profile_pool(vec![unsupported_launch_profile("openclaw")]);
+            } else {
+                cold.switch_launch_profile_agent("openclaw").unwrap();
+            }
+            let committed = cold.prefs();
+            cold.rebase_daemon_driver_prefs(&committed);
+            assert_eq!(cold.pending_launch_delivery_id(42), Some(delivery.clone()));
+            assert_eq!(cold.active_count(), 1);
+            assert_eq!(committed.launch_profile_pool()[0].agent_id, "openclaw");
+            assert_eq!(committed.launch_tiers, original.launch_tiers);
+            assert!(committed.pending_effects.iter().all(|effect| !matches!(
+                effect.payload,
+                crate::IssueMonitorEffectPayload::ReleaseClaim { .. }
+            )));
+        }
+    }
+
     /// A launch profile naming `agent_id`, with every other field at the value
     /// a freshly saved profile carries.
     fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
@@ -7455,8 +7500,12 @@ pub(crate) mod tests {
             "2026-10-16T00:00:02Z",
         );
         let row = monitor.inbox_item(42).unwrap();
-        assert_eq!(row.state, MonitorInboxState::HoldExcluded);
-        assert!(row.exclusion_reason.as_deref().unwrap().contains("hold"));
+        assert_eq!(row.state, MonitorInboxState::NotReady);
+        assert!(row
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("plan/tasks"));
         assert_eq!(held.title, snapshot.title);
         assert_eq!(held.author_login, snapshot.author_login);
         assert_eq!(held.body.as_deref(), Some(snapshot.body.as_str()));
@@ -8342,11 +8391,14 @@ exit 1
             },
         );
         monitor.terminal_queue_push(&[50, 51], "test", "2026-07-02T00:00:00Z");
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
         let mut not_ready = issue(50);
+        not_ready.author_login = Some("akiojin".into());
         not_ready.labels = vec!["gwt-spec".to_string(), "auto-merge".to_string()];
         not_ready.readiness = IssueMonitorReadiness::NotReady;
         let mut held = issue(51);
-        held.labels = vec!["auto-merge".to_string(), "hold".to_string()];
+        held.author_login = Some("akiojin".into());
+        held.labels = vec!["auto-merge".to_string(), "gwt-feedback".to_string()];
         crate::scan_issue_monitor_candidates(
             &mut monitor,
             &[not_ready.clone(), held.clone()],
@@ -8367,7 +8419,7 @@ exit 1
         );
         assert_eq!(
             monitor.inbox_item(51).map(|item| item.state),
-            Some(MonitorInboxState::HoldExcluded)
+            Some(MonitorInboxState::SourceExcluded)
         );
 
         // Eligibility precedes claim acquisition. A fresh exclusion must also
@@ -8381,7 +8433,7 @@ exit 1
         monitor.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
         monitor.terminal_queue_push(&[50, 51], "test", now);
         for mut ready in [not_ready.clone(), held.clone()] {
-            ready.labels.retain(|label| label != "hold");
+            ready.labels.retain(|label| label != "gwt-feedback");
             ready.readiness = IssueMonitorReadiness::ReadyWithOpenTasks;
             ready.body = Some("## Acceptance Criteria\n- [ ] AC-1: execute\n".to_string());
             monitor.record_candidate(ready.clone());

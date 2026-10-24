@@ -1,6 +1,57 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.140.0] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Auto配信を手動profile保存時の補償から保護する
+- **issue-monitor:** Hold ラベルの起動除外を Backlog に統一する
+- **monitor:** Tier保存時に非対応の未所有配信を補償する
+- **ci:** Bypass slow runner HTTP mirrors for cold apt installs
+- **gh:** Preserve comment success after cache refresh failures
+- **monitor:** Issue別tier保存時に未所有配信を補償する
+- **monitor:** Claim launch deliveries from the worker with the durable publish budget
+- **hooks:** Preserve stop bookkeeping warnings
+
+### Features
+
+- **pm:** Expose canonical dependency observations
+
+### Miscellaneous Tasks
+
+- **work:** Record periodic wake contract reconciliation
+- **work:** Record periodic wake reconciliation pr
+- **work:** Record monitor list delivery metadata
+- **work:** Record Logs error delivery metadata
+- **work:** Record headless profile acceptance
+- **work:** Record headless acceptance pr metadata
+- **work:** Record issue 3590 delivery audit
+- **work:** Settle issue 3590 delivery evidence
+- **work:** Record issue 3590 slice settlement
+- **work:** Record issue 3590 current settlement
+- **work:** Record issue 3590 completion order pr
+- **work:** Record cold apt delivery metadata
+- **work:** Record Logs snapshot delivery metadata
+- **work:** Record dependency observation PR
+- **work:** Record issue 3165 compatibility pr
+- **work:** Record stop warning delivery metadata
+
+### Performance
+
+- **ui:** Batch monitor-driven issue list renders
+
+### Refactor
+
+- **ui:** Render Logs errors from shared state
+- **ui:** Render Logs snapshots from shared state
+
+### Testing
+
+- **issue-monitor:** Hold 廃止後の admission 前提を更新する
+- **execution:** Cover execution then build completion
+- **monitor:** Preserve markerless scan and launch behavior
+
 ## [9.139.0] - 2026-10-23
 
 ### Bug Fixes

@@ -206,6 +206,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         expected_queue_order: Option<Vec<u64>>,
         issue_numbers: Vec<u64>,
+        all_terminals: bool,
     },
     MonitorQueueMove {
         project_root: Option<std::path::PathBuf>,
