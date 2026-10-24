@@ -111,7 +111,7 @@ test.describe("Recovery Center", () => {
     await expect(modal.locator(".recovery-center-row")).toHaveCount(2);
   });
 
-  test("distinguishes missing storage and displays an explicit action rejection", async ({ page }) => {
+  test("distinguishes missing storage and preserves Board response fences and retry", async ({ page }, info) => {
     await page.evaluate(() => { (window as any).__recoveryCenterMissing = true; });
     await runPaletteCommand(page, "Open Recovery Center");
     const modal = page.locator("#recovery-center-modal");
@@ -128,6 +128,44 @@ test.describe("Recovery Center", () => {
     await expect(modal.getByRole("alert"))
       .toHaveText("Recovery action handle opaque-acknowledged is invalid: generation mismatch");
     await expect(modal.getByRole("dialog", { name: "Recovery Center" })).toBeVisible();
+
+    await page.evaluate(() => { (window as any).__recoveryCenterHoldBoard = true; });
+    await modal.getByRole("button", { name: "Open Board history" }).click();
+    const requests = (await fixtureMessages(page)).filter(message => message.kind === "open_recovery_center_board_entry");
+    const request = requests.at(-1)!;
+    expect(request.request_id).not.toBe(requests[0].request_id);
+    const filter = modal.locator("#recovery-center-worktree-filter");
+    await filter.focus();
+    await page.evaluate(request => {
+      const socket = (window as any).__recoveryCenterFixtureSocket;
+      const response = { ...request, kind: "recovery_center_board_entry", error: "Stale rejection must stay absent" };
+      socket.emit({ ...response, request_id: "stale-action" });
+      socket.emit({ ...response, generation: Number(request.generation) + 1 });
+      // Another receiver is a FIFO marker for both rejected responses.
+      socket.emit({ kind: "branch_entries", id: "board-response-marker", load_id: 1, phase: "hydrated",
+        entries: [{ name: "work/board-marker", scope: "local" }] });
+    }, request);
+    await expect(page.locator("#op-strip-branches")).toHaveText("1");
+    await expect(modal.getByRole("alert"))
+      .toHaveText("Recovery action handle opaque-acknowledged is invalid: generation mismatch");
+    await expect(filter).toBeFocused();
+    await info.attach("recovery-board-retry", { body: await modal.screenshot(), contentType: "image/png" });
+    await page.evaluate(request => {
+      (window as any).__recoveryCenterFixtureSocket.emit({ kind: "recovery_center_board_entry",
+        request_id: request.request_id, generation: request.generation, board_entry_id: "board-entry-public-42" });
+    }, request);
+    await expect(modal).not.toHaveClass(/\bopen\b/);
+    await expect.poll(() => fixtureMessages(page))
+      .toContainEqual(expect.objectContaining({ kind: "create_window", preset: "board" }));
+    await page.evaluate(request => {
+      const socket = (window as any).__recoveryCenterFixtureSocket;
+      socket.emit({ kind: "recovery_center_board_entry", request_id: request.request_id,
+        generation: request.generation, error: "Closed response must stay absent" });
+      socket.emit({ kind: "branch_entries", id: "board-response-marker", load_id: 2, phase: "hydrated", entries: [] });
+    }, request);
+    await expect(page.locator("#op-strip-branches")).toHaveText("0");
+    await expect(modal).not.toHaveClass(/\bopen\b/);
+    await expect(modal.locator(".recovery-center-status")).toHaveText("");
   });
 
   test("renders all public facets and reuses the Board deep-link path", async ({
@@ -299,6 +337,7 @@ async function installRecoveryCenterBackend(page: any): Promise<void> {
             items: (window as any).__recoveryCenterMissing ? [] : recoveryItems,
           });
         } else if (message?.kind === "open_recovery_center_board_entry") {
+          if ((window as any).__recoveryCenterHoldBoard) return;
           this.emit({
             kind: "recovery_center_board_entry",
             request_id: message.request_id,
