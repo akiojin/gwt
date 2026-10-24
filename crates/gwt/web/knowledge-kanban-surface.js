@@ -5534,26 +5534,9 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            renderKnowledgeSelection(event.id, state, previousNumber);
-            // SPEC-2017 US-9 — refresh the Drawer body when the detail
-            // is for the entry the Drawer is currently showing. This
-            // also handles the swap-on-different-card case (T-034):
-            // requestKnowledgeDetail was just dispatched for the new
-            // number, so the new detail will arrive here and overwrite
-            // the body without re-mounting the Drawer.
-            const drawer = document.getElementById("kanban-drawer");
-            if (
-              drawer &&
-              drawer.dataset.open === "true" &&
-              kanbanDrawerActiveContext &&
-              kanbanDrawerActiveContext.windowId === event.id
-            ) {
-              kanbanDrawerActiveContext = {
-                ...kanbanDrawerActiveContext,
-                number: event.detail?.number ?? kanbanDrawerActiveContext.number,
-              };
-              knowledgeBoardViewModel.update(() => ({ windowId: event.id, drawer: true }));
-            }
+            knowledgeCompletionViewModel.update(() => ({
+              windowId: event.id, previousNumber, detailCompletion: true,
+            }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
@@ -5738,11 +5721,34 @@ export function createKnowledgeKanbanSurface({
         if (detailOnly) renderKnowledgeDetailView(windowId, state);
         else renderKnowledgeBoardView(windowId, element, state);
       });
-      // List completion publishes data in receive; the synchronous view owns
-      // both the full rebuild and revision-preserving selection updates.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber }) => {
+      // Receive commits completion state; the synchronous view owns list,
+      // selection and detail rendering, including the open Drawer.
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion }) => {
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (detailCompletion) {
+          renderKnowledgeSelection(windowId, state, previousNumber);
+          // SPEC-2017 US-9 — refresh the Drawer body when the detail
+          // is for the entry the Drawer is currently showing. This
+          // also handles the swap-on-different-card case (T-034):
+          // requestKnowledgeDetail was just dispatched for the new
+          // number, so the new detail will arrive here and overwrite
+          // the body without re-mounting the Drawer.
+          const drawer = document.getElementById("kanban-drawer");
+          if (
+            drawer &&
+            drawer.dataset.open === "true" &&
+            kanbanDrawerActiveContext &&
+            kanbanDrawerActiveContext.windowId === windowId
+          ) {
+            kanbanDrawerActiveContext = {
+              ...kanbanDrawerActiveContext,
+              number: state.detail?.number ?? kanbanDrawerActiveContext.number,
+            };
+            knowledgeBoardViewModel.update(() => ({ windowId, drawer: true }));
+          }
+          return;
+        }
         if (detailRefreshNumber) {
           dispatchKnowledgeDetailRequest(windowId, state.kind, detailRefreshNumber, { explicit: false });
           return;

@@ -1366,6 +1366,9 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       <div class="knowledge-status"></div><div class="knowledge-list"></div>
       <div class="knowledge-detail-pane"></div>
     </div></section>
+    <div id="kanban-drawer-backdrop"></div>
+    <aside id="kanban-drawer"><h2 id="kanban-drawer-title"></h2>
+      <div id="kanban-drawer-body"></div><div id="kanban-drawer-footer"></div></aside>
   `);
   const originalDocument = globalThis.document;
   globalThis.document = document;
@@ -1406,6 +1409,31 @@ test("unchanged entry revisions retain rows while completing loads and preservin
       assert.equal(state.selectedNumber, ROW_B.number);
       assert.equal(element.querySelector(".knowledge-detail-title").textContent, ROW_B.title);
       assert.equal(originalRow.classList.contains("selected"), true);
+
+      const drawer = document.getElementById("kanban-drawer");
+      drawer.focus = () => {};
+      surface.openKanbanDrawer({ windowId: "win-1", kind: "issue", number: ROW_B.number });
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_detail", id: "win-1", knowledge_kind: "issue",
+        request_id: state.detailRequestId,
+        detail: { ...detailFor(ROW_B, "Completed drawer body"), title: "Completed beta" },
+      });
+      assert.equal(state.detailLoading, false, "detail completion is synchronous");
+      assert.equal(document.getElementById("kanban-drawer-title").textContent, "Completed beta");
+      assert.ok(document.getElementById("kanban-drawer-body").textContent.includes("Completed drawer body"));
+      assert.ok(element.querySelector('[data-issue-number="2"]') === originalRow,
+        "detail completion must preserve the list row");
+      const other = surface.ensureKnowledgeBridgeState("other-window", "issue");
+      other.selectedNumber = ROW_A.number;
+      surface.applyKnowledgeReceiveEvent({
+        kind: "knowledge_detail", id: "other-window", knowledge_kind: "issue",
+        detail: detailFor(ROW_A, "Other window body"),
+      });
+      assert.equal(other.detail.number, ROW_A.number);
+      assert.equal(document.getElementById("kanban-drawer-title").textContent, "Completed beta");
+      assert.ok(!document.getElementById("kanban-drawer-body").textContent.includes("Other window body"));
+      surface.closeKanbanDrawer();
+      surface.clearKnowledgeBridgeState("other-window");
 
       surface.applyKnowledgeReceiveEvent({
         kind: "knowledge_error", id: "win-1", knowledge_kind: "issue",
