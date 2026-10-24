@@ -543,13 +543,16 @@ claim is marked **Claimed elsewhere**; neither proves a local live agent.
 
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
-a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
-appear red; error details and history stay in the notification center. Use ⚙ to
+a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
+**Issues settings**. The switches show the server-confirmed On / Off state.
+Only current failures appear red; error details and history stay in the notification center.
+Use **Issues settings** to
 expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. Autonomous and Start / Stop return to the summary when collapsed.
-Auto-apply updates is in **System**. Select **Manual** to edit
-Max active, then select **Apply** to save the final number. **Auto** disables editing
+profiles. The summary switches remain available when settings are collapsed.
+Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
+edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
+Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
 and shows the effective limit, with **Measuring capacity…** while measurement is pending.
 Lowering the limit below the active count keeps existing agents running; new launches
 wait until the active count falls below the limit. Auto-refill is
@@ -566,12 +569,18 @@ only the cyclic links. Removing the marker also removes the wait on the next sca
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
-agent's read-only output. **Windowize** opens the agent in an individual Agents
-tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
+agent's read-only output. With automatic tiers enabled, cards show the running
+tier or the current next-tier selection. The preview shows provider, model and
+effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
+next launch; a running agent keeps its profile. Changes appear after the server
+accepts them, and the highest tier explains why it cannot be raised. Next-tier
+previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal in Works.
+**Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
 
-**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+The shared **Machine budget** remains separate from a roster's requested member count.
+Its default **Auto** policy reflects CPU,
 free memory and disk space, the GUI's CPU use, and live agents in other projects.
 Registered projects without live agents consume no share. **Machine budget**
 shows the limiting resource and distinguishes the Monitor's implementation/review
@@ -580,18 +589,22 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+Before a roster is created, the legacy **Max active** control can select a **Manual**
+override or **Auto** to follow the recommendation. This machine policy is shared
 by all projects on this machine. Manual is a total worker limit; each project receives
 the remaining capacity after other projects' workers, while PM windows stay separate.
 Settings shows this project's allocation and other projects' worker consumption.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
-timing-dependent test failures may block unrelated PRs. Automation uses
+timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
+`issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
+members; Auto requests are rejected to keep membership and requested capacity equal.
+For legacy projects without a roster, automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
-and the shared `agent_capacity` measurement.
+and the shared `agent_capacity` measurement. Roster projects also report
+`agent_roster_capacity` and `agent_roster_revision` for the project member setting.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 

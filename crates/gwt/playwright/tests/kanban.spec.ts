@@ -48,6 +48,164 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5016 error completions render shared state and recover with focus retained", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    const pane = surface.locator(".knowledge-detail-pane");
+    await expect(pane).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await row.evaluate(element => { element.setAttribute("data-error-retained", "true"); });
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.filter(message => message.kind === "select_knowledge_bridge_entry").at(-1);
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_error", message: "Detail refresh failed" });
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_detail", detail: {
+        number: 3096, title: "Recovered detail", state: "open", labels: ["bug"],
+        sections: [{ title: "Description", body: "Recovered body", body_html: "<p>Recovered body</p>" }],
+      } });
+    });
+    // The positive completion follows the error on the same FIFO dispatch.
+    await expect(pane.locator(".knowledge-detail-title")).toHaveText("Recovered detail");
+    await expect(row).toHaveAttribute("data-error-retained", "true");
+    await expect(search).toBeFocused();
+    await search.fill("Issue");
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "search_knowledge_bridge").length)).toBe(1);
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "search_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_error",
+        error_domain: "non_semantic", message: "Cache search failed" });
+    });
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "load_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_entries", entries: [
+        { number: 3096, title: "Issue recovered after error", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human" },
+      ], selected_number: 3273, refresh_enabled: true });
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_error", id: request.id,
+        knowledge_kind: "issue", request_id: -1, message: "Stale error must be rejected" });
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated", id: request.id,
+        issue_number: 3096, result: { kind: "ok", fresh_entry: {
+          number: 3096, title: "Issue recovered after stale error", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human",
+        } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Issue recovered after stale error");
+    await expect(page.getByRole("button", { name: /^Issue load failed/ })).toHaveCount(0);
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-error-completion.png") });
+  });
+
+  test("Issue #5016 detail completions render shared state and retain focus", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    const pane = surface.locator(".knowledge-detail-pane");
+    await expect(pane).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.filter(message => message.kind === "select_knowledge_bridge_entry").at(-1);
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_detail", detail: {
+        number: 3096, title: "Completed shared detail", subtitle: "#3096", state: "open", labels: ["bug"],
+        sections: [{ title: "Description", body: "Completed shared Markdown", body_html: "<p>Completed shared <strong>Markdown</strong></p>" }],
+        launch_issue_number: 3096,
+      } });
+    });
+    await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
+    await expect(pane.locator("strong")).toHaveText("Markdown");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_detail", id: "issue-kanban", knowledge_kind: "issue", request_id: -1,
+        detail: { number: 3273, title: "Stale detail must be rejected", sections: [] } });
+      // This positive FIFO marker runs after the stale response. A prior DOM
+      // assertion alone could pass before either response was dispatched.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated", id: "issue-kanban", issue_number: 3096,
+        result: { kind: "ok", fresh_entry: { number: 3096, title: "Detail FIFO marker", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human" } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Detail FIFO marker");
+    await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
+    await expect(pane.locator("strong")).toHaveText("Markdown");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-detail-completion.png") });
+  });
+
+  test("Issue #5016 search completions render shared state and reject stale replies", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.fill("Issue");
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "search_knowledge_bridge").length)).toBe(1);
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "search_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_search_results",
+        entries: [{ number: 3096, title: "Authoritative semantic result", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human" }], selected_number: 3273, refresh_enabled: true });
+    });
+    await expect(surface.locator(".knowledge-row")).toHaveCount(1);
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Authoritative semantic result");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "search_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_search_results",
+        entries: [], selected_number: null, empty_message: "Stale result" });
+      // FIFO marker: a phase completion replaces an existing row only. If
+      // the stale reply cleared it, this acknowledgement cannot recreate it.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated",
+        id: request.id, issue_number: 3096, result: { kind: "ok", fresh_entry: {
+          number: 3096, title: "Search result after stale reply", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human",
+        } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Search result after stale reply");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-search-completion.png") });
+  });
+
   test("Issue #5016 phase completions render shared state and retain selection and focus", async ({ page }, info) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -492,9 +650,10 @@ test.describe("Issue Bridge load recovery", () => {
     ).not.toHaveAttribute("open", "");
     for (const selector of [
       ".knowledge-monitor-max-active", ".knowledge-monitor-labels", ".knowledge-monitor-pool",
-      '[data-action="monitor-auto-apply"]', '[data-action="monitor-auto-refill"]',
+      '[data-action="monitor-auto-apply"]',
       '[data-action="monitor-capacity-auto"]',
     ]) await expect(issueSurface.locator(selector)).toHaveCount(0);
+    await expect(issueSurface.getByRole("switch", { name: "Auto-refill", exact: true })).toBeVisible();
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
     // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
     // server state only. A click sends the request and nothing moves until an
@@ -538,7 +697,7 @@ test.describe("Issue Bridge load recovery", () => {
     // computed value has left the Off color instead of sampling once.
     await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
     const gear = issueSurface.getByRole("button", { name: "Issues settings", exact: true });
-    await expect(gear).toHaveText("⚙");
+    await expect(gear).toHaveText("⚙ Issues settings");
     await gear.click();
     // SPEC #3885 T-033: quick register lives in the "+ New" popover.
     await issueSurface.locator('[data-action="issue-new"]').click();

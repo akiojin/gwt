@@ -3329,6 +3329,8 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
             github_budget: None,

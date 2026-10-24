@@ -11,9 +11,9 @@
 //! the admission watchdog can then resume the same Session.
 //!
 //! Existing Stop contracts hold: `stop_hook_active` short-circuits (one
-//! forced continuation per cycle), parse/IO errors and missing records fail
-//! open (pre-P8a worktrees and unlinked launches are unchanged), another
-//! session's record stays silent (FR-014t), and intake lanes are excluded —
+//! forced continuation per cycle), parse/IO errors warn and fail open, missing
+//! records stay silent (pre-P8a worktrees and unlinked launches are unchanged),
+//! another session's record stays silent (FR-014t), and intake lanes are excluded —
 //! they own no execution and have their own completion gate.
 
 use std::path::Path;
@@ -34,8 +34,12 @@ pub fn handle_with_input(
         Ok(Some(record)) => record,
         // No record: pre-P8a worktree or unlinked launch — unchanged.
         Ok(None) => return HookOutput::Silent,
-        // Malformed record fails open for hooks.
-        Err(_) => return HookOutput::Silent,
+        Err(error) => {
+            tracing::warn!(%error, "execution control record is unreadable");
+            return HookOutput::system_message(format!(
+                "Warning: Execution control record is unreadable ({error}). Stop is not blocked by this infrastructure failure."
+            ));
+        }
     };
     // P9a (T-122): invalid integrity must not release the gate. The loader
     // also uses this result for missing/stale generation authority, so the
@@ -364,10 +368,24 @@ mod tests {
         );
     }
 
-    // FR-015 analog: no record (pre-P8a worktrees / unlinked launches) and
-    // malformed records fail open.
+    // FR-026: malformed records warn without blocking; missing records stay silent.
     #[test]
-    fn missing_or_malformed_record_fails_open() {
+    fn missing_record_stays_silent_and_malformed_record_warns_without_blocking_stop() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_agent::GWT_SESSION_ID_ENV,
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "CODEX_THREAD_ID",
+        ]
+        .map(ScopedEnvVar::unset);
         let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
@@ -376,10 +394,26 @@ mod tests {
         let path = crate::cli::execution_state::state_path(dir.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{not json").unwrap();
-        assert_eq!(
-            handle_with_input(dir.path(), "{}", Some("sess-1")),
-            HookOutput::Silent
-        );
+        let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("malformed record must warn without blocking Stop: {output:?}");
+        };
+        assert!(message.contains("Warning:"), "{message}");
+        assert!(message.contains("Execution control record"), "{message}");
+        assert!(message.contains("not blocked"), "{message}");
+
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            "{}",
+            dir.path(),
+            Some("sess-1"),
+        )
+        .expect("public Stop hook");
+        let HookOutput::SystemMessage(public_message) = output else {
+            panic!("public Stop must retain the warning: {output:?}");
+        };
+        assert!(public_message.contains(&message), "{public_message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not json");
     }
 
     #[test]

@@ -724,7 +724,7 @@ test("Issue rows render monitor projections and send controls from the full cano
 
   for (const selector of [
     ".knowledge-monitor-max-active", ".knowledge-monitor-labels", ".knowledge-monitor-pool",
-    '[data-action="monitor-auto-apply"]', '[data-action="monitor-auto-refill"]',
+    '[data-action="monitor-auto-apply"]',
     '[data-action="monitor-capacity-auto"]',
   ]) assert.equal(body.querySelector(selector), null, `${selector} belongs in Settings`);
 
@@ -1052,8 +1052,37 @@ test("Issue board has four queue columns, labelled controls and one filter row",
   assert.equal(body.querySelector("[data-issue-filter], [data-issue-lane-filter]"),null);
   assert.equal(body.querySelector('[data-issue-view="list"]').textContent,"Kanban");
   assert.equal(body.querySelector('[data-action="monitor-settings"]').getAttribute("aria-label"), "Issues settings");
-  assert.equal(body.querySelector('[data-action="monitor-auto-refill"]'), null);
+  const controls = body.querySelector('.knowledge-monitor-controls');
+  assert.ok(controls.querySelector('[data-action="monitor-auto-refill"]'));
+  assert.ok(controls.querySelector('[data-action="monitor-autonomous"]'));
+  for (const [action, label] of [["monitor-auto-refill", "Auto-refill"], ["monitor-autonomous", "Autonomous"],
+    ["monitor-toggle", "Start"], ["monitor-settings", "Issues settings"]]) {
+    assert.ok(controls.querySelector(`[data-action="${action}"]`).textContent.includes(label), `${action} has a visible label`);
+  }
 
+});
+
+test("Issue board auto-refill renders confirmed state and preserves the configured limit", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const toggle = body.querySelector('[data-action="monitor-auto-refill"]');
+  assert.ok(toggle);
+  assert.equal(toggle.getAttribute("role"), "switch");
+  assert.equal(toggle.getAttribute("aria-checked"), "false");
+  surface.applyIssueMonitorStatus({terminal_queue_auto_refill:false, terminal_queue_auto_refill_limit:5});
+  toggle.click();
+  assert.deepEqual(sent.at(-1), {kind:"set_issue_monitor_auto_refill", enabled:true, limit:5});
+  assert.equal(toggle.getAttribute("aria-checked"), "false", "request does not optimistically enable refill");
+  assert.equal(toggle.querySelector('.knowledge-monitor-switch__state').textContent, "Off");
+  surface.applyIssueMonitorStatus({terminal_queue_auto_refill:true, terminal_queue_auto_refill_limit:5});
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  assert.equal(toggle.querySelector('.knowledge-monitor-switch__state').textContent, "On");
+  toggle.click();
+  assert.deepEqual(sent.at(-1), {kind:"set_issue_monitor_auto_refill", enabled:false, limit:5});
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  surface.applyIssueMonitorStatus({terminal_queue_auto_refill:false, terminal_queue_auto_refill_limit:0});
+  toggle.click();
+  assert.deepEqual(sent.at(-1), {kind:"set_issue_monitor_auto_refill", enabled:true, limit:0});
 });
 
 test("Issue queue drops include hold-labeled cards and retain server projection", async (t) => {

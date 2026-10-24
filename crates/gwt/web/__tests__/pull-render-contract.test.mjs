@@ -833,6 +833,46 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Knowledge search completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const searches = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_search_results'));
+  const local = text => searches(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => searches(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Existing directive validation, window lookup and injected search sends
+  // are unresolved data calls; retain their exact base fingerprints.
+  const dataCalls = [
+    '0a22d6c58763360e17b5f67308c83a29a1872c995ba84906a5bd93fa3dc8147c',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '4641b75eb58eadb1809225500910f9e1dffc0deb7bf23ef7a60db35583e00869',
+    '4f169a3e6d482e1b3be66cb97e3fbe4a83372a8c57a214f23589a97e0a9e9e10',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+  ].sort();
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
+      && !finding.path.includes('>renderKnowledgeBridge')));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  const bypass = source.replace('case "knowledge_search_results": {',
+    'case "knowledge_search_results": { renderKnowledgeBridge(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  // app groups this event with three other receivers; test both its label
+  // and the common group tail so a later direct write cannot evade the guard.
+  for (const label of ['knowledge_search_results', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Knowledge phase completions commit shared state and reject direct rendering", () => {
   const file = 'crates/gwt/web/knowledge-kanban-surface.js';
   const appFile = 'crates/gwt/web/app.js';
@@ -983,4 +1023,108 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge detail completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const details = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_detail'));
+  const local = text => details(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => details(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Existing queued-load and recovery calls remain synchronous data paths.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ].sort();
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
+      && !finding.path.includes('>renderKnowledgeSelection')));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  const bypass = source.replace('case "knowledge_detail": {',
+    'case "knowledge_detail": { renderKnowledgeSelection(event.id, state, null);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  for (const label of ['knowledge_detail', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Active card preview receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const previews = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('terminal_preview'));
+  const local = text => previews(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => previews(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "terminal_preview": {',
+    'case "terminal_preview": { document.body.textContent = event.text;');
+  assert.notEqual(bypass, source);
+  for (const findings of [local(bypass), delegated(app, bypass)]) {
+    assert.ok(findings.some(finding => finding.kind === 'dom-write'));
+  }
+  const appBypass = app.replace('case "terminal_preview":',
+    'case "terminal_preview": document.body.textContent = event.text;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge error completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_error'));
+  const local = text => errors(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => errors(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Search dispatch and load recovery stay synchronous, including the
+  // recovery timer's model update; only direct receiver rendering moves.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ].sort();
+  const directRender = finding => /(?:^|>)applyKnowledgeReceiveEvent>renderKnowledge(?:Bridge|StatusOnly)(?:>|$)/.test(finding.path);
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call' && !directRender(finding)));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  for (const call of ['renderKnowledgeBridge(event.id);', 'document.body.textContent = event.message;']) {
+    const bypass = source.replace('case "knowledge_error": {', `case "knowledge_error": { ${call}`);
+    assert.notEqual(bypass, source);
+    for (const findings of [local(bypass), delegated(app, bypass)]) {
+      assert.ok(findings.some(finding => finding.kind.startsWith('dom-') || directRender(finding)));
+    }
+  }
+  for (const label of ['knowledge_error']) {
+    const bypass = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(bypass, app);
+    assert.ok(delegated(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
 });

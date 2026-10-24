@@ -144,7 +144,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
-  for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-refill"]', '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
+  for (const selector of [".knowledge-monitor-max-active", '[data-action="monitor-auto-apply"]', ".knowledge-monitor-labels", ".knowledge-monitor-pool"]) {
     assert.equal(body.querySelector(selector), null, `${selector} belongs to Settings`);
   }
 
@@ -161,11 +161,11 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   assert.equal(pill.title, "");
 });
 
-test("AC-23: ⚙ holds the settings copy and the held fallback in its tooltip", async (t) => {
+test("AC-23: labelled settings holds the settings copy and the held fallback in its tooltip", async (t) => {
   const { body, surface } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   const gear = body.querySelector('.knowledge-monitor-bar [data-action="monitor-settings"]');
-  assert.equal(gear.textContent, "⚙");
+  assert.equal(gear.textContent, "⚙ Issues settings");
 
   surface.applyIssueMonitorStatus({
     ...STATUS,
@@ -713,6 +713,76 @@ test("T-7b.2a: tier chips show only reported minimums and agent failures with at
   assert.doesNotMatch(select.getAttribute("aria-description"), /currently running|successfully started/i);
   surface.applyIssueMonitorStatus({ ...STATUS });
   assert.equal(body.querySelectorAll('[data-kind="tier"]').length, 0, "omitted facts clear stale chips");
+});
+
+test("Issue #4499: next tier and per-Issue raise use confirmed selection and CAS without inventing history", async (t) => {
+  const { body, surface, state, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  state.entries = [entry(11, "queued"), entry(12, "queued")];
+  state.selectedNumber = 11;
+  state.previewHidden = false;
+  state.detail = { number: 11, title: "Issue 11", labels: [], sections: [
+    { title: "Description", content: { type: "markdown", body: "Issue body" } },
+    { title: "Acceptance criteria", content: { type: "markdown", body: "- [ ] AC-1: expected behavior" } },
+  ] };
+  const facts = { issue_number: 11, tier_count: 3, next_minimum_tier: 0,
+    next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
+  const report = value => surface.applyIssueMonitorStatus({ ...STATUS, tier_config_token: "observed-config", tier_facts: [value] });
+  report(facts);
+  assert.equal(body.querySelector('[data-issue-number="11"] [data-key="tier-next"]')?.textContent, "Next tier 1");
+  assert.equal(body.querySelector('[data-issue-number="12"] [data-key="tier-next"]'), null);
+  const preview = () => body.querySelector(".issue-detail-tier");
+  assert.match(preview()?.textContent || "", /claude.*sonnet.*medium/);
+  assert.match(preview().textContent, /launch-time checks/i);
+  preview().querySelector('[data-action="raise-issue-tier"]').click();
+  assert.deepEqual(sent.at(-1), { kind: "set_issue_monitor_tier", issue_number: 11, tier: 2, expected_config_token: "observed-config" });
+  assert.match(preview().textContent, /Next tier 1/, "sending does not optimistically change the selected tier");
+  const readingBody = body.querySelector(".issue-detail-body");
+  readingBody.scrollTop = 90;
+  const acceptance = [...readingBody.querySelectorAll("details")].at(-1);
+  acceptance.open = true;
+  report({ ...facts, minimum_tier_override: 2, next_launch: { ...facts.next_launch, tier: 2 } });
+  assert.ok(body.querySelector(".issue-detail-body") === readingBody, "tier confirmation retains the connected body");
+  assert.equal(acceptance.open, true);
+  assert.equal(readingBody.scrollTop, 90);
+  assert.match(preview().textContent, /Next tier 2/, "unchanged detail rerenders after confirmed tier changes");
+  assert.equal(preview().querySelector('[data-action="raise-issue-tier"]').disabled, true);
+  assert.match(preview().textContent, /Highest configured tier/i);
+  state.issueDetailView = "output";
+  surface.renderKnowledgeBridge("win-1");
+  assert.match(preview().textContent, /Next tier 2/, "Output keeps the same tier controls");
+  report({ ...facts, next_launch: undefined, next_launch_unavailable_reason: "Every provider is held" });
+  assert.match(preview().textContent, /Every provider is held/);
+  assert.equal(preview().querySelector('[data-action="raise-issue-tier"]').disabled, true);
+});
+
+test("Issue #4499: running profile is separate from next-tier overrides in both preview tabs", async (t) => {
+  const agent = { id: "agent-11", session_id: "session-11", status: "running", linked_issue_number: 11 };
+  const agentActivityModel = createUiStateStore({ byIssue: { 11: [{ window_id: agent.id, session_id: agent.session_id }] } },
+    { scheduleFrame: run => { run(); return () => {}; } });
+  const windowCatalogModel = createUiStateStore({ catalog: {
+    appState: { tabs: [{ workspace: { windows: [agent, { id: "win-1" }] } }] }, runtimeStates: {},
+  } }, { scheduleFrame: run => { run(); return () => {}; } });
+  const { body, surface, state } = await makeFixture({ surface: { windowCatalogModel, agentActivityModel } });
+  t.after(() => { surface.clearKnowledgeBridgeState("win-1"); windowCatalogModel.dispose(); agentActivityModel.dispose(); });
+  state.entries = [entry(11, "launched")]; state.selectedNumber = 11; state.previewHidden = false;
+  state.detail = { number: 11, title: "Issue 11", labels: [], sections: [] };
+  surface.applyIssueMonitorStatus({ ...STATUS, tier_config_token: "config", tier_facts: [{ issue_number: 11, tier_count: 3,
+    next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" },
+    confirmed_launch: { tier: 0, window_id: agent.id, delivery_id: "delivery-11",
+      profile: { agent_id: "codex", model: "gpt-6-luna", reasoning: "low" } },
+  }] });
+  for (const view of ["issue", "output"]) {
+    state.issueDetailView = view; surface.renderKnowledgeBridge("win-1");
+    assert.match(body.querySelector(".issue-detail-tier")?.textContent || "", /Running tier 0.*codex.*gpt-6-luna.*low/);
+    assert.match(body.querySelector(".issue-detail-tier").textContent, /next launch/i);
+  }
+  agentActivityModel.update(() => ({ byIssue: {} }));
+  assert.ok(!body.querySelector('[data-key="tier-running"]'), "a stale running window without current activity cannot prove a running tier");
+  assert.doesNotMatch(body.querySelector(".issue-detail-tier").textContent, /Running tier|gpt-6-luna/);
+  agentActivityModel.update(() => ({ byIssue: { 11: [{ window_id: agent.id, session_id: agent.session_id }] } }));
+  windowCatalogModel.update(model => ({ catalog: { ...model.catalog, runtimeStates: { [agent.id]: "stopped" } } }));
+  assert.doesNotMatch(body.querySelector(".issue-detail-tier").textContent, /Running tier|gpt-6-luna/);
 });
 
 test("Monitor list bursts render once while controls and notifications stay synchronous", async (t) => {

@@ -2315,6 +2315,11 @@ enum IssueMonitorControl {
         enabled: bool,
         limit: usize,
     },
+    TierSet {
+        issue_number: u64,
+        tier: u8,
+        expected_config_token: String,
+    },
     /// SPEC-3431 FR-006: request one immediate scan without changing any
     /// state. The PM's `launch_now` writes the new priority order to prefs
     /// (the SOT the driver re-reads each scan) and then sends this so the
@@ -3077,6 +3082,8 @@ fn apply_routine_issue_monitor_control(
         | IssueMonitorControl::ConfigSet { .. }
         | IssueMonitorControl::ProfilesSet { .. }
         | IssueMonitorControl::ProfilesPatch(_)
+        // Tier writes need their CAS result classified inside the writer transaction.
+        | IssueMonitorControl::TierSet { .. }
         | IssueMonitorControl::WaitDeclared { .. } => false,
         // SPEC-3431 FR-006: scan-only; mutating nothing is the contract.
         IssueMonitorControl::ScanNow => true,
@@ -3584,9 +3591,11 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
         accepted.control,
         IssueMonitorControl::LaunchFailed { .. } | IssueMonitorControl::AgentFailed { .. }
     );
-    let profiles_control = matches!(
+    let replacement_control = matches!(
         accepted.control,
-        IssueMonitorControl::ProfilesSet { .. } | IssueMonitorControl::ProfilesPatch(_)
+        IssueMonitorControl::ProfilesSet { .. }
+            | IssueMonitorControl::ProfilesPatch(_)
+            | IssueMonitorControl::TierSet { .. }
     );
     let monitor_has_exact_receipt = monitor
         .last_control_receipt()
@@ -3608,8 +3617,8 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 .filter(|receipt| receipt.control_id == accepted.control_id)
                 .cloned()
             {
-                if !monitor_has_exact_receipt && profiles_control {
-                    // Rebase already restored the complete disk-owned pool,
+                if !monitor_has_exact_receipt && replacement_control {
+                    // Rebase already restored the complete disk-owned configuration,
                     // authority epoch and revoked effects. Reapplying would
                     // advance the epoch twice or reject the committed CAS.
                     if !crate::issue_monitor::monitor_project_prefs_equal(
@@ -3748,11 +3757,39 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 control => control.clone(),
             };
             let authority_epoch_before = candidate.effect_authority_epoch();
-            applied = Some(try_apply_issue_monitor_control(
-                &mut candidate,
-                control,
-                &accepted.processed_at,
-            ));
+            applied = Some(
+                if let IssueMonitorControl::TierSet {
+                    issue_number,
+                    tier,
+                    expected_config_token,
+                } = control
+                {
+                    let mut prefs = candidate.prefs();
+                    match prefs.apply_issue_minimum_launch_tier(
+                        issue_number,
+                        tier,
+                        Some(&expected_config_token),
+                    ) {
+                        Ok(()) => {
+                            candidate.rebase_gui_observer_prefs(&prefs);
+                            Some(true)
+                        }
+                        Err(error)
+                            if error.to_string()
+                                == crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR =>
+                        {
+                            config_conflict = true;
+                            return Err(error);
+                        }
+                        Err(_) => {
+                            rejected = Some(IssueMonitorControlCommit::Rejected);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    try_apply_issue_monitor_control(&mut candidate, control, &accepted.processed_at)
+                },
+            );
             authority_changed = candidate.effect_authority_epoch() != authority_epoch_before;
             let refused_launch_binding = match &accepted.control {
                 IssueMonitorControl::Launched {
@@ -5081,6 +5118,21 @@ fn decode_issue_monitor_control_in_repo(
                 return Some(IssueMonitorControl::TerminalQueueAutoRefill {
                     enabled: refill.get("enabled")?.as_bool()?,
                     limit: usize::try_from(refill.get("limit")?.as_u64()?).ok()?,
+                });
+            }
+            if let Some(tier) = payload.get("tier_set") {
+                let issue_number = tier.get("number")?.as_u64()?;
+                if issue_number == 0 {
+                    return None;
+                }
+                let expected_config_token = tier.get("expected_config_token")?.as_str()?;
+                if expected_config_token.trim().is_empty() {
+                    return None;
+                }
+                return Some(IssueMonitorControl::TierSet {
+                    issue_number,
+                    tier: u8::try_from(tier.get("tier")?.as_u64()?).ok()?,
+                    expected_config_token: expected_config_token.to_string(),
                 });
             }
             if let Some(remove) = payload.get("terminal_queue_remove") {
@@ -13986,6 +14038,126 @@ exit 0
     // scan and nothing else. It carries no authority (it changes no config),
     // and it must leave every piece of monitor state untouched — the launch
     // itself still goes through the ordinary claim/slot path on that scan.
+    #[test]
+    fn issue_monitor_tier_control_commits_once_and_rejects_stale_writes() {
+        let _prefs_budget = pin_prefs_hang_guard();
+        let temp = TempDir::new().expect("tempdir");
+        let prefs_path = temp.path().join("issue-monitor.json");
+        let profile: crate::IssueMonitorLaunchProfile =
+            serde_json::from_value(serde_json::json!({"agent_id": "codex"})).expect("profile");
+        let prefs = crate::IssueMonitorPrefs {
+            launch_auto: true,
+            launch_tiers: vec![vec![profile.clone()], vec![profile]],
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed tiers");
+        let control = || {
+            decode_issue_monitor_control_for_test(
+                crate::runtime_daemon_events::issue_monitor_payload(
+                    "control",
+                    serde_json::json!({"tier_set": {
+                        "number": 4499, "tier": 1,
+                        "expected_config_token": prefs.config_token()
+                    }}),
+                    std::process::id() + 1,
+                ),
+            )
+            .expect("per-Issue tier control decodes")
+        };
+        let mut monitor =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+        let mut permit = super::IssueMonitorEffectPermit::new();
+        let mut pending = None;
+        let hub = BroadcastHub::new();
+        let outcome = super::apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            control(),
+            &mut permit,
+            &mut pending,
+            None,
+        );
+        assert!(outcome.should_scan());
+        let committed = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            committed.effect_authority_epoch,
+            prefs.effect_authority_epoch + 1
+        );
+        assert_eq!(committed.tier_overrides.get(&4499), Some(&1));
+        assert_eq!(committed, monitor.prefs());
+        let receipt = committed.last_control_receipt.as_ref().unwrap();
+        let mut recovered =
+            test_monitor_with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
+        let replay = super::try_apply_accepted_issue_monitor_control_with_disk_migration(
+            &prefs_path,
+            &mut recovered,
+            super::AcceptedIssueMonitorControl {
+                control_id: receipt.control_id.clone(),
+                processed_at: "2026-10-25T00:00:00Z".into(),
+                control: control(),
+            },
+        );
+        assert!(replay.should_scan());
+        assert_eq!(
+            recovered.prefs(),
+            committed,
+            "receipt replay must not advance authority twice"
+        );
+        let (latest, ()) = crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.launch_tiers[1][0].model = Some("changed-configured-model".to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert_ne!(latest.config_token(), prefs.config_token());
+        let stale = super::apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            control(),
+            &mut permit,
+            &mut pending,
+            None,
+        );
+        assert_eq!(stale, super::IssueMonitorControlCommit::ConfigConflict);
+        assert!(
+            pending.is_none(),
+            "a stale write must leave the control lane open"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            latest
+        );
+        let out_of_range = decode_issue_monitor_control_for_test(
+            crate::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"tier_set": {
+                    "number":4499,"tier":2,"expected_config_token":latest.config_token()
+                }}),
+                std::process::id() + 1,
+            ),
+        )
+        .unwrap();
+        let rejected = super::apply_or_queue_issue_monitor_control(
+            &hub,
+            &prefs_path,
+            &mut monitor,
+            out_of_range,
+            &mut permit,
+            &mut pending,
+            None,
+        );
+        assert_eq!(rejected, super::IssueMonitorControlCommit::Rejected);
+        assert!(
+            pending.is_none(),
+            "invalid tier must leave the control lane open"
+        );
+        assert_eq!(
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+            latest
+        );
+    }
+
     #[test]
     fn kanban_queue_controls_decode() {
         for payload in [

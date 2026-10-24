@@ -3551,12 +3551,29 @@ impl std::error::Error for GitHubRemoteResolutionError {}
 /// Bind admission to the project's actual source repository. A failed lookup
 /// keeps restored launch work held until a later scan resolves its provenance.
 pub fn bind_issue_monitor_source_repository(monitor: &mut IssueMonitorState, project_root: &Path) {
-    let repository = github_remote_owner_and_repo(project_root).ok();
+    let repository = configured_github_owner_and_repo(project_root)
+        .or_else(|| github_remote_owner_and_repo(project_root).ok());
     monitor.set_source_repository(
         repository
             .as_ref()
             .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
     );
+}
+
+/// Issue #6096: resolve a GitHub `origin` from the repository's Git config
+/// files before spawning `git remote get-url origin`. Launch admission binds
+/// the source on every attempt, and one Git spawn costs seconds on a loaded
+/// Windows host. A Nested Bare + Worktree layout root reads its bare child's
+/// config. Unresolvable layouts and non-GitHub URLs keep the Git path.
+fn configured_github_owner_and_repo(project_root: &Path) -> Option<(String, String)> {
+    if gwt_git::repository::git_health::cached_metadata_failure(project_root).is_some() {
+        return None;
+    }
+    let origin = gwt_core::repo_hash::configured_origin_url(project_root).or_else(|| {
+        let common_dir = gwt_core::repo_hash::resolve_repository_common_dir(project_root)?;
+        gwt_core::repo_hash::configured_origin_url(&common_dir)
+    })?;
+    parse_github_remote_url(origin.trim())
 }
 
 pub fn github_remote_owner_and_repo(
@@ -3787,6 +3804,57 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn issue6096_source_binding_reads_github_origin_without_spawning_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let config =
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:acme/widget.git\n";
+        // A plain checkout and a Nested Bare + Worktree layout root.
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(checkout.join(".git").join("config"), config).unwrap();
+        std::fs::write(checkout.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let layout = temp.path().join("layout");
+        let bare = layout.join("widget.git");
+        for dir in ["objects", "refs"] {
+            std::fs::create_dir_all(bare.join(dir)).unwrap();
+        }
+        std::fs::write(
+            bare.join("config"),
+            config.replace("bare = false", "bare = true"),
+        )
+        .unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let git_spawns_before = gwt_core::process::thread_git_spawn_count();
+        for root in [&checkout, &layout] {
+            assert_eq!(
+                configured_github_owner_and_repo(root),
+                Some(("acme".to_string(), "widget".to_string())),
+                "{}",
+                root.display()
+            );
+        }
+        assert!(
+            crate::index_worker::detect_repo_hash(&layout).is_some(),
+            "a layout root resolves its repository hash from the bare child"
+        );
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - git_spawns_before,
+            0,
+            "launch admission must not pay a Git process spawn for the source origin"
+        );
+
+        // Git reports the first of several origin URLs while config routing
+        // prefers the last; only Git can settle that, so no fast answer.
+        std::fs::write(
+            checkout.join(".git").join("config"),
+            format!("{config}[remote \"origin\"]\n\turl = https://github.com/acme/other.git\n"),
+        )
+        .unwrap();
+        assert_eq!(configured_github_owner_and_repo(&checkout), None);
     }
 
     #[test]

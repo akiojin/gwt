@@ -520,13 +520,14 @@ Active バッジは PM を含むエージェント人数を数え、Issue 数と
 
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
-容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
+容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
+スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
+エラーの詳細と履歴は通知センターで確認できます。**Issues settings** で同じペインの設定行を展開し、
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
-設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
-Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
-**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
+設定を閉じても要約帯のスイッチを操作できます。Auto-apply updates は **System** で設定します。
+Agents 名簿のあるプロジェクトでは **Max active** で有効メンバー数を編集し、**Apply** で名簿を増減します。**Auto** は選べません。
+名簿のない旧設定では **Manual** で数値を編集できます。**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
 稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
 Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
@@ -534,11 +535,16 @@ Auto-refill は**既定で OFF**です。
 
 Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
 本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
+段の自動選択が有効な場合、カードには実行中の段、または現在の次回段の候補を表示します。
+両タブのプレビューで provider・model・effort を確認でき、**Raise one tier** は
+その Issue の次回起動の最低段だけを一段上げます。実行中のエージェントの設定は変わりません。
+変更はサーバーで受理された後に反映され、最上段では上げられない理由を表示します。
+次回段の候補は起動時の検証で変わることがあります。
 **Windowize** でエージェントを Works のネイティブ端末に開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
-**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+共有の **Machine budget** は、名簿が要求するメンバー数とは別の設定です。既定の **Auto** は CPU、空きメモリとディスク、
 GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
 ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
 表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。計測が未完了または
@@ -546,15 +552,18 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-**Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
-Auto / Manual と手動の要求上限は、このマシンの全プロジェクトで共通です。Manual は
+名簿の作成前は、旧 **Max active** 操作で **Manual** の固定上限または推奨値へ追従する **Auto** を選べます。
+この machine policy は全プロジェクトで共通です。Manual は
 実装・レビュー窓の合計上限で、他プロジェクトの消費を引いた残りを各プロジェクトへ配分します。
 PM 窓の会計は別に表示し、Settings には自プロジェクトの割当と他プロジェクトの消費を併記します。
 共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
-自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
+人数と要求上限を一致させるため、Auto への変更は拒否します。名簿のない旧設定では、
+`issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
+名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` がプロジェクトの人数設定を表します。
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 

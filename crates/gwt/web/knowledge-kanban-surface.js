@@ -943,13 +943,19 @@ export function createKnowledgeKanbanSurface({
             ? agent.placement.issue_number : agent?.linked_issue_number;
           const runtime = Object.hasOwn(catalog?.runtimeStates || {}, confirmed.window_id)
             ? catalog.runtimeStates[confirmed.window_id] : agent?.status;
+          const currentSession = !agentActivityModel || agentActivityModel.read().byIssue[issueNumber]?.some(item =>
+            item.window_id === confirmed.window_id && item.session_id === agent?.session_id);
           // Display normalization maps unknown to running; evidence must use the raw state.
-          if (agent && Number(linkedIssue) === issueNumber
+          if (agent && currentSession && Number(linkedIssue) === issueNumber
               && (agent.linked_issue_number == null || Number(agent.linked_issue_number) === issueNumber)
               && runtime === "running") {
             chips.push({ kind: "tier", key: "tier-running", label: `Running tier ${confirmed.tier}`,
               explanation: `Acknowledged launch tier ${confirmed.tier} (zero-based tiers); the matching agent window currently reports running.` });
           }
+        }
+        if (!chips.length && isTier(facts.next_launch?.tier) && facts.next_launch.tier < facts.tier_count) {
+          chips.push({ kind: "tier", key: "tier-next", label: `Next tier ${facts.next_launch.tier}`,
+            explanation: "Current automatic selection (zero-based tiers). Launch-time checks may select another candidate." });
         }
         if (!isTier(facts.recorded_launch_tier) && !isTier(facts.recorded_landing_tier)) return chips;
         if (isTier(facts.minimum_tier_override)) {
@@ -966,6 +972,46 @@ export function createKnowledgeKanbanSurface({
               : "The next automatic minimum tier has not been reported."}` });
         }
         return chips;
+      }
+
+      function renderIssueTierControls(issueNumber) {
+        const status = issueMonitorModel.read().status;
+        const facts = status.tier_facts?.find(item => item.issue_number === issueNumber);
+        if (!facts) return null;
+        const section = createNode("section", "issue-detail-tier knowledge-section");
+        section.setAttribute("aria-label", `Tier for Issue #${issueNumber}`);
+        const profileLabel = profile => profile
+          ? `${profile.agent_id} / ${profile.model || "model not reported"} / ${profile.reasoning || "effort not reported"}`
+          : "Profile not reported";
+        const running = issueTierChips(issueNumber).find(chip => chip.key === "tier-running");
+        if (running) section.appendChild(createNode("div", "knowledge-detail-subtitle",
+          `${running.label} · ${profileLabel(facts.confirmed_launch.profile)}`));
+        const next = facts.next_launch;
+        const hasNext = Number.isInteger(next?.tier) && next.tier >= 0 && next.tier < facts.tier_count;
+        section.appendChild(createNode("div", "knowledge-detail-subtitle", hasNext
+          ? `Next tier ${next.tier} · ${profileLabel(next)}`
+          : `Next tier unavailable: ${facts.next_launch_unavailable_reason || "Automatic selection has not been reported."}`));
+        if (hasNext) section.appendChild(createNode("p", "knowledge-detail-subtitle",
+          "Current automatic selection; launch-time checks may select another candidate."));
+        const baseTier = Math.max(next?.tier ?? 0, running ? facts.confirmed_launch.tier : 0,
+          facts.minimum_tier_override ?? 0);
+        const highest = hasNext && baseTier + 1 >= facts.tier_count;
+        const reason = highest ? "Highest configured tier; no higher tier is available."
+          : !hasNext ? facts.next_launch_unavailable_reason || "Wait for automatic tier selection."
+          : !status.tier_config_token ? "Refresh tier settings before changing the next launch."
+          : "Raise the minimum tier for this Issue's next launch. A running agent keeps its current profile.";
+        const button = createNode("button", "wizard-button is-compact", "Raise one tier");
+        button.type = "button";
+        button.dataset.action = "raise-issue-tier";
+        button.setAttribute("aria-label", `Raise one tier for Issue #${issueNumber}`);
+        button.disabled = highest || !hasNext || !status.tier_config_token;
+        explainIssueControl(button, reason, `raise-issue-tier-${issueNumber}`);
+        button.addEventListener("click", () => {
+          if (!button.disabled) send({ kind: "set_issue_monitor_tier", issue_number: issueNumber,
+            tier: baseTier + 1, expected_config_token: status.tier_config_token });
+        });
+        section.append(button, createNode("p", "knowledge-detail-subtitle", reason));
+        return section;
       }
 
       function issueStateExplanation(primary, entry) {
@@ -1109,6 +1155,7 @@ export function createKnowledgeKanbanSurface({
       const issueWindowViewModel = createUiStateStore({ windowId: null });
       const knowledgeBoardViewModel = createUiStateStore({ windowId: null });
       const issueDetailRenderKeys = new WeakMap();
+      const issueDetailTierRenderKeys = new WeakMap();
       // Receive publishes invalidation; the view owns projection/layout reads.
       const knowledgeEventRefreshModel = createUiStateStore({ kind: null, revision: 0 });
       const knowledgeAutoRefreshModel = createUiStateStore({ revision: 0 });
@@ -1359,16 +1406,18 @@ export function createKnowledgeKanbanSurface({
           toggle.dataset.enabled = enabled ? "true" : "false";
           toggle.classList.toggle("primary", !enabled);
         }
-        // Issue #3561: the Autonomous control is a WAI-ARIA switch whose label
+        // Issue #3561 / #4499: each control is a WAI-ARIA switch whose label
         // names the setting and whose aria-checked + state word carry the
         // current value. It renders only what the server status says — the
         // click handler never writes a local optimistic value.
-        const autonomous = element.querySelector('[data-action="monitor-autonomous"]');
-        if (autonomous) {
-          const enabled = Boolean(issueMonitorModel.read().status.autonomous_mode);
-          autonomous.setAttribute("aria-checked", enabled ? "true" : "false");
-          autonomous.dataset.enabled = enabled ? "true" : "false";
-          const stateWord = autonomous.querySelector(".knowledge-monitor-switch__state");
+        for (const [action, setting] of [["monitor-autonomous", "autonomous_mode"],
+          ["monitor-auto-refill", "terminal_queue_auto_refill"]]) {
+          const toggle = element.querySelector(`[data-action="${action}"]`);
+          if (!toggle) continue;
+          const enabled = Boolean(issueMonitorModel.read().status[setting]);
+          toggle.setAttribute("aria-checked", enabled ? "true" : "false");
+          toggle.dataset.enabled = enabled ? "true" : "false";
+          const stateWord = toggle.querySelector(".knowledge-monitor-switch__state");
           if (stateWord) stateWord.textContent = enabled ? "On" : "Off";
         }
 
@@ -1387,6 +1436,7 @@ export function createKnowledgeKanbanSurface({
           effective_launch_profile: nextStatus?.effective_launch_profile ?? null,
           // Empty facts are omitted on the wire; never retain an older snapshot.
           tier_facts: Array.isArray(nextStatus?.tier_facts) ? nextStatus.tier_facts : [],
+          tier_config_token: nextStatus?.tier_config_token ?? null,
           // Issue #3628: omitted (skip_serializing_if) once the fleet recovers.
           agent_blackout: nextStatus?.agent_blackout ?? null,
           update_drain: nextStatus?.update_drain ?? null,
@@ -1573,6 +1623,15 @@ export function createKnowledgeKanbanSurface({
             send({
               kind: "set_issue_monitor_enabled",
               enabled: !Boolean(issueMonitorModel.read().status.enabled),
+            });
+          });
+        bar
+          .querySelector('[data-action="monitor-auto-refill"]')
+          ?.addEventListener("click", () => {
+            send({
+              kind: "set_issue_monitor_auto_refill",
+              enabled: !Boolean(issueMonitorModel.read().status.terminal_queue_auto_refill),
+              limit: issueMonitorModel.read().status.terminal_queue_auto_refill_limit ?? 0,
             });
           });
         bar
@@ -4024,9 +4083,31 @@ export function createKnowledgeKanbanSurface({
             windowRoleBadgeLabel?.(target) || target.agent_id,
           ] : null),
         ]);
-        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) return;
+        const tierKey = JSON.stringify([
+          issueMonitorModel.read().status.tier_facts?.find(item => item.issue_number === Number(number)),
+          issueMonitorModel.read().status.tier_config_token, issueTierChips(Number(number)),
+        ]);
+        if (issueDetailRenderKeys.get(detailPane) === key && !state.renderError) {
+          if (issueDetailTierRenderKeys.get(detailPane) !== tierKey) {
+            const previous = detailPane.querySelector(".issue-detail-tier");
+            const focused = previous?.contains(document.activeElement);
+            const tiers = renderIssueTierControls(Number(number));
+            if (previous) {
+              if (tiers) previous.replaceWith(tiers);
+              else previous.remove();
+            } else if (tiers && !detailPane.hidden) {
+              const header = detailPane.querySelector(".issue-detail-header");
+              if (header) header.insertBefore(tiers, header.querySelector(".issue-detail-actions"));
+              else detailPane.insertBefore(tiers, detailPane.querySelector(".issue-detail-tabs")?.nextSibling || null);
+            }
+            if (focused) tiers?.querySelector('[data-action="raise-issue-tier"]:not(:disabled)')?.focus();
+            issueDetailTierRenderKeys.set(detailPane, tierKey);
+          }
+          return;
+        }
         renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview });
         issueDetailRenderKeys.set(detailPane, key);
+        issueDetailTierRenderKeys.set(detailPane, tierKey);
       }
 
       function renderIssueDetailPaneContents(windowId, state, detailPane, { agentPreview = true } = {}) {
@@ -4059,6 +4140,8 @@ export function createKnowledgeKanbanSurface({
           detailPane.appendChild(tabs);
         }
         if (agentPreview && state.issueDetailView === "output") {
+          const tiers = renderIssueTierControls(state.selectedNumber);
+          if (tiers) detailPane.appendChild(tiers);
           const preview = agentPreview && state.selectedNumber != null
             ? renderIssueAgentPreview(windowId, state) : null;
           if (preview) detailPane.appendChild(preview);
@@ -4163,6 +4246,8 @@ export function createKnowledgeKanbanSurface({
           status.appendChild(createNode("span", "knowledge-chip", label));
         }
         header.appendChild(status);
+        const tiers = renderIssueTierControls(number);
+        if (tiers) header.appendChild(tiers);
         if (entry.queued_by) {
           const source = entry.queued_by === "auto-refill" ? "Auto-refill"
             : entry.queued_by === "urgent" ? "Urgent label" : "Operator";
@@ -5144,13 +5229,18 @@ export function createKnowledgeKanbanSurface({
                   <span class="knowledge-monitor-metric" data-metric="active">Active 0/1</span>
                   <span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span>
                   </div><div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
+                  <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Auto-refill" data-action="monitor-auto-refill" data-enabled="false">
+                    <span class="knowledge-monitor-switch__label">Auto-refill</span>
+                    <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
+                    <span class="knowledge-monitor-switch__state">Off</span>
+                  </button>
                   <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Autonomous mode" data-action="monitor-autonomous" data-enabled="false">
                     <span class="knowledge-monitor-switch__label">Autonomous</span>
                     <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
                     <span class="knowledge-monitor-switch__state">Off</span>
                   </button>
                   <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
-                  <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙</button>
+                  <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
                   </div>
                   <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
                 </section>
@@ -5220,6 +5310,7 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             bindIssueControlExplanations(windowData.id, body.querySelector(".issue-bridge-root"));
             for (const [selector, text] of [
+              ['[data-action="monitor-auto-refill"]', "Automatically add eligible Backlog issues to the queue up to the refill limit. Change the limit in Issues settings; 0 disables refill."],
               ['[data-action="monitor-autonomous"]', "Allow eligible issues to run without waiting for human approval."],
               ['[data-action="monitor-toggle"]', "Start or pause monitoring for queued issues."],
               ['[data-issue-view="list"]', "Show issues by their execution queue state with a read-only output preview."],
@@ -5324,13 +5415,7 @@ export function createKnowledgeKanbanSurface({
           }
           case "terminal_preview": {
             terminalPreviewText.set(event.id, event.text);
-            for (const element of windowMap.values()) {
-              for (const output of element.querySelectorAll(".issue-card-output")) {
-                if (output.dataset.windowId === event.id) {
-                  output.querySelector("pre").textContent = event.text;
-                }
-              }
-            }
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, terminalPreview: true }));
             break;
           }
           case "knowledge_entries": {
@@ -5491,7 +5576,7 @@ export function createKnowledgeKanbanSurface({
             if (selectionIsCurrent && state.selectionGeneration === 0) {
               state.detail = null;
             }
-            renderKnowledgeBridge(event.id);
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
             break;
           }
           case "knowledge_detail": {
@@ -5517,26 +5602,9 @@ export function createKnowledgeKanbanSurface({
               finishKnowledgeLoad(state, event.id, event.knowledge_kind);
             }
             state.detailLoading = false;
-            renderKnowledgeSelection(event.id, state, previousNumber);
-            // SPEC-2017 US-9 — refresh the Drawer body when the detail
-            // is for the entry the Drawer is currently showing. This
-            // also handles the swap-on-different-card case (T-034):
-            // requestKnowledgeDetail was just dispatched for the new
-            // number, so the new detail will arrive here and overwrite
-            // the body without re-mounting the Drawer.
-            const drawer = document.getElementById("kanban-drawer");
-            if (
-              drawer &&
-              drawer.dataset.open === "true" &&
-              kanbanDrawerActiveContext &&
-              kanbanDrawerActiveContext.windowId === event.id
-            ) {
-              kanbanDrawerActiveContext = {
-                ...kanbanDrawerActiveContext,
-                number: event.detail?.number ?? kanbanDrawerActiveContext.number,
-              };
-              knowledgeBoardViewModel.update(() => ({ windowId: event.id, drawer: true }));
-            }
+            knowledgeCompletionViewModel.update(() => ({
+              windowId: event.id, previousNumber, detailCompletion: true,
+            }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
@@ -5621,10 +5689,10 @@ export function createKnowledgeKanbanSurface({
               ) {
                 // Legacy/untyped semantic failures are deliberately silent
                 // and never start the typed indefinite retry ladder.
-                renderKnowledgeStatusOnly(event.id, state);
+                knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "status" }));
               } else {
                 state.error = event.message;
-                renderKnowledgeBridge(event.id);
+                knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
               }
               break;
             }
@@ -5663,10 +5731,9 @@ export function createKnowledgeKanbanSurface({
             state.searching = false;
             state.detailLoading = false;
             if (matchesLoadRequest) {
-              renderKnowledgeBridge(event.id);
+              knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
             } else {
-              renderKnowledgeStatusOnly(event.id, state);
-              renderKnowledgeDetailOnly(event.id, state);
+              knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "detail" }));
             }
             break;
           }
@@ -5721,11 +5788,50 @@ export function createKnowledgeKanbanSurface({
         if (detailOnly) renderKnowledgeDetailView(windowId, state);
         else renderKnowledgeBoardView(windowId, element, state);
       });
-      // List completion publishes data in receive; the synchronous view owns
-      // both the full rebuild and revision-preserving selection updates.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber }) => {
+      // Receive commits completion state; the synchronous view owns list,
+      // selection and detail rendering, including the open Drawer.
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion, terminalPreview }) => {
+        if (terminalPreview) {
+          const text = terminalPreviewText.get(windowId);
+          for (const element of windowMap.values()) {
+            for (const output of element.querySelectorAll(".issue-card-output")) {
+              if (output.dataset.windowId === windowId) {
+                output.querySelector("pre").textContent = text;
+              }
+            }
+          }
+          return;
+        }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (errorCompletion) {
+          renderKnowledgeStatusOnly(windowId, state);
+          if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);
+          return;
+        }
+        if (detailCompletion) {
+          renderKnowledgeSelection(windowId, state, previousNumber);
+          // SPEC-2017 US-9 — refresh the Drawer body when the detail
+          // is for the entry the Drawer is currently showing. This
+          // also handles the swap-on-different-card case (T-034):
+          // requestKnowledgeDetail was just dispatched for the new
+          // number, so the new detail will arrive here and overwrite
+          // the body without re-mounting the Drawer.
+          const drawer = document.getElementById("kanban-drawer");
+          if (
+            drawer &&
+            drawer.dataset.open === "true" &&
+            kanbanDrawerActiveContext &&
+            kanbanDrawerActiveContext.windowId === windowId
+          ) {
+            kanbanDrawerActiveContext = {
+              ...kanbanDrawerActiveContext,
+              number: state.detail?.number ?? kanbanDrawerActiveContext.number,
+            };
+            knowledgeBoardViewModel.update(() => ({ windowId, drawer: true }));
+          }
+          return;
+        }
         if (detailRefreshNumber) {
           dispatchKnowledgeDetailRequest(windowId, state.kind, detailRefreshNumber, { explicit: false });
           return;

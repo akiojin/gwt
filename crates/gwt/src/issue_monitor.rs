@@ -38,7 +38,8 @@ mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
 pub use tiers::{
     IssueMonitorConfirmedLaunchTier, IssueMonitorTierFacts, IssueMonitorTierLandingStats,
-    IssueMonitorTierRecord, IssueMonitorTierSelection,
+    IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
+    IssueMonitorTierSelectionProjection,
 };
 mod quota;
 pub(crate) use quota::provider_quota_reset_label;
@@ -2720,6 +2721,7 @@ pub fn parse_issue_monitor_dependencies(body: &str, issue_number: u64) -> IssueM
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorDependencyFacts {
     declarations: IssueMonitorDependencies,
+    is_spec: bool,
     state: IssueMonitorIssueState,
     updated_at: Option<String>,
     source_hash: String,
@@ -3882,6 +3884,12 @@ pub struct IssueMonitorStatusView {
     /// inferring the tier or liveness of a current launch from issue history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tier_facts: Vec<IssueMonitorTierFacts>,
+    /// Current configuration observation required by per-Issue tier controls.
+    #[serde(default)]
+    pub tier_config_token: String,
+    /// Effective automatic pools for the runtime's cached read-only selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_tiers: Vec<Vec<IssueMonitorLaunchProfile>>,
     /// Issue #3628 (AC-5): the fleet has run nothing for longer than the
     /// blackout window while work was runnable.
     ///
@@ -10924,19 +10932,25 @@ impl IssueMonitorState {
     }
 
     pub fn effective_max_active_agents(&self) -> usize {
+        self.effective_max_active_agents_under(&self.agent_capacity)
+    }
+
+    /// Issue #6096: derive the slot limit without applying the capacity sample.
+    /// Admission compares this decision because sampler snapshot bytes change.
+    pub fn effective_max_active_agents_under(&self, capacity: &AgentCapacity) -> usize {
         if self.agent_roster.is_some() {
             let machine = match self.roster_machine_policy.as_ref() {
                 Some(policy) if policy.mode == IssueMonitorMaxActiveMode::Manual => policy
                     .manual_limit
                     .unwrap_or(1)
                     .saturating_sub(
-                        self.agent_capacity
+                        capacity
                             .other_live_agents
-                            .saturating_sub(self.agent_capacity.other_pm_agents),
+                            .saturating_sub(capacity.other_pm_agents),
                     )
-                    .saturating_sub(self.agent_capacity.own_untracked_workers),
-                _ if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() => {
-                    self.agent_capacity.recommended_worker_limit
+                    .saturating_sub(capacity.own_untracked_workers),
+                _ if capacity.measurement_complete && capacity.is_fresh() => {
+                    capacity.recommended_worker_limit
                 }
                 _ => self.config.max_active,
             };
@@ -10948,18 +10962,30 @@ impl IssueMonitorState {
                 .max_active
                 .max(1)
                 .saturating_sub(
-                    self.agent_capacity
+                    capacity
                         .other_live_agents
-                        .saturating_sub(self.agent_capacity.other_pm_agents),
+                        .saturating_sub(capacity.other_pm_agents),
                 )
-                .saturating_sub(self.agent_capacity.own_untracked_workers),
+                .saturating_sub(capacity.own_untracked_workers),
             IssueMonitorMaxActiveMode::Auto
-                if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
+                if capacity.measurement_complete && capacity.is_fresh() =>
             {
-                self.agent_capacity.recommended_worker_limit
+                capacity.recommended_worker_limit
             }
             IssueMonitorMaxActiveMode::Auto => self.config.max_active,
         }
+    }
+
+    /// The slot limit the current machine capacity snapshot grants
+    /// `project_root`, observed the same way [`Self::refresh_agent_capacity`]
+    /// does but without mutating this state.
+    pub fn project_capacity_limit_now(&self, project_root: &Path) -> usize {
+        let capacity = crate::agent_capacity::project_capacity(
+            project_root,
+            &BTreeSet::new(),
+            self.review_windows.len(),
+        );
+        self.effective_max_active_agents_under(&capacity)
     }
 
     fn apply_agent_capacity_limit(&mut self) {
@@ -13473,6 +13499,7 @@ impl IssueMonitorState {
                 issue.body.as_deref().unwrap_or(""),
                 issue.number,
             ),
+            is_spec: has_gwt_spec_label(&issue.labels),
             state: issue.state,
             updated_at: issue.updated_at.clone(),
             source_hash: IssueMonitorDependencyObservation::new(issue, None).source_hash,
@@ -14351,9 +14378,13 @@ impl IssueMonitorState {
             .filter(|(terminal, _)| *terminal != &host)
             .map(|(_, queue)| queue.entries.len())
             .sum();
-        let auto_tier_count = self
-            .launch_auto
-            .then(|| self.prefs().effective_launch_tiers().len());
+        let prefs = self.prefs();
+        let launch_tiers = if self.launch_auto {
+            prefs.effective_launch_tiers()
+        } else {
+            Vec::new()
+        };
+        let auto_tier_count = self.launch_auto.then_some(launch_tiers.len());
         IssueMonitorStatusView {
             agent_roster_capacity: self
                 .agent_roster
@@ -14432,6 +14463,8 @@ impl IssueMonitorState {
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
             tier_facts: self.tier_facts(auto_tier_count),
+            tier_config_token: prefs.config_token(),
+            launch_tiers,
             autonomous_issues: self
                 .autonomous_records
                 .values()
@@ -25571,6 +25604,38 @@ mod tests {
         assert_eq!(project_b.max_active_agents_override(), Some(5));
         project_a.set_agent_capacity(AgentCapacity::default());
         assert_eq!(project_a.effective_max_active_agents(), 5);
+
+        // Roster revalidation must use the proposed sample's PM count too.
+        project_a.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada",
+                    "enabled": true,
+                    "created_at": IDLE_NOW,
+                }],
+            }))
+            .unwrap(),
+        );
+        project_a.set_max_active_agents(1);
+        project_a.apply_machine_policy(&crate::machine_agent_settings::Policy {
+            mode: IssueMonitorMaxActiveMode::Manual,
+            manual_limit: Some(1),
+            last_change: None,
+        });
+        project_a.set_agent_capacity(AgentCapacity {
+            other_live_agents: 1,
+            other_pm_agents: 1,
+            ..AgentCapacity::default()
+        });
+        let fresh = AgentCapacity {
+            other_live_agents: 1,
+            other_pm_agents: 0,
+            ..AgentCapacity::default()
+        };
+        assert_eq!(project_a.effective_max_active_agents_under(&fresh), 0);
     }
 
     #[test]
@@ -29737,8 +29802,33 @@ mod tests {
         prefs.tier_overrides.insert(42, 0);
         prefs.tier_overrides.insert(7, 2);
         monitor.rebase_daemon_driver_prefs(&prefs);
+        monitor.terminal_queue_auto_refill = false;
+        let mut backlog_issue = issue(99);
+        backlog_issue.labels.clear();
+        scan_issue_monitor_candidates(&mut monitor, &[backlog_issue], "2026-09-29T00:00:00Z");
+        assert!(monitor.inbox_item(99).is_none());
+        assert!(!monitor.terminal_queue_contains(99));
+        assert!(!monitor.queue.contains(&99));
         let before = monitor.prefs();
         let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(wire["tier_facts"].as_array().unwrap().len(), 3);
+        let backlog = &wire["tier_facts"][2];
+        assert_eq!(backlog["issue_number"], 99);
+        assert_eq!(backlog["is_spec"], false);
+        assert_eq!(backlog["tier_count"], 3);
+        assert_eq!(backlog["next_minimum_tier"], 0);
+        assert!(backlog.get("next_launch").is_none());
+        assert!(backlog["next_launch_unavailable_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
+        assert!(backlog.get("confirmed_launch").is_none());
+        assert!(backlog.get("recorded_launch_tier").is_none());
+        assert!(backlog.get("minimum_tier_override").is_none());
+        assert_eq!(wire["tier_config_token"], before.config_token());
+        assert_eq!(
+            wire["launch_tiers"],
+            serde_json::json!(before.effective_launch_tiers())
+        );
         assert_eq!(wire["tier_facts"][0]["issue_number"], 7);
         assert!(wire["tier_facts"][0]["recorded_launch_tier"].is_null());
         assert!(wire["tier_facts"][0]["next_minimum_tier"].is_null());
@@ -29760,6 +29850,8 @@ mod tests {
         monitor.launch_auto = false;
         let wire = serde_json::to_value(monitor.status_view()).unwrap();
         assert!(wire["tier_facts"][1]["next_minimum_tier"].is_null());
+        assert!(wire["tier_facts"][1].get("tier_count").is_none());
+        assert!(wire.get("launch_tiers").is_none());
         assert_eq!(wire["tier_facts"][1]["history_floor"], 9);
     }
 

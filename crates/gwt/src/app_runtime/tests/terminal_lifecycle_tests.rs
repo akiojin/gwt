@@ -4198,7 +4198,7 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
         prepared.is_current(&input.host_project_roots),
         "observation-only foreign prefs keys must not stale admission"
     );
-    assert!(prepared.can_refresh_capacity(&input.host_project_roots));
+    assert!(prepared.can_revalidate(&input.host_project_roots));
 
     gwt::save_issue_monitor_prefs(
         &foreign,
@@ -4218,7 +4218,7 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
         !prepared.is_current(&input.host_project_roots),
         "a foreign update drain must still stale admission"
     );
-    assert!(!prepared.can_refresh_capacity(&input.host_project_roots));
+    assert!(!prepared.can_revalidate(&input.host_project_roots));
 }
 
 #[test]
@@ -4263,6 +4263,234 @@ fn issue6096_scan_restamped_record_fields_do_not_change_prefs_digest() {
     let mut stranded = prefs(1, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z", "a");
     stranded["generation_reclaim"]["stranded"] = serde_json::json!([8]);
     assert_ne!(base, digest(stranded), "reclaim content must still stale");
+}
+
+fn issue6096_admission_fixture(
+    temp: &std::path::Path,
+) -> (
+    AppRuntime,
+    PathBuf,
+    super::super::launch::IssueMonitorSpawnAdmissionInput,
+) {
+    let repo = temp.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let repo = dunce::canonicalize(repo).expect("canonical repo");
+    gwt::save_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
+            max_active_agents: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let runtime = sample_runtime(
+        temp,
+        vec![sample_project_tab(
+            "tab-1",
+            "Repo",
+            repo.clone(),
+            ProjectKind::Git,
+            &[],
+        )],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 43, "work/issue-43");
+    (runtime, repo, input)
+}
+
+fn issue6096_write_capacity_sample(repo: &Path, available_ram_bytes: u64) {
+    let target = repo.join("target");
+    fs::create_dir_all(&target).unwrap();
+    let artifact = target.join("fixture-artifact");
+    fs::write(&artifact, b"measured target fixture").unwrap();
+    let target_bytes = fs::metadata(&artifact).unwrap().len();
+    let now = u64::try_from(Utc::now().timestamp()).expect("positive epoch");
+    let snapshot = serde_json::json!({
+        "observed_at": now, "expires_at": now + 30,
+        "performance_cores": 2, "gui_cpu_millicores": 0,
+        "available_ram_bytes": available_ram_bytes,
+        "per_agent_ram_bytes": 512_u64 * 1024 * 1024,
+        "free_disk_bytes": 4096,
+        "targets": BTreeMap::from([(target, serde_json::json!({
+            "bytes": target_bytes, "observed_at": now
+        }))]),
+        "disk_observations": BTreeMap::from([(repo.to_path_buf(), serde_json::json!({
+            "available_bytes": 4096, "observed_at": now
+        }))]),
+        "inventory": {"sessions": [], "uncertainties": []}
+    });
+    let machine_state = gwt_core::paths::gwt_home().join("machine-state");
+    fs::create_dir_all(&machine_state).unwrap();
+    fs::write(
+        machine_state.join("agent-capacity.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn issue6096_capacity_resample_keeps_admission_until_its_slot_limit_drops() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    issue6096_write_capacity_sample(&repo, 2 * 1024 * 1024 * 1024);
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(
+        prepared.monitor.has_capacity_for_monitor_spawn(43, false),
+        "the fresh sample grants a slot"
+    );
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    // The host sampler rewrites the file every ~5s with new RAM/CPU readings.
+    // A renewal that grants the same slot limit must not stale the admission,
+    // however long the admission took relative to the renewal cadence.
+    issue6096_write_capacity_sample(&repo, 2 * 1024 * 1024 * 1024 + 64 * 1024 * 1024);
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "a same-limit capacity renewal must keep the prepared admission"
+    );
+
+    issue6096_write_capacity_sample(&repo, 0);
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "an exhausted capacity sample must still stale the admission"
+    );
+    assert!(
+        input
+            .refresh(&prepared)
+            .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
+        "a re-evaluation that loses the slot must not keep the launch"
+    );
+}
+
+#[test]
+fn issue6096_target_prefs_churn_is_settled_by_the_admission_decision() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let churn = |priority_order: Vec<u64>| {
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.priority_order = priority_order;
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    };
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    churn(vec![7]);
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a target prefs rewrite asks for a decision re-evaluation"
+    );
+    assert!(
+        prepared.can_revalidate(&input.host_project_roots),
+        "an unrelated target prefs rewrite must not force a full re-preparation"
+    );
+    let revalidated = input
+        .refresh(&prepared)
+        .expect("the same decision keeps the launch");
+    assert!(revalidated.is_current(&input.host_project_roots));
+
+    // A busy project rewrites prefs faster than a slow host re-evaluates.
+    // Once the decision was re-confirmed, further churn must not loop.
+    churn(vec![7, 8]);
+    assert!(
+        revalidated.is_current(&input.host_project_roots),
+        "a re-evaluated admission converges despite continued prefs churn"
+    );
+
+    let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    prefs.open_pr_observations.insert(
+        43,
+        gwt::issue_monitor::IssueMonitorOpenPrObservation {
+            observed_at: "2026-10-24T00:00:00Z".to_string(),
+            hold: Some(gwt::issue_monitor::IssueMonitorOpenPrHold {
+                pr_number: 99,
+                lifecycle: "open".to_string(),
+            }),
+        },
+    );
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(
+        !revalidated.is_current(&input.host_project_roots),
+        "a PR hold for the launched Issue stays a strict fence"
+    );
+    assert!(!revalidated.can_revalidate(&input.host_project_roots));
+
+    prefs.open_pr_observations.clear();
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    let revalidated = input
+        .refresh(&input.prepare().unwrap())
+        .expect("re-evaluate without the hold");
+    prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
+        version: "99.0.0".to_string(),
+        since: "2026-10-24T00:00:00Z".to_string(),
+        reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+        automatic: None,
+        blocking: Vec::new(),
+    });
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    assert!(
+        !revalidated.is_current(&input.host_project_roots),
+        "the target project's update drain stays a strict fence"
+    );
+}
+
+#[test]
+fn issue6096_issue_cache_resync_keeps_admission_until_evidence_changes() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (_runtime, repo, input) = issue6096_admission_fixture(temp.path());
+    let cache_root = issue_cache_root(&repo);
+    let cache = Cache::new(cache_root.clone());
+    let source = sample_issue_snapshot(43, "Launch target", &[], "Body", "2026-10-24T00:00:00Z");
+    cache.write_snapshot(&source).unwrap();
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    // A cache sync rewrites every entry with a new generation token.
+    let meta = cache_root.join("43").join("meta.json");
+    let mut rewritten: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta).unwrap()).unwrap();
+    rewritten["generation"] = serde_json::json!("resynced-generation");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&meta)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
+    fs::write(&meta, serde_json::to_vec_pretty(&rewritten).unwrap()).unwrap();
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "an evidence-identical cache resync must keep the admission"
+    );
+
+    let mut closed = source;
+    closed.state = IssueState::Closed;
+    cache.write_snapshot(&closed).unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "closing the launched Issue stays a strict fence"
+    );
+    assert!(!prepared.can_revalidate(&input.host_project_roots));
 }
 
 #[test]
