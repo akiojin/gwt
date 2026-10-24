@@ -5,7 +5,7 @@
 //! same Stop-block semantics: while the skill state is `active: true` for the
 //! current agent session, block Stop so the skill keeps running; honour
 //! `stop_hook_active: true` to cap forced continuation at one per cycle
-//! (FR-014o); fail open on any I/O or JSON error (FR-014u); and stay silent
+//! (FR-014o); warn and fail open on any I/O or JSON error (FR-014u); and stay silent
 //! when the recorded `session_id` differs from the current session (FR-014t).
 //!
 //! Before P2 this body lived inside `skill_plan_spec_stop_check` and the other
@@ -31,8 +31,15 @@ pub(crate) fn decide(
     if stop_hook_active_from(input) {
         return HookOutput::Silent;
     }
-    let Ok(Some(state)) = skill_state::load(worktree, skill_name) else {
-        return HookOutput::Silent;
+    let state = match skill_state::load(worktree, skill_name) {
+        Ok(Some(state)) => state,
+        Ok(None) => return HookOutput::Silent,
+        Err(error) => {
+            tracing::warn!(%error, skill_name, "skill state is unreadable");
+            return HookOutput::system_message(format!(
+                "Warning: {skill_display} skill state is unreadable ({error}). Stop is not blocked by this infrastructure failure."
+            ));
+        }
     };
     if !state.active {
         return HookOutput::Silent;
