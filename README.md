@@ -571,7 +571,12 @@ only the cyclic links. Removing the marker also removes the wait on the next sca
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
-agent's read-only output. **Windowize** opens the agent in an individual Agents
+agent's read-only output. With automatic tiers enabled, cards show the running
+tier or the current next-tier selection. The preview shows provider, model and
+effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
+next launch; a running agent keeps its profile. Changes appear after the server
+accepts them, and the highest tier explains why it cannot be raised. Next-tier
+previews remain subject to launch-time checks. **Windowize** opens the agent in an individual Agents
 tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.

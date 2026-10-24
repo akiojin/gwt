@@ -956,6 +956,11 @@ pub enum FrontendEvent {
         enabled: bool,
         limit: usize,
     },
+    SetIssueMonitorTier {
+        issue_number: u64,
+        tier: u8,
+        expected_config_token: String,
+    },
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,
@@ -3867,6 +3872,23 @@ mod tests {
             assert_eq!(event.delivery_policy().kind, event.event_kind());
             assert!(!event.delivery_policy().coalesces_on_frontend());
         }
+    }
+
+    #[test]
+    fn issue_monitor_tier_set_requires_an_observed_configuration() {
+        let event = serde_json::json!({
+            "kind": "set_issue_monitor_tier",
+            "issue_number": 4499,
+            "tier": 1,
+            "expected_config_token": "observed-tier-config"
+        });
+        assert!(serde_json::from_value::<FrontendEvent>(event.clone()).is_ok());
+        let mut unguarded = event;
+        unguarded
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_config_token");
+        assert!(serde_json::from_value::<FrontendEvent>(unguarded).is_err());
     }
 
     #[test]

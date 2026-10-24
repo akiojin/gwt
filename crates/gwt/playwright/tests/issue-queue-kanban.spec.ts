@@ -27,7 +27,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
+    includeAgent: info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -497,9 +497,10 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await max.press("Tab");
   await controls.getByRole("button", { name: "Apply Max active", exact: true }).click();
   await expect(max).toHaveValue("3");
-  // Wait for the saved Manual status before requesting Auto; the input's
-  // optimistic value alone does not acknowledge the fixture's async reply.
-  await expect.poll(() => page.evaluate(() => (window as any).__queueLatestStatus.max_active_agents)).toBe(3);
+  // The fixture records a queued reply before dispatching it. Wait for the
+  // rendered allocation to prove the app consumed Manual before requesting Auto.
+  await expect(controls.getByRole("status").filter({hasText:"This project allocation:"}))
+    .toContainText("This project allocation: 3");
   await mode.selectOption("auto");
   await expect(max).toBeDisabled();
   await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
@@ -1243,6 +1244,9 @@ test("T-7b.2b.2: Running tier uses exact live window and clears stale explanatio
   await expect(popup).not.toContainText("Acknowledged launch tier");
   await page.screenshot({path: test.info().outputPath("running-tier-cleared.png")});
   await page.evaluate(() => (window as any).__queueAgentState("running"));
+  await expect(chip, "a status event alone cannot revive an exited Session").toHaveCount(0);
+  await page.evaluate(() => (window as any).__queueActivity([{window_id:"tab-queue::agent-5",
+    session_id:"agent-5-session",runtime_incarnation:1,issue_number:5,is_pm:false}]));
   await expect(chip).toHaveText("Running tier 0");
   await page.evaluate(() => (window as any).__queueAgentWindow({id:"other-agent"}));
   await expect(chip).toHaveCount(0);
@@ -1281,6 +1285,70 @@ test("card selection keeps issue body, acceptance and provenance beside switchab
   await page.getByRole("button",{name:"Issue",exact:true}).click();
   await expect(detail).toContainText("Description for #6");
   await expect(page.locator(".issue-queue-board")).toBeVisible();
+});
+
+test("T-F2: tier raise is per-Issue, server-confirmed and retained beside body and Output", async ({page}) => {
+  const facts = { issue_number: 3, tier_count: 3, next_minimum_tier: 0,
+    next_launch: { tier: 1, agent_id: "claude", model: "sonnet", reasoning: "medium" } };
+  await confirm(page, [3, 4], { tier_config_token: "observed-config", tier_facts: [facts] });
+  await expect(row(page, 3).locator('[data-key="tier-next"]')).toHaveText("Next tier 1");
+  await expect(row(page, 4).locator('[data-key="tier-next"]')).toHaveCount(0);
+  await row(page, 3).locator(".knowledge-row-select").click();
+  const detail = page.locator(".knowledge-detail-pane");
+  const tiers = detail.locator(".issue-detail-tier");
+  await expect(tiers).toContainText("claude / sonnet / medium");
+  await expect(tiers).toContainText("launch-time checks");
+  await expect(detail).toContainText("Description for #3");
+  await expect(detail.locator(".issue-detail-provenance")).toHaveText("Queued by: Operator");
+  await detail.locator(".issue-detail-body .knowledge-section").filter({hasText:"Acceptance criteria"}).locator("summary").click();
+  await expect(detail).toContainText("AC-3: expected behavior");
+  await tiers.getByRole("button", {name:"Raise one tier for Issue #3", exact:true}).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages.filter((m:any) => m.kind === "set_issue_monitor_tier"))).toEqual([
+    { kind: "set_issue_monitor_tier", issue_number: 3, tier: 2, expected_config_token: "observed-config" },
+  ]);
+  await expect(tiers).toContainText("Next tier 1");
+  await confirm(page, [3, 4], { tier_config_token: "updated-config", tier_facts: [{...facts,
+    minimum_tier_override: 2, next_launch: {...facts.next_launch, tier:2} }] });
+  await expect(tiers).toContainText("Next tier 2");
+  await expect(detail.locator(".issue-detail-body .knowledge-section").filter({hasText:"Acceptance criteria"})).toHaveJSProperty("open", true);
+  await expect(tiers.getByRole("button", {name:/Raise one tier/})).toBeDisabled();
+  await expect(tiers).toContainText("Highest configured tier");
+  await page.getByRole("button", {name:"Output",exact:true}).click();
+  await expect(tiers).toContainText("Next tier 2");
+  await expect(detail).toContainText("Waiting in queue");
+  await confirm(page, [3, 4], { tier_facts: [{...facts, next_launch:undefined,
+    next_launch_unavailable_reason:"Every provider is held"}] });
+  await expect(tiers).toContainText("Every provider is held");
+  await expect(tiers.getByRole("button", {name:/Raise one tier/})).toBeDisabled();
+});
+
+test("T-F2: exact running profile stays distinct from the next override in both preview tabs", async ({page}) => {
+  await confirm(page, [3, 4], { tier_config_token: "observed-config", tier_facts: [{ issue_number:5, tier_count:3,
+    next_launch:{tier:1,agent_id:"claude",model:"sonnet",reasoning:"medium"},
+    confirmed_launch:{tier:0,window_id:"tab-queue::agent-5",delivery_id:"delivery-5",
+      profile:{agent_id:"codex",model:"gpt-6-luna",reasoning:"low"}},
+  }] });
+  await expect(row(page, 5).locator('[data-key="tier-running"]')).toHaveText("Running tier 0");
+  await row(page, 5).locator(".knowledge-row-select").click();
+  const tiers = page.locator(".issue-detail-tier");
+  for (const name of ["Issue", "Output"]) {
+    await page.getByRole("button", {name,exact:true}).click();
+    await expect(tiers).toContainText("Running tier 0 · codex / gpt-6-luna / low");
+    await expect(tiers).toContainText("Next tier 1 · claude / sonnet / medium");
+    await expect(tiers).toContainText("A running agent keeps its current profile");
+  }
+  await page.getByRole("button", {name:"Issue",exact:true}).click();
+  await page.screenshot({path:test.info().outputPath(`issue-4499-tier-actual-${test.info().project.name.includes("light") ? "light" : "dark"}.png`)});
+  await page.evaluate(() => (window as any).__queueActivity([]));
+  await expect(row(page, 5).locator('[data-key="tier-running"]')).toHaveCount(0);
+  await expect(tiers).not.toContainText("Running tier");
+  await expect(tiers).not.toContainText("gpt-6-luna");
+  await page.evaluate(() => (window as any).__queueActivity([{ window_id:"tab-queue::agent-5",
+    session_id:"agent-5-session", runtime_incarnation:1, issue_number:5, is_pm:false }]));
+  await expect(tiers).toContainText("Running tier 0");
+  await page.evaluate(() => (window as any).__queueAgentState("stopped"));
+  await expect(tiers).not.toContainText("Running tier");
+  await expect(tiers).not.toContainText("gpt-6-luna");
 });
 
 test("urgent priority, cap fallback and PM demotion preserve assignment provenance", async ({page}) => {
