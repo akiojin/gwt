@@ -1063,6 +1063,30 @@ test("Knowledge detail completions commit shared state and reject direct renderi
   }
 });
 
+test("Active card preview receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const previews = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('terminal_preview'));
+  const local = text => previews(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => previews(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "terminal_preview": {',
+    'case "terminal_preview": { document.body.textContent = event.text;');
+  assert.notEqual(bypass, source);
+  for (const findings of [local(bypass), delegated(app, bypass)]) {
+    assert.ok(findings.some(finding => finding.kind === 'dom-write'));
+  }
+  const appBypass = app.replace('case "terminal_preview":',
+    'case "terminal_preview": document.body.textContent = event.text;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind === 'dom-write'));
+});
+
 test("Knowledge error completions commit shared state and reject direct rendering", () => {
   const file = 'crates/gwt/web/knowledge-kanban-surface.js';
   const appFile = 'crates/gwt/web/app.js';

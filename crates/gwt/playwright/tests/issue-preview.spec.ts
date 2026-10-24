@@ -87,10 +87,17 @@ test.describe("Issue preview placement", () => {
       await expect(output.locator(".xterm, input, textarea, third")).toHaveCount(0);
     }
     expect(await page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview-2").hasRuntime)).toBe(false);
+    const search = page.locator(".surface-knowledge .knowledge-search");
+    await search.focus();
+    await outputs.nth(1).evaluate(element => element.setAttribute("data-preview-retained", "true"));
     await page.evaluate(() => window.__fixtureSocket.emit({
       kind: "terminal_preview", id: "tab-issue::agent-preview-2", text: "second\n<third>\nnewest",
     }));
     await expect(outputs.nth(1).locator("pre")).toHaveText("second\n<third>\nnewest");
+    await expect(outputs.nth(1)).toHaveAttribute("data-preview-retained", "true");
+    await expect(outputs.first().locator("pre")).toHaveText("agent 1 first\n  second\n<third>");
+    await expect(outputs.nth(2).locator("pre")).toHaveText("agent 3 first\n  second\n<third>");
+    await expect(search).toBeFocused();
     await page.screenshot({ path: info.outputPath("active-live-tails.png") });
     await outputs.first().locator("pre").click();
     await page.keyboard.type("no input");
