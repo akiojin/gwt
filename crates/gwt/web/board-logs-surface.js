@@ -65,7 +65,12 @@ export function createBoardLogsSurface({
       // synchronous, including stale-scope reloads and equal-valued errors.
       const logResponseModel = createUiStateStore(null);
       logResponseModel.subscribe(response => response, response => {
-        if (!response || !finishLogRequest(response.windowId)) return;
+        if (!response) return;
+        if (response.kind === "log_entry_appended") {
+          appendLiveLogEntry(response.entry);
+          return;
+        }
+        if (!finishLogRequest(response.windowId)) return;
         const state = ensureLogState(response.windowId);
         state.loading = false;
         if (response.kind === "log_error") {
@@ -1909,7 +1914,7 @@ export function createBoardLogsSurface({
             break;
           }
           case "log_entry_appended":
-            appendLiveLogEntry(event.entry);
+            logResponseModel.update(() => ({ kind: event.kind, entry: event.entry }));
             break;
           case "board_error": {
             const state = ensureBoardState(event.id);
