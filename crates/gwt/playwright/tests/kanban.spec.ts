@@ -48,6 +48,55 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5016 search completions render shared state and reject stale replies", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.fill("Issue");
+    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "search_knowledge_bridge").length)).toBe(1);
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "search_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_search_results",
+        entries: [{ number: 3096, title: "Authoritative semantic result", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human" }], selected_number: 3273, refresh_enabled: true });
+    });
+    await expect(surface.locator(".knowledge-row")).toHaveCount(1);
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Authoritative semantic result");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.find(message => message.kind === "search_knowledge_bridge");
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_search_results",
+        entries: [], selected_number: null, empty_message: "Stale result" });
+      // FIFO marker: a phase completion replaces an existing row only. If
+      // the stale reply cleared it, this acknowledgement cannot recreate it.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated",
+        id: request.id, issue_number: 3096, result: { kind: "ok", fresh_entry: {
+          number: 3096, title: "Search result after stale reply", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human",
+        } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Search result after stale reply");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-search-completion.png") });
+  });
+
   test("Issue #5016 phase completions render shared state and retain selection and focus", async ({ page }, info) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
