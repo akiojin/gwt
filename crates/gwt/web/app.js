@@ -3817,6 +3817,11 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         focusBoardEntry,
       });
 
+      const recoveryCenterStateModel = createUiStateStore(null);
+      recoveryCenterStateModel.subscribe(state => state, response => {
+        if (response) recoveryCenterController?.handleState(response);
+      });
+
       function openIssueLaunchWizard(windowId, issueNumber) {
         send({
           kind: "open_issue_launch_wizard",
@@ -5291,7 +5296,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
             applyBoardLogsReceiveEvent(event);
             break;
           case "recovery_center_state":
-            recoveryCenterController?.handleState(event);
+            recoveryCenterStateModel.update(() => ({ ...event }));
             break;
           case "recovery_center_board_entry":
             recoveryCenterController?.handleBoardEntry(event);
