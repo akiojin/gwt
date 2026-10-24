@@ -48,6 +48,53 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5016 detail completions render shared state and retain focus", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    const pane = surface.locator(".knowledge-detail-pane");
+    await expect(pane).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await page.evaluate(() => {
+      const request = window.__knowledgeLoadMessages.filter(message => message.kind === "select_knowledge_bridge_entry").at(-1);
+      window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_detail", detail: {
+        number: 3096, title: "Completed shared detail", subtitle: "#3096", state: "open", labels: ["bug"],
+        sections: [{ title: "Description", body: "Completed shared Markdown", body_html: "<p>Completed shared <strong>Markdown</strong></p>" }],
+        launch_issue_number: 3096,
+      } });
+    });
+    await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
+    await expect(pane.locator("strong")).toHaveText("Markdown");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_detail", id: "issue-kanban", knowledge_kind: "issue", request_id: -1,
+        detail: { number: 3273, title: "Stale detail must be rejected", sections: [] } });
+      // This positive FIFO marker runs after the stale response. A prior DOM
+      // assertion alone could pass before either response was dispatched.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated", id: "issue-kanban", issue_number: 3096,
+        result: { kind: "ok", fresh_entry: { number: 3096, title: "Detail FIFO marker", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human" } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Detail FIFO marker");
+    await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
+    await expect(pane.locator("strong")).toHaveText("Markdown");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-detail-completion.png") });
+  });
+
   test("Issue #5016 search completions render shared state and reject stale replies", async ({ page }, info) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
