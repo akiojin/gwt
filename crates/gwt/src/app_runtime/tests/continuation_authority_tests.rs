@@ -35,7 +35,6 @@ fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
         "client-b",
         "immutable-operation".to_string(),
         "work-b".to_string(),
-        canvas_bounds(),
     );
     assert!(conflict.iter().any(|event| matches!(
         &event.event,
@@ -52,7 +51,6 @@ fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
         "client-a",
         "immutable-operation".to_string(),
         "work-a".to_string(),
-        canvas_bounds(),
     );
     assert!(replay.iter().any(|event| matches!(
         &event.event,
@@ -487,7 +485,6 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
         "client-projection-only",
         "projection-only-operation".to_string(),
         work_id.clone(),
-        canvas_bounds(),
     );
 
     assert!(events.iter().all(|event| !matches!(
@@ -563,7 +560,6 @@ fn projection_only_continue_uses_spec_generation_authority_without_issue_cache()
         "client-projection-spec",
         "projection-spec-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let pending = runtime
@@ -610,7 +606,6 @@ fn projection_only_continue_uses_spec_legacy_flat_authority_without_issue_cache(
         "client-projection-spec-legacy-flat",
         "projection-spec-legacy-flat-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let pending = runtime
@@ -682,7 +677,6 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
         "client-projection-canonical-branch",
         "projection-canonical-branch-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let _pending = runtime
@@ -744,7 +738,6 @@ fn linked_workspace_resume_routes_through_authority_producing_continuation() {
         "linked-resume-operation".to_string(),
         durable.id.clone(),
         None,
-        canvas_bounds(),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -814,7 +807,6 @@ fn continue_work_prefers_exact_custom_durable_session() {
         "client-custom-durable",
         "custom-durable-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     assert!(events.iter().all(|event| !matches!(
@@ -891,7 +883,6 @@ fn continue_work_durable_session_requires_same_work_ref_agent() {
         "client-ref-agent-mismatch",
         "ref-agent-mismatch-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let pending = runtime
@@ -968,7 +959,6 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
             "client-missing-work-agent",
             format!("operation-{case_name}"),
             work_id,
-            canvas_bounds(),
         );
 
         assert!(
@@ -1058,7 +1048,6 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
         "client-branch-divergence",
         "operation-branch-divergence".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     assert!(
@@ -1127,7 +1116,6 @@ fn continue_work_shell_ref_cannot_authenticate_agent_session() {
         "client-shell-ref",
         "shell-ref-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     assert!(runtime.pending_continue_work.is_empty());
@@ -1193,7 +1181,6 @@ fn projection_only_continue_ignores_noncanonical_projected_session_path() {
         "client-projection-noncanonical-session",
         "projection-noncanonical-session-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let window = runtime
@@ -1337,7 +1324,6 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         "client-foreign-recovery",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
 
     assert!(
@@ -1412,7 +1398,6 @@ fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
         "client-projection-conflicting-session",
         "projection-conflicting-session-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     let pending = runtime
@@ -1472,7 +1457,6 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
         "client-projection-container-first",
         "projection-container-first-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -1539,7 +1523,6 @@ fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_st
         "client-projection-spawn-failure",
         "projection-spawn-failure-operation".to_string(),
         work_id,
-        canvas_bounds(),
     );
     let window_id = runtime
         .pending_continue_work
@@ -1637,7 +1620,6 @@ fn projection_only_continue_owner_change_before_activation_aborts_without_commit
         "client-projection-owner-toctou",
         operation_id.to_string(),
         work_id.clone(),
-        canvas_bounds(),
     );
     let (window_id, pending) = runtime
         .pending_continue_work
@@ -1918,7 +1900,6 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
         "client-owner-kind-heal",
         "owner-kind-heal-operation".to_string(),
         work_id.clone(),
-        canvas_bounds(),
     );
 
     assert!(
@@ -2201,7 +2182,6 @@ fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
         "client-1",
         "legacy-focus-operation".to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -2525,7 +2505,6 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
 
     assert!(
@@ -2567,7 +2546,6 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         "client-retry-exact",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(
         reconciled.iter().any(|event| matches!(
@@ -2770,7 +2748,6 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             "client-retry-dangling",
             operation_id.to_string(),
             work_id.to_string(),
-            canvas_bounds(),
         );
 
         assert!(
@@ -2820,7 +2797,6 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         "client-retry-materialized",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
 
     assert!(
@@ -2844,7 +2820,6 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         "client-retry",
         operation_id.to_string(),
         work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(
         events.iter().any(|event| matches!(
@@ -3132,7 +3107,6 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
             "client-cleanup",
             operation_id,
             work_id,
-            canvas_bounds(),
         );
 
         assert!(
@@ -3375,7 +3349,6 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "client-reconnected",
         operation_id.to_string(),
         selected_work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(
         runtime
@@ -3558,7 +3531,6 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "client-response-loss",
         operation_id.to_string(),
         selected_work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(same_host_retry.iter().any(|event| matches!(
         &event.event,
@@ -3623,7 +3595,6 @@ fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_
         "client-retry",
         operation_id.to_string(),
         selected_work_id.to_string(),
-        canvas_bounds(),
     );
     assert!(
         retry_events.iter().all(|event| !matches!(

@@ -3,8 +3,8 @@
 // modal + running-agent cues), the Recent Projects list (picker overlay +
 // Open Project split-button menu), the project picker / onboarding
 // renderers, the toolbar action availability, the Windows dropdown
-// (window list state + render key + renderer), the maximized-window
-// viewport sync, the Open/Clone project modal glue, the migration modal
+// (window list state + render key + renderer), the Open/Clone project modal
+// glue, the migration modal
 // glue, the window_list / clone_* / migration_* receive() bodies, and the
 // project-shell chrome listeners. Pure movement from app.js: behavior,
 // DOM output, and WS protocol are unchanged; the moved code keeps its
@@ -37,12 +37,12 @@
 //   used by the render keys that stayed in app.js).
 // - runtimeStateForWindow / windowDisplayTitle / windowTitleTooltip /
 //   windowRoleBadgeLabel / shouldShowRuntimeStatus /
-//   visibleWindowData / presetSurface: window presentation helpers owned
+//   presetSurface: window presentation helper owned
 //   by app.js (still used by the core window renderers there).
 // - focusWindowRemotely(windowId, opts): focus path owned by app.js.
 // - frameWindow(windowId, opts): select a window in its fixed rail host.
 // - scheduleTerminalFit(windowId, persist): terminal core scheduler.
-// - visibleBounds(): current visible canvas bounds in world space.
+
 // - addButton: toolbar button owned by app.js
 //   (their click listeners stay there).
 // - cloneProjectModal / cloneProjectDialog / migrationModal /
@@ -83,13 +83,11 @@ export function createProjectShellSurface({
   windowTitleTooltip,
   windowRoleBadgeLabel,
   shouldShowRuntimeStatus,
-  visibleWindowData,
   presetSurface,
   focusWindowRemotely,
   // Window-list rows select the window in its fixed rail host.
   frameWindow,
   scheduleTerminalFit,
-  visibleBounds,
   addButton,
 
 
@@ -522,14 +520,6 @@ export function createProjectShellSurface({
           requestWindowList();
         }
       }
-
-      // SPEC-2008 camera-focus: the maximized-window viewport sync
-      // (geometryMatches / syncMaximizedWindowsToViewport /
-      // scheduleMaximizedWindowsToViewportSync /
-      // workspaceHasVisibleMaximizedWindow) was removed. Windows render at
-      // their own geometry and the camera is driven locally by app.js
-      // (frameWindow / enterOverview), so there is no shared maximized fill to
-      // reconcile per client.
 
       function renderRecentProjects({ force = false } = {}) {
         const appState = getAppState();

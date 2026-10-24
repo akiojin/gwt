@@ -168,7 +168,7 @@ fn issue_5646_restart_preview_reports_twelve_agents_and_issues_without_applying(
             );
             let mut persisted = tab.workspace.persisted().clone();
             persisted.windows[0].linked_issue_number = Some(5600 + number);
-            tab.workspace = WindowCanvasState::from_persisted(persisted);
+            tab.workspace = WindowRegistry::from_persisted(persisted);
             tab
         })
         .collect();
@@ -679,16 +679,14 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         LaunchWizardAction::SetModel {
             model: "gpt-5.5".to_string(),
         },
-        None,
     );
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
         },
-        None,
     );
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
         "global issue monitor settings runtime resolution",
         &recorded_events,
@@ -718,19 +716,12 @@ fn app_runtime_issue_monitor_configure_profile_saves_global_profile_without_laun
         unreachable!("matched above")
     };
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, *result);
-    let _confirm_events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let _confirm_events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let saved_events = {
         // Verify profile contents independently of the host's prefs lock/fsync latency.
         let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
-        runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            None,
-        )
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit)
     };
 
     assert!(
@@ -803,8 +794,7 @@ fn app_runtime_agent_settings_update_preserves_the_saved_profile_and_wizard() {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let prefs_before = fs::read(&prefs_path).unwrap();
 
-    let events =
-        runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup, None);
+    let events = runtime.handle_launch_wizard_action(&context, LaunchWizardAction::RunAgentSetup);
     let updated = agent_settings_view(&events);
     assert!(updated.error.is_none(), "{:?}", updated.error);
     assert_eq!(updated.selected_launch_target, "agent");
@@ -903,11 +893,8 @@ fn app_runtime_issue_monitor_agent_settings_preserves_an_undetected_saved_agent(
             .agent_id,
         "codex"
     );
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert!(agent_settings_view(&events).error.is_some());
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("read unchanged pool");
@@ -948,12 +935,10 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
         LaunchWizardAction::SetReasoning {
             reasoning: "high".to_string(),
         },
-        None,
     );
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::AddAgentSettingsSet,
-        None,
     );
     let view = agent_settings_view(&events);
     assert_eq!(
@@ -974,7 +959,6 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
         LaunchWizardAction::SetAgent {
             agent_id: "codex".to_string(),
         },
-        None,
     );
     let view = agent_settings_view(&events);
     assert!(
@@ -989,7 +973,6 @@ fn app_runtime_issue_monitor_agent_settings_sets_are_added_reordered_and_saved_i
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::MoveAgentSettingsSet { index: 2, to: 0 },
-        None,
     );
     let view = agent_settings_view(&events);
     assert_eq!(
@@ -1079,7 +1062,6 @@ fn app_runtime_issue_monitor_agent_settings_keeps_a_runtime_the_form_was_not_ask
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SelectAgentSettingsSet { index: 1 },
-        None,
     );
     let view = agent_settings_view(&events);
     assert_eq!(view.selected_agent_id, "claude");
@@ -1168,7 +1150,6 @@ fn app_runtime_issue_monitor_agent_settings_keeps_at_least_one_set() {
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::RemoveAgentSettingsSet { index: 0 },
-        None,
     );
     let view = agent_settings_view(&events);
     assert_eq!(agent_settings_set_agents(view), vec!["claude"]);
@@ -1185,7 +1166,6 @@ fn app_runtime_issue_monitor_agent_settings_keeps_at_least_one_set() {
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::RemoveAgentSettingsSet { index: 0 },
-        None,
     );
     let view = agent_settings_view(&events);
     assert_eq!(agent_settings_set_agents(view), vec!["claude"]);
@@ -2316,7 +2296,6 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
             action: LaunchWizardAction::UseStartMethod {
                 method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
             },
-            bounds: None,
         },
     );
     resolve_launch_wizard_runtime_confirmation(
@@ -2328,7 +2307,6 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
-            bounds: None,
         },
     );
     assert!(
@@ -2342,7 +2320,6 @@ fn app_runtime_issue_monitor_launch_now_wires_launch_feedback_to_issue_row() {
         "client-1".to_string(),
         FrontendEvent::LaunchWizardAction {
             action: LaunchWizardAction::Submit,
-            bounds: Some(canvas_bounds()),
         },
     );
 
@@ -2396,27 +2373,27 @@ fn app_runtime_agent_window_initial_state_broadcast_includes_agent_id() {
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode).build();
 
     let events = runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect("spawn agent window");
 
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
-        .expect("initial WindowCanvasState broadcast");
+        .expect("initial WindowRegistry broadcast");
     let tab = workspace
         .tabs
         .iter()
         .find(|tab| tab.id == "tab-1")
-        .expect("tab in WindowCanvasState");
+        .expect("tab in WindowRegistry");
     let agent_window = tab
         .workspace
         .windows
         .iter()
         .find(|window| window.preset == WindowPreset::Agent)
-        .expect("agent window in WindowCanvasState");
+        .expect("agent window in WindowRegistry");
 
     assert_eq!(agent_window.title, "Claude Code");
     assert_eq!(agent_window.agent_id.as_deref(), Some("claude"));
@@ -2466,7 +2443,7 @@ fn app_state_view_projects_agent_window_worktree_form_without_guessing_restored_
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -2561,7 +2538,7 @@ fn app_runtime_agent_window_initial_title_uses_branch_issue_link_title() {
         .build();
 
     runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect("spawn agent window");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -2613,7 +2590,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         .build();
 
     runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect("spawn agent window");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -2662,7 +2639,7 @@ fn app_runtime_agent_window_initial_title_ignores_projection_owner_for_other_bra
         .build();
 
     runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect("spawn agent window");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -2702,7 +2679,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -2788,7 +2765,7 @@ fn app_runtime_board_milestone_updates_same_session_agent_window_detail_only() {
 }
 
 /// Phase U-5 (SPEC-2359 US-38, FR-125, FR-126): a Board post that updates
-/// an agent's current focus must broadcast both `WindowCanvasState` (so the
+/// an agent's current focus must broadcast both `WindowRegistry` (so the
 /// pane detail rehydrates on WS reconnect / GUI reload), then schedule
 /// `ActiveWorkProjection` (Active Work card) on the background path. Board
 /// `title_summary` is legacy history metadata; the live pane title comes
@@ -2814,7 +2791,7 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -2860,8 +2837,8 @@ fn app_runtime_board_milestone_broadcasts_workspace_state_for_focus_sync() {
     assert!(
             events
                 .iter()
-                .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
-            "expected WindowCanvasState broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
+                .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
+            "expected WindowRegistry broadcast from Board path so pane heading refreshes on reconnect: {events:?}"
         );
     assert!(events
         .iter()

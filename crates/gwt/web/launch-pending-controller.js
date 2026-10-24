@@ -269,7 +269,7 @@ export function continueWorkOutcomeNotice(event) {
  * Owns the public Continue work intent boundary.
  *
  * The browser is allowed to name only its idempotency key, the selected
- * opaque Work, and presentation bounds. Durable Session, conversation,
+ * opaque Work. Durable Session, conversation,
  * generation, binding, and Host authority are resolved by the backend.
  */
 export function createContinueWorkDispatcher({
@@ -281,9 +281,9 @@ export function createContinueWorkDispatcher({
     return `continue:${workId}`;
   }
 
-  function dispatch(rawWorkId, bounds) {
+  function dispatch(rawWorkId) {
     const workId = String(rawWorkId || "").trim();
-    if (!workId || !bounds || !launchPending || typeof send !== "function") {
+    if (!workId || !launchPending || typeof send !== "function") {
       return false;
     }
     const key = pendingKey(workId);
@@ -306,7 +306,6 @@ export function createContinueWorkDispatcher({
       kind: "continue_work",
       operation_id: operationId,
       work_id: workId,
-      bounds,
     });
     return true;
   }

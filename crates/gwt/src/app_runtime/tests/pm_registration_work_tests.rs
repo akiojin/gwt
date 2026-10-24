@@ -220,7 +220,7 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -272,7 +272,7 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -352,7 +352,7 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -906,7 +906,7 @@ fn restore_drain_with_no_restored_windows_finishes_inside_500ms() {
 
         let git_spawns = gwt_core::process::thread_git_spawn_count();
         let started = Instant::now();
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
         fastest = fastest.min(started.elapsed());
         assert_eq!(
             gwt_core::process::thread_git_spawn_count() - git_spawns,
@@ -2783,7 +2783,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             .tab_mut("tab-1")
             .unwrap()
             .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds());
+            .add_window(WindowPreset::Agent);
         runtime
             .tab_mut("tab-1")
             .unwrap()
@@ -2804,7 +2804,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         );
         runtime.register_window("tab-1", &placeholder.id);
 
-        runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        runtime.spawn_restored_agent_session("tab-1", source, None, origin);
         let assigned_name = runtime
             .tab("tab-1")
             .unwrap()
@@ -2927,7 +2927,6 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         "tab-1",
         session,
         None,
-        canvas_bounds(),
         super::super::startup::RestoreOrigin::Automatic,
     );
 

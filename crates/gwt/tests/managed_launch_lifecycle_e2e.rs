@@ -397,13 +397,18 @@ fn the_permission_gate_precedes_the_window_on_every_managed_launch_route() {
     let monitor_gate = wizard
         .find("permission_readiness::pre_launch_block")
         .expect("the Issue Monitor launch route must consult the permission gate");
-    let spawn = wizard
-        .find("spawn_agent_window_with_feedback_at_geometry")
-        .expect("the monitor route spawns its window here");
-    assert!(
-        monitor_gate < spawn,
-        "the monitor route must refuse before the agent window exists"
-    );
+    for wrapper in [
+        "spawn_agent_window_with_prepared_monitor_admission(",
+        "spawn_agent_window_with_feedback(",
+    ] {
+        let spawn = wizard
+            .find(wrapper)
+            .expect("the monitor route spawns its window here");
+        assert!(
+            monitor_gate < spawn,
+            "the monitor route must refuse before the agent window exists via {wrapper}"
+        );
+    }
 
     // AC-2's half of the same ordering: above the GitHub claim, not below it.
     let monitor = read_source(&root, "crates/gwt/src/issue_monitor.rs");

@@ -57,8 +57,8 @@ test("surface preset reopen focuses and reveals existing windows instead of crea
   );
   assert.match(
     focusBody,
-    /kind:\s*"create_window"[\s\S]*preset[\s\S]*bounds:\s*visibleBounds\(\)/,
-    "missing surface windows should still be created at the current viewport",
+    /kind:\s*"create_window"[\s\S]*preset,\s*\}/,
+    "missing surface windows are created without world coordinates",
   );
 });
 

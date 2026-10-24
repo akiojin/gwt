@@ -1,6 +1,6 @@
 // Issue #4538: the single HTML entrypoint for `/` and `/p/<repo-hash>`.
 // The route decides which application loads: the Hub picker never loads the
-// Project workspace (no tabs, no canvas), and a Project tab loads only it.
+// Project workspace (no project surfaces), and a Project tab loads only it.
 import { parseFrontendRoute, renderRouteNotFound } from "./frontend-route.js";
 import { mountHubApp } from "./hub-app.js";
 

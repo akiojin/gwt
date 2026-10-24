@@ -186,19 +186,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CycleFocus { direction, .. } => {
             FrontendUserActionLog::new("cycle_focus", "window").mode(format!("{direction:?}"))
         }
-        FrontendEvent::ArrangeWindows { mode, .. } => {
-            FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
-        }
-        FrontendEvent::DockWindowTab { id, target_id } => {
-            FrontendUserActionLog::new("dock_window_tab", "window")
-                .window(id)
-                .target(target_id)
-        }
         FrontendEvent::ActivateWindowTab { id } => {
             FrontendUserActionLog::new("activate_window_tab", "window").window(id)
-        }
-        FrontendEvent::DetachWindowTab { id, .. } => {
-            FrontendUserActionLog::new("detach_window_tab", "window").window(id)
         }
         FrontendEvent::PlaceAgentWindowInKanban {
             id,
@@ -747,7 +736,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("issue_monitor_configure_profile", "issue_monitor")
         }
         // SPEC-3431 FR-018: the PM launcher is a deliberate user action worth
-        // logging; its payload is only optional canvas bounds.
+        // logging; it carries no project credentials or conversation content.
         FrontendEvent::OpenPmAgent { .. } => FrontendUserActionLog::new("open_pm_agent", "pm"),
         // SPEC-3431 FR-026: PM settings changes are deliberate, low-frequency
         // user actions; the agent/model they select is not sensitive.
@@ -778,8 +767,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::StartupFirstFrame { .. }
         | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
-        | FrontendEvent::UpdateViewport { .. }
-        | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadPmReports { .. }

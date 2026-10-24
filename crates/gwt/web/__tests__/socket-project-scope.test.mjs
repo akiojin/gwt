@@ -31,7 +31,6 @@ function fixture({ routeProjectKey = null } = {}) {
     requestAnimationFrame(callback) { context.startupFrames.push(callback); return context.startupFrames.length; },
     cancelAnimationFrame() {},
     setTimeout(callback) { context.startupTimers.push(callback); return context.startupTimers.length; },
-    visibleBounds: () => ({ width: 800, height: 600 }),
     reconnectCallbacks: [], connectionStates: [],
     socketReceiveDispatcher: null, recoveryCenterController: null,
     closeResetCount: 0, attentionReportCount: 0,
@@ -123,17 +122,17 @@ test("offline input is discarded while queued control messages retain project sc
   select("0123456789abcdef");
   context.send({ kind: "terminal_input", id: "pane-a", data: "a" });
   context.send({ kind: "pane_send_input", session_id: "pane-a", text: "a" });
-  context.send({ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 });
   select("fedcba9876543210");
   context.send({ kind: "terminal_input", id: "pane-b", data: "b" });
-  context.send({ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } });
+  context.send({ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 });
   assert.equal(context.droppedInputs, 3, "every discarded input is surfaced immediately");
   assert.equal(sockets.length, 3);
   sockets[2].open();
-  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-b", geometry: { x: 10, y: 10, width: 800, height: 450 } }]);
+  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 }]);
   select("0123456789abcdef");
   sockets[3].open();
-  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_window_geometry", id: "pane-a", geometry: { x: 0, y: 0, width: 720, height: 420 } }]);
+  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 }]);
 });
 
 test("Hub socket refuses pane input before project scope is known", () => {
@@ -407,7 +406,6 @@ test("a queued startup notification ignores a route that became missing", () => 
       startupAutoResumeReadySent: false, routeProjectMissing: false, socketReceiveDispatcherGeneration: 1,
       setTimeout() {}, clearTimeout() {}, cancelAnimationFrame() {},
       requestAnimationFrame(callback) { queued.push(callback); },
-      visibleBounds() { assert.equal(context.routeProjectMissing, false); return { width: 800, height: 600 }; },
       send(message) { sent.push(message); },
     });
     vm.runInContext(functionSource('sendStartupAutoResumeReady'), context);

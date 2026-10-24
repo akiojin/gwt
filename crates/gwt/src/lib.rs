@@ -85,7 +85,7 @@ pub mod update_control;
 pub mod update_drain;
 pub mod update_settings;
 pub mod web_protocol_enums;
-pub mod window_canvas;
+pub mod window_registry;
 pub mod window_state;
 pub mod work_notes;
 pub(crate) mod workspace_update_receipt;
@@ -258,9 +258,9 @@ pub use persistence::{
     load_session_state, load_workspace_state, migrate_legacy_workspace_state,
     pause_process_windows_for_restore, project_title_from_path, save_session_state,
     save_workspace_state, save_workspace_state_durable, workspace_state_path, AgentKanbanLane,
-    CanvasViewport, PersistedSessionState, PersistedSessionTabState, PersistedWindowCanvasState,
-    PersistedWindowState, ProjectKind, RecentProjectEntry, WindowGeometry, WindowPlacement,
-    WindowProcessStatus, WindowState, WindowSurfaceOwner, WindowWorktreeForm,
+    PersistedSessionState, PersistedSessionTabState, PersistedWindowRegistry, PersistedWindowState,
+    ProjectKind, RecentProjectEntry, WindowPlacement, WindowProcessStatus, WindowState,
+    WindowSurfaceOwner, WindowWorktreeForm,
 };
 pub use preset::{
     detect_shell_program, resolve_launch_spec, LaunchSpec, PresetResolveError, ShellProgram,
@@ -268,12 +268,11 @@ pub use preset::{
 };
 pub use protocol::{
     ActiveWorkAgentView, ActiveWorkCleanupCandidateView, ActiveWorkItemView,
-    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, ArrangeMode,
-    AttachmentProgressPhase, BackendEvent, BranchEntriesPhase, ContentLimits,
-    ContinueWorkOutcomeKind, CustomAgentErrorCode, FileAttachment, FocusCycleDirection,
-    FrontendEvent, GitHubRepositorySearchResultView, HubProjectView, HubStateView,
-    IndexSearchMatchMode, IndexSearchResult, IndexSearchScope, IndexSearchTarget,
-    LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
+    ActiveWorkProjectionView, ActiveWorkspaceWorkView, AppStateView, AttachmentProgressPhase,
+    BackendEvent, BranchEntriesPhase, ContentLimits, ContinueWorkOutcomeKind, CustomAgentErrorCode,
+    FileAttachment, FocusCycleDirection, FrontendEvent, GitHubRepositorySearchResultView,
+    HubProjectView, HubStateView, IndexSearchMatchMode, IndexSearchResult, IndexSearchScope,
+    IndexSearchTarget, LogScopeSelection, ManagedHookHealthView, ManagedHookPendingDiscussionView,
     ManagedHookPendingGoalView, ManagedHookSlowHandlerView, PmAgentOption, ProfileEntryView,
     ProfileEnvEntryView, ProfileSnapshotView, ProjectTabView, RecentProjectView,
     RecoveryCenterItemState, RecoveryCenterItemView, RecoveryCenterLoadStatus, RunningAgentSummary,
@@ -283,4 +282,4 @@ pub use protocol::{
     WorkspaceJournalEntryView, WorkspaceResumeSource, WorkspaceStateNoticeKind,
     WorkspaceStateNoticeView, WorkspaceView,
 };
-pub use window_canvas::WindowCanvasState;
+pub use window_registry::WindowRegistry;

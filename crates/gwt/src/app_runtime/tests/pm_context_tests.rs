@@ -233,10 +233,7 @@ fn explicit_pm_actions_start_the_pm_even_when_auto_start_is_opted_out() {
     );
 
     // The launcher click does not.
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::OpenPmAgent { bounds: None },
-    );
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenPmAgent {});
 
     drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
@@ -845,7 +842,7 @@ fn pm_bootstrap_ensures_pm_for_open_git_tabs() {
         .is_empty());
     assert_eq!(runtime.pending_startup_pm_tabs, vec!["tab-1".to_string()]);
 
-    runtime.startup_auto_resume_ready_events(canvas_bounds());
+    runtime.startup_auto_resume_ready_events();
 
     let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 
@@ -888,7 +885,7 @@ fn pm_bootstrap_respects_opt_out() {
     disable_pm_auto_start(&repo);
 
     runtime.bootstrap();
-    runtime.startup_auto_resume_ready_events(canvas_bounds());
+    runtime.startup_auto_resume_ready_events();
 
     assert!(runtime
         .tab("tab-1")
@@ -1626,7 +1623,7 @@ fn workspace_view_marks_only_the_registered_pm_window() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1824,7 +1821,7 @@ fn workspace_view_carries_the_runtime_start_time_for_live_agent_windows() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1908,12 +1905,7 @@ fn open_pm_agent_event_routes_to_the_active_tab_ensure() {
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.handle_frontend_event(
-        "client-1".to_string(),
-        FrontendEvent::OpenPmAgent {
-            bounds: Some(canvas_bounds()),
-        },
-    );
+    runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::OpenPmAgent {});
 
     let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
 

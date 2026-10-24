@@ -831,6 +831,46 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Knowledge search completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const searches = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_search_results'));
+  const local = text => searches(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => searches(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Existing directive validation, window lookup and injected search sends
+  // are unresolved data calls; retain their exact base fingerprints.
+  const dataCalls = [
+    '0a22d6c58763360e17b5f67308c83a29a1872c995ba84906a5bd93fa3dc8147c',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '4641b75eb58eadb1809225500910f9e1dffc0deb7bf23ef7a60db35583e00869',
+    '4f169a3e6d482e1b3be66cb97e3fbe4a83372a8c57a214f23589a97e0a9e9e10',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+  ].sort();
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
+      && !finding.path.includes('>renderKnowledgeBridge')));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  const bypass = source.replace('case "knowledge_search_results": {',
+    'case "knowledge_search_results": { renderKnowledgeBridge(event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeBridge')));
+  // app groups this event with three other receivers; test both its label
+  // and the common group tail so a later direct write cannot evade the guard.
+  for (const label of ['knowledge_search_results', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Knowledge phase completions commit shared state and reject direct rendering", () => {
   const file = 'crates/gwt/web/knowledge-kanban-surface.js';
   const appFile = 'crates/gwt/web/app.js';

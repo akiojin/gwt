@@ -850,7 +850,7 @@ fn app_runtime_agent_window_initial_title_uses_linked_issue_title() {
         .build();
 
     runtime
-        .spawn_agent_window("tab-1", config, canvas_bounds(), None)
+        .spawn_agent_window("tab-1", config, None)
         .expect("spawn agent window");
 
     let tab = runtime.tab("tab-1").expect("tab");
@@ -1237,7 +1237,7 @@ fn app_runtime_lifecycle_ack_never_replays_local_writer() {
 
     assert!(launched
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(
         !runtime.window_lookup.contains_key("tab-1::stale-agent"),
         "ACK closes the stale failed window captured before daemon commit"
@@ -1541,7 +1541,6 @@ fn app_runtime_agent_failed_ack_closes_default_mode_monitor_bootstrap_error_wind
         let result = retained.runtime.spawn_agent_window_with_feedback(
             "tab-1",
             config.clone(),
-            canvas_bounds(),
             None,
             feedback.clone(),
         );

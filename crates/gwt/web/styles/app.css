@@ -31,7 +31,7 @@
 }
 
 /* SPEC-2356 — base layout. The Operator chrome (Project Bar / Sidebar
-   Layers / Canvas / Status Strip) is laid out via #app's grid declared
+   Rail / Surfaces / Status Strip) is laid out via #app's grid declared
    in components.css, so `.project-shell` becomes a passthrough via
    `display: contents` and individual surfaces inherit the grid areas.
    Body colours come from tokens.css; do not hard-code them here. */
@@ -2703,8 +2703,8 @@ body {
 }
 
 /* SPEC #3885 T-005 (FR-003a / FR-012): after Windowize the status row slot
- * shows a "Shown on canvas" face with no second input face. */
-.issue-agent-status.is-on-canvas {
+ * shows a "Shown in Agents" face with no second input face. */
+.issue-agent-status.is-in-agents {
   grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
 }
 

@@ -23,7 +23,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22t%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function entry(number, monitorState, extra = {}) {
@@ -78,7 +78,6 @@ async function makeFixture(options = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     reportSurfaceError: (error) => reported.push(error),
     resolveSurfaceError: (key) => resolved.push(key),
@@ -360,7 +359,7 @@ test("AC-25: issueDetailActionModel gives each state its FR-023 action set", asy
   const liveWindow = { id: "agent-1", status: "running", placement: { kind: "canvas" } };
   const running = issueDetailActionModel({
     entry: entry(2, "launched"),
-    canvasWindow: liveWindow,
+    surfaceWindow: liveWindow,
   });
   assert.equal(running.phase, "running");
   assert.deepEqual(running.actions, ["open-window"]);

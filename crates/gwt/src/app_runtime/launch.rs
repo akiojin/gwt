@@ -63,10 +63,10 @@ use super::continuation::{
 use super::{
     active_agent_session_matches_work, agent_launch_purpose_title,
     apply_windows_host_shell_wrapper, combined_window_id, detect_shell_program,
-    finalize_docker_agent_launch_config_with_binding, geometry_to_pty_size,
-    install_launch_gwt_bin_env, intake_hook_config_is_disposable, is_ephemeral_worktree_path,
-    launch_output_mirror, mark_auto_resume_source_completed, next_window_runtime_incarnation,
-    normalize_branch_name, prepare_docker_runtime_for_launch,
+    finalize_docker_agent_launch_config_with_binding, install_launch_gwt_bin_env,
+    intake_hook_config_is_disposable, is_ephemeral_worktree_path, launch_output_mirror,
+    mark_auto_resume_source_completed, next_window_runtime_incarnation, normalize_branch_name,
+    prepare_docker_runtime_for_launch,
     refresh_managed_gwt_assets_for_agent_with_codex_hook_discovery_mode,
     register_codex_managed_hook_trust_in_docker, register_codex_managed_project_trust_in_docker,
     resolve_docker_agent_program_with_binding, resolve_launch_spec_with_fallback,
@@ -74,8 +74,8 @@ use super::{
     save_start_work_workspace_projection, ActiveAgentSession, AgentCapabilityIssuer,
     AgentKanbanLaunchTarget, AppEventProxy, AppRuntime, BlockingTaskSpawner, DockerLaunchBinding,
     IssueMonitorLaunchDeliveryState, LaunchFeedbackContext, LiveSessionEntry, OutboundEvent, Pane,
-    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowGeometry, WindowPreset,
-    WindowProcessStatus, WindowRuntime, WorkspaceResumeContext,
+    PendingContinueWork, PendingFreshExecutionLaunch, UserEvent, WindowPreset, WindowProcessStatus,
+    WindowRuntime, WorkspaceResumeContext,
 };
 
 #[cfg(test)]
@@ -1744,7 +1744,7 @@ struct LaunchCompletionInput {
     generation: u64,
     tab_id: String,
     project_root: PathBuf,
-    geometry: Option<WindowGeometry>,
+    had_window: bool,
     sessions_dir: PathBuf,
     session_cache: LaunchWizardMemoryCache,
     issue_link_cache_dir: PathBuf,
@@ -2278,7 +2278,7 @@ fn prepare_agent_launch_inner(
         runtime_target,
         tab_id: input.tab_id.clone(),
     };
-    let geometry = input.geometry.as_ref().ok_or_else(|| {
+    input.had_window.then_some(()).ok_or_else(|| {
         let Some(genesis) = genesis.as_ref() else {
             return "Window not found".to_string();
         };
@@ -2372,7 +2372,8 @@ fn prepare_agent_launch_inner(
         "spawn_pty",
         &launch_argv_summary(&process_launch.args),
     );
-    let (cols, rows) = geometry_to_pty_size(geometry);
+    // Bootstrap a standard grid; the mounted terminal sends UpdateTerminalGrid.
+    let (cols, rows) = (80, 24);
     let initial_prompt_file = process_launch.initial_prompt_file;
     let spawn_config = gwt_terminal::pty::SpawnConfig {
         command: process_launch.command,
@@ -2823,20 +2824,6 @@ fn initial_agent_window_status(_config: &gwt_agent::LaunchConfig) -> WindowProce
     WindowProcessStatus::Running
 }
 
-#[derive(Debug, Clone)]
-enum AgentWindowPlacement {
-    Centered(WindowGeometry),
-    Exact(WindowGeometry),
-}
-
-impl AgentWindowPlacement {
-    fn bounds(&self) -> WindowGeometry {
-        match self {
-            Self::Centered(bounds) | Self::Exact(bounds) => bounds.clone(),
-        }
-    }
-}
-
 /// Disk and process inputs captured before the GUI accepts a Monitor launch.
 #[derive(Debug, Clone)]
 pub(super) struct IssueMonitorSpawnAdmissionInput {
@@ -2869,17 +2856,129 @@ enum IssueMonitorAdmissionFileVersion {
     /// content, because the daemon rewrites observation-only keys every few
     /// seconds on every host project.
     IssueMonitorPrefs(Option<super::IssueMonitorPrefsStamp>),
+    /// Issue #6096: the safety projection of a prefs file. Another host
+    /// project's prefs only feed the host-wide update drain hold, so its scans,
+    /// claims and launches must not invalidate this admission. The target
+    /// project's projection adds the launched Issue's PR hold, so both stay
+    /// strict fences after a decision re-evaluation stops fencing the rest.
+    PrefsFence {
+        issue_number: Option<u64>,
+        digest: Option<[u8; 32]>,
+    },
+    /// Issue #6096: cached Issue evidence. A cache sync rewrites every entry
+    /// with a fresh `generation` token; only the evidence content fences.
+    IssueCache(Option<[u8; 32]>),
+}
+
+/// How a dependency fences a prepared admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueMonitorAdmissionDependencyRole {
+    /// Any change refuses the admission and needs a fresh preparation.
+    Strict,
+    /// The target project's prefs: a change asks the worker to re-evaluate
+    /// the admission decision instead of restarting the whole launch.
+    TargetPrefs,
+    /// The shared machine capacity sample, rewritten every few seconds.
+    /// A change is compared by the slot limit it grants, not its bytes.
+    Capacity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
+    role: IssueMonitorAdmissionDependencyRole,
     version: IssueMonitorAdmissionFileVersion,
 }
 
+fn issue_monitor_prefs_fence_digest(
+    path: &Path,
+    issue_number: Option<u64>,
+) -> std::io::Result<Option<[u8; 32]>> {
+    use sha2::{Digest as _, Sha256};
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut hasher = Sha256::new();
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(map)) => {
+            hasher.update(b"drain:");
+            hasher.update(
+                serde_json::to_vec(map.get("update_drain").unwrap_or(&serde_json::Value::Null))
+                    .unwrap_or_default(),
+            );
+            if let Some(issue_number) = issue_number {
+                let hold = map
+                    .get("open_pr_observations")
+                    .and_then(|observations| observations.get(issue_number.to_string()))
+                    .and_then(|observation| observation.get("hold"))
+                    .unwrap_or(&serde_json::Value::Null);
+                hasher.update(b"hold:");
+                hasher.update(serde_json::to_vec(hold).unwrap_or_default());
+            }
+        }
+        // Unparsable bytes fail closed: any byte change invalidates.
+        _ => {
+            hasher.update(b"raw:");
+            hasher.update(&bytes);
+        }
+    }
+    Ok(Some(hasher.finalize().into()))
+}
+
+fn issue_cache_evidence_digest(path: &Path) -> std::io::Result<Option<[u8; 32]>> {
+    use sha2::{Digest as _, Sha256};
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut hasher = Sha256::new();
+    let meta = path.file_name().is_some_and(|name| name == "meta.json");
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(mut map)) if meta => {
+            map.remove("generation");
+            hasher.update(b"meta:");
+            hasher.update(serde_json::to_vec(&serde_json::Value::Object(map)).unwrap_or_default());
+        }
+        _ => {
+            hasher.update(b"raw:");
+            hasher.update(&bytes);
+        }
+    }
+    Ok(Some(hasher.finalize().into()))
+}
+
 impl IssueMonitorAdmissionFileStamp {
-    fn read(path: &Path) -> std::io::Result<Self> {
-        let version = if is_issue_monitor_prefs_path(path) {
+    fn read_issue_cache(path: &Path) -> std::io::Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            role: IssueMonitorAdmissionDependencyRole::Strict,
+            version: IssueMonitorAdmissionFileVersion::IssueCache(issue_cache_evidence_digest(
+                path,
+            )?),
+        })
+    }
+
+    fn read_prefs_fence(path: &Path, issue_number: Option<u64>) -> std::io::Result<Self> {
+        Ok(Self {
+            path: path.to_path_buf(),
+            role: IssueMonitorAdmissionDependencyRole::Strict,
+            version: IssueMonitorAdmissionFileVersion::PrefsFence {
+                issue_number,
+                digest: issue_monitor_prefs_fence_digest(path, issue_number)?,
+            },
+        })
+    }
+
+    fn read_with_role(
+        path: &Path,
+        role: IssueMonitorAdmissionDependencyRole,
+    ) -> std::io::Result<Self> {
+        let version = if is_issue_monitor_prefs_path(path)
+            && role == IssueMonitorAdmissionDependencyRole::TargetPrefs
+        {
             IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(
                 super::IssueMonitorPrefsStamp::read(path)?,
             )
@@ -2892,6 +2991,7 @@ impl IssueMonitorAdmissionFileStamp {
         };
         Ok(Self {
             path: path.to_path_buf(),
+            role,
             version,
         })
     }
@@ -2901,9 +3001,48 @@ impl IssueMonitorAdmissionFileStamp {
             IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(expected) => {
                 super::IssueMonitorPrefsStamp::matches_current(expected.as_ref(), &self.path)
             }
-            IssueMonitorAdmissionFileVersion::Metadata(_) => {
-                Self::read(&self.path).is_ok_and(|current| current == *self)
+            IssueMonitorAdmissionFileVersion::PrefsFence {
+                issue_number,
+                digest,
+            } => issue_monitor_prefs_fence_digest(&self.path, *issue_number)
+                .is_ok_and(|current| current == *digest),
+            IssueMonitorAdmissionFileVersion::IssueCache(expected) => {
+                issue_cache_evidence_digest(&self.path).is_ok_and(|current| current == *expected)
             }
+            IssueMonitorAdmissionFileVersion::Metadata(_) => {
+                Self::read_with_role(&self.path, self.role).is_ok_and(|current| current == *self)
+            }
+        }
+    }
+}
+
+/// Issue #6096: the outcome the GUI spawn admission derives from a prepared
+/// Monitor state. A re-evaluation that reaches the same outcome keeps the
+/// prepared launch, however often unrelated prefs records were rewritten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IssueMonitorSpawnAdmissionDecision {
+    update_drain: bool,
+    source_exclusion: Option<String>,
+    dependency_exclusion: Option<String>,
+    wait_in_force: bool,
+    monitor_pane: bool,
+    implementation_capacity: bool,
+    review_capacity: bool,
+}
+
+impl IssueMonitorSpawnAdmissionDecision {
+    fn evaluate(monitor: &gwt::IssueMonitorState, issue_number: u64) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            update_drain: monitor.update_drain().is_some(),
+            source_exclusion: monitor.launch_source_exclusion(issue_number),
+            dependency_exclusion: monitor.launch_dependency_exclusion(issue_number),
+            wait_in_force: monitor
+                .autonomous_wait(issue_number)
+                .is_some_and(|wait| gwt::issue_monitor::wait_declaration_in_force(wait, &now)),
+            monitor_pane: monitor.has_monitor_pane_for_issue(issue_number),
+            implementation_capacity: monitor.has_capacity_for_monitor_spawn(issue_number, false),
+            review_capacity: monitor.has_capacity_for_monitor_spawn(issue_number, true),
         }
     }
 }
@@ -2930,30 +3069,58 @@ pub(super) struct PreparedIssueMonitorSpawnAdmission {
     host_project_roots: std::collections::BTreeSet<PathBuf>,
     dependencies: Vec<IssueMonitorAdmissionFileStamp>,
     capacity_expires_at: Option<u64>,
+    /// Slot limit granted by the capacity sample this admission evaluated.
+    capacity_limit: usize,
+    decision: IssueMonitorSpawnAdmissionDecision,
+    /// Issue #6096: set once the worker re-evaluated this admission and
+    /// reached the original decision. The target prefs then stop fencing it:
+    /// a busy project rewrites them faster than any host can re-evaluate.
+    decision_revalidated: bool,
 }
 
 impl PreparedIssueMonitorSpawnAdmission {
-    pub(super) fn can_refresh_capacity(&self, host_project_roots: &[PathBuf]) -> bool {
-        let capacity_path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+    fn dependencies_with_role(
+        &self,
+        role: IssueMonitorAdmissionDependencyRole,
+    ) -> impl Iterator<Item = &IssueMonitorAdmissionFileStamp> {
+        self.dependencies
+            .iter()
+            .filter(move |dependency| dependency.role == role)
+    }
+
+    /// True while a worker re-evaluation can keep this launch: the host set and
+    /// every strict source (update manifest/payload, machine policy, other
+    /// projects' update drains, Issue cache evidence) are unchanged. Target
+    /// prefs and capacity churn are decided by the re-evaluation itself.
+    pub(super) fn can_revalidate(&self, host_project_roots: &[PathBuf]) -> bool {
         self.host_project_roots == host_project_roots.iter().cloned().collect()
             && self
-                .dependencies
-                .iter()
-                .filter(|expected| expected.path != capacity_path)
+                .dependencies_with_role(IssueMonitorAdmissionDependencyRole::Strict)
                 .all(IssueMonitorAdmissionFileStamp::is_current)
+    }
+
+    /// Issue #6096: a capacity resample keeps the admission while the slot
+    /// limit it grants is not lower. Only an unchanged, unexpired sample is
+    /// trusted without re-deriving that limit.
+    fn capacity_admits(&self) -> bool {
+        let sample_current = self.capacity_expires_at.is_none_or(|expires| {
+            chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
+        }) && self
+            .dependencies_with_role(IssueMonitorAdmissionDependencyRole::Capacity)
+            .all(IssueMonitorAdmissionFileStamp::is_current);
+        sample_current
+            || self.monitor.project_capacity_limit_now(&self.project_root) >= self.capacity_limit
     }
 
     /// Metadata checks preserve worker admission when another project or the
     /// shared machine observation changes before the GUI creates its pane.
     pub(super) fn is_current(&self, host_project_roots: &[PathBuf]) -> bool {
-        self.host_project_roots == host_project_roots.iter().cloned().collect()
-            && self.capacity_expires_at.is_none_or(|expires| {
-                chrono::Utc::now().timestamp() < i64::try_from(expires).unwrap_or(i64::MAX)
-            })
-            && self
-                .dependencies
-                .iter()
-                .all(IssueMonitorAdmissionFileStamp::is_current)
+        self.can_revalidate(host_project_roots)
+            && (self.decision_revalidated
+                || self
+                    .dependencies_with_role(IssueMonitorAdmissionDependencyRole::TargetPrefs)
+                    .all(IssueMonitorAdmissionFileStamp::is_current))
+            && self.capacity_admits()
     }
 }
 
@@ -2966,11 +3133,16 @@ impl IssueMonitorSpawnAdmissionInput {
         &self,
         previous: &PreparedIssueMonitorSpawnAdmission,
     ) -> Result<PreparedIssueMonitorSpawnAdmission, String> {
-        let refreshed = self.prepare_with_identity(Some(previous))?;
+        let mut refreshed = self.prepare_with_identity(Some(previous))?;
         // Keep the original source/policy fence across the queued refresh too.
-        if !previous.can_refresh_capacity(&self.host_project_roots) {
+        // Issue #6096: the target prefs and capacity sample may have moved
+        // while this ran; the launch survives only if the decision did not.
+        if !previous.can_revalidate(&self.host_project_roots)
+            || refreshed.decision != previous.decision
+        {
             return Err(ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
         }
+        refreshed.decision_revalidated = true;
         Ok(refreshed)
     }
 
@@ -3000,9 +3172,36 @@ impl IssueMonitorSpawnAdmissionInput {
             };
             paths.insert(payload_path);
         }
+        let target_prefs = gwt::issue_monitor_prefs_path_for_repo_path(&self.project_root);
+        let capacity_path = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
         let mut dependencies = paths
             .iter()
-            .map(|path| IssueMonitorAdmissionFileStamp::read(path))
+            .flat_map(|path| {
+                if *path == target_prefs {
+                    vec![
+                        IssueMonitorAdmissionFileStamp::read_with_role(
+                            path,
+                            IssueMonitorAdmissionDependencyRole::TargetPrefs,
+                        ),
+                        IssueMonitorAdmissionFileStamp::read_prefs_fence(
+                            path,
+                            Some(self.issue_number),
+                        ),
+                    ]
+                } else if is_issue_monitor_prefs_path(path) {
+                    vec![IssueMonitorAdmissionFileStamp::read_prefs_fence(path, None)]
+                } else if *path == capacity_path {
+                    vec![IssueMonitorAdmissionFileStamp::read_with_role(
+                        path,
+                        IssueMonitorAdmissionDependencyRole::Capacity,
+                    )]
+                } else {
+                    vec![IssueMonitorAdmissionFileStamp::read_with_role(
+                        path,
+                        IssueMonitorAdmissionDependencyRole::Strict,
+                    )]
+                }
+            })
             .collect::<std::io::Result<Vec<_>>>()
             .map_err(|error| format!("Cannot inspect Monitor spawn admission: {error}"))?;
         tracing::info!(
@@ -3042,6 +3241,8 @@ impl IssueMonitorSpawnAdmissionInput {
             .agent_status_at(&chrono::Utc::now().to_rfc3339())
             .agent_capacity;
         let capacity_expires_at = capacity.is_fresh().then_some(capacity.expires_at).flatten();
+        let capacity_limit = monitor.effective_max_active_agents();
+        let decision = IssueMonitorSpawnAdmissionDecision::evaluate(&monitor, self.issue_number);
         let (purpose_title, reserved_agent_name) = if let Some(previous) = previous {
             (
                 previous.purpose_title.clone(),
@@ -3096,6 +3297,9 @@ impl IssueMonitorSpawnAdmissionInput {
             host_project_roots: self.host_project_roots.iter().cloned().collect(),
             dependencies,
             capacity_expires_at,
+            capacity_limit,
+            decision,
+            decision_revalidated: false,
         })
     }
 }
@@ -3117,9 +3321,11 @@ fn prepare_issue_monitor_spawn_capacity(
             |number| {
                 let source = cache_root.join(number.to_string());
                 for path in [source.join("meta.json"), source.join("body.md")] {
-                    dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
-                        |error| format!("Cannot inspect Monitor spawn admission: {error}"),
-                    )?);
+                    dependencies.push(
+                        IssueMonitorAdmissionFileStamp::read_issue_cache(&path).map_err(
+                            |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                        )?,
+                    );
                 }
                 // Cache::load_entry hydrates only metadata-declared comments.
                 // Stamp missing declarations too: their later arrival changes
@@ -3130,9 +3336,11 @@ fn prepare_issue_monitor_spawn_capacity(
                 {
                     for id in meta.comment_ids {
                         let path = source.join("comments").join(format!("{id}.md"));
-                        dependencies.push(IssueMonitorAdmissionFileStamp::read(&path).map_err(
-                            |error| format!("Cannot inspect Monitor spawn admission: {error}"),
-                        )?);
+                        dependencies.push(
+                            IssueMonitorAdmissionFileStamp::read_issue_cache(&path).map_err(
+                                |error| format!("Cannot inspect Monitor spawn admission: {error}"),
+                            )?,
+                        );
                     }
                 }
                 Ok(())
@@ -3187,7 +3395,6 @@ fn prepare_host_update_drain_launch_hold(
 #[derive(Debug, Clone)]
 struct AgentWindowSpawnOptions {
     inherited_agent_name: Option<String>,
-    placement: AgentWindowPlacement,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
     agent_kanban_target: Option<AgentKanbanLaunchTarget>,
@@ -4651,7 +4858,7 @@ impl AppRuntime {
             self.tab(&address.tab_id)
                 .and_then(|tab| tab.workspace.window(&address.raw_id))
         });
-        let geometry = window.map(|window| window.geometry.clone());
+        let had_window = window.is_some();
         let prior_session_id = window.and_then(|window| window.session_id.clone());
         let generation = next_window_runtime_incarnation();
         let current = Arc::new(AtomicBool::new(true));
@@ -4666,7 +4873,7 @@ impl AppRuntime {
                     .get(&window_id)
                     .map(|runtime| runtime.incarnation),
                 prior_session_id,
-                had_window: geometry.is_some(),
+                had_window,
                 started_at: self
                     .inflight_launches
                     .values()
@@ -4719,7 +4926,7 @@ impl AppRuntime {
             generation,
             tab_id: address.map(|address| address.tab_id).unwrap_or_default(),
             project_root,
-            geometry,
+            had_window,
             sessions_dir: self.sessions_dir.clone(),
             session_cache: self.launch_wizard_cache.clone(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
@@ -5227,14 +5434,13 @@ impl AppRuntime {
                         None,
                     );
                 };
-                let Some(window) = tab.workspace.window(&address.raw_id) else {
+                let Some(_window) = tab.workspace.window(&address.raw_id) else {
                     return self.launch_error_events(
                         window_id,
                         "Window not found".to_string(),
                         None,
                     );
                 };
-                let geometry = window.geometry.clone();
 
                 // SPEC-2809 (revised) — second Launch Wizard exit path
                 // emits the same launch banner sequence as the primary
@@ -5254,7 +5460,6 @@ impl AppRuntime {
                 );
                 match self.spawn_process_window_with_console_kind(
                     &window_id,
-                    geometry,
                     process_launch,
                     Some(gwt_core::process_console::ProcessKind::AgentBootstrap),
                 ) {
@@ -5329,7 +5534,6 @@ impl AppRuntime {
         tab_id: &str,
         raw_id: &str,
         preset: WindowPreset,
-        geometry: WindowGeometry,
     ) -> Vec<OutboundEvent> {
         self.register_window(tab_id, raw_id);
         let window_id = combined_window_id(tab_id, raw_id);
@@ -5511,7 +5715,6 @@ impl AppRuntime {
         }
         match self.spawn_process_window_with_console_kind(
             &window_id,
-            geometry,
             ProcessLaunch {
                 initial_prompt_file: None,
                 command: launch.command,
@@ -5550,11 +5753,11 @@ impl AppRuntime {
     pub(crate) fn spawn_process_window_with_console_kind(
         &mut self,
         id: &str,
-        geometry: WindowGeometry,
         launch: ProcessLaunch,
         console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> Result<(), String> {
-        let (cols, rows) = geometry_to_pty_size(&geometry);
+        // Bootstrap a standard grid; xterm fit owns subsequent resizing.
+        let (cols, rows) = (80, 24);
         let resource_policy = launch.resource_policy;
         let spawn_config = gwt_terminal::pty::SpawnConfig {
             command: launch.command,
@@ -5711,15 +5914,13 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5733,39 +5934,14 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: LaunchFeedbackContext,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
-                workspace_resume_context,
-                launch_feedback_context: Some(launch_feedback_context),
-                agent_kanban_target: None,
-                continuation: None,
-                prepared_monitor_admission: None,
-            },
-        )
-    }
-
-    pub(crate) fn spawn_agent_window_with_feedback_at_geometry(
-        &mut self,
-        tab_id: &str,
-        config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
-        workspace_resume_context: Option<WorkspaceResumeContext>,
-        launch_feedback_context: LaunchFeedbackContext,
-    ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
-            tab_id,
-            config,
-            AgentWindowSpawnOptions {
-                inherited_agent_name: None,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
@@ -5776,21 +5952,19 @@ impl AppRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+    pub(super) fn spawn_agent_window_with_prepared_monitor_admission(
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: LaunchFeedbackContext,
         prepared: PreparedIssueMonitorSpawnAdmission,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
                 agent_kanban_target: None,
@@ -5804,17 +5978,15 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         launch_feedback_context: Option<LaunchFeedbackContext>,
         target: AgentKanbanLaunchTarget,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context,
                 launch_feedback_context,
                 agent_kanban_target: Some(target),
@@ -5824,20 +5996,18 @@ impl AppRuntime {
         )
     }
 
-    pub(crate) fn spawn_agent_window_at_geometry(
+    pub(crate) fn spawn_agent_window_with_identity(
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        geometry: WindowGeometry,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         inherited_agent_name: Option<String>,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name,
-                placement: AgentWindowPlacement::Exact(geometry),
                 workspace_resume_context,
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5851,16 +6021,14 @@ impl AppRuntime {
         &mut self,
         tab_id: &str,
         config: gwt_agent::LaunchConfig,
-        bounds: WindowGeometry,
         workspace_resume_context: WorkspaceResumeContext,
         continuation: PendingContinueWork,
     ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_placement(
+        self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
                 inherited_agent_name: None,
-                placement: AgentWindowPlacement::Centered(bounds),
                 workspace_resume_context: Some(workspace_resume_context),
                 launch_feedback_context: None,
                 agent_kanban_target: None,
@@ -5905,9 +6073,8 @@ impl AppRuntime {
     pub(crate) fn focus_existing_live_work_agent_events(
         &mut self,
         window_id: &str,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let events = self.focus_window_events(window_id, bounds);
+        let events = self.focus_window_events(window_id);
         if events.is_empty() {
             self.window_lookup
                 .get(window_id)
@@ -5951,7 +6118,7 @@ impl AppRuntime {
         }
     }
 
-    fn spawn_agent_window_with_placement(
+    fn spawn_agent_window_with_options(
         &mut self,
         tab_id: &str,
         mut config: gwt_agent::LaunchConfig,
@@ -5967,7 +6134,6 @@ impl AppRuntime {
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
             inherited_agent_name,
-            placement,
             workspace_resume_context,
             launch_feedback_context,
             agent_kanban_target,
@@ -6028,8 +6194,7 @@ impl AppRuntime {
                             .then(|| window_id.clone())
                     })
             {
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+                return Ok(self.focus_existing_live_work_agent_events(&window_id));
             }
         }
         if continuation.is_none() && !issue_monitor_launch {
@@ -6038,8 +6203,7 @@ impl AppRuntime {
                 config.branch.as_deref(),
                 config.working_dir.as_deref(),
             ) {
-                return Ok(self
-                    .focus_existing_live_work_agent_events(&window_id, Some(placement.bounds())));
+                return Ok(self.focus_existing_live_work_agent_events(&window_id));
             }
         }
         // SPEC-2359 W-17 (FR-398, Issue #3034): the live-window check above
@@ -6061,10 +6225,7 @@ impl AppRuntime {
             if let Some(key) = inflight_key.as_deref() {
                 if let Some((window_id, _)) = self.inflight_launches.get(key) {
                     let window_id = window_id.clone();
-                    return Ok(self.focus_existing_live_work_agent_events(
-                        &window_id,
-                        Some(placement.bounds()),
-                    ));
+                    return Ok(self.focus_existing_live_work_agent_events(&window_id));
                 }
             }
         }
@@ -6118,7 +6279,7 @@ impl AppRuntime {
                 return Err(format!("Issue Monitor pending execution cleanup must finish before launching Issue #{issue_number} again"));
             }
             // Delivery admission may predate a cap change or the last census.
-            // Check the current canvas before creating any Monitor pane.
+            // Check the current window catalog before creating any Monitor pane.
             let (mut monitor, host_started_at) = match prepared_monitor_admission.take() {
                 Some(prepared) => {
                     if prepared.project_root != project_root_path
@@ -6268,15 +6429,9 @@ impl AppRuntime {
         let tab = self
             .tab_mut(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
-        let window = match placement {
-            AgentWindowPlacement::Centered(bounds) => {
-                tab.workspace
-                    .add_window_with_title(WindowPreset::Agent, title, true, bounds)
-            }
-            AgentWindowPlacement::Exact(geometry) => tab
-                .workspace
-                .add_window_at_geometry_with_title(WindowPreset::Agent, title, true, geometry),
-        };
+        let window = tab
+            .workspace
+            .add_window_with_title(WindowPreset::Agent, title, true);
         if let Some(name) = agent_name {
             tab.workspace.set_agent_name(&window.id, Some(name));
         }
@@ -6302,9 +6457,8 @@ impl AppRuntime {
             );
         } else if let Some(issue_number) = issue_monitor_issue_number {
             // SPEC-3671 FR-002: an Issue Monitor launch is mirrored inside the Issue
-            // window instead of opening a canvas window. FR-003 keeps every manual
-            // launch (Start Work / Launch Agent) on the canvas, and a tab with no
-            // Issue window keeps the canvas fallback so the agent is never invisible.
+            // window while retaining the same Agent pane. Manual launches and tabs
+            // without an Issue host expose their pane on the Agents surface.
             if let Some(issue_window_id) = tab.workspace.issue_preview_host_window_id() {
                 let _ = tab.workspace.place_agent_window_in_issue_preview(
                     &window.id,

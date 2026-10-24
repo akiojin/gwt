@@ -11,7 +11,7 @@
 // - branchCleanupModal / branchCleanupDialog: modal chrome elements owned
 //   by app.js (its Esc handler and backdrop click also reference them).
 // - launchPending: shared Resume/Launch pending controller instance.
-// - visibleBounds(): canvas bounds payload helper.
+
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
 // - renderWorkspaceWindows(): late-bound Workspace Overview re-render.
@@ -31,7 +31,6 @@ export function createBranchesCleanupSurface({
   branchCleanupModal,
   branchCleanupDialog,
   launchPending,
-  visibleBounds,
   getActiveWorkProjection,
   renderWorkspaceWindows,
 }) {
@@ -290,7 +289,6 @@ export function createBranchesCleanupSurface({
             kind: "resume_branch_latest_agent",
             id: windowId,
             branch_name: branchName,
-            bounds: visibleBounds(),
           });
         };
         resumeButton.addEventListener("click", (event) => {

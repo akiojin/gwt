@@ -1719,9 +1719,8 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
         "expected a named one-shot startup auto-resume readiness helper",
     );
     assert!(
-        html.contains("kind: \"startup_auto_resume_ready\"")
-            && html.contains("bounds: visibleBounds()"),
-        "expected readiness payload to carry the current fixed surface bounds",
+        html.contains("kind: \"startup_auto_resume_ready\""),
+        "expected readiness to announce the mounted surfaces without layout coordinates",
     );
     assert!(
             readiness_flow.is_match(html),
@@ -2781,8 +2780,8 @@ fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
 #[test]
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
-    let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\};"#,
+    let submit_action = regex::Regex::new(
+            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};"#,
         )
         .expect("valid regex");
     let footer_close_control = regex::Regex::new(
@@ -2824,8 +2823,8 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         "expected issue launch wizard entrypoint to send the canonical frontend event payload",
     );
     assert!(
-            submit_bounds.is_match(html),
-            "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
+            submit_action.is_match(html),
+            "expected wizard actions to be normalized through launch_wizard_action without layout coordinates",
         );
     assert!(
         !html.contains(r#"id="wizard-close-button""#) && !html.contains("wizardCloseButton"),
@@ -3651,7 +3650,7 @@ fn embedded_web_app_js_uses_modal_shell_selector() {
 
 /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
 /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
-/// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
+/// aligned with the new viewport, and `UpdateTerminalGrid` must be sent
 /// for each visible terminal so the backend PTY cols/rows match. Without
 /// this fan-out the wrap stays stuck until the user resizes a single
 /// terminal manually.
@@ -3691,10 +3690,9 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
 }
 
 /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
-/// hidden terminals (display:none-equivalent `.hidden` attribute set when
-/// a window-tab is non-active) so a fit during the hidden phase cannot
-/// pollute xterm.js with cols/rows = 0. The check must consider both
-/// minimized and the DOM `element.hidden` flag.
+/// hidden terminal hosts so a fit during the hidden phase cannot
+/// pollute xterm.js with cols/rows = 0. Surface ownership and actual DOM
+/// layout determine visibility independently of retired saved placement.
 #[test]
 fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let js = app_js();
@@ -3710,8 +3708,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let body = &after[..end_offset];
     // After SPEC-2008 Phase 24 follow-up, the predicate delegates to
     // `viewportEligibleForRefresh` in `terminal-viewport-reflow.js`.
-    // Behaviour (.hidden short-circuit + minimised short-circuit) is
-    // pinned by `__tests__/terminal-viewport-reflow.test.mjs`; this
+    // DOM visibility behaviour is pinned by
+    // `__tests__/terminal-viewport-reflow.test.mjs`; this
     // Rust contract only confirms the wiring stays in the bundle.
     assert!(
         body.contains("viewportEligibleForRefresh({"),
@@ -3719,9 +3717,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
              (SPEC-2008 FR-051 + Phase 24 follow-up); body: {body}",
     );
     assert!(
-        body.contains("windowMap.get(windowId)") && body.contains("workspaceWindowById"),
-        "expected predicate to forward both the DOM element and the workspace window \
-             so the helper can short-circuit on .hidden / minimized; body: {body}",
+        body.contains("windowMap.get(windowId)") && !body.contains("workspaceWindowById"),
+        "expected predicate to forward the DOM element without saved placement state; body: {body}",
     );
 }
 
@@ -3733,10 +3730,9 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
 #[test]
 fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     let js = app_js();
-    // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
-    // longer ends with a maximized-viewport sync. It now recomputes operator
-    // telemetry (rail window-count badge) after mounting
-    // every window and applying its visibility transition. Issue #3365: the
+    // Surface hosts own which windows are presented. The catalog loop
+    // recomputes operator telemetry after mounting each live window and
+    // clearing stale child visibility. Issue #3365: the
     // loop is a per-window `isolate` callback inside workspaceRenderSync so
     // one poisoned window cannot block the others, and the telemetry
     // recompute is the guard's `recompute` hook (guaranteed even on a failed
@@ -3763,8 +3759,8 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              so element.hidden mutation + reveal hook share one helper; body: {body}",
     );
     assert!(
-        body.contains("visibleWindowData(windowData)"),
-        "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
+        body.contains("shouldHide: false") && !body.contains("visibleWindowData"),
+        "expected catalog mounts to leave visibility to the surface host; body: {body}",
     );
     assert!(
         body.contains("onReveal: () => activateTerminalOnReveal(windowData.id)"),

@@ -63,15 +63,11 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const windows = page.locator('.workspace-window[data-preset="settings"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, {
-        kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1120, height: 930 },
-      });
+        kind: "create_window", preset: "issue", });
       await expect(windows.first()).toBeVisible();
       const windowId = await windows.first().getAttribute("data-id");
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
-      await sendLiveGwtEvent(page, {
-        kind: "update_window_geometry", id: windowId,
-        geometry: { x: 60, y: 50, width: 720, height: 420 }, cols: 80, rows: 24,
-      });
+      await page.setViewportSize({ width: 720, height: 650 });
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const createdSettings = !(await settings.count());
       const issues = settings.locator('[data-settings-panel="issues"]');
@@ -177,10 +173,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         await expect(warning).toBeInViewport({ ratio: 1 });
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await testInfo.attach(`agent-capacity-warning-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
-        await sendLiveGwtEvent(page, {
-          kind: "update_window_geometry", id: windowId,
-          geometry: { x: 60, y: 50, width: 1120, height: 930 }, cols: 80, rows: 24,
-        });
+        await page.setViewportSize({ width: 1120, height: 1080 });
         await expect.poll(() => surface.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(850);
         await testInfo.attach(`agent-capacity-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
 
@@ -293,8 +286,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       const windows = page.locator('.workspace-window[data-preset="settings"]');
       if (!(await windows.count())) await sendLiveGwtEvent(page, {
-        kind: "create_window", preset: "issue", bounds: { x: 50, y: 40, width: 1120, height: 850 },
-      });
+        kind: "create_window", preset: "issue", });
       const surface = windows.first();
       await expect(surface).toBeVisible();
       const saved = await latestStatus(page) ?? {};

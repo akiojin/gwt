@@ -1,6 +1,33 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.141.2] - 2026-10-24
+
+### Bug Fixes
+
+- **hooks:** Retain unreadable execution record stop warnings
+- **issue-monitor:** Launch admission converges on slow Windows hosts (#6096)
+
+### Miscellaneous Tasks
+
+- **work:** Record canvas removal delivery scope
+- **work:** Record knowledge search delivery successor
+- **work:** Record unreadable stop warning delivery audit
+- **work:** Link unreadable stop warning pr
+- **work:** PR #6244の検証引継ぎを記録
+
+### Refactor
+
+- **gui:** Remove retired canvas state and placement APIs
+- **ui:** Render knowledge search completions from shared state
+
+### Testing
+
+- **gui:** 端末計測前にAgents面を表示する
+- **gui:** Isolate focus dispatch from log rendering
+- Align launch and resume contracts with surface APIs
+- **hooks:** Stop警告に既存consumerの期待値を整合
+
 ## [9.141.1] - 2026-10-24
 
 ### Bug Fixes

@@ -2336,7 +2336,7 @@ fn continue_work_ready_timeout_does_not_terminate_a_window_owned_by_another_sess
 fn continue_work_ready_timeout_starts_only_after_pty_handoff() {
     let source = include_str!("../launch.rs");
     let launch_dispatch_start = source
-        .find("fn spawn_agent_window_with_placement(")
+        .find("fn spawn_agent_window_with_options(")
         .expect("launch dispatch function");
     let async_preparation_start = source[launch_dispatch_start..]
         .find("pub(crate) fn spawn_agent_window_async(")
@@ -2452,7 +2452,6 @@ fn continue_work_rejects_parallel_operation_for_same_work_before_preparing_autho
         "client-2",
         "second-operation".to_string(),
         "work-shared".to_string(),
-        canvas_bounds(),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -2497,7 +2496,6 @@ fn continue_work_empty_operation_identity_failure_is_not_cached() {
         "client-invalid",
         String::new(),
         "work-a".to_string(),
-        canvas_bounds(),
     );
 
     assert!(events.iter().any(|event| matches!(
@@ -2568,7 +2566,6 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
         "client-invalid",
         operation_id.to_string(),
         String::new(),
-        canvas_bounds(),
     );
 
     assert!(invalid.iter().any(|event| matches!(
@@ -2626,7 +2623,6 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
         "client-replay",
         operation_id.to_string(),
         "work-a".to_string(),
-        canvas_bounds(),
     );
     let replay_clients = replay
         .iter()
@@ -2679,7 +2675,6 @@ fn continue_work_invalid_identity_cannot_overwrite_cached_outcome_or_drain_waite
         "client-conflict",
         operation_id.to_string(),
         "work-b".to_string(),
-        canvas_bounds(),
     );
     assert!(conflict.iter().any(|event| matches!(
         &event.event,

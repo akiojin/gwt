@@ -219,7 +219,7 @@ fn issue_4537_hub_sync_does_not_contain_project_workspace() {
     assert!(
         events.iter().all(|event| !matches!(
             event.event,
-            BackendEvent::WindowCanvasState { .. }
+            BackendEvent::WorkspaceState { .. }
                 | BackendEvent::TerminalSnapshot { .. }
                 | BackendEvent::LaunchWizardState { .. }
         )),
@@ -732,8 +732,8 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     run_worker(0);
     assert_eq!(
         gwt_core::process::thread_git_spawn_count() - before,
-        2,
-        "reused facts leave the source preflight and current fallback claim's Git validation"
+        1,
+        "reused facts leave only the current fallback claim's Git validation; Issue #6096 reads the source origin from Git config"
     );
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read current head claim");
     assert_eq!(
@@ -1065,9 +1065,7 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let other = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3166));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
@@ -1171,7 +1169,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         .tab_mut("tab-1")
         .unwrap()
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+        .add_window(WindowPreset::Agent);
     let foreign_window_id = combined_window_id("tab-1", &foreign.id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
     assert!(tab
@@ -1235,7 +1233,7 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
 }
 
 #[test]
-fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts() {
+fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1275,33 +1273,23 @@ fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts
         .join("agent-names.jsonl");
     let reserved_names = fs::read(&history).expect("worker reserved identity");
     // The host sampler creates/renews this file independently of launch facts.
+    // Issue #6096: a renewal that grants the same slot limit is settled on the
+    // GUI by that decision, so a host slower than the ~5s renewal cadence
+    // still launches instead of re-evaluating against every new sample.
     let capacity = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
     fs::create_dir_all(capacity.parent().unwrap()).unwrap();
     fs::write(&capacity, b"{}").unwrap();
-    assert!(fixture
+    fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(prepared)
-        .is_empty());
-    let before = gwt_core::process::thread_git_spawn_count();
-    drain_queued_blocking_tasks(&queued);
+        .handle_issue_monitor_launch_prepared(prepared);
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "a same-limit capacity renewal must reach pane creation, not another preparation"
+    );
     assert_eq!(
         fs::read(&history).unwrap(),
         reserved_names,
         "capacity renewal must retain the prepared identity"
-    );
-    assert_eq!(
-        gwt_core::process::thread_git_spawn_count() - before,
-        1,
-        "only final admission may validate Git; claim/base/prompt facts stay prepared"
-    );
-    // A refreshed completion is queued, without creating a pane on the worker.
-    let refreshed = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    fixture
-        .runtime
-        .handle_issue_monitor_launch_prepared(refreshed);
-    assert!(
-        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
-        "refreshed admission must reach pane creation, not another preparation"
     );
 
     let input = fixture.runtime.capture_issue_monitor_spawn_admission(
@@ -1321,6 +1309,105 @@ fn issue6096_capacity_renewal_refreshes_admission_without_repeating_launch_facts
             .refresh(&previous)
             .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
         "a policy edit while the refresh is queued must retain the original fence"
+    );
+}
+
+#[test]
+fn issue6096_slow_admission_launches_after_one_revalidation_despite_rewrites() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("manual admission slots independent of host observations");
+    let mut fixture = monitor_relaunch_fixture_with_settlement(
+        temp.path(),
+        "prefs-churn",
+        MonitorProviderConversationFixture::Present,
+        MonitorNativeHolderFixture::None,
+        true,
+        LinkedIssueKind::Issue,
+        gwt::cli::execution_state::ExecutionSettlement::Completed,
+    );
+    let (spawner, queued) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
+    fixture
+        .runtime
+        .auto_launch_issue_monitor_delivery_events_for_project(
+            &fixture.project_root,
+            3165,
+            LinkedIssueKind::Issue,
+            fixture.delivery_id.clone(),
+            gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
+        );
+    drain_queued_blocking_tasks(&queued);
+    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let capacity = gwt_core::paths::gwt_home().join("machine-state/agent-capacity.json");
+    fs::create_dir_all(capacity.parent().unwrap()).unwrap();
+    // Issue #6096: model an admission that takes ~15s on a loaded host without
+    // waiting for it. In that window the sampler renews the capacity file
+    // about every 5s and the daemon rewrites unrelated prefs records. The
+    // decision (a free slot, no drain/hold, Issue open) never changes, so the
+    // launch must open after at most one re-evaluation, however slow it was.
+    let mut renewal = 0_u64;
+    let mut slow_evaluation_window = |priority_order: Vec<u64>| {
+        for _ in 0..3 {
+            renewal += 1;
+            let observed_at = u64::try_from(Utc::now().timestamp()).unwrap() + renewal;
+            fs::write(
+                &capacity,
+                serde_json::to_vec(&serde_json::json!({
+                    "observed_at": observed_at, "expires_at": observed_at + 30,
+                    "performance_cores": 8, "gui_cpu_millicores": renewal * 7,
+                    "available_ram_bytes": (64 + renewal) * 1024 * 1024 * 1024,
+                    "per_agent_ram_bytes": 512_u64 * 1024 * 1024,
+                    "free_disk_bytes": 1_u64 << 40,
+                    "inventory": {"sessions": [], "uncertainties": []}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        prefs.priority_order = priority_order;
+        gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
+    };
+    slow_evaluation_window(vec![9001]);
+    assert!(
+        fixture
+            .runtime
+            .handle_issue_monitor_launch_prepared(prepared)
+            .is_empty(),
+        "unrelated rewrites schedule one worker re-evaluation"
+    );
+    assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let revalidated = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    // The re-evaluation itself is just as slow: everything moves again.
+    slow_evaluation_window(vec![9001, 9002]);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(revalidated);
+    assert!(
+        !fixture.runtime.pending_launch_feedback_contexts.is_empty(),
+        "a slow but unchanged admission decision must reach pane creation"
+    );
+    assert!(
+        !fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_))),
+        "no further preparation may be queued once the launch converged"
     );
 }
 
@@ -1362,9 +1449,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let unrelated = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let unrelated = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace
         .set_linked_issue_number(&unrelated.id, Some(3166));
     tab.workspace
@@ -1404,12 +1489,10 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         Some(expected_window_id.as_str()),
         "the reused facts must claim the current proposed pane"
     );
-    // Source preflight, the offline fallback claim, and final pane admission
-    // validate the actual origin. Base/hydration/prompt facts remain reused.
-    assert_eq!(
-        repeated_git, 3,
-        "only the current source checks and claim may validate Git"
-    );
+    // The offline fallback claim validates Git. Issue #6096: source preflight
+    // and final pane admission read the origin from Git config without a
+    // process spawn. Base/hydration/prompt facts remain reused.
+    assert_eq!(repeated_git, 1, "only the current claim may validate Git");
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
 }
 
@@ -1527,9 +1610,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
     insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let other = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3165));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
@@ -1539,7 +1620,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         .set_agent_name(&holder_raw_id, Some("ExistingExactHolder".to_string())));
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows.swap(0, 1);
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     fixture.runtime.register_window("tab-1", &other.id);
     assert_eq!(
         fixture

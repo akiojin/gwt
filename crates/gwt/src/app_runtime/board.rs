@@ -33,8 +33,8 @@ use gwt::{
 };
 
 use super::{
-    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent,
-    WindowGeometry, WindowPreset, WindowProcessStatus,
+    combined_window_id, same_worktree_path, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
+    WindowProcessStatus,
 };
 
 pub(super) fn gui_default_board_scope_for_project(
@@ -248,9 +248,8 @@ impl AppRuntime {
         client_id: &str,
         id: &str,
         origin_session_id: &str,
-        bounds: Option<WindowGeometry>,
     ) -> Vec<OutboundEvent> {
-        let (tab_id, board_geometry) = match self.board_surface_context(id) {
+        let tab_id = match self.board_surface_context(id) {
             Ok(context) => context,
             Err(message) => return board_error(client_id, id, message),
         };
@@ -265,7 +264,7 @@ impl AppRuntime {
             .find(|(_, session)| session.session_id == origin_session_id)
             .map(|(window_id, _)| window_id.clone());
         if let Some(window_id) = live_window_id {
-            let events = self.focus_window_events(&window_id, bounds);
+            let events = self.focus_window_events(&window_id);
             return if events.is_empty() {
                 board_error(
                     client_id,
@@ -281,7 +280,7 @@ impl AppRuntime {
             Ok(config) => config,
             Err(message) => return board_error(client_id, id, message),
         };
-        match self.spawn_agent_window(&tab_id, config, bounds.unwrap_or(board_geometry), None) {
+        match self.spawn_agent_window(&tab_id, config, None) {
             Ok(events) => events,
             Err(message) => board_error(client_id, id, message),
         }
@@ -350,7 +349,7 @@ impl AppRuntime {
         Ok(config)
     }
 
-    fn board_surface_context(&self, id: &str) -> Result<(String, WindowGeometry), String> {
+    fn board_surface_context(&self, id: &str) -> Result<String, String> {
         let address = self
             .window_lookup
             .get(id)
@@ -365,7 +364,7 @@ impl AppRuntime {
         if window.preset != WindowPreset::Board {
             return Err("Window is not a Board surface".to_string());
         }
-        Ok((address.tab_id.clone(), window.geometry.clone()))
+        Ok(address.tab_id.clone())
     }
 
     pub(crate) fn record_workspace_board_milestone_event(

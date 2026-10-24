@@ -2333,7 +2333,6 @@ fn config_error(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use crate::cli::TestEnv;
-    use crate::persistence::WindowGeometry;
     use gwt_core::test_support::ScopedEnvVar;
 
     use super::*;
@@ -2357,23 +2356,14 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             preset,
-            geometry: WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            geometry_revision: 0,
             z_index: 1,
             status: WindowState::Running,
-            placement: WindowPlacement::Canvas,
+            placement: WindowPlacement::Surface,
             persist: true,
             agent_id: agent_id.map(str::to_string),
             agent_name: None,
             agent_color: None,
             worktree_form: WindowWorktreeForm::Unknown,
-            tab_group_id: None,
-            tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,

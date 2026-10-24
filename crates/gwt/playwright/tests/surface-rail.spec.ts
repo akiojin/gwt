@@ -389,8 +389,8 @@ test.describe("Surface rail", () => {
     }
     expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(2);
     for (const message of (await sentMessages(page)).filter(message => message.kind === "create_window")) {
-      expect(message.bounds!.width).toBeGreaterThan(0);
-      expect(message.bounds!.height).toBeGreaterThan(0);
+      expect(message).not.toHaveProperty("bounds");
+      expect(message).not.toHaveProperty("geometry");
     }
     const activeViewId = await right.locator(".workspace-window").getAttribute("data-id");
     await clearMessages(page);
@@ -967,7 +967,7 @@ async function clearMessages(page: Page): Promise<void> {
 async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false, focusedId = "board-window"): Promise<void> {
   await page.addInitScript(({ groupedSettings, ownership, focusedId }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
-    const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
+    const surfaceWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
       preset: "agent",
@@ -994,7 +994,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     // Persisted canvas locations deliberately sit outside the viewport. The
     // fixed surface layout must ignore them, including inactive legacy groups.
     const windows = [
-      canvasWindow("pm-window", {
+      surfaceWindow("pm-window", {
         title: "Project Manager",
         preset: "claude",
         is_pm: true,
@@ -1008,19 +1008,19 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         geometry: { x: -3200, y: 80, width: 560, height: 340 },
         z_index: 2,
       }),
-      canvasWindow("issue-window", {
+      surfaceWindow("issue-window", {
         title: "Settings",
         preset: "settings",
         geometry: { x: 80, y: 80, width: 640, height: 420 },
         z_index: 10,
       }),
-      canvasWindow("board-window", {
+      surfaceWindow("board-window", {
         title: "Board",
         preset: "board",
         geometry: { x: 760, y: 80, width: 520, height: 420 },
         z_index: 20,
       }),
-      canvasWindow("agent-one", {
+      surfaceWindow("agent-one", {
         status: "running",
         agent_id: "agent-one",
         agent_name: "Aster",
@@ -1029,7 +1029,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         geometry: { x: 2400, y: 1400, width: 560, height: 340 },
         z_index: 5,
       }),
-      canvasWindow("agent-two", {
+      surfaceWindow("agent-two", {
         status: "waiting",
         agent_id: "agent-two",
         agent_name: "Birch",
@@ -1041,14 +1041,14 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     ];
     if (groupedSettings) {
       Object.assign(windows.find((data) => data.id === "board-window")!, { tab_group_id: "group", tab_group_active: true });
-      windows.push(canvasWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
+      windows.push(surfaceWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
     }
     if (focusedId === "shell-window") {
-      windows.push(canvasWindow(focusedId, { preset: "shell", status: "running", minimized: true,
+      windows.push(surfaceWindow(focusedId, { preset: "shell", status: "running", minimized: true,
         tab_group_id: "retired-group", tab_group_active: false }));
     }
     if (focusedId === "legacy-issues-window") {
-      windows.push(canvasWindow(focusedId, { preset: "issue", title: "Issues" }));
+      windows.push(surfaceWindow(focusedId, { preset: "issue", title: "Issues" }));
     }
     const focused = windows.find(data => data.id === focusedId);
     if (focused) focused.z_index = 100;
@@ -1061,8 +1061,8 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     }
 
     if (ownership) {
-      windows.push(canvasWindow("naming-window", { title: "Naming…", status: "running", session_id: "session-naming" }));
-      windows.push(canvasWindow("start-work-shell", { preset: "shell", status: "running", surface_owner: "agents", persist: false }));
+      windows.push(surfaceWindow("naming-window", { title: "Naming…", status: "running", session_id: "session-naming" }));
+      windows.push(surfaceWindow("start-work-shell", { preset: "shell", status: "running", surface_owner: "agents", persist: false }));
       for (const data of windows) data.geometry = { x: 80, y: 80, width: 560, height: 340 };
       const saved = sessionStorage.getItem("surface-ownership-windows");
       if (saved) windows.splice(0, windows.length, ...JSON.parse(saved));
@@ -1093,7 +1093,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
             kind: "git",
             workspace: {
               viewport: { x: -5000, y: 3000, zoom: 0.4 },
-              windows: [canvasWindow("second-board", {
+              windows: [surfaceWindow("second-board", {
                 preset: "board", geometry: { x: -5000, y: 3000, width: 520, height: 420 },
               })],
             },
@@ -1145,7 +1145,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         if (message.kind === "open_board_origin_agent") {
           let target = windows.find(data => data.session_id === message.origin_session_id);
           if (!target) {
-            target = canvasWindow("agent-resumed", { session_id: message.origin_session_id, status: "running" });
+            target = surfaceWindow("agent-resumed", { session_id: message.origin_session_id, status: "running" });
             windows.push(target);
           }
           target.z_index = ++zCounter;
@@ -1154,7 +1154,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         if (message.kind === "create_window" && message.preset) {
           zCounter += 1;
           const id = `${message.preset}-new`;
-          windows.push(canvasWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, surface_owner: message.surface_owner, z_index: zCounter }));
+          windows.push(surfaceWindow(windows.some(data => data.id === id) ? `${id}-${zCounter}` : id, { preset: message.preset, surface_owner: message.surface_owner, z_index: zCounter }));
           this.emit(workspaceState());
         }
         if (message.kind === "close_window") {
@@ -1163,15 +1163,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
           this.emit(workspaceState());
         }
         if (ownership) sessionStorage.setItem("surface-ownership-windows", JSON.stringify(windows.filter(windowData => windowData.persist !== false)));
-        if (message.kind === "activate_window_tab") {
-          const target = windows.find((data) => data.id === message.id);
-          if (target?.tab_group_id) {
-            for (const data of windows) {
-              if (data.tab_group_id === target.tab_group_id) data.tab_group_active = data.id === target.id;
-            }
-            this.emit(workspaceState());
-          }
-        }
+
       }
 
       close(): void {

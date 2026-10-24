@@ -678,7 +678,7 @@ fn startup_update_resume_under_large_session_load() {
                 }
             }
             match row["startup"]["phase"].as_str() {
-                Some("canvas_ready") => canvas = row["value"].as_f64(),
+                Some("surface_ready") => canvas = row["value"].as_f64(),
                 Some("restore_drain") => drain = row["value"].as_f64(),
                 Some("session_load") => parsed_sessions = row["startup"]["count"].as_u64(),
                 _ => {}
@@ -701,7 +701,7 @@ fn startup_update_resume_under_large_session_load() {
         .as_mut()
         .and_then(|browser| browser.0.try_wait().ok().flatten());
     let report = json!({"passed":passed, "sessions":1500, "worktrees":6,
-        "update_resume_marker":true, "parsed_sessions":parsed_sessions, "canvas_ready_ms":canvas,
+        "update_resume_marker":true, "parsed_sessions":parsed_sessions, "surface_ready_ms":canvas,
         "common_dir_git_spawns":common_dir_spawns.len(), "process_logging_seen":process_logging_seen,
         "restore_drain_ms":drain, "perf_log_excerpt":phases,
         "browser_started":browser.is_some(), "browser_binary":browser_binary,
