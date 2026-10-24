@@ -4164,14 +4164,24 @@ fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
 
     let foreign = gwt::issue_monitor_prefs_path_for_repo_path(&other);
     let original = fs::read(&foreign).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&foreign)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
     fs::write(&foreign, &original).unwrap();
     assert!(
         prepared.is_current(&input.host_project_roots),
         "a byte-identical foreign prefs rewrite must not stale admission"
     );
 
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&foreign)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .unwrap();
     gwt::save_issue_monitor_prefs(
         &foreign,
         &gwt::IssueMonitorPrefs {

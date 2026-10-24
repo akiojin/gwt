@@ -33270,8 +33270,14 @@ mod tests {
         monitor.set_autonomous_mode(true);
         save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit prefs");
         let bytes = fs::read(&path).unwrap();
-        let modified = fs::metadata(&path).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Backdate the file so any rewrite would observably move its mtime.
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
 
         let (unchanged, ()) = mutate_issue_monitor_prefs_recovering(
             &path,
