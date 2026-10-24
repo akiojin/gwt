@@ -5418,6 +5418,12 @@ pub(crate) mod tests {
         // Immediate admission and full scans use the durable planner, not the
         // synchronous claim API below. Both must reject before any effect.
         let mut durable = monitor.clone();
+        let mut preferred = unsupported_launch_profile("openclaw");
+        preferred.prefer_for = vec!["kind:issue".into()];
+        durable.set_launch_tiers(
+            true,
+            vec![vec![unsupported_launch_profile("codex"), preferred]],
+        );
         assert_eq!(
             durable
                 .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
@@ -5434,6 +5440,7 @@ pub(crate) mod tests {
             assert!(reason.contains(required), "{reason}");
         }
         durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        durable.set_launch_tiers(false, Vec::new());
         crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
         assert_eq!(
             durable
@@ -5505,13 +5512,16 @@ pub(crate) mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
 
+        let mut durable = monitor.clone();
+        let mut preferred = unsupported_launch_profile("codex");
+        preferred.prefer_for = vec!["kind:issue".into()];
+        durable.set_launch_tiers(
+            true,
+            vec![vec![unsupported_launch_profile("openclaw"), preferred]],
+        );
         assert_eq!(
-            monitor.clone().prepare_claim_effects_with_probe(
-                "host:1",
-                "2026-07-02T00:00:10Z",
-                1,
-                |_| false,
-            ),
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false,),
             1,
             "a supported provider still prepares a durable claim"
         );

@@ -12006,7 +12006,14 @@ impl IssueMonitorState {
                     })
                 });
             self.prefs()
-                .select_auto_launch_profile(issue_number, is_spec, None, select)
+                .select_auto_launch_profile(issue_number, is_spec, None, |pool| {
+                    let work_tags = vec![if is_spec {
+                        "kind:spec".to_string()
+                    } else {
+                        "kind:issue".to_string()
+                    }];
+                    select_launch_profile(pool, &holds, &work_tags, None, now)
+                })
         } else {
             None
         };
