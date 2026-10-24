@@ -888,13 +888,19 @@ milestone のみ・category のみ・他 Goal の参照から所属を広げま�
 `unobserved_issues` と Monitor の取得元・観測範囲も確認してください。この観測は
 Goal や指標の達成・critical path・起動可能性を証明せず、優先順位や起動の変更を
 許可しません。
+各ロードマップ項目の `dependency_observations` は、その行に直接保存された Issue の
+診断だけを選び、供給された行順・重複・依存情報の欠落を保持します。空・重複 ID や
+不正な紐付けも行ごとの所属を維持し、Goal・milestone・他の行から所属を広げません。
+Monitor がなければ空所属でも null、供給された snapshot に一致する行がなければ [] です。
+`unobserved_issues` と Monitor の取得元・スキャン時刻・対象範囲の制限を併せて確認します。
+この照合だけで完全なグラフ・critical path・起動可能性・優先順位・health は判断しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
 空・重複 ID や不正な紐付けも行を分けて保持し、Goal・Milestone・他の行から所属を
 広げません。queue/active 所属だけでは inbox 状態を推定しません。Monitor がなければ
-直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属は
-空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
+直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属の状態・
+未観測配列は空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
 マイルストーンの `target_date_observation` は、厳密な `YYYY-MM-DD` の目標日と、
 記録済みスキャンの UTC 暦日を比較します。`days_past_target_at_scan` は目標日の当日・
 以前なら 0、日付が欠落・不正なら不足情報名とともに不明を返し、現在時計を使いません。

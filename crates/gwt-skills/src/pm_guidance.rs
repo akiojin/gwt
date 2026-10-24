@@ -67,7 +67,7 @@ retain their supplied inbox order without duplicates. Keep separate rows for
 duplicate or empty IDs and invalid traces; never expand membership through a Goal,
 Milestone or another row. Queue/active membership alone supplies no inbox state.
 An absent Monitor leaves every direct Issue unobserved; degraded observations
-retain their provenance. Empty membership yields empty arrays. These observations
+retain their provenance. Empty membership yields empty state and unobserved arrays. These observations
 do not establish health, completion, priority or permission to launch work.
 `target_date_observation` compares each saved milestone target with the scan's UTC calendar date.
 Only exact YYYY-MM-DD targets and valid RFC3339 scan timestamps supply
@@ -220,6 +220,12 @@ Milestone-only, category-only and other-Goal references do not add members.
 The same row order, repeats, missingness and null/[] semantics apply; keep `unobserved_issues`
 and the enclosing Monitor provenance. These observations do not prove Goal achievement,
 metric attainment, critical path or readiness, and authorize no priority or launch changes.
+Each roadmap item's `dependency_observations` selects only that row's directly saved Issues.
+Empty or duplicate IDs and invalid traces keep independent membership; never expand it through
+a Goal, milestone or another row. Preserve the supplied row order, repeats and typed missingness.
+Absent Monitor yields null even for empty membership; supplied snapshots without matching rows
+yield []. Keep `unobserved_issues` and the enclosing Monitor source, scan time and coverage limits.
+This join does not establish a complete graph, critical path, readiness, priority or health.
 
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
@@ -4496,6 +4502,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
+            "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",
