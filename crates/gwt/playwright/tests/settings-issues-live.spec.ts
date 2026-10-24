@@ -358,7 +358,7 @@ test.describe("Issue #5322 Settings", () => {
         await editNumber(issues.getByLabel("Max active", { exact: true }), "4");
         await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
         await expect.poll(async () => (await readPreferences(a)).max_active_agents).toBe(4);
-        await issues.getByLabel("Auto-refill", { exact: true }).check();
+        await issues.getByRole("checkbox", { name: "Auto-refill", exact: true }).check();
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill).toBe(true);
         await editNumber(issues.getByLabel("Refill limit", { exact: true }), "5");
         await expect.poll(async () => (await readPreferences(a)).terminal_queue_auto_refill_limit).toBe(5);
@@ -512,7 +512,7 @@ test.describe("Issue #5322 Settings", () => {
         await openSettings(page, "issues");
         await expect(autonomous(page)).toHaveAttribute("aria-checked", "true");
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue("4");
-        await expect(issues.getByLabel("Auto-refill", { exact: true })).toBeChecked();
+        await expect(issues.getByRole("checkbox", { name: "Auto-refill", exact: true })).toBeChecked();
         await expect(issues.getByLabel("Refill limit", { exact: true })).toHaveValue("5");
         await expect(issues.getByLabel("Allowed labels", { exact: true })).toHaveValue("auto-merge, bug");
         await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
