@@ -48,6 +48,41 @@ test.describe("Issue Bridge load recovery", () => {
     viewport: { width: 1440, height: 900 },
   });
 
+  test("Issue #5016 phase completions render shared state and retain selection and focus", async ({ page }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({
+      kind: "knowledge_bridge_phase_updated", id: "issue-kanban", issue_number: 3096,
+      result: { kind: "ok", fresh_entry: { number: 3096, title: "Phase completion rendered",
+        state: "open", labels: ["bug"], is_spec: false, phase: "implementation", monitor_state: "needs_human" } },
+    }));
+    await expect(row.locator(".knowledge-row-title")).toHaveText("Phase completion rendered");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({
+      kind: "knowledge_bridge_phase_updated", id: "issue-kanban", issue_number: 3096,
+      result: { kind: "error", message: "Phase write failed" },
+    }));
+    await expect(surface.locator(".knowledge-list")).toContainText("Issue load failed");
+    await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-phase-completion.png") });
+  });
+
   test("Issue #5395: projection snapshots update Related Work and hidden event bursts reload once on reveal", async ({ page }, testInfo) => {
     test.setTimeout(60_000);
     const errors: string[] = [];

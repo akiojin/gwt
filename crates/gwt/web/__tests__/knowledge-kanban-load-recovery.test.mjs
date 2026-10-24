@@ -122,6 +122,42 @@ const ROW_B = {
   phase: "draft",
 };
 
+test("phase completion preserves synchronous acknowledgement and rollback state", async () => {
+  const surface = createSurface(await importSurfaceModule(), []);
+  const state = surface.ensureKnowledgeBridgeState("win-1", "issue");
+  state.entries = [ROW_B];
+  state.baseEntries = [ROW_B];
+  state.selectedNumber = ROW_B.number;
+  state.query = "Beta";
+  state.dndSnapshot = { issueNumber: ROW_B.number, entry: ROW_B };
+  state.pendingPhaseUpdates.set(ROW_B.number, {});
+  const fresh = { ...ROW_B, phase: "implementation" };
+  const reply = { kind: "knowledge_bridge_phase_updated", id: "win-1",
+    issue_number: ROW_B.number, result: { kind: "ok", fresh_entry: fresh } };
+  surface.applyKnowledgeReceiveEvent({ ...reply, id: "other-window" });
+  assert.equal(state.pendingPhaseUpdates.size, 1);
+  surface.applyKnowledgeReceiveEvent(reply);
+  assert.equal(state.pendingPhaseUpdates.size, 0);
+  assert.equal(state.entries[0], fresh);
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.dndSnapshot, null);
+
+  state.entries[0] = { ...fresh, phase: "done" };
+  state.dndSnapshot = { issueNumber: ROW_B.number, entry: fresh };
+  state.pendingPhaseUpdates.set(ROW_B.number, {});
+  surface.applyKnowledgeReceiveEvent({ ...reply, result: { kind: "error", message: "Phase write failed" } });
+  assert.equal(state.pendingPhaseUpdates.size, 0);
+  assert.equal(state.entries[0], fresh);
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.dndSnapshot, null);
+  assert.equal(state.error, "Phase write failed");
+  assert.equal(state.selectedNumber, ROW_B.number);
+  assert.equal(state.query, "Beta");
+  surface.clearKnowledgeBridgeState("win-1");
+  surface.applyKnowledgeReceiveEvent(reply);
+  assert.equal(surface.knowledgeBridgeStateMap.has("win-1"), false);
+});
+
 function detailFor(row, body) {
   return {
     number: row.number,
