@@ -541,9 +541,10 @@ test.describe("Issue Bridge load recovery", () => {
     ).not.toHaveAttribute("open", "");
     for (const selector of [
       ".knowledge-monitor-max-active", ".knowledge-monitor-labels", ".knowledge-monitor-pool",
-      '[data-action="monitor-auto-apply"]', '[data-action="monitor-auto-refill"]',
+      '[data-action="monitor-auto-apply"]',
       '[data-action="monitor-capacity-auto"]',
     ]) await expect(issueSurface.locator(selector)).toHaveCount(0);
+    await expect(issueSurface.getByRole("switch", { name: "Auto-refill", exact: true })).toBeVisible();
     await issueSurface.locator('[data-action="monitor-toggle"]').click();
     // Issue #3561: the Autonomous control is a WAI-ARIA switch that shows the
     // server state only. A click sends the request and nothing moves until an
@@ -587,7 +588,7 @@ test.describe("Issue Bridge load recovery", () => {
     // computed value has left the Off color instead of sampling once.
     await expect(autonomousTrack).not.toHaveCSS("background-color", offTrackColor);
     const gear = issueSurface.getByRole("button", { name: "Issues settings", exact: true });
-    await expect(gear).toHaveText("⚙");
+    await expect(gear).toHaveText("⚙ Issues settings");
     await gear.click();
     // SPEC #3885 T-033: quick register lives in the "+ New" popover.
     await issueSurface.locator('[data-action="issue-new"]').click();

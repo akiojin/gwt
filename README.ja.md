@@ -516,11 +516,12 @@ Monitor はキュー内の位置を維持し、**Blocked by dependency** と未�
 
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
-容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
+容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
+スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
+エラーの詳細と履歴は通知センターで確認できます。**Issues settings** で同じペインの設定行を展開し、
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
-設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
+設定を閉じても要約帯のスイッチを操作できます。Auto-apply updates は **System** で設定します。
 Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
 **Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
 稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。

@@ -606,7 +606,7 @@ test.describe("Surface rail", () => {
     for (const [name, pattern] of [
       ["Max active mode", /Auto.*Manual/], ["Max active", /agent/i],
       ["Auto-refill", /queue/i], ["Refill limit", /0.*disable/i], ["Allowed labels", /matching issues/i],
-    ] as const) await explain(issues.getByLabel(name, { exact: true }), pattern);
+    ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
     await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();
     const pm = settings.locator('[data-settings-panel="project-manager"]');
     for (const [role, pattern] of [
