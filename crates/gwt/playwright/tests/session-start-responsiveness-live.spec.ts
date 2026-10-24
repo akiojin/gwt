@@ -34,9 +34,11 @@ test.describe("SessionStart foreground responsiveness (#5042)", () => {
       // Rust regressions; this test measures the foreground event-loop budget.
       const count = 500;
       const known = new Set(windows.map(window => window.id));
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "logs" });
-      await expect.poll(() => windows.find(window => window.preset === "logs" && !known.has(window.id))?.id).toBeTruthy();
-      targetId = windows.find(window => window.preset === "logs" && !known.has(window.id))!.id;
+      // A static surface avoids adding initial log loading and live log
+      // rendering to the dispatch measurement as FocusWindow records actions.
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "agent_kanban" });
+      await expect.poll(() => windows.find(window => window.preset === "agent_kanban" && !known.has(window.id))?.id).toBeTruthy();
+      targetId = windows.find(window => window.preset === "agent_kanban" && !known.has(window.id))!.id;
       const initialOrder = windows.find(window => window.id === targetId)!.z_index;
       try {
         const startedAt = Date.now();
