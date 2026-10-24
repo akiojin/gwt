@@ -4128,6 +4128,92 @@ fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
 }
 
 #[test]
+fn issue6096_foreign_prefs_observation_rewrites_keep_spawn_admission_current() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    let other = temp.path().join("other");
+    for root in [&repo, &other] {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+        gwt::save_issue_monitor_prefs(
+            &gwt::issue_monitor_prefs_path_for_repo_path(root),
+            &gwt::IssueMonitorPrefs::default(),
+        )
+        .unwrap();
+    }
+    let runtime = sample_runtime(
+        temp.path(),
+        vec![
+            sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]),
+            sample_project_tab("tab-2", "Other", other.clone(), ProjectKind::Git, &[]),
+        ],
+        Some("tab-1"),
+    );
+    let input = runtime.capture_issue_monitor_spawn_admission(&repo, 42, "work/issue-42");
+    assert_eq!(
+        input.host_project_roots.len(),
+        2,
+        "both hosts fence admission"
+    );
+    let prepared = input.prepare().expect("prepare admission");
+    assert!(prepared.is_current(&input.host_project_roots));
+
+    let foreign = gwt::issue_monitor_prefs_path_for_repo_path(&other);
+    let original = fs::read(&foreign).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(&foreign, &original).unwrap();
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "a byte-identical foreign prefs rewrite must not stale admission"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    gwt::save_issue_monitor_prefs(
+        &foreign,
+        &gwt::IssueMonitorPrefs {
+            last_control_receipt: Some(gwt::IssueMonitorControlReceipt {
+                control_id: "control-1".into(),
+                should_scan: true,
+                authority_changed: false,
+            }),
+            last_scan_at: Some("2026-10-24T00:00:00Z".into()),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(fs::read(&foreign).unwrap(), original);
+    assert!(
+        prepared.is_current(&input.host_project_roots),
+        "observation-only foreign prefs keys must not stale admission"
+    );
+    assert!(prepared.can_refresh_capacity(&input.host_project_roots));
+
+    gwt::save_issue_monitor_prefs(
+        &foreign,
+        &gwt::IssueMonitorPrefs {
+            update_drain: Some(gwt::IssueMonitorUpdateDrain {
+                version: "99.0.0".to_string(),
+                since: "2026-10-24T00:00:00Z".to_string(),
+                reason: gwt::IssueMonitorUpdateDrainReason::Auto,
+                automatic: None,
+                blocking: Vec::new(),
+            }),
+            ..gwt::IssueMonitorPrefs::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !prepared.is_current(&input.host_project_roots),
+        "a foreign update drain must still stale admission"
+    );
+    assert!(!prepared.can_refresh_capacity(&input.host_project_roots));
+}
+
+#[test]
 fn issue3165_spawn_admission_revalidates_hydrated_comment_sources() {
     let _env_lock = env_test_lock()
         .lock()

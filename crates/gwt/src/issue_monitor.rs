@@ -7408,7 +7408,17 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
             }
             Err(error) => return Err(error),
         };
+        // Issue #6096: a clean load whose mutation changed nothing must not
+        // rewrite the file. Unconditional saves bumped the prefs mtime every
+        // few seconds and kept every prepared Monitor launch admission stale.
+        let before = recovery
+            .is_none()
+            .then(|| path.exists().then(|| prefs.clone()))
+            .flatten();
         let result = mutation(&mut prefs)?;
+        if before.as_ref().is_some_and(|before| *before == prefs) {
+            return Ok((prefs, result));
+        }
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
@@ -33245,6 +33255,44 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
             "the unreadable bytes are still quarantined for diagnosis"
+        );
+    }
+
+    /// Issue #6096: a recovering transaction that changes nothing (for
+    /// example the daemon's windowless-launch expiry with nothing expired)
+    /// must not rewrite the prefs, or every prepared launch admission that
+    /// fences the file goes stale.
+    #[test]
+    fn issue6096_noop_recovering_mutation_does_not_rewrite_prefs() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[(3873, "project-a::agent-2")]);
+        monitor.set_autonomous_mode(true);
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit prefs");
+        let bytes = fs::read(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let (unchanged, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("no-op transaction");
+        assert_eq!(unchanged.launched_issues.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        let (changed, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |prefs| prefs.autonomous_mode = false,
+        )
+        .expect("changing transaction");
+        assert!(!changed.autonomous_mode);
+        assert!(
+            !load_issue_monitor_prefs(&path).unwrap().autonomous_mode,
+            "a real change still commits"
         );
     }
 
