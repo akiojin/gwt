@@ -149,7 +149,9 @@ test("Active Work projection receivers commit shared state and reject bypass ren
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const modelFile = 'crates/gwt/web/issue-other-surface.js';
   const model = readFileSync(new URL('../issue-other-surface.js', import.meta.url), 'utf8');
-  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model]]) }).filter(finding =>
+  const activityFile = 'crates/gwt/web/agent-activity-model.js';
+  const activity = readFileSync(new URL('../agent-activity-model.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model], [activityFile, activity]]) }).filter(finding =>
     /^\/active_work_projection(?:_patch)?(?:\||$)/.test(finding.context));
   assert.deepEqual(findings(app), []);
   for (const kind of ['active_work_projection', 'active_work_projection_patch']) {

@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -89,7 +90,12 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
   const windowized = [];
   const stateSince = new Map();
   let windows = [issueWindow, ...workspaceWindows];
+  const activity = createAgentActivityModel("fixture");
+  activity.applyAgentActivitySnapshot({ project_key: "fixture", host_id: "host", observed_at: new Date().toISOString(),
+    agents: workspaceWindows.map(target => ({ window_id: target.id, session_id: `session-${target.id}`,
+      runtime_incarnation: 1, issue_number: target.placement?.issue_number, is_pm: false })) });
   const surface = mod.createKnowledgeKanbanSurface({
+    agentActivityModel: activity.model,
     scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {

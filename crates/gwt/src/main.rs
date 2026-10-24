@@ -11259,7 +11259,9 @@ fn main() -> std::io::Result<()> {
                 tab_id,
                 target,
                 payload,
-            }) if tab_id == context.tab_id && app.project_context_is_current(&context) => {
+            }) if tab_id == context.tab_id
+                && app.project_context_is_current(&context)
+                && app.prepared_active_work_dispatch_is_current(&tab_id, &payload) => {
                 clients.dispatch_prepared_active_work(payload, target);
             }
             // A background projection from a closed or replaced owner generation

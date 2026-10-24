@@ -514,6 +514,12 @@ Monitor はキュー内の位置を維持し、**Blocked by dependency** と未�
 前提の情報が無い場合や判定できない場合は依存待機を適用せず、循環は警告を表示して
 循環する辺だけを無効にします。マーカーを削除した場合も次の scan で待機を解除します。
 
+Active 列には、この端末でエージェントプロセスの生存を確認した Issue を表示します。
+Active バッジは PM を含むエージェント人数を数え、Issue 数と PM 人数を別に示します。
+同じ Issue にエージェントが 2 人いてもカードは 1 枚です。`Active —` は生存情報の取得待ちです。
+過去の活動は **Recorded work**、別の担当者の claim は **Claimed elsewhere** と表示し、
+いずれもローカルで動くエージェントには数えません。
+
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、

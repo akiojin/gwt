@@ -44,6 +44,43 @@ const column = (page: Page, phase: string) => page.locator(`[data-queue-column="
 const row = (page: Page, number: number) => page.locator(`.knowledge-row[data-issue-number="${number}"]`);
 const messages = (page: Page) => page.evaluate(() => (window as any).__queueMessages.filter((message: any) =>
   ["issue_monitor_queue_push", "issue_monitor_queue_remove", "issue_monitor_queue_move", "set_issue_monitor_auto_refill"].includes(message.kind)));
+
+test("AC34 local agent census separates five live agents from eighteen recorded Works", async ({ page }) => {
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueSetEntries([1, 2, 3, 4, 5].map(number => ({ number, title: `Issue ${number}`, state: "open",
+      labels: [], related_work_refs: [{id:`work-${number}`}] })));
+    fixture.__queueInbox([{issue:{number:4},state:"launched"},
+      {issue:{number:5},state:"blocked_by_claim",blocked_by_owner:"another-terminal"}]);
+    fixture.__queueEvent({kind:"active_work_projection",projection:{id:"queue-fixture",active_works:[
+      {id:"work-4",active_agents:18,agents:[],works:[]},
+    ]}});
+    fixture.__queueActivity([
+      {window_id:"tab-queue::pm",session_id:"pm",runtime_incarnation:1,is_pm:true},
+      ...[1,1,2,3].map((issue_number,index)=>({window_id:`tab-queue::live-${index}`,
+        session_id:`session-${index}`,runtime_incarnation:1,is_pm:false,issue_number})),
+    ]);
+  });
+  const metric = page.locator('[data-metric="active"]');
+  await expect(metric).toHaveText("Active 5 · 3 issues · PM 1");
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(3);
+  await expect(row(page,4)).toContainText("Recorded work");
+  await expect(row(page,5)).toContainText("Claimed elsewhere");
+  await page.screenshot({ path: test.info().outputPath("local-live-five-agents.png") });
+  await page.evaluate(() => {
+    const fixture=window as any;
+    fixture.__queueActivity([{window_id:"tab-queue::pm",session_id:"pm",runtime_incarnation:1,is_pm:true}],
+      "2026-10-24T15:00:01Z");
+  });
+  await expect(metric).toHaveText("Active 1 · 0 issues · PM 1");
+  await page.evaluate(() => {
+    const fixture=window as any;
+    fixture.__queueActivity([{window_id:"tab-queue::stale",session_id:"stale",runtime_incarnation:1,is_pm:false,issue_number:1}],
+      "2026-10-24T15:00:00Z");
+  });
+  await expect(metric).toHaveText("Active 1 · 0 issues · PM 1");
+  await expect(column(page,"active").locator(".knowledge-row")).toHaveCount(0);
+});
 async function confirm(page: Page, numbers: number[], extra = {}) {
   await page.evaluate(({numbers, extra}) => (window as any).__queueConfirm(numbers, extra), {numbers, extra});
 }
@@ -408,7 +445,7 @@ test("Issue #5321 Settings integrates Issues at 1280px without duplicate surface
   await expect(max).toHaveValue("3");
   // Wait for the saved Manual status before requesting Auto; the input's
   // optimistic value alone does not acknowledge the fixture's async reply.
-  await expect(root.locator('[data-metric="active"]')).toHaveText("Active 1/3");
+  await expect.poll(() => page.evaluate(() => (window as any).__queueLatestStatus.max_active_agents)).toBe(3);
   await mode.selectOption("auto");
   await expect(max).toBeDisabled();
   await expect(settings.getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
@@ -477,12 +514,13 @@ test("Issue #5415 failed initial startup requeues once and releases its Active s
   await confirm(page, [3, 4], { enabled: true, state: "active", active_count: 1 });
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launched" }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1/1");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issues · PM 0");
+  await page.evaluate(() => (window as any).__queueActivity([]));
   await confirm(page, [5, 3, 4], { state: "active", active_count: 0, last_error: null });
   await page.evaluate(diagnosis => (window as any).__queueInbox([
     { issue: { number: 5 }, state: "queued", error_message: diagnosis },
   ]), diagnosis);
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0/1");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toBeVisible();
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toHaveCount(0);
   await expect(row(page, 5)).toHaveCount(1);
@@ -523,6 +561,19 @@ test("Issue #5287 inbox-first restart, GUI error, load failure and renderer reco
   await expect(loadNotice).toHaveAttribute("data-resolved", "true");
   await expect(row(page, 3)).toContainText("Enriched queued issue");
   await expect(page.locator(".knowledge-row")).toHaveCount(6);
+  await assertInbox();
+  // Settle the projection/Monitor refresh after the initial load completes.
+  // Its background render must not repair the deliberate one-shot fault while
+  // the failure notice is being inspected.
+  const priorLoads = await page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "load_knowledge_bridge").length);
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.__queueInbox(fixture.__queueLatestInbox);
+  });
+  await expect.poll(() => page.evaluate(() => (window as any).__queueMessages
+    .filter((message: any) => message.kind === "load_knowledge_bridge").length)).toBeGreaterThan(priorLoads);
+  await page.evaluate(() => (window as any).__queueKnowledgeComplete());
   await assertInbox();
   await page.evaluate(() => {
     const original = Element.prototype.insertBefore;
@@ -567,6 +618,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
   const reason = "Choose the publication scope before work can continue";
   await page.evaluate(reason => {
     const fixture = window as any;
+    fixture.__queueActivity([]);
     fixture.__queueSetEntries([42, 43].map(number => ({ number, title: `Decision issue ${number}`, state: "open",
       labels: [], related_work_refs: [{ id: `work-${number}` }] })));
     fixture.__queueEvent({ kind: "active_work_projection", projection: { id: "stale-work", agents: [], works: [],
@@ -579,9 +631,9 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
       { issue: { number: 43 }, state: "blocked_by_claim" },
     ]);
   }, reason);
-  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0");
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0/2");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 0 · 0 issues · PM 0");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Idle Q1 A0/2");
   await expect(row(page, 42).locator(".knowledge-row-badge")).toHaveText("Needs human");
   await expect(row(page, 42).locator('[data-key="reason"]')).toHaveText(reason);
@@ -592,6 +644,7 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
     const fixture = window as any;
     fixture.__queueSetEntries([42, 43, 44].map(number => ({ number, title: `Decision issue ${number}`, state: "open",
       labels: [], related_work_refs: number === 44 ? [] : [{ id: `work-${number}` }] })));
+    fixture.__queueActivity([{window_id:"tab-queue::agent-44",session_id:"session-44",runtime_incarnation:1,issue_number:44,is_pm:false}]);
     fixture.__queueStatus({ state: "active", active_count: 1 });
     fixture.__queueInbox([
       { issue: { number: 42 }, state: "needs_human", error_message: "Choose the publication scope before work can continue" },
@@ -599,11 +652,11 @@ test("Issue #5491 judgment holds stay outside Active and counts follow live laun
       { issue: { number: 44 }, state: "launching" },
     ]);
   });
-  await expect(column(page, "active").locator("h3")).toHaveText("Active · 1");
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issues");
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
   await expect(column(page, "active").locator('[data-issue-number="44"]')).toBeVisible();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 2");
-  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1/2");
+  await expect(page.locator('[data-metric="active"]')).toHaveText("Active 1 · 1 issues · PM 0");
   await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q1 A1/2");
 });
 
@@ -622,13 +675,13 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
       fixture.__queueAgentState(status);
     }, status);
     await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
-    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1");
+    await expect(column(page, "active").locator("h3")).toHaveText("Active · 1 issues");
     await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(1);
     await expect(column(page, "done").locator('[data-issue-number="5"]')).toHaveCount(0);
     await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText(label);
     await expect(row(page, 5).locator('[data-key="closed"]')).toHaveText("Closed");
     await expect(row(page, 5)).toContainText("Session cleanup pending");
-    await expect(activeMetric).toHaveText("Active 1/8");
+    await expect(activeMetric).toHaveText("Active 1 · 1 issues · PM 0");
   }
   await activeMetric.hover();
   await expect(popup).toBeVisible();
@@ -642,8 +695,8 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
   });
   await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
   await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
-  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0");
-  await expect(activeMetric).toHaveText("Active 0/8");
+  await expect(column(page, "active").locator("h3")).toHaveText("Active · 0 issues");
+  await expect(activeMetric).toHaveText("Active 0 · 0 issues · PM 0");
   await expect(row(page, 5)).not.toContainText("Session cleanup pending");
 
   const cause = "Agent process exited with code 17 during session cleanup";
@@ -654,7 +707,7 @@ test("Issue #6141 closed issues follow live sessions and explain cleanup, counts
   }, cause);
   await expect(column(page, "done").locator('[data-issue-number="5"]')).toBeVisible();
   const badge = row(page, 5).locator(".knowledge-row-badge");
-  await expect(badge).toHaveText("Error");
+  await expect(badge).toHaveText("Agent failed");
   await badge.hover();
   await expect(popup).toBeVisible();
   await expect(popup).toContainText(cause);
@@ -680,7 +733,7 @@ test("Issue #4862 failed launches with no window show their reason outside Activ
         id: `work-${number}`, title: `Stale active Work ${number}`, active_agents: 1, agents: [], works: [],
       })) } });
   });
-  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(2);
+  await expect(column(page, "active").locator(".knowledge-row")).toHaveCount(0);
   await page.evaluate(() => (window as any).__queueInbox([42, 43].map((number, index) => ({ issue: { number },
     state: index ? "agent_failed" : "launch_failed", launched_window_id: null,
     error_message: `Issue ${number}: successor has invalid lineage` }))));
@@ -721,7 +774,10 @@ test("Issue #4862 PM stop stays Held outside the queue while a stale pane linger
   await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "launch_failed", error_message: "old failed attempt" }]));
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toBeVisible();
   await expect(row(page, 5).locator(".knowledge-row-badge")).toHaveText("Running");
-  await page.evaluate(() => (window as any).__queueInbox([{ issue: { number: 5 }, state: "needs_human", error_message: "stopped: PM paused for investigation" }]));
+  await page.evaluate(() => {
+    (window as any).__queueActivity([]);
+    (window as any).__queueInbox([{ issue: { number: 5 }, state: "needs_human", error_message: "stopped: PM paused for investigation" }]);
+  });
   const held = column(page, "backlog").locator('[data-issue-number="5"]');
   await expect(held).toBeVisible();
   await expect(held.locator(".knowledge-row-badge")).toHaveText("Held");
@@ -993,7 +1049,7 @@ test("Monitor list bursts render once while controls remain synchronous", async 
       window.cancelAnimationFrame = originalCancel;
     }
   });
-  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 2/1" }, rows: 1, active: true,
+  expect(result).toEqual({ before: { rows: 0, same: true, queue: "Queue 49", active: "Active 1 · 1 issues · PM 0" }, rows: 1, active: false,
     latest: "Min tier 49", request: { kind: "set_issue_monitor_autonomous_mode", enabled: false } });
   const select = row(page, 3).locator(".knowledge-row-select");
   await select.focus();
@@ -1295,6 +1351,8 @@ test("auto-refill starts off and toggle and limit use server-confirmed values", 
 
 test("live launched state survives stale cache and retains full queue positions", async ({ page }) => {
   await confirm(page, [99, 3, 4]);
+  await page.evaluate(() => (window as any).__queueActivity([{window_id:"tab-queue::agent-3",session_id:"session-3",
+    runtime_incarnation:1,issue_number:3,is_pm:false}]));
   await page.evaluate(() => (window as any).__queueInbox([{issue:{number:3},state:"launched"}]));
   await expect(column(page, "queued").locator('[data-issue-number="3"]')).toHaveCount(0);
   await expect(column(page, "active").locator('[data-issue-number="3"]')).toBeVisible();
@@ -1326,6 +1384,8 @@ test("an unfocused Issue window reflects a launch while animation frames are sus
       });
       observer.observe(document.body, {childList:true,subtree:true});
     });
+    (window as any).__queueActivity([{window_id:"tab-queue::agent-3",session_id:"session-3",
+      runtime_incarnation:1,issue_number:3,is_pm:false}]);
     (window as any).__queueInbox([{issue:{number:3},state:"launched"}]);
     try { return await rendered; } finally { window.requestAnimationFrame = scheduleFrame; }
   });
@@ -1344,6 +1404,11 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       max_active_agents_mode:"auto",max_active_agents_override:null,
       launch_profile_source:"saved",launch_profile_summary:"Fixture agent",terminal_queue_auto_refill:false,
       terminal_queue_auto_refill_limit:3,terminal_queue:[{number:3,queued_by:"operator"},{number:4,queued_by:"auto-refill"}],queue_len:2};
+    let activityRevision = 0;
+    let liveAgents = [{ window_id: "tab-queue::agent-5", session_id: "agent-5-session",
+      runtime_incarnation: 1, issue_number: 5, is_pm: false }];
+    const activity = () => ({ project_key: projectKey, host_id: "fixture-host",
+      observed_at: new Date(1792840000000 + activityRevision++).toISOString(), agents: liveAgents });
     const entries=[
       {number:1,title:"First backlog issue",...(observeSkipped ? {labels:["gwt-queued"],monitor_state:"skipped",
         exclusion_reason:"not selected in this terminal queue"} : {})},{number:2,title:"Second backlog issue"},
@@ -1357,6 +1422,11 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       readyState=0;
       constructor(public readonly url:string) { super();
         fixture.__queueEvent=(event:any)=>this.emit(event);
+        fixture.__queueActivity=(agents:any[], observed_at?:string)=>{
+          liveAgents=agents;
+          this.emit({kind:"active_work_projection_patch",projection:{id:"queue-fixture",active_works:[],
+            local_agent_activity:{...activity(), ...(observed_at ? {observed_at} : {})}}});
+        };
         fixture.__queueEntries=(revision:string, patch?:{number:number,title:string})=>{
           const entry=entries.find(entry=>entry.number===patch?.number);
           if (entry && patch) entry.title=patch.title;
@@ -1386,6 +1456,7 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
         this.emit({kind:"issue_monitor_status",status});
       }; fixture.__queueAgentState=(state:string)=>{
         this.emit({kind:"terminal_status",id:"tab-queue::agent-5",status:state});
+        if (["stopped", "error"].includes(state)) fixture.__queueActivity([]);
       }; fixture.__queueFocusResponse=()=>{
         const workspace=fixture.__queueWorkspace;
         const issue=workspace.tabs[0].workspace.windows.find((item:any)=>item.id==="tab-queue::issue-1");
@@ -1404,7 +1475,14 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
       fixture.__queueRefreshDetail=()=>this.emit({...fixture.__queueLastDetail,
         detail:{...fixture.__queueLastDetail.detail,title:"Refreshed issue"}});
         setTimeout(()=>{this.readyState=1;this.dispatchEvent(new Event("open"));},0); }
-      emit(payload:unknown) {const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
+      emit(payload:any) {
+        if (payload.kind === "issue_monitor_status") fixture.__queueLatestStatus = payload.status;
+        if (payload.kind === "issue_monitor_inbox") fixture.__queueLatestInbox = payload.items;
+        if (["active_work_projection", "active_work_projection_patch"].includes(payload.kind) &&
+            !Object.hasOwn(payload.projection, "local_agent_activity")) {
+          payload={...payload, projection:{...payload.projection,local_agent_activity:activity()}};
+        }
+        const data=JSON.stringify(payload);setTimeout(()=>this.dispatchEvent(new MessageEvent("message",{data})),0);}
       send(raw:string) {
         const message=JSON.parse(raw);fixture.__queueMessages.push(message);
         if(message.kind==="frontend_ready") { fixture.__queueWorkspace={app_version:"playwright",tabs:[{
@@ -1414,7 +1492,8 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             ...(includeAgent ? [{id:"tab-queue::agent-5",session_id:"agent-5-session",title:"Issue 5 agent",preset:"agent",agent_id:"codex",
               geometry:{x:80,y:80,width:900,height:600},z_index:2,status:"running",persist:true,minimized:false,maximized:false,
               placement:{kind:"issue_preview",issue_window_id:"tab-queue::issue-1",issue_number:5}}] : [])]} }],active_tab_id:"tab-queue",recent_projects:[]};
-          this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace}); }
+          this.emit({kind:"workspace_state",workspace:fixture.__queueWorkspace});
+          this.emit({kind:"active_work_projection",projection:{id:"queue-fixture",active_works:[],local_agent_activity:activity()}}); }
         else if(message.kind==="create_window" && message.preset==="settings") {
           const workspace=fixture.__queueWorkspace;
           workspace.tabs[0].workspace.windows.push({id:"tab-queue::settings",title:"Settings",preset:"settings",

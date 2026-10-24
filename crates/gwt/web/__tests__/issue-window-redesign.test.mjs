@@ -140,7 +140,7 @@ test("AC-23: the Issues summary carries only status, counts and frequent control
   surface.applyIssueMonitorStatus(STATUS);
   assert.equal(pill.textContent, "Running");
   assert.equal(pill.dataset.tone, "active");
-  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active 0/2", "no Issue cards are loaded");
+  assert.equal(bar.querySelector('[data-metric="active"]').textContent, "Active —", "no runtime census has been received");
   assert.equal(bar.querySelector('[data-metric="queue"]').textContent, "Queue 3");
   assert.equal(bar.querySelector('[data-action="monitor-toggle"]').textContent, "Stop");
   assert.ok(bar.querySelector('[data-action="monitor-autonomous"][role="switch"]'));
@@ -640,6 +640,8 @@ test("T-7a: known monitor, agent and Work states explain their meaning", async (
   const { body, document, surface, state } = await makeFixture({
     windows: [agent],
     surface: {
+      agentActivityModel: createUiStateStore({ byIssue: { 12: [{ window_id: agent.id }] }, count: 1,
+        issueCount: 1, pmCount: 0, snapshot: { observed_at: "2026-10-24T14:00:00Z" } }),
       getActiveWorkProjection: () => ({ active_works: [{ id: "work-13" }] }),
       workAttentionFor: () => ({ lane: "paused" }),
     },
@@ -740,7 +742,7 @@ test("Monitor list bursts render once while controls and notifications stay sync
   assert.ok(reported.some(error => error.message === "Transient error"), "transient errors are not coalesced away");
   assert.ok(resolved.includes("issue-monitor:last_error"), "error recovery stays synchronous");
   assert.equal(body.querySelector('[data-metric="queue"]').textContent, "Queue 49", "independent controls stay current");
-  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active 1/2", "inbox-only updates keep the summary synchronous");
+  assert.equal(body.querySelector('[data-metric="active"]').textContent, "Active —", "inbox updates cannot prove local child liveness");
   body.querySelector('[data-action="monitor-toggle"]').click();
   assert.ok(sent.some(message => message.kind === "set_issue_monitor_enabled" && message.enabled === true));
   assert.equal(renders, 0, "Monitor receipts wait for the shared frame before rendering the list");
@@ -749,7 +751,7 @@ test("Monitor list bursts render once while controls and notifications stay sync
   for (const run of [...frames]) { frames.delete(run); run(); }
   assert.equal(renders, 1, "status and inbox use the same latest render");
   assert.match(body.querySelector(".knowledge-row").textContent, /Min tier 49/);
-  assert.ok(body.querySelector('[data-queue-column="active"] [data-issue-number="11"]'));
+  assert.ok(body.querySelector('[data-queue-column="backlog"] [data-issue-number="11"]'));
   surface.applyIssueMonitorStatus({ ...STATUS, queue_len: 50 });
   body.querySelector(".knowledge-row-select").click();
   assert.equal(state.selectedNumber, 11, "selection stays synchronous with a pending frame");

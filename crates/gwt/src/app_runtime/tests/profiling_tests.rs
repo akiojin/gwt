@@ -634,6 +634,7 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
         works: Vec::new(),
         cleanup_candidate: None,
         managed_hook_health: None,
+        local_agent_activity: None,
         active_work_count: 0,
         active_works: Vec::new(),
         agents: Vec::new(),

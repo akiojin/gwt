@@ -225,9 +225,9 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
   assert.equal(row.querySelector(".knowledge-row-work"), null, "no separate Work band");
   const reason = row.querySelector('.knowledge-row-secondary-item[data-kind="reason"]');
   assert.equal(reason.textContent, "Waiting on review");
-  const pr = row.querySelector('.knowledge-row-secondary-item[data-key="pr"]');
-  assert.equal(pr.textContent, "PR #3699 · open");
-  assert.equal(pr.title, "https://github.com/akiojin/gwt/pull/3699");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="recorded"]').textContent, "Recorded work");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="pr"]'), null,
+    "the recorded-work explanation takes the second bounded secondary slot");
 });
 
 test("an Issue with no correlated Work renders no Work block", async (t) => {

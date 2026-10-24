@@ -1823,6 +1823,25 @@ pub struct ActiveWorkItemView {
     pub cleanup_blocked_reason: Option<String>,
 }
 
+/// Read-only membership measured from this GUI host's current agent children.
+/// This does not grant launch, close, or Issue Monitor slot authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityView {
+    pub project_key: String,
+    pub host_id: String,
+    pub observed_at: String,
+    pub agents: Vec<LocalAgentActivityAgentView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityAgentView {
+    pub window_id: String,
+    pub session_id: String,
+    pub runtime_incarnation: u64,
+    pub issue_number: Option<u64>,
+    pub is_pm: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
@@ -1856,6 +1875,8 @@ pub struct ActiveWorkProjectionView {
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_agent_activity: Option<LocalAgentActivityView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4722,6 +4743,7 @@ mod tests {
                     remote_delete_available: true,
                 }),
                 managed_hook_health: None,
+                local_agent_activity: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
                     linked_issue_numbers: Vec::new(),

@@ -10,6 +10,57 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings" });
+      const issues = page.locator('[data-settings-panel="issues"]');
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
+      const metric = issues.locator('[data-metric="active"]');
+      await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
+      const row = issues.locator(`[data-issue-number="${fixture.issueNumber}"]`);
+      await expect(row).toBeVisible({ timeout: 60_000 });
+      await row.dragTo(issues.locator('[data-queue-column="queued"] h3'));
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const activity = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter((item: any) => item.payload.projection?.local_agent_activity)
+        .at(-1)?.payload.projection.local_agent_activity);
+      await expect(metric).toHaveText("Active 1 · 1 issues · PM 0", { timeout: 60_000 });
+      const live = await activity();
+      const agent = live.agents.find((agent: any) => agent.session_id === launch.gwt_session_id);
+      expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
+      expect(agent.runtime_incarnation).toBeGreaterThan(0);
+      expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      await info.attach(`local-live-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => {
+        try { process.kill(launch.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000, message: "the exact provider child exited and was reaped" }).toBe(true);
+      await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
+      expect((await activity()).agents).toEqual([]);
+      await expect(issues.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
+      await expect(row).toBeVisible();
+      expect(errors, "zero console/page errors across the real child exit").toEqual([]);
+      await info.attach("local-live-exit", { body: JSON.stringify({ before: live, after: await activity(), launch }, null, 2), contentType: "application/json" });
+    } finally {
+      try {
+        const observations = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+          .filter(({ payload }: any) => payload.projection || payload.kind === "terminal_status")
+          .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind,
+            activity: payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
+        await info.attach("local-live-wire", { body: JSON.stringify({ observations, errors }, null, 2), contentType: "application/json" });
+      } finally { await fixture.stop(); }
+    }
+  });
+
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];

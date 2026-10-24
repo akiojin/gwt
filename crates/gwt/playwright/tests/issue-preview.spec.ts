@@ -943,9 +943,16 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
           window.__knowledgeLoadMessages.push(message);
           if (message.kind === "frontend_ready") {
             this.emit(workspaceState());
-            if (includeWorkProjection) this.emit({
+            this.emit({
               kind: "active_work_projection",
-              projection: activeWorkProjection,
+              projection: { ...(includeWorkProjection ? activeWorkProjection : {
+                id: "local-activity", active_works: [], agents: [], works: [], unassigned_agents: [], journal_entries: [],
+              }), local_agent_activity: {
+                project_key: projectKey, host_id: "preview-fixture-host", observed_at: new Date().toISOString(),
+                agents: windows.filter(window => window.agent_id).map(window => ({ window_id: window.id,
+                  session_id: window.session_id, runtime_incarnation: 1, is_pm: false,
+                  issue_number: window.linked_issue_number ?? window.placement?.issue_number })),
+              } },
             });
             return;
           }
