@@ -4,7 +4,7 @@
 // status row per running agent) and the split view, which lays the running
 // Issues out as "Issue detail + interactive terminal" pairs. Switching modes
 // reparents the same terminal runtime, so the PTY, its scrollback and the
-// selection survive. After Windowize the pair shows the "Shown in Agents" face
+// selection survive. After Windowize the pair shows the "Shown in Works" face
 // instead of a second input face (US-4 / FR-003a), and a pair can be expanded
 // or shrunk in place (T-005). Stopping an agent lives only in the row's ⋯ menu
 // (FR-015), and the status row's elapsed time comes from the backend's agent
@@ -320,7 +320,7 @@ test("US-4 / FR-003a: a Windowized agent's pair shows the canvas face, not a sec
   );
   click(fx.body.querySelector('[data-issue-detail-view="output"]'));
   const detail = fx.body.querySelector(".knowledge-detail-pane");
-  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
+  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Works/);
   assert.ok(detail.querySelector('[data-action="focus-surface-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
   fx.terminalMounts.length = 0;
@@ -331,7 +331,7 @@ test("US-4 / FR-003a: a Windowized agent's pair shows the canvas face, not a sec
   assert.deepEqual(list.map((pair) => pair.dataset.issueNumber), ["3671", "3672"]);
   const inAgents = list[0];
   assert.ok(inAgents.classList.contains("is-in-agents"));
-  assert.match(inAgents.querySelector(".issue-split-placeholder").textContent, /Shown in Agents/);
+  assert.match(inAgents.querySelector(".issue-split-placeholder").textContent, /Shown in Works/);
   assert.equal(Boolean(inAgents.querySelector(".terminal-root")), false, "no second input face");
   assert.ok(Boolean(inAgents.querySelector('[data-action="focus-surface-window"]')));
   assert.equal(Boolean(inAgents.querySelector('[data-action="windowize-issue-preview"]')), false);

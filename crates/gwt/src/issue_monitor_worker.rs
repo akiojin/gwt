@@ -3425,6 +3425,20 @@ pub fn load_cached_issue_monitor_candidate(
         .map(cached_issue_monitor_candidate)
 }
 
+/// Resolve continuity from the existing cached owner contract without a fetch.
+pub fn cached_agent_member_spec_owner(project_root: &Path, issue_number: u64) -> Option<u64> {
+    let root = crate::issue_cache::issue_cache_root_for_repo_path(project_root)?;
+    let issue = load_cached_issue_monitor_candidate(&root, issue_number)?;
+    if issue.labels.iter().any(|label| label == "gwt-spec") {
+        Some(issue_number)
+    } else {
+        issue
+            .body
+            .as_deref()
+            .and_then(crate::knowledge_bridge::parent_spec_from_body)
+    }
+}
+
 /// Read only the target's cached dependency evidence, recording each source
 /// before it is read so launch admission can reject changes to that evidence.
 pub fn load_cached_issue_monitor_dependency_candidates(

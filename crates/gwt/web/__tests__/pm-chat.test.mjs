@@ -425,13 +425,13 @@ test('clipboard failure shows and reports the concrete upload cause', async () =
 });
 
 
-test('Agents tiles own browser and native file drops and their progress', async () => {
+test('Works full terminals own browser and native file drops and their progress', async () => {
   let source = await readFile(new URL('../terminal-attachments.js', import.meta.url), 'utf8');
   for (const name of ['terminal-copy-shortcut', 'terminal-context-menu', 'ui-state-store']) {
     source = source.replace(`"/${name}.js"`, JSON.stringify(new URL(`../${name}.js`, import.meta.url).href));
   }
   const { createTerminalAttachments } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
-  const { document, window } = parseHTML('<html><body><section hidden><div class="workspace-window" data-id="agent"></div></section><article class="agent-tile" data-agent-id="agent"><header>Agent</header><div class="terminal-root"></div></article></body></html>');
+  const { document, window } = parseHTML('<html><body><section hidden><div class="workspace-window" data-id="agent"></div></section><section class="works-surface"><section class="works-full"><header class="works-full-header">Agent</header><div class="works-terminal-host"><div class="works-terminal terminal-root" data-window-id="agent"></div></div></section></section></body></html>');
   const previous = { window: globalThis.window, document: globalThis.document };
   globalThis.window = window;
   globalThis.document = document;
@@ -440,7 +440,7 @@ test('Agents tiles own browser and native file drops and their progress', async 
   window.__gwtAttachmentUploader = async () => ({ upload_id: 'tile-upload' });
   try {
     const cached = document.querySelector('.workspace-window');
-    const tile = document.querySelector('.agent-tile');
+    const tile = document.querySelector('.works-full');
     const terminalRoot = tile.querySelector('.terminal-root');
     document.elementFromPoint = () => terminalRoot;
     const bridge = createTerminalAttachments({ send: message => sent.push(message),

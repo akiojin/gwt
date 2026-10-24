@@ -125,6 +125,11 @@ pub fn launch_config_from_persisted_session(
     }
 
     let mut config = builder.build();
+    if let Some(member_id) = session.agent_member_id.as_ref() {
+        config
+            .env_vars
+            .insert("GWT_AGENT_MEMBER_ID".into(), member_id.clone());
+    }
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();
     }
@@ -387,6 +392,13 @@ pub fn apply_resume_identity_to_session(
     session: &mut gwt_agent::Session,
     config: &gwt_agent::LaunchConfig,
 ) {
+    if session.agent_member_id.is_none() {
+        session.agent_member_id = config
+            .env_vars
+            .get("GWT_AGENT_MEMBER_ID")
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty());
+    }
     if session.agent_name.is_none() {
         session.agent_name = config
             .env_vars

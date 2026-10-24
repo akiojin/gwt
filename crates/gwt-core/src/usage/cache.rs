@@ -20,6 +20,9 @@ struct CodexTranscript {
     session: SessionUsage,
     account: Option<(codex::CodexAccount, Option<DateTime<Utc>>)>,
     events: Vec<ConsumptionEvent>,
+    last_event_total: Option<Value>,
+    observed_at: Option<DateTime<Utc>>,
+    incomplete: bool,
 }
 
 impl Default for CodexTranscript {
@@ -28,6 +31,9 @@ impl Default for CodexTranscript {
             session: codex::parse_codex_session("", ""),
             account: None,
             events: Vec::new(),
+            last_event_total: None,
+            observed_at: None,
+            incomplete: false,
         }
     }
 }
@@ -56,7 +62,21 @@ impl CodexTranscript {
                 .get("rate_limits")
                 .and_then(|limits| codex::parse_rate_limits_at(limits, observed_at))
                 .map(|account| (account, observed_at));
-            self.events.extend(consumption::parse_codex_events(line));
+            let info = payload.get("info");
+            let total = info.and_then(|info| info.get("total_token_usage"));
+            let last = info.and_then(|info| info.get("last_token_usage"));
+            if total.is_some() || last.is_some() {
+                self.observed_at = observed_at.or(self.observed_at);
+                let duplicate = total.is_some() && total == self.last_event_total.as_ref();
+                if !duplicate {
+                    let events = consumption::parse_codex_events(line);
+                    self.incomplete |= events.is_empty();
+                    if !events.is_empty() {
+                        self.last_event_total = total.cloned();
+                        self.events.extend(events);
+                    }
+                }
+            }
         }
         if model.is_some() {
             self.session.model = model;
@@ -67,6 +87,8 @@ impl CodexTranscript {
 struct ClaudeTranscript {
     session: SessionUsage,
     events: Vec<ConsumptionEvent>,
+    observed_at: Option<DateTime<Utc>>,
+    incomplete: bool,
 }
 
 impl Default for ClaudeTranscript {
@@ -74,6 +96,8 @@ impl Default for ClaudeTranscript {
         Self {
             session: claude::parse_claude_transcript("", ""),
             events: Vec::new(),
+            observed_at: None,
+            incomplete: false,
         }
     }
 }
@@ -85,10 +109,27 @@ impl ClaudeTranscript {
             return;
         }
         let session = &mut self.session;
+        let first = session.state != UsageState::Ok;
         session.state = UsageState::Ok;
         session.input_tokens += next.input_tokens;
         session.output_tokens += next.output_tokens;
         session.total_tokens += next.total_tokens;
+        session.cache_read_tokens = if first {
+            next.cache_read_tokens
+        } else {
+            session
+                .cache_read_tokens
+                .zip(next.cache_read_tokens)
+                .map(|(a, b)| a + b)
+        };
+        session.cache_creation_tokens = if first {
+            next.cache_creation_tokens
+        } else {
+            session
+                .cache_creation_tokens
+                .zip(next.cache_creation_tokens)
+                .map(|(a, b)| a + b)
+        };
         if next.model.is_some() {
             session.model = next.model;
         }
@@ -103,7 +144,12 @@ impl ClaudeTranscript {
             session.context_used_tokens,
             session.context_limit_tokens,
         );
-        self.events.extend(consumption::parse_claude_events(line));
+        let events = consumption::parse_claude_events(line);
+        self.incomplete |= events.is_empty();
+        if let Some((at, _)) = events.last() {
+            self.observed_at = Some(*at);
+        }
+        self.events.extend(events);
     }
 }
 
@@ -164,6 +210,32 @@ impl UsageCache {
             .session
             .clone();
         usage.session_id = session_id.to_owned();
+        usage.provider_session_id = Some(session_id.to_owned());
+        Some(usage)
+    }
+
+    pub fn codex_session_at(
+        &mut self,
+        home: &Path,
+        session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<SessionUsage> {
+        let mut usage = self.codex_session(home, session_id)?;
+        let path = self
+            .paths(home, UsageProvider::Codex)
+            .iter()
+            .find(|path| codex::rollout_matches_session(path, session_id))?
+            .clone();
+        let summary = self.codex.read(&path, CodexTranscript::apply)?;
+        if usage.state == UsageState::Ok || !summary.events.is_empty() {
+            usage.telemetry = Some(consumption::session_telemetry(
+                UsageProvider::Codex,
+                &summary.events,
+                summary.observed_at,
+                summary.incomplete,
+                now,
+            ));
+        }
         Some(usage)
     }
 
@@ -184,6 +256,36 @@ impl UsageCache {
             .session
             .clone();
         usage.session_id = session_id.to_owned();
+        usage.provider_session_id = Some(session_id.to_owned());
+        Some(usage)
+    }
+
+    pub fn claude_session_at(
+        &mut self,
+        home: &Path,
+        session_id: &str,
+        now: DateTime<Utc>,
+    ) -> Option<SessionUsage> {
+        let mut usage = self.claude_session(home, session_id)?;
+        let filename = format!("{session_id}.jsonl");
+        let path = self
+            .paths(home, UsageProvider::ClaudeCode)
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == filename.as_str())
+            })?
+            .clone();
+        let summary = self.claude.read(&path, ClaudeTranscript::apply)?;
+        if usage.state == UsageState::Ok {
+            usage.telemetry = Some(consumption::session_telemetry(
+                UsageProvider::ClaudeCode,
+                &summary.events,
+                summary.observed_at,
+                summary.incomplete,
+                now,
+            ));
+        }
         Some(usage)
     }
 
@@ -284,6 +386,97 @@ mod tests {
     use super::*;
     use crate::usage::{claude, codex, consumption};
     use std::{fs, io::Write};
+
+    #[test]
+    fn session_telemetry_keeps_thirty_minutes_and_does_not_mix_transcripts() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir(home.path().join("sessions")).unwrap();
+        let line = |timestamp: &str,
+                    (total_input, total_cached, total_output),
+                    (input, cached, output)| {
+            serde_json::json!({"timestamp": timestamp, "payload": {"type": "token_count", "info": {
+                "total_token_usage": {"input_tokens": total_input, "cached_input_tokens": total_cached, "output_tokens": total_output},
+                "last_token_usage": {"input_tokens": input, "cached_input_tokens": cached, "output_tokens": output}
+            }}}).to_string() + "\n"
+        };
+        fs::write(
+            home.path().join("sessions/rollout-owned.jsonl"),
+            line("2026-10-15T12:00:59.999Z", (10, 4, 2), (10, 4, 2))
+                + &line("2026-10-15T12:01:00Z", (30, 9, 5), (20, 5, 3))
+                + &line("2026-10-15T12:28:00Z", (60, 15, 9), (30, 6, 4))
+                + &line("2026-10-15T12:28:00Z", (60, 15, 9), (30, 6, 4)),
+        )
+        .unwrap();
+        fs::write(
+            home.path().join("sessions/rollout-other.jsonl"),
+            line(
+                "2026-10-15T12:29:00Z",
+                (9000, 8000, 1000),
+                (9000, 8000, 1000),
+            ),
+        )
+        .unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-15T12:30:30Z")
+            .unwrap()
+            .to_utc();
+        let mut cache = UsageCache::default();
+        let usage = cache.codex_session_at(home.path(), "owned", now).unwrap();
+        let telemetry = usage.telemetry.unwrap();
+        assert_eq!(telemetry.minute_buckets.len(), 30);
+        assert_eq!(telemetry.minute_buckets[0].tokens, Some(23));
+        assert_eq!(telemetry.minute_buckets[26].tokens, Some(0));
+        assert_eq!(telemetry.minute_buckets[27].tokens, Some(34));
+        assert_eq!(telemetry.today_tokens, Some(69));
+        assert_eq!(telemetry.today_input_tokens, Some(60));
+        assert_eq!(telemetry.today_cache_read_tokens, Some(15));
+        assert_eq!(telemetry.today_output_tokens, Some(9));
+        assert_eq!(
+            telemetry.observed_at,
+            Some(now - chrono::Duration::seconds(150))
+        );
+        assert_eq!(telemetry.source, "codex_rollout");
+        let bytes = cache.bytes_read();
+        cache.begin_poll();
+        assert!(cache.codex_session_at(home.path(), "owned", now).is_some());
+        assert_eq!(cache.bytes_read(), bytes);
+    }
+
+    #[test]
+    fn session_telemetry_distinguishes_unobserved_minutes_from_measured_zero() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join("projects/project")).unwrap();
+        let path = home.path().join("projects/project/session.jsonl");
+        fs::write(&path, concat!(
+            r#"{"timestamp":"2026-10-15T12:29:00Z","type":"assistant","message":{"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+            "\n"
+        )).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-15T12:30:30Z")
+            .unwrap()
+            .to_utc();
+        let mut cache = UsageCache::default();
+        let usage = cache
+            .claude_session_at(home.path(), "session", now)
+            .unwrap();
+        let telemetry = usage.telemetry.unwrap();
+        assert_eq!(telemetry.minute_buckets[27].tokens, None);
+        assert_eq!(telemetry.minute_buckets[28].tokens, Some(0));
+        assert_eq!(telemetry.today_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(0));
+        fs::OpenOptions::new().append(true).open(path).unwrap().write_all(
+            b"{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+        ).unwrap();
+        let usage = cache
+            .claude_session_at(home.path(), "session", now)
+            .unwrap();
+        let telemetry = usage.telemetry.unwrap();
+        assert_eq!(telemetry.quality, "partial");
+        assert_eq!(telemetry.today_tokens, None);
+        assert!(telemetry
+            .minute_buckets
+            .iter()
+            .all(|bucket| bucket.tokens.is_none()));
+        assert_eq!(usage.cache_read_tokens, None);
+    }
 
     #[test]
     fn cached_and_stateless_session_readers_match_the_exact_rollout_id() {

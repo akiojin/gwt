@@ -30,7 +30,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Agents, Board, and Settings
+- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
 - **Provider usage** — hover over USAGE for account limits, including Claude's
   Fable weekly limit and enabled Usage credits with utilization, used/limit,
@@ -461,7 +461,7 @@ Common windows include:
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
   open this same Work Item view. Issue Monitor agents are mirrored read-only in
   the Issue window's right pane,
-  and `Windowize` opens the same session in an individual Agents tab for input.
+  and `Windowize` opens the same session in its native terminal in Works for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -501,14 +501,11 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-gwt assigns each worker Agent a random memorable name in the output language
-when it starts. Its badge, window title, Fleet, Kanban, and Board show that
-name, and the PM uses it when reporting work. Names are unique across the
-project's history and never receive numeric suffixes; exhausted catalogs expand
-with localized family names. Automatic restoration keeps the existing name;
-explicitly restarting an Issue's Agent assigns a fresh name. Issue comments
-record assignments, handovers, PR creation, and completion; PR bodies also
-include the responsible name. The resident PM keeps its own fixed identity.
+Implementation Agents are persistent project members with memorable names in the output language.
+A new Issue reuses an available member; a continuation prefers its previous member when available.
+New member names are unique within the project and use localized family names when needed.
+Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
+Kanban, Board, Issue comments, and PR attribution. The resident PM keeps its own role identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -1725,27 +1722,28 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
-- Open **PM** from its separate rail entry; PM uses a single pane.
-- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
-- Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
-- Use **Close split** to keep the active surface in one pane.
-- In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
+- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works.
+- **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
-Workspaces saved with the former free-placement layout restore their windows and sessions into the current surfaces; obsolete positions, sizes, and camera settings are discarded on save.
+Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
+branch and verification facts. Unavailable measurements display **—**, including context remaining
+unless the provider reports it directly. Today totals use this project's measured conversations;
+account-wide usage is not copied into them. Individual PR information is not shown here.
+
+Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
+setting do not return after reload or restart; the roster's Team/Past tabs remain.
 
 ## Agent Navigation
 
-Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
-Agent tabs by activity: running/starting first, waiting/idle next, then the
-remaining Agents. Agents shown inside Issues and Shell terminals are included;
-PM is skipped. Cycling keeps the split view and focuses the selected
-terminal for input. Closing the selected tab returns to All agents without stopping the
-agent; cycling can reopen the same terminal.
-
-Agent card and tab titles stay on one line with the name fixed at the start.
-Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
-Issue and Project Manager settings also explain their controls on hover and keyboard focus.
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select current implementation
+Agents by activity while keeping the split layout. PM and auxiliary Shells are skipped.
+The selected native terminal receives input; returning to the list keeps every session running.
+Names stay on one line, and longer purposes can be scrolled horizontally or read on hover.
+Issue and Project Manager settings explain their controls on hover and keyboard focus.
 
 ## Operator Design Language (SPEC-2356)
 

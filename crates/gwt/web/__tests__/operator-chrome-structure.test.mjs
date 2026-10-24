@@ -4996,7 +4996,7 @@ test("Hidden window output is gated while Agents retain shared preview buffers",
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\(agentsHost\s*&&\s*agentsSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
+    /canWrite:\s*\(windowId\)\s*=>\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
     "Agents must keep shared Issue preview buffers current while other hidden windows retain output gating",
   );
 

@@ -57,6 +57,7 @@ const ROOT_MODULES = new Set([
   "surface-rail.js",
   "split-surfaces.js",
   "agents-surface.js",
+  "works-surface.js",
   "terminal-text-preview.js",
   "focus-trap.js",
   "startup-metrics.js",

@@ -2751,6 +2751,7 @@ fn rebase_mutate_and_persist_issue_monitor_state<T>(
         // proposals: no writer lock may span those reads. Compare the complete
         // source snapshot at commit so a concurrent control is never lost.
         let result = mutation(monitor);
+        monitor.synchronize_agent_roster_capacity(prefs_path)?;
         let proposed = monitor.prefs();
         gwt::try_mutate_issue_monitor_prefs(prefs_path, |disk| {
             if *disk != observed {
@@ -4901,6 +4902,16 @@ impl AppRuntime {
             )?,
         };
         if let Some(session) = &mut session {
+            if !matches!(
+                session.status,
+                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+            ) && !session.review_dispatch
+                && !gwt::session_inventory::observe_session(session, &self.sessions_dir)
+                    .sessions
+                    .is_empty()
+            {
+                gwt::agent_names::adopt_project_member_session(&root, &self.sessions_dir, session)?;
+            }
             if session.agent_name.is_none() {
                 let previous = session.clone();
                 session.agent_name = Some(name.clone());
@@ -9431,6 +9442,7 @@ impl AppRuntime {
                 projection_error.as_deref(),
                 &now,
             );
+            monitor.synchronize_agent_roster_capacity(&prefs_path)?;
             *prefs = monitor.prefs();
             Ok((monitor, result))
         })
@@ -12444,6 +12456,7 @@ impl AppRuntime {
             | FrontendEvent::SaveUiTrace { .. }
             | FrontendEvent::OpenPmAgent { .. }
             | FrontendEvent::RestartPmAgent
+            | FrontendEvent::AgentRoster { .. }
             | FrontendEvent::ListIssueMonitor
             | FrontendEvent::IssueMonitorLaunchNow { .. }
             | FrontendEvent::IssueMonitorQueuePush { .. }
@@ -12905,6 +12918,10 @@ impl AppRuntime {
             FrontendEvent::SetClaudeAccountUsageEnabled { enabled } => {
                 self.set_claude_account_usage_enabled_events(enabled)
             }
+            FrontendEvent::AgentRoster {
+                action,
+                expected_revision,
+            } => self.agent_roster_events(context, &client_id, action, expected_revision),
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady {} => {
                 if self.agent_maintenance.busy {

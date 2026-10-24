@@ -24,6 +24,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/surface-rail.test.mjs \
   crates/gwt/web/__tests__/split-surfaces.test.mjs \
   crates/gwt/web/__tests__/surface-layout-only.test.mjs \
+  crates/gwt/web/__tests__/works-surface.test.mjs \
   crates/gwt/web/__tests__/agents-surface.test.mjs \
   crates/gwt/web/__tests__/terminal-text-preview.test.mjs \
   crates/gwt/web/__tests__/pm-launcher.test.mjs \

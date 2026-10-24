@@ -65,11 +65,14 @@ test.describe("AC-11 real backend surface ownership", () => {
       window.WebSocket = class extends NativeWebSocket {
         constructor(url: string | URL, protocols?: string | string[]) {
           super(url, protocols);
+          if (new URL(String(url), location.href).pathname === "/ws"
+            && new URL(String(url), location.href).searchParams.has("repo_hash")) (window as any).__ac11ProjectSocket = this;
           this.addEventListener("message", event => {
             if (typeof event.data !== "string") return;
             try {
               const message = JSON.parse(event.data);
               if (message.kind === "workspace_state") (window as any).__ac11Workspace = message.workspace;
+              if (message.kind === "agent_roster") (window as any).__ac11Roster = message.roster;
             } catch { /* Binary terminal transport remains owned by the app. */ }
           });
         }
@@ -105,7 +108,7 @@ test.describe("AC-11 real backend surface ownership", () => {
       await expect(terminal).toBeVisible();
       await terminal.getByRole("button", { name: "Execution log", exact: true }).click();
       await expect(terminal.locator(".xterm")).toBeVisible();
-      await expect(main.locator(".agent-tile")).toHaveCount(0);
+      await expect(main.locator(".work-row")).toHaveCount(0);
       await expect(page.getByRole("button", { name: "Split view", exact: true })).toBeDisabled();
       return terminal;
     };
@@ -148,27 +151,44 @@ test.describe("AC-11 real backend surface ownership", () => {
     const reopenedSettingsId = await settings.getAttribute("data-id");
     await expect.poll(async () => (await control("/state")).workspace.windows.find((data: any) => data.id === reopenedSettingsId?.split("::").at(-1))?.surface_owner).toBe("pm");
 
-    await page.locator(".op-rail__surface[data-surface='agents']").click();
-    await expect(main).toHaveAttribute("data-surface", "agents");
-    await expect(main.locator(".agent-tile")).toHaveCount(3);
+    await page.locator(".op-rail__surface[data-surface='works']").click();
+    if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+      await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+    await expect(main).toHaveAttribute("data-surface", "works");
+    await expect(main.locator(".work-row")).toHaveCount(3);
+    const pmId = (await catalog(page)).find(data => data.is_pm)!.id;
+    await expect(main.locator(".work-row").first()).toHaveAttribute("data-window-id", pmId);
+    // Both fixture workers are intentional members; persist their capacity via
+    // the same guarded roster API the product uses before testing GUI restore.
+    await expect.poll(() => page.evaluate(() => (window as any).__ac11Roster?.revision)).toBeTruthy();
+    if (await page.evaluate(() => (window as any).__ac11Roster.capacity < 2)) {
+      await page.evaluate(() => (window as any).__ac11ProjectSocket.send(JSON.stringify({
+        kind: "agent_roster", action: { kind: "resize", size: 2 }, expected_revision: (window as any).__ac11Roster.revision,
+      })));
+      await expect.poll(() => page.evaluate(() => (window as any).__ac11Roster.capacity)).toBe(2);
+    }
     for (const role of ["WORKER_A", "WORKER_B"]) {
       const worker = (await catalog(page)).find(data => data.agent_name === `AC11 ${role}`)!;
-      const tile = main.locator(`.agent-tile[data-agent-id='${worker.id}']`);
-      await main.locator(`[id="agents-tab-${worker.id}"]`).click();
-      await expectLive(tile, role);
-      await typeInto(tile, "worker-input-" + role);
-      await expect(tile.locator(".xterm-rows")).toContainText(`AC11 INPUT ${role} worker-input-${role}`);
+      const row = main.locator(`.work-row[data-window-id='${worker.id}']`);
+      await expect(row.locator(".terminal-text-preview")).toBeVisible();
+      await row.getByRole("button", { name: "Open terminal", exact: true }).click();
+      const terminal = main.locator(`.works-full .works-terminal[data-window-id='${worker.id}']`);
+      await expectLive(terminal, role);
+      await typeInto(terminal, "worker-input-" + role);
+      await expect(terminal.locator(".xterm-rows")).toContainText(`AC11 INPUT ${role} worker-input-${role}`);
+      await main.getByRole("button", { name: "← Back to Works", exact: true }).click();
     }
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
     const shellWindow = (await catalog(page)).find(data => data.preset === "shell")!;
-    const shell = main.locator(`.agent-tile[data-agent-id='${shellWindow.id}']`);
-    await expect(shell.locator(".agent-tile__mode")).toHaveText("Interactive");
-    await main.getByRole("tab", { name: "Start Work", exact: true }).click();
+    await showShell(page, shellWindow.id);
+    const shell = main.locator(`.workspace-window[data-id='${shellWindow.id}']`);
     await typeInto(shell, "printf 'AC11_SHELL_%s\\n' INPUT_OK");
     await expect(shell.locator(".xterm-rows")).toContainText("AC11_SHELL_INPUT_OK");
-    await expect(main.locator(`.agent-tile[data-agent-id='${(await catalog(page)).find(data => data.is_pm)!.id}']`)).toHaveCount(0);
-    await main.getByRole("tab", { name: "All agents", exact: true }).click();
-    await expect(main.locator(".agent-tile:visible")).toHaveCount(3);
+    await page.locator(".op-rail__surface[data-surface='works']").click();
+    if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+      await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+    await expect(main.locator(`.work-row[data-window-id='${shellWindow.id}']`)).toHaveCount(0);
+    await expect(main.locator(".work-row:visible")).toHaveCount(3);
+    await expect(main.locator(".work-row").first()).toHaveAttribute("data-window-id", pmId);
     await page.screenshot({ path: testInfo.outputPath("live-agents-before-reload.png") });
 
     await page.reload();
@@ -210,18 +230,32 @@ test.describe("AC-11 real backend surface ownership", () => {
     await expect(main).toHaveAttribute("data-surface", "settings");
     await expect(main.locator(".workspace-window[data-preset='settings']")).toHaveAttribute("data-id", "ownership-live::settings-normal");
     await expect(page.getByRole("button", { name: "Split view", exact: true })).toBeEnabled();
-    await page.locator(".op-rail__surface[data-surface='agents']").click();
-    await expect(main.locator(".agent-tile")).toHaveCount(2);
+    await page.locator(".op-rail__surface[data-surface='works']").click();
+    if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+      await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+    await expect(main.locator(".work-row")).toHaveCount(3);
+    await expect(main.locator(".work-row").first()).toHaveAttribute("data-window-id", (await catalog(page)).find(data => data.is_pm)!.id);
     const worker = (await catalog(page)).find(data => data.agent_name === "AC11 WORKER_A")!;
-    const tile = main.locator(`.agent-tile[data-agent-id='${worker.id}']`);
-    await main.locator(`[id="agents-tab-${worker.id}"]`).click();
-    await expectLive(tile, "WORKER_A");
-    await typeInto(tile, "worker-after-restart");
-    await expect(tile.locator(".xterm-rows")).toContainText("AC11 INPUT WORKER_A worker-after-restart");
-    await main.getByRole("tab", { name: "All agents", exact: true }).click();
-    await expect(main.locator(".agent-tile:visible")).toHaveCount(2);
+    await main.locator(`.work-row[data-window-id='${worker.id}']`).getByRole("button", { name: "Open terminal", exact: true }).click();
+    const terminal = main.locator(`.works-full .works-terminal[data-window-id='${worker.id}']`);
+    await expectLive(terminal, "WORKER_A");
+    await typeInto(terminal, "worker-after-restart");
+    await expect(terminal.locator(".xterm-rows")).toContainText("AC11 INPUT WORKER_A worker-after-restart");
+    await main.getByRole("button", { name: "← Back to Works", exact: true }).click();
+    await expect(main.locator(".work-row:visible")).toHaveCount(3);
     await page.screenshot({ path: testInfo.outputPath("live-agents-after-gui-restart.png") });
     expect(errors).toEqual([]);
     await testInfo.attach("real-backend-restore", { body: JSON.stringify({ initial, restored }, null, 2), contentType: "application/json" });
   });
 });
+
+async function showShell(page: Page, id: string) {
+  const windows = await catalog(page);
+  const index = windows.findIndex(window => window.id === id);
+  expect(index, "the exact Shell is in the real project catalog").toBeGreaterThanOrEqual(0);
+  await page.locator("#window-list-button").click();
+  const rows = page.locator("#window-list-panel .window-list-row");
+  await expect(rows).toHaveCount(windows.length);
+  await rows.nth(index).click();
+  await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+}

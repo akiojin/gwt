@@ -717,7 +717,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     let html = frontend_bundle_source();
     // The rAF must dispatch to completeInitialFitHandshake — keeping
     // the handshake idempotent and gated on real layout (see helper
-    // below). Agents tabs keep a layout box while hidden; ordinary hidden
+    // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
     // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
@@ -725,9 +725,9 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     // The helper must (a) bail on hidden windows outside the measurable
-    // Agents tab layout, and (b) mark ready only after activation succeeds.
+    // Works cache layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -752,7 +752,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         );
     assert!(
             handshake_helper.is_match(html),
-            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Agents tabs, and only set isReady=true after activation succeeds (FR-057)",
+            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Works caches, and only set isReady=true after activation succeeds (FR-057)",
         );
     assert!(
             reveal_completes_handshake.is_match(html),
@@ -790,7 +790,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // resize-recovers-on-move signature documented in
     // .gwt/work/memory.md 2026-05-13.
     let layout_box_gate = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -1089,6 +1089,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
         ("/styles/tokens.css", CSS, MUTABLE),
         ("/styles/typography.css", CSS, MUTABLE),
         ("/styles/components.css", CSS, MUTABLE),
+        ("/styles/works-agents.css", CSS, MUTABLE),
         ("/styles/app.css", CSS, MUTABLE),
         ("/assets/fonts/MonaSans.woff2", FONT, IMMUTABLE),
         ("/assets/fonts/HubotSans-Regular.woff2", FONT, IMMUTABLE),

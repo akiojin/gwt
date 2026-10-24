@@ -4319,6 +4319,12 @@ fn apply_monitor_config_set(
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
+    if max_active_auto && prefs.agent_roster.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Project Agent roster capacity is controlled by its enabled members",
+        ));
+    }
     validate_monitor_config_set(
         allowed_labels,
         enabled,
@@ -4546,7 +4552,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 caller_is_resident_pm,
             )?;
             let requested = candidate.max_active_last_change.as_ref()
-                .filter(|_| max_active.is_some() || max_active_auto);
+                .filter(|_| (max_active.is_some() || max_active_auto) && candidate.agent_roster.is_none());
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
                 prefs, expected_config_token, requested, &control_id,

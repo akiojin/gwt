@@ -1,6 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -147,6 +147,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       } from "/surface-rail.js";
       import { createSplitSurfaces } from "/split-surfaces.js";
       import { createAgentsSurface } from "/agents-surface.js";
+      import { createWorksSurface } from "/works-surface.js";
       import { createTerminalTextPreview } from "/terminal-text-preview.js";
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
@@ -265,7 +266,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
           runtime.terminal.write(text, onWritten);
         },
         // Hidden Agents tabs still feed the shared buffer used by Issue previews.
-        canWrite: (windowId) => (agentsHost && agentsSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        canWrite: (windowId) => (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -276,10 +277,12 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       });
       const windowMap = new Map();
       let splitSurfaces = null;
+      let worksSurface = null;
       let agentsSurface = null;
-      let agentsHost = null;
+      let rosterHost = null;
+      let worksHost = null;
       const textPreviews = new Map();
-      const agentPreviousHosts = new Map();
+      const worksPreviousHosts = new Map();
       const renderedWindowElementKeys = new Map();
       const renderedRuntimeStatusKeys = new Map();
       const renderedAgentKanbanBodyKeys = new Map();
@@ -424,6 +427,9 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
+      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const worksTelemetryModel = createUiStateStore({ sessions: [] });
+      const sessionUsageModel = createUiStateStore([]);
       let routeProjectMissing = false;
       // Issue #2694 Phase C — per-connection dispatcher so queued messages
       // from a closed socket cannot flush into the next reconnect session
@@ -554,7 +560,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         const windows = workspace?.windows || [];
         const parts = [];
         appendRenderKeyPart(parts, "agents_hosted");
-        appendRenderKeyPart(parts, Boolean(agentsHost));
+        appendRenderKeyPart(parts, Boolean(worksHost));
         appendRenderKeyPart(parts, "active_tab_id");
         appendRenderKeyPart(parts, appState?.active_tab_id || null);
         appendRenderKeyPart(parts, "active_window_ids");
@@ -2034,9 +2040,10 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       }
 
       function cycleFocus(direction) {
-        // SPEC #4777 T-10: cycle the existing Agents tabs in runtime-priority
-        // order while preserving each surface selection.
-        const windows = activeWorkspace().windows || [];
+        // SPEC #4777: cycle current native Works in runtime-priority order
+        // while preserving each surface selection.
+        const windows = (activeWorkspace().windows || []).filter(data => agentActivityModel.read().agents
+          .some(agent => agent.window_id === data.id && agent.session_id === data.session_id));
         const nextWindowId = selectNextAgentFocusWindowId(
           windows,
           focusedId,
@@ -2046,9 +2053,9 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         if (!nextWindowId) {
           return;
         }
-        splitSurfaces?.focusSurface("agents");
-        openSurface("agents");
-        if (!agentsSurface.openTab(nextWindowId)) return;
+        splitSurfaces?.focusSurface("works");
+        openSurface("works");
+        if (!worksSurface.openWork(nextWindowId)) return;
         pendingFrameWindowId = null;
         focusWindowRemotely(nextWindowId);
         terminalMap.get(nextWindowId)?.terminal.focus();
@@ -2103,8 +2110,8 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       // `terminal-viewport-reflow.js` so the host resize controller and
       // unit tests can reuse it.
       function canRefreshTerminalViewport(windowId) {
-        if (agentsHost && agentsSurface?.contains(windowId)) return agentsSurface.isVisible(windowId);
-        if (agentsHost === document.querySelector(".surface-area")) return false;
+        if (worksHost && worksSurface?.contains(windowId)) return worksSurface.isVisible(windowId);
+        if (worksHost === document.querySelector(".surface-area")) return false;
         const terminalHost = terminalMap.get(windowId)?.terminal?.element?.parentElement;
         if (terminalHost) return elementHasLayoutBox(terminalHost);
         return viewportEligibleForRefresh({ element: windowMap.get(windowId) });
@@ -2577,7 +2584,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
 
       function openPmAgent() {
         windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
-        if (agentsHost) setAgentsHost(null);
+        if (worksHost) setWorksHost(null);
         if (pmWindowId && windowMap.has(pmWindowId)) {
           requestWindowFrame(pmWindowId);
           return;
@@ -2918,9 +2925,9 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       }
 
       function focusWindowLocally(windowId) {
-        if (agentsHost && agentsSurface?.contains(windowId)) {
-          splitSurfaces?.focusSurface("agents");
-          if (!agentsSurface.isVisible(windowId)) agentsSurface.reveal(windowId);
+        if (worksHost && worksSurface?.contains(windowId)) {
+          splitSurfaces?.focusSurface("works");
+          if (!worksSurface.isVisible(windowId)) worksSurface.reveal(windowId);
         }
         splitSurfaces?.focusWindow(windowId);
         const targetElement = windowMap.get(windowId);
@@ -2951,8 +2958,8 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
           applySurfaceSelection(document, splitSurfaces.activeSurface());
           return;
         }
-        if (agentsHost) {
-          applySurfaceSelection(document, "agents");
+        if (worksHost) {
+          applySurfaceSelection(document, "works");
           return;
         }
         const focusedWindow = focusedId
@@ -3195,7 +3202,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       }
 
       function createTerminalRuntime(windowId, terminalContainer, options = {}) {
-        if (options.readOnly && agentsHost && surfaceForWindow(workspaceWindowById(windowId)) === "agents") {
+        if (options.readOnly && !options.nativeHost && worksHost && surfaceForWindow(workspaceWindowById(windowId)) === "works") {
           const runtime = terminalMap.get(windowId) || createTerminalRuntime(windowId, terminalContainer);
           if (runtime) {
             queueMicrotask(cleanupTextPreviews);
@@ -3365,19 +3372,19 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       }
 
       // SPEC-2008 Phase 26.A / FR-057: run the initial fit + replay
-      // pending buffered content. Hidden windows wait for reveal; Agents tab
-      // panels keep their layout box and can fit before selection. Every path
+      // pending buffered content. Hidden windows wait for reveal; inert Works
+      // caches keep their layout box and can fit before selection. Every path
       // still waits for real dimensions before releasing deferred writes.
       function completeInitialFitHandshake(windowId) {
         const runtime = terminalMap.get(windowId);
         if (!runtime || runtime.isReady) {
           return;
         }
-        // Agents tab panels retain a real layout box while hidden, so their
+        // Inert Works caches retain a real layout box while hidden, so their
         // first fit can feed a visible Issue mirror without selecting the tab.
         // Ordinary hidden windows still wait for reveal; the box guard below
         // keeps every first write behind a fit to actual dimensions.
-        if (!(agentsHost && agentsSurface?.contains(windowId)) && !canRefreshTerminalViewport(windowId)) {
+        if (!(worksHost && worksSurface?.contains(windowId)) && !canRefreshTerminalViewport(windowId)) {
           // Still hidden; wait for the next reveal. The hidden →
           // visible transition handler (scheduleTerminalFocusActivation)
           // will call back into this helper.
@@ -3708,8 +3715,8 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         // SPEC-3671 FR-007 / FR-008: the Issue preview mounts the shared terminal
         // runtime read-only, so the live output streams but no input path exists.
         createTerminalRuntime: (id, terminalRoot, options) =>
-          createTerminalRuntime(id, terminalRoot, { ...options, readOnly: Boolean(agentsHost) || options?.readOnly }),
-        isAgentsSurfaceMounted: () => Boolean(agentsHost),
+          createTerminalRuntime(id, terminalRoot, { ...options, readOnly: Boolean(worksHost) || options?.readOnly }),
+        isAgentsSurfaceMounted: () => Boolean(worksHost),
         windowDisplayTitle,
         windowRoleBadgeLabel,
         // Windowize keeps the existing placement transport and opens the live Agents view.
@@ -3787,8 +3794,8 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
           const target = (activeWorkspace().windows || []).find(data => data.session_id === sessionId);
           if (target) frameWindow(target.id);
           else {
-            splitSurfaces.show("agents");
-            document.getElementById("agents-tab-all")?.click();
+            openSurface("works");
+            worksSurface.showList();
           }
         },
         createNode,
@@ -4648,7 +4655,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
         // SPEC-3671 FR-010: Windowize (and Agent Kanban undock) moves a window back
         // into Agents without changing its preset, so `mountWindowBody` does not
         // run again. Reclaim the live terminal into this window's own body.
-        if (surface === "terminal" && !isContainedPlacement(windowData) && !agentsHost) {
+        if (surface === "terminal" && !isContainedPlacement(windowData) && !worksHost) {
           const terminalRoot = element.querySelector(".window-body .terminal-root");
           if (
             terminalRoot &&
@@ -5160,10 +5167,17 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
           case "window_list":
             windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
             break;
+          case "agent_roster_error":
+            applyAgentRosterError(event);
+            break;
+          case "agent_roster":
+            applyAgentRosterSnapshot(event.roster);
+            break;
           case "provider_usage":
+            sessionUsageModel.update(() => event.sessions || []);
             applyProviderUsageUi({
               accounts: event.accounts || [],
-              sessions: event.sessions || [],
+              sessions: (event.sessions || []).filter(session => session.active !== false),
               consumption: event.consumption || [],
             });
             break;
@@ -5493,6 +5507,7 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       window.addEventListener("unload", () => {
         disposeProjectShellSurface();
 
+        worksSurface?.dispose();
         agentsSurface?.dispose();
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
@@ -5626,55 +5641,63 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       if (kanbanDrawerBackdrop) {
         kanbanDrawerBackdrop.addEventListener("click", closeKanbanDrawer);
       }
-      function setAgentsHost(host, previewHost = null) {
-        if (agentsHost === host) { agentsSurface.setPreviewHost(previewHost); return; }
-        agentsHost = host;
+      function setWorksHost(host, previewHost = null) {
+        if (worksHost === host) { worksSurface.setPreviewHost(previewHost); return; }
+        worksHost = host;
         const area = document.querySelector(".surface-area");
-        area.classList.toggle("is-agents", host === area);
-        agentsSurface.element.hidden = !host;
-        (host || area).appendChild(agentsSurface.element);
-        if (host) agentsSurface.sync();
+        area.classList.toggle("is-works", host === area);
+        worksSurface.element.hidden = !host;
+        (host || area).appendChild(worksSurface.element);
+        if (host) { worksSurface.sync(); requestAgentRoster(); }
         else {
-          for (const [id, previous] of agentPreviousHosts) {
+          for (const [id, previous] of worksPreviousHosts) {
             const runtime = terminalMap.get(id);
             if (runtime && previous.container.isConnected) {
               reparentTerminalRuntime(id, runtime, previous.container, { readOnly: previous.readOnly });
             }
           }
-          agentPreviousHosts.clear();
+          worksPreviousHosts.clear();
           cleanupTextPreviews(true);
         }
-        agentsSurface.setPreviewHost(previewHost);
+        worksSurface.setPreviewHost(previewHost);
         renderedIssuePreviewBodyKeys.clear();
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
-      agentsSurface = createAgentsSurface({
+      worksSurface = createWorksSurface({
         document,
         windowCatalogModel,
+        activityModel: agentActivityModel,
+        rosterModel,
         windowDisplayTitle,
         getWindows: catalog => catalogActiveWindows(catalog).map(data => ({
           ...data, status: catalog.runtimeStates[data.id] ?? data.status,
         })),
-        isMounted: () => Boolean(agentsHost),
-        mountTerminal: (id, root) => {
+        isMounted: () => Boolean(worksHost),
+        mountTerminal: (id, root, options = {}) => {
           const runtime = terminalMap.get(id);
-          if (runtime && runtime.terminalContainer !== root && !agentPreviousHosts.get(id)?.container.isConnected) {
-            agentPreviousHosts.set(id, { container: runtime.terminalContainer, readOnly: runtime.readOnly });
+          if (runtime && runtime.terminalContainer !== root && !worksPreviousHosts.get(id)?.container.isConnected) {
+            worksPreviousHosts.set(id, { container: runtime.terminalContainer, readOnly: runtime.readOnly });
           }
-          createTerminalRuntime(id, root);
+          createTerminalRuntime(id, root, { ...options, nativeHost: true });
         },
-        mountPreview: (id, root) => createTerminalTextPreview({
-          document, terminal: terminalMap.get(id).terminal, container: root,
-        }),
+        mountPreview: (id, root, options = {}) => {
+          const terminal = terminalMap.get(id)?.terminal;
+          return terminal ? createTerminalTextPreview({ document, terminal, container: root, ...options }) : () => {};
+        },
+        onSelectMember: (memberId) => {
+          openSurface("agents");
+          agentsSurface.selectMember(memberId);
+        },
+        getTelemetry: () => worksTelemetryModel.read(),
         onFocus: focusWindowLocally,
         onPreviewFocus: (id) => {
           focusWindowLocally(id);
           terminalMap.get(id)?.terminal.focus();
         },
         onLayout: () => requestAnimationFrame(() => {
-          if (!agentsHost) return;
+          if (!worksHost) return;
           for (const id of terminalMap.keys()) {
-            if (agentsSurface.isVisible(id)) {
+            if (worksSurface.isVisible(id)) {
               terminalOutputBatcher.schedulePending(id);
               completeInitialFitHandshake(id);
               scheduleTerminalFit(id, true);
@@ -5682,15 +5705,61 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
           }
         }),
       });
+      worksSurface.element.hidden = true;
+      document.querySelector(".surface-area").appendChild(worksSurface.element);
+      let latestSessionUsage = [];
+      function updateWorksTelemetry(sessions = latestSessionUsage) {
+        latestSessionUsage = sessions;
+        const projection = activeWorkProjectionModel.read()?.projection;
+        worksTelemetryModel.update(() => selectWorksTelemetry({ sessions,
+          projectRoot: activeProjectTab()?.project_root,
+          agents: agentActivityModel.read().agents, works: projection?.active_works || [],
+          bySession: rosterModel.read().by_session || {},
+        }));
+      }
+      sessionUsageModel.subscribe(state => state, sessions => {
+        applyAgentRosterUsage(sessions, activeProjectTab()?.project_root);
+        updateWorksTelemetry(sessions);
+      });
+      rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      agentActivityModel.subscribe(state => state.agents.map(agent => `${agent.session_id}:${agent.runtime_incarnation}`).join("|"), () => {
+        updateWorksTelemetry(); requestAgentRoster();
+      });
+      activeWorkProjectionModel.subscribe(state => state, () => updateWorksTelemetry());
+      function requestAgentRoster(action = { kind: "read" }) {
+        send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
+      }
+      function setRosterHost(host, previewHost = null) {
+        const changed = rosterHost !== host;
+        rosterHost = host;
+        agentsSurface.element.hidden = !host;
+        (host || document.querySelector(".surface-area")).appendChild(agentsSurface.element);
+        agentsSurface.setPreviewHost(previewHost);
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); }
+      }
+      function openAssignedWork(assignment) {
+        const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
+          && agent.session_id === assignment?.session_id && agent.runtime_incarnation === assignment?.runtime_incarnation);
+        if (!live) return false;
+        openSurface("works");
+        return worksSurface.openWork(live);
+      }
+      agentsSurface = createAgentsSurface({ document, rosterModel, activityModel: agentActivityModel, windowCatalogModel,
+        onAddMember: () => requestAgentRoster({ kind: "add" }),
+        onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onOpenWork: openAssignedWork,
+      });
       agentsSurface.element.hidden = true;
       document.querySelector(".surface-area").appendChild(agentsSurface.element);
+      worksTelemetryModel.subscribeFrame(state => state, () => worksSurface.sync());
       splitSurfaces = createSplitSurfaces({
         document,
 
         windowCatalogModel,
         getWindows: catalog => catalogActiveWindows(catalog).map(windowWithSettingsSection),
         getElement: (id) => windowMap.get(id),
-        onAgentsHost: setAgentsHost,
+        onWorksHost: setWorksHost,
+        onAgentsHost: setRosterHost,
 
         openSurface: (surface) => {
           const preset = surface === "issues" ? "settings" : surface;
@@ -5707,26 +5776,26 @@ import { createAgentActivityModel } from "/agent-activity-model.js";
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
         if (splitSurfaces.isOpen()) splitSurfaces.collapse();
-        else splitSurfaces.open(agentsHost ? "agents" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
+        else splitSurfaces.open(worksHost ? "works" : surfaceForWindow(windowWithSettingsSection(workspaceWindowById(focusedId))));
       });
       window.addEventListener("resize", () => {
-        if (!splitSurfaces.hasLayout && !agentsHost) return;
+        if (!splitSurfaces.hasLayout && !worksHost) return;
         for (const id of windowMap.keys()) {
-          if (splitSurfaces.containsWindow(id) || (agentsHost && agentsSurface.isVisible(id))) scheduleTerminalFit(id, true);
+          if (splitSurfaces.containsWindow(id) || (worksHost && worksSurface.isVisible(id))) scheduleTerminalFit(id, true);
         }
       });
       installSurfaceRail(document, { openSurface });
       launchWizardVisibilityModel.subscribe(model => model.open, open => {
-        if (open) openSurface("agents");
+        if (open) openSurface("works");
       });
       windowCatalogModel.subscribe(model => model.navigation, navigation => {
         if (!navigation) return;
         const { windowId, notifyFocus } = navigation;
         const data = workspaceWindowById(windowId);
-        if (surfaceForWindow(data) !== "agents") splitSurfaces.showWindow(windowId);
+        if (surfaceForWindow(data) !== "works") splitSurfaces.showWindow(windowId);
         else {
-          openSurface("agents");
-          agentsSurface.openTab(windowId);
+          openSurface("works");
+          worksSurface.openWork(windowId);
         }
         if (notifyFocus) focusWindowRemotely(windowId);
         else focusWindowLocally(windowId);

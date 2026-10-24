@@ -3676,7 +3676,7 @@ export function createKnowledgeKanbanSurface({
       // selected. The agent state itself is the row's single primary badge
       // (AC-5), so the status row carries no second badge. It mounts no terminal;
       // Windowize stays the only hand-off (FR-010). After Windowize the same slot
-      // shows a "Shown in Agents" face (FR-012) that offers focus, never a second
+      // shows a "Shown in Works" face (FR-012) that offers focus, never a second
       // input face for the PTY.
       function renderIssueAgentStatusRow(windowId, state, entry, faces) {
         const target = faces.inlineWindow || faces.surfaceWindow;
@@ -3704,7 +3704,7 @@ export function createKnowledgeKanbanSurface({
           createNode(
             "div",
             "issue-agent-status-meta",
-            inAgents ? `${meta} · Shown in Agents` : meta,
+            inAgents ? `${meta} · Shown in Works` : meta,
           ),
         );
         row.appendChild(titleWrap);
@@ -3716,7 +3716,7 @@ export function createKnowledgeKanbanSurface({
             createNode(
               "div",
               "issue-agent-status-placeholder",
-              "Shown in Agents. Input goes to the Agents tab.",
+              "Shown in Works. Input goes to the Works terminal.",
             ),
           );
           row.appendChild(issueRowActionButton("focus-surface-window", context));
@@ -3837,7 +3837,7 @@ export function createKnowledgeKanbanSurface({
             createNode(
               "div",
               "issue-split-placeholder",
-              "Shown in Agents. Input goes to the Agents tab.",
+              "Shown in Works. Input goes to the Works terminal.",
             ),
           );
           return pair;
@@ -4068,7 +4068,7 @@ export function createKnowledgeKanbanSurface({
             const surfaceWindow = entry ? issueRowFaces(windowId, entry, work).surfaceWindow : null;
             if (surfaceWindow) {
               detailPane.appendChild(createNode("div", "knowledge-detail-empty issue-preview-empty",
-                "Shown in Agents. Use Focus window to view the agent output."));
+                "Shown in Works. Use Focus window to view the agent output."));
               detailPane.appendChild(issueRowActionButton("focus-surface-window", {
                 windowId, state, entry, work, surfaceWindow, target: surfaceWindow,
               }));
@@ -4495,11 +4495,11 @@ export function createKnowledgeKanbanSurface({
         "launch-agent": Object.freeze({ label: "Launch agent", aria: "Launch an agent for" }),
         "windowize-issue-preview": Object.freeze({
           label: "Windowize",
-          aria: "Open the agent terminal in an Agents tab for",
+          aria: "Open the agent terminal in a Works terminal for",
         }),
         "focus-surface-window": Object.freeze({
           label: "Focus window",
-          aria: "Focus the Agents tab for",
+          aria: "Focus the Works terminal for",
         }),
         // SPEC #3885 FR-015: the only place an agent can be stopped from.
         "stop-agent": Object.freeze({
@@ -4527,7 +4527,7 @@ export function createKnowledgeKanbanSurface({
         "windowize-issue-preview",
         "focus-surface-window",
       ]);
-      // Ids this surface Windowized, so the row keeps its "Shown in Agents" face
+      // Ids this surface Windowized, so the row keeps its "Shown in Works" face
       // even before the Work projection reports the agent's window id.
       const windowizedAgentWindowIds = new Set();
 

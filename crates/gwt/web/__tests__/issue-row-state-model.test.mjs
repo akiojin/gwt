@@ -4,7 +4,7 @@
 // secondary information, and at most two visible action buttons that depend on
 // that state. Anything else moves into the row's overflow menu. The row's agent
 // status row carries no second badge, and once the agent is Windowized the same
-// slot shows a "Shown in Agents" face instead of a second input face.
+// slot shows a "Shown in Works" face instead of a second input face.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -175,7 +175,7 @@ test("AC34 stale Issue windows cannot offer Focus or agent faces in row, detail 
     fixture.body.querySelector('[data-issue-detail-view="output"]').click();
     const detail = fixture.body.querySelector(".knowledge-detail-pane");
     assert.equal(detail.querySelector('[data-action="open-window"], [data-action="focus-surface-window"]'), null);
-    assert.doesNotMatch(detail.textContent, /Shown in Agents|Read-only preview/);
+    assert.doesNotMatch(detail.textContent, /Shown in Works|Read-only preview/);
   }
   fixture.setLiveAgents([live, { ...stale[0], id: "absent-4499" },
     { ...stale[1], session_id: "successor-5016" }]);
@@ -761,7 +761,7 @@ test("Issue #4804 focuses its existing window across repeated actions and permit
 
   assert.ok(!fixture.body.querySelector('[data-action="windowize-issue-preview"]'),
     "Kanban and the output preview offer focus while this project already has a window");
-  assert.match(fixture.body.querySelector(".issue-preview-empty").textContent, /Shown in Agents/);
+  assert.match(fixture.body.querySelector(".issue-preview-empty").textContent, /Shown in Works/);
   const focus = fixture.body.querySelector('[data-action="focus-surface-window"]');
   focus.click();
   focus.click();
@@ -1060,7 +1060,7 @@ test("row actions dispatch from the visible buttons and from the overflow menu",
 });
 
 // T-005 / FR-012: after Windowize the row keeps the Issue ↔ agent link as a
-// "Shown in Agents" face with no second input face for the PTY.
+// "Shown in Works" face with no second input face for the PTY.
 test("after Windowize the row shows the agent as on the canvas and offers focus", async (t) => {
   const agent = agentWindow("agent-1", 3671);
   const fixture = await makeFixture({ workspaceWindows: [agent] });
@@ -1085,7 +1085,7 @@ test("after Windowize the row shows the agent as on the canvas and offers focus"
   assert.equal(face.dataset.windowId, "agent-1");
   assert.equal(face.querySelector(".terminal-root"), null, "no second input face for the PTY");
   assert.equal(fixture.calls.terminalMounts.length, 0, "nothing is mounted");
-  assert.match(face.textContent, /Shown in Agents/);
+  assert.match(face.textContent, /Shown in Works/);
   assert.equal(face.querySelector('[data-action="windowize-issue-preview"]'), null);
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Running");
   assert.deepEqual(visibleActions(row), ["focus-surface-window"]);

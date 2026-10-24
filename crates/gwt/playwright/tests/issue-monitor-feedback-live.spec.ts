@@ -76,7 +76,13 @@ test.describe("External feedback intake (isolated live backend)", () => {
       expect(inbox.find((row: any) => row.issue.number === fixture.trusted).exclusion_reason ?? null).toBeNull();
       expect(status.inbox.filter((row: any) => [fixture.raw, fixture.external].includes(row.issue_number))
         .every((row: any) => !row.claim_id && !row.delivery_id && !row.launched_window_id)).toBe(true);
-      await expect(page.locator('.agent-tile, .workspace-window[data-preset="shell"]')).toHaveCount(0);
+      const launchedWindows = await page.evaluate(() => {
+        const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
+        return workspace.tabs.flatMap((tab: any) => tab.workspace.windows)
+          .filter((pane: any) => ["agent", "codex", "claude", "shell"].includes(pane.preset));
+      });
+      expect(launchedWindows, "disabled intake creates no agent or Shell window").toEqual([]);
+      await expect(page.locator('.work-row, .workspace-window[data-preset="shell"]')).toHaveCount(0);
       const screenshot = info.outputPath(`feedback-intake-${theme}.png`);
       await page.screenshot({ path: screenshot, fullPage: true });
       await info.attach(`feedback-intake-${theme}`, { path: screenshot, contentType: "image/png" });

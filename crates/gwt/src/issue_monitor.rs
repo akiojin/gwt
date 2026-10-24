@@ -986,6 +986,8 @@ pub struct IssueMonitorPriorityReasonNote {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster: Option<crate::agent_names::AgentRoster>,
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
         default = "current_issue_monitor_prefs_schema_version",
@@ -1330,6 +1332,7 @@ pub struct IssueMonitorTerminalQueue {
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
+            agent_roster: None,
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
@@ -1427,6 +1430,10 @@ impl IssueMonitorPrefs {
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
+            "agent_roster": self.agent_roster.as_ref().map(|roster| serde_json::json!({
+                "revision": roster.revision,
+                "enabled_members": roster.enabled_count(),
+            })),
             "enabled": self.enabled,
             "autonomous_mode": self.autonomous_mode,
             "allowed_labels": self.allowed_labels,
@@ -3812,6 +3819,10 @@ fn machine_max_active_scope() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster_revision: Option<u64>,
     #[serde(default = "machine_max_active_scope")]
     pub max_active_agents_scope: String,
     #[serde(default)]
@@ -5018,6 +5029,10 @@ enum IssueMonitorSourceRepository {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_roster: Option<crate::agent_names::AgentRoster>,
+    #[serde(skip)]
+    roster_machine_policy: Option<crate::machine_agent_settings::Policy>,
     /// Runtime identity of the repository actually read; never a saved approval.
     #[serde(skip)]
     source_repository: IssueMonitorSourceRepository,
@@ -6460,6 +6475,17 @@ fn issue_monitor_prefs_cache(
 
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
     let mut prefs = load_issue_monitor_prefs_raw(path)?;
+    if let Some(roster) = &prefs.agent_roster {
+        roster
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if roster.enabled_count() != prefs.max_active_agents {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent roster and project capacity disagree",
+            ));
+        }
+    }
     if machine_managed_monitor_prefs(path) {
         // Cache only project bytes. The machine policy may change without any
         // project-file stamp change, including on a cache hit.
@@ -6534,6 +6560,9 @@ pub(crate) fn apply_machine_policy_to_prefs(
     prefs: &mut IssueMonitorPrefs,
     policy: &crate::machine_agent_settings::Policy,
 ) {
+    if prefs.agent_roster.is_some() {
+        return;
+    }
     prefs.max_active_agents_mode = policy.mode;
     if let Some(limit) = policy.manual_limit {
         prefs.max_active_agents = limit;
@@ -6731,11 +6760,15 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let mut normalized = prefs.clone();
+    crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
+        .map_err(io::Error::other)?;
+    let prefs = &normalized;
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
     crate::machine_agent_settings::migration_before_project_save(path)?;
     let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
-    if machine_managed_monitor_prefs(path) {
+    if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
         // mirror, never this project's or the machine's requested policy.
@@ -7299,6 +7332,8 @@ pub fn try_mutate_issue_monitor_prefs<T>(
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let before = prefs.clone();
         let result = mutation(&mut prefs)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
+            .map_err(io::Error::other)?;
         if prefs != before {
             save_issue_monitor_prefs_unlocked(path, &prefs)?;
         }
@@ -7329,6 +7364,8 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
         }
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let result = mutation(&mut prefs)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
+            .map_err(io::Error::other)?;
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
@@ -7918,6 +7955,8 @@ impl IssueMonitorState {
 
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
+            agent_roster: None,
+            roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
             queue_label_observation: None,
             config,
@@ -8025,6 +8064,7 @@ impl IssueMonitorState {
             IssueMonitorMaxActiveMode::Auto => prefs.max_active_agents,
         };
         let mut state = Self::new(config);
+        state.agent_roster = prefs.agent_roster.clone();
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
@@ -8203,12 +8243,16 @@ impl IssueMonitorState {
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
+            agent_roster: self.agent_roster.clone(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
-            max_active_agents: self
-                .max_active_agents_override()
-                .unwrap_or_else(|| self.effective_max_active_agents()),
+            max_active_agents: if self.agent_roster.is_some() {
+                self.config.max_active.max(1)
+            } else {
+                self.max_active_agents_override()
+                    .unwrap_or_else(|| self.effective_max_active_agents())
+            },
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
@@ -8332,6 +8376,15 @@ impl IssueMonitorState {
             last_scan_error: self.last_scan_error.clone(),
             agent_blackout_since: self.agent_blackout_since.clone(),
         }
+    }
+
+    /// Finalize a numerical cap change inside its existing prefs transaction.
+    pub fn synchronize_agent_roster_capacity(&mut self, prefs_path: &Path) -> io::Result<()> {
+        let mut prefs = self.prefs();
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, prefs_path)
+            .map_err(io::Error::other)?;
+        self.agent_roster = prefs.agent_roster;
+        Ok(())
     }
 
     fn merge_closure_record(&mut self, incoming: IssueClosureRecord) {
@@ -10871,6 +10924,24 @@ impl IssueMonitorState {
     }
 
     pub fn effective_max_active_agents(&self) -> usize {
+        if self.agent_roster.is_some() {
+            let machine = match self.roster_machine_policy.as_ref() {
+                Some(policy) if policy.mode == IssueMonitorMaxActiveMode::Manual => policy
+                    .manual_limit
+                    .unwrap_or(1)
+                    .saturating_sub(
+                        self.agent_capacity
+                            .other_live_agents
+                            .saturating_sub(self.agent_capacity.other_pm_agents),
+                    )
+                    .saturating_sub(self.agent_capacity.own_untracked_workers),
+                _ if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() => {
+                    self.agent_capacity.recommended_worker_limit
+                }
+                _ => self.config.max_active,
+            };
+            return self.config.max_active.min(machine);
+        }
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
                 .config
@@ -10892,7 +10963,9 @@ impl IssueMonitorState {
     }
 
     fn apply_agent_capacity_limit(&mut self) {
-        if self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto {
+        if self.agent_roster.is_none()
+            && self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+        {
             self.config.max_active = self.effective_max_active_agents();
         }
     }
@@ -10924,6 +10997,10 @@ impl IssueMonitorState {
     }
 
     pub fn apply_machine_policy(&mut self, policy: &crate::machine_agent_settings::Policy) {
+        if self.agent_roster.is_some() {
+            self.roster_machine_policy = Some(policy.clone());
+            return;
+        }
         let previous_limit = self.effective_max_active_agents();
         self.max_active_agents_mode = policy.mode;
         self.config.max_active = policy.manual_limit.unwrap_or(previous_limit);
@@ -10933,6 +11010,9 @@ impl IssueMonitorState {
 
     /// Persist only an explicit accepted change, preserving its replay identity.
     pub fn persist_machine_max_active_change(&mut self, control_id: &str) -> io::Result<()> {
+        if self.agent_roster.is_some() {
+            return Ok(());
+        }
         let change = self.max_active_last_change.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -12328,6 +12408,10 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        self.agent_roster = disk.agent_roster.clone();
+        if let Some(roster) = self.agent_roster.as_ref() {
+            self.config.max_active = roster.enabled_count();
+        }
         // Cancellation revisions order only cancellation evidence. Equal
         // revisions retain the normal GUI/daemon phase ownership policy.
         let disk_completions = Self::completion_records_from_prefs(disk);
@@ -14271,6 +14355,11 @@ impl IssueMonitorState {
             .launch_auto
             .then(|| self.prefs().effective_launch_tiers().len());
         IssueMonitorStatusView {
+            agent_roster_capacity: self
+                .agent_roster
+                .as_ref()
+                .map(|roster| roster.enabled_count()),
+            agent_roster_revision: self.agent_roster.as_ref().map(|roster| roster.revision),
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
