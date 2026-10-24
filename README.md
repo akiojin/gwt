@@ -954,6 +954,14 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+`policy.dependency_observations` retains every supplied Monitor inbox row, including
+repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
+references. Absent typed status stays null with `dependency_status` named as missing.
+Neither absent nor empty status proves no dependencies or readiness: the Monitor can omit
+status for zero declarations and omit resolved or unknown blockers. No usable observation
+returns null; a supplied empty inbox returns []. Keep the Monitor source, scan time and
+coverage limits when interpreting this partial snapshot. It does not establish a fresh
+project-wide graph, bundle completeness, priority, milestone health or launch permission.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied
