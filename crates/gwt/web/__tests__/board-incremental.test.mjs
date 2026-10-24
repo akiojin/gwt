@@ -10,12 +10,15 @@ const { createBoardLogsSurface } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`,
 );
 
-function fixture() {
+function fixture(onNotification) {
   const sent = [], notifications = [];
   const surface = createBoardLogsSurface({
     send: event => sent.push(event),
     windowMap: new Map(),
-    pushAlertToast: notice => notifications.push(notice),
+    pushAlertToast: notice => {
+      notifications.push(notice);
+      onNotification?.(surface.ensureBoardState("board"));
+    },
     activeWorkspace: () => ({ windows: [{ id: "board", preset: "board" }] }),
     focusOrSpawnPreset: () => {},
     activeProjectTab: () => null,
@@ -141,7 +144,11 @@ test("Issue #5531: resync reissues lost Board and Logs reads without clearing th
 });
 
 test("Board incremental entries preserve history, update IDs, and ignore repeated mention notifications", () => {
-  const { surface, state, receive, notifications } = fixture();
+  const { surface, state, receive, notifications } = fixture(state => {
+    assert.ok(Object.isFrozen(state.entries), "notify only after the shared snapshot is committed");
+    assert.ok(Object.isFrozen(state.entries.at(-1).mentions));
+    assert.equal(state.entries.at(-1).content.body, "3");
+  });
   receive([entry("2")], true);
   surface.applyBoardLogsReceiveEvent({
     kind: "board_history_page", id: "board", entries: [entry("1")], has_more_before: true,

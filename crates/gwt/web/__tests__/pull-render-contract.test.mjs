@@ -831,6 +831,34 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Board entries commit shared data and reject direct mention rendering", () => {
+  const file = 'crates/gwt/web/board-logs-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const entries = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('board_entries'));
+  const local = entries(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' }));
+  const delegated = entries(scanModule(app, appFile, { modules: new Map([[file, source]]) }));
+  // The guard deliberately leaves the existing imported pure mention selector
+  // unresolved. Every path other than that selector must cross the store.
+  for (const findings of [local, delegated]) {
+    assert.ok(findings.length > 0);
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
+      && finding.path.endsWith('>find:callback')));
+  }
+  const bypass = source.replace('case "board_entries": {',
+    'case "board_entries": { showBoardMentionNotification(event.entries[0], event.id);');
+  assert.notEqual(bypass, source);
+  assert.ok(entries(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' })).length > local.length);
+  assert.ok(entries(scanModule(app, appFile, { modules: new Map([[file, bypass]]) })).length > delegated.length);
+  const appBypass = app.replace('case "board_entries":',
+    'case "board_entries": document.body.textContent = event.kind;');
+  assert.notEqual(appBypass, app);
+  assert.ok(entries(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
+    .some(finding => finding.kind.startsWith('dom-')));
+});
+
 test("Logs live receipts commit shared data and reject direct rendering", () => {
   const file = 'crates/gwt/web/board-logs-surface.js';
   const appFile = 'crates/gwt/web/app.js';

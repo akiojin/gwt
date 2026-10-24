@@ -95,6 +95,9 @@ export function createBoardLogsSurface({
         if (!snapshot) return;
         const state = ensureBoardState(snapshot.windowId);
         state.entries = snapshot.entries;
+        if (snapshot.mentionEntry) {
+          showBoardMentionNotification(snapshot.mentionEntry, snapshot.windowId);
+        }
         renderBoard(snapshot.windowId);
         if (state.error) return;
         if (state.pendingLatestReload) {
@@ -1872,13 +1875,14 @@ export function createBoardLogsSurface({
             } else if (addedEntry && !state.shouldFollowBoardBottom) {
               state.newEntriesAvailable = true;
             }
+            let mentionEntry = null;
             if (
               addressedEntry &&
               addressedEntry.id !== state.lastNotifiedMentionEntryId
             ) {
               state.forYouUnread += 1;
               state.lastNotifiedMentionEntryId = addressedEntry.id;
-              showBoardMentionNotification(addressedEntry, event.id);
+              mentionEntry = addressedEntry;
             }
             state.loading = false;
             state.error = unconfirmedSubmit
@@ -1887,7 +1891,7 @@ export function createBoardLogsSurface({
             if (completedSubmit && state.hasNewerEntries) {
               state.pendingLatestReload = true;
             }
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
+            boardModel.update(() => ({ windowId: event.id, entries: state.entries, mentionEntry }));
             break;
           }
           case "board_history_page": {
