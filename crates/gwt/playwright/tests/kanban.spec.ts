@@ -1254,6 +1254,16 @@ const SELECTION_ROW_COUNT = 500;
 const SELECTION_P95_BUDGET_MS = 50;
 
 test.describe("SPEC #3170 immediate selection under delayed and reversed responses", () => {
+  const errors = new WeakMap<object, string[]>();
+  test.beforeEach(async ({ page }) => {
+    const captured: string[] = [];
+    errors.set(page, captured);
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+  });
+  test.afterEach(async ({ page }) => {
+    expect(errors.get(page), "zero console/page errors").toEqual([]);
+  });
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
@@ -1271,6 +1281,10 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
 
       await page.goto(APP_URL);
       await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      // Reach the 500-entry virtual list through the same visible action as an
+      // operator before measuring selection, just as rowFor scrolls beforehand.
+      await page.locator('.surface-knowledge [data-action="show-backlog"]').click();
+      await expect(page.locator('.surface-knowledge .knowledge-virtual-spacer')).not.toHaveCount(0);
       expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       // Distinct rows, striding across the list so consecutive clicks never
@@ -1342,6 +1356,10 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
 
       await page.goto(APP_URL);
       await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      // Reach the 500-entry virtual list through the same visible action as an
+      // operator before measuring selection, just as rowFor scrolls beforehand.
+      await page.locator('.surface-knowledge [data-action="show-backlog"]').click();
+      await expect(page.locator('.surface-knowledge .knowledge-virtual-spacer')).not.toHaveCount(0);
       expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       const first = SELECTION_FIRST_NUMBER + 3;

@@ -9842,6 +9842,7 @@ mod tests {
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 priority_order: vec![7, 42, 99],
                 ..Default::default()
             },
@@ -9873,6 +9874,32 @@ mod tests {
         );
         assert_eq!(prefs.priority_order, vec![42, 7, 99]);
         assert!(prefs.enabled);
+
+        let mut resumed =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        resumed.set_source_repository(Some(("example", "repo")));
+        resumed.set_gui_connected(true);
+        let candidates = [7, 42].map(|number| crate::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: format!("Issue {number}"),
+            labels: Vec::new(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        let now = "2026-09-29T00:01:00Z";
+        // Scan the persisted operation result without a fixture auto-enqueue.
+        crate::scan_issue_monitor_candidates(&mut resumed, &candidates, now);
+        assert_eq!(
+            resumed
+                .next_launch_request(now)
+                .expect("launch_now target")
+                .issue_number,
+            42
+        );
     }
 
     /// Issue #5062 AC-4: an update drain refuses every new launch, so

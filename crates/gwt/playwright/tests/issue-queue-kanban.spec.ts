@@ -898,6 +898,7 @@ test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({
     expect(await row(page,number).locator(".knowledge-row-number").evaluate(node=>node.nextElementSibling?.className)).toBe("knowledge-row-title");
   }
   await expect(row(page,3).locator(".issue-card-label")).toHaveText("spec");
+  await expect(row(page,5).locator(".issue-card-updated + .issue-agent-status")).toHaveCount(1);
   const theme=info.project.name.includes("light")?"light":"dark";
   await page.setViewportSize({width:1600,height:1400});
   await page.locator('.knowledge-search').focus();
@@ -1155,6 +1156,9 @@ test("T-7b.2a: tier minimums and failures explain reported facts and clear on om
 });
 
 test("Monitor list bursts render once while controls remain synchronous", async ({ page }) => {
+  // The board can mount before its independently delivered live census.
+  // Freeze rendering only after that initial authoritative snapshot is applied.
+  await expect(page.locator('.issue-bridge-root [data-metric="active"]')).toHaveText("Active 1 · 1 issue · PM 0");
   const result = await page.evaluate(() => {
     const board = document.querySelector(".issue-queue-board")!;
     const originalRaf = window.requestAnimationFrame;
