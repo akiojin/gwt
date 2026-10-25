@@ -100,7 +100,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(restored.provider_session_id).toBe(source.provider_session_id);
       expect(restored.resume_session_id).toBe(source.provider_session_id);
       await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
-        entry.stage === "idle" && entry.gwt_session_id === restored.gwt_session_id), { timeout: 60_000 }).toBe(true);
+        entry.stage === "idle" && entry.pid === restored.pid && entry.gwt_session_id === restored.gwt_session_id), { timeout: 60_000 }).toBe(true);
       expect(fixture.processAlive(restored.pid)).toBe(true);
       const restoredSession = await readFile(join(fixture.home, ".gwt", "sessions", `${restored.gwt_session_id}.toml`), "utf8");
       expect(restoredSession).toContain(`agent_member_id = "${member.agent_member_id}"`);

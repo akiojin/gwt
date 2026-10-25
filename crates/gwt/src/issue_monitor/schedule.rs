@@ -317,13 +317,29 @@ fn reconcile(
     }
     // Automatic plans are preferences until claiming starts. A busy member
     // must not strand them while another member can admit the work now.
+    let switch_exclusion = |number, member: &str| {
+        prefs.agent_switch_admission_exclusion(Some(number), member, false, host)
+    };
     for index in 0..reservations.len() {
         let entry = &reservations[index];
         if entry.host_id != host
             || entry.reason == AgentScheduleReason::AssignedByYou
             || prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+            || prefs.agent_switch_intents.values().any(|intent| {
+                intent.request.target_issue_number == entry.issue_number
+                    && intent.request.member_id == entry.agent_member_id
+                    && intent.source.assignment.host_id == host
+                    && !matches!(
+                        intent.stage,
+                        AgentSwitchStage::Completed
+                            | AgentSwitchStage::Cancelled
+                            | AgentSwitchStage::Failed
+                    )
+            })
             || !members.iter().any(|member| {
-                member.agent_member_id == entry.agent_member_id && member.assignment.is_some()
+                member.agent_member_id == entry.agent_member_id
+                    && (member.assignment.is_some()
+                        || switch_exclusion(entry.issue_number, &member.agent_member_id).is_some())
             })
         {
             continue;
@@ -333,6 +349,7 @@ fn reconcile(
             .copied()
             .filter(|member| {
                 member.assignment.is_none()
+                    && switch_exclusion(entry.issue_number, &member.agent_member_id).is_none()
                     && !prefs.pending_launch_deliveries.iter().any(|delivery| {
                         delivery.agent_member_id.as_deref() == Some(&member.agent_member_id)
                     })
@@ -686,6 +703,61 @@ mod tests {
         install_switch_pin(&root, member, AgentSwitchStage::StoppingCurrent, false);
         let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
         let prefs = load_issue_monitor_prefs(&path).unwrap();
+        let mut automatic = prefs.clone();
+        let operation = automatic
+            .agent_switch_intents
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        automatic
+            .agent_switch_intents
+            .get_mut(&operation)
+            .unwrap()
+            .stage = AgentSwitchStage::Checkpointing;
+        let mut assignment = automatic.agent_switch_intents[&operation]
+            .source
+            .assignment
+            .clone();
+        automatic.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
+        let host = crate::process::current_hostname();
+        let owner = |prefs: &IssueMonitorPrefs, number| {
+            prefs
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .find(|entry| entry.issue_number == number)
+                .unwrap()
+                .agent_member_id
+                .clone()
+        };
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let selected_target_kept = owner(&automatic, 41) == *member;
+        let unrelated_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
+
+        automatic
+            .agent_switch_intents
+            .get_mut(&operation)
+            .unwrap()
+            .stage = AgentSwitchStage::Unknown;
+        automatic.agent_roster.as_mut().unwrap().members[0].assignment = None;
+        automatic
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 43)
+            .unwrap()
+            .agent_member_id = member.clone();
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let pinned_plan_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
+        assignment.issue_number = Some(100);
+        assignment.session_id = None;
+        automatic.agent_roster.as_mut().unwrap().members[1].assignment = Some(assignment);
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let pinned_destination_skipped = owner(&automatic, 42) == roster.members[1].agent_member_id;
+        assert!(selected_target_kept && unrelated_moved && pinned_plan_moved && pinned_destination_skipped,
+            "selected target kept={selected_target_kept}, ordinary busy plan moved={unrelated_moved}, unrelated pinned plan moved={pinned_plan_moved}, pinned destination skipped={pinned_destination_skipped}");
+
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
         assert!(
             monitor.agent_schedule_launch_exclusion(43).is_some(),
