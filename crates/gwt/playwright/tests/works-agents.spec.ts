@@ -50,6 +50,34 @@ test.describe("Works and Agents approved baseline", () => {
     expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
   });
 
+  test("workspace snapshots refresh Works and Agents while preserving native controls", async ({ page }, info) => {
+    const terminal = works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm');
+    await terminal.evaluate(node => { (window as any).__workspaceTerminal = node; });
+    const rail = page.locator('.op-rail__surface[data-surface="works"]');
+    await rail.focus();
+    for (const title of ['First workspace snapshot', '<img src=x> latest workspace']) {
+      await page.evaluate(title => (window as any).__worksAgentsFixture.workspaceTitle(title), title);
+      await expect(workRow(page, "agent-one").locator(".work-purpose")).toHaveText(title);
+      await expect(rail).toBeFocused();
+      expect(await terminal.evaluate(node => node === (window as any).__workspaceTerminal)).toBe(true);
+    }
+    await page.screenshot({ path: info.outputPath("workspace-state-works.png") });
+    await openRail(page, "agents");
+    const current = roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose');
+    await expect(current).toHaveText('<img src=x> latest workspace');
+    await expect(current.locator("img")).toHaveCount(0);
+    for (const title of ['Shared workspace title', 'Shared workspace title']) {
+      await page.evaluate(title => (window as any).__worksAgentsFixture.workspaceTitle(title), title);
+      await expect(current).toHaveText(title);
+    }
+    await page.screenshot({ path: info.outputPath("workspace-state-agents.png") });
+    await current.click();
+    await expect(full(page)).toBeVisible();
+    expect(await full(page).locator(".xterm").evaluate(node => node === (window as any).__workspaceTerminal)).toBe(true);
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await expect(workRow(page, "agent-one").locator(".work-purpose")).toHaveText("Shared workspace title");
+  });
+
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
     await expect(works(page).locator(".work-row")).toHaveCount(3);
     expect(await works(page).locator(".work-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.windowId))).toEqual(["pm-window", "agent-one", "agent-two"]);
@@ -354,6 +382,7 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },

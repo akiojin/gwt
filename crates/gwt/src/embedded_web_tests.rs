@@ -1710,10 +1710,26 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
 #[test]
 fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render() {
     let html = frontend_bundle_source();
-    let readiness_flow = regex::Regex::new(
-            r#"case\s+"workspace_state":\s*\{[\s\S]*?projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
-        )
-        .expect("valid regex");
+    let subscription = js_braced_block_after(
+        html,
+        "workspaceStateModel.subscribe(state => state, snapshot => ",
+    )
+    .expect("shared workspace state subscription");
+    let mut remaining = subscription;
+    for step in [
+        "projectError = \"\";",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);",
+        "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
+        "updatePmLauncher(activeWorkspace());",
+        "resolvePendingWindowFrames();",
+        "sendStartupAutoResumeReady();",
+        "startupMetrics.onWorkspaceRendered();",
+    ] {
+        remaining = remaining
+            .split_once(step)
+            .unwrap_or_else(|| panic!("workspace subscription must preserve ordered step: {step}"))
+            .1;
+    }
 
     assert!(
         html.contains("function sendStartupAutoResumeReady()"),
@@ -1723,10 +1739,6 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
         html.contains("kind: \"startup_auto_resume_ready\""),
         "expected readiness to announce the mounted surfaces without layout coordinates",
     );
-    assert!(
-            readiness_flow.is_match(html),
-            "expected workspace_state hydration to render before announcing startup auto-resume readiness",
-        );
 }
 
 #[test]
@@ -1757,13 +1769,10 @@ fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_mod
 #[test]
 fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items before
-    // breaking. Tolerate the optional `{` and additional code
-    // between renderAppState and break.
+    // SPEC #5016: the receiver commits data; its synchronous subscription
+    // retains app-state rendering and the startup readiness ordering above.
     let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -1788,7 +1797,7 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
     );
     assert!(
             workspace_state_flow.is_match(html),
-            "expected workspace_state events to clear project errors and re-render through the app-state workspace helper",
+            "expected workspace_state events to commit a fresh shared receipt before subscribed rendering",
         );
 }
 
@@ -3077,13 +3086,10 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
 #[test]
 fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items. Tolerate
-    // the optional `{` and additional code between renderAppState
-    // and break.
+    // SPEC #5016: workspace hydration now reaches the shell through a
+    // shared model subscription rather than direct receiver rendering.
     let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
@@ -3132,7 +3138,11 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected frontend bootstrap to connect through the socket transport unit",
     );
     assert!(
-        workspace_event.is_match(html),
+        workspace_event.is_match(html)
+            && html.contains("const workspaceStateModel = createUiStateStore(null);")
+            && html.contains(
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);"
+            ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
     assert!(

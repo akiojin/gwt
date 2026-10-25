@@ -10,6 +10,20 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Workspace snapshots commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/workspace_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.workspace.app_version;',
+    'frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);']) {
+    const mutated = app.replace('case "workspace_state": {', `case "workspace_state": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Hub open results commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/hub-app.js';
   const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
