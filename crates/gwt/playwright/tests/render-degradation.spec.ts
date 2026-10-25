@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { APP_PROJECT_KEY, APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 const degradationBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
 const degradationAppUrl = degradationBase ? new URL(new URL(APP_URL).pathname, degradationBase).href : APP_URL;
@@ -43,6 +43,7 @@ function workspaceState(windows: unknown[]) {
         {
           id: "tab-1",
           title: "Degradation Fixture",
+          project_key: APP_PROJECT_KEY,
           project_root: "/fixture",
           kind: "git",
           workspace: {
