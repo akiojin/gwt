@@ -307,7 +307,7 @@ test.describe("Works and Agents approved baseline", () => {
     const currentIdentity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
     await expect(plans).toBeVisible();
     await expect(roster(page).locator(".roster-current-work")).toBeVisible();
-    expect(await plans.evaluate(node => node.previousElementSibling?.classList.contains("roster-current-work"))).toBe(true);
+    await expect(roster(page).locator(".roster-current-work + .roster-plans")).toBeVisible();
     await expect(roster(page).locator(".roster-row")).toHaveCount(3);
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
     await expect(plans).toContainText("No queued issue");
