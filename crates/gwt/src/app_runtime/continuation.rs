@@ -1,3 +1,11 @@
+use gwt::project_runtime::launch_finalization::{
+    durable_fresh_execution_candidate, path_matches,
+    resolve_split_workspace_state_external_commit_with_retry_hint, DurableFreshExecutionCandidate,
+};
+pub(super) use gwt::project_runtime::launch_finalization::{
+    reject_continue_work_workspace_commit, resolve_split_workspace_state_external_commit,
+};
+
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -808,110 +816,6 @@ fn continue_work_outcome(
     )
 }
 
-pub(super) fn reject_continue_work_workspace_commit(
-    project_root: &Path,
-    work_event_root: &Path,
-    operation_id: &str,
-) -> std::io::Result<()> {
-    match resolve_split_workspace_state_external_commit(
-        project_root,
-        work_event_root,
-        operation_id,
-        gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
-    ) {
-        Ok(
-            gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
-            | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing,
-        ) => Ok(()),
-        Ok(resolution) => Err(std::io::Error::other(format!(
-            "continuation Work rejection returned {resolution:?}"
-        ))),
-        Err(error) => Err(std::io::Error::other(error.to_string())),
-    }
-}
-
-pub(super) fn resolve_split_workspace_state_external_commit(
-    project_root: &Path,
-    work_event_root: &Path,
-    operation_id: &str,
-    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
-) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
-    resolve_split_workspace_state_external_commit_with_retry_hint(
-        project_root,
-        work_event_root,
-        operation_id,
-        decision,
-    )
-    .map(|(resolution, _)| resolution)
-}
-
-fn resolve_split_workspace_state_external_commit_with_retry_hint(
-    project_root: &Path,
-    work_event_root: &Path,
-    operation_id: &str,
-    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
-) -> gwt_core::error::Result<(
-    gwt_core::workspace_projection::ExternalWorkspaceCommitResolution,
-    Option<String>,
-)> {
-    use gwt_core::workspace_projection::ExternalWorkspaceCommitResolution;
-
-    let current_path = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(project_root);
-    let canonical_work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(project_root);
-    let legacy_work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(work_event_root);
-    let canonical = gwt_core::workspace_projection::resolve_workspace_state_external_commit_at(
-        &current_path,
-        &canonical_work_items_path,
-        operation_id,
-        decision,
-    );
-    let resolve_legacy = legacy_work_items_path != canonical_work_items_path
-        && match &canonical {
-            Ok(ExternalWorkspaceCommitResolution::Missing) => true,
-            Err(gwt_core::error::GwtError::ExternalWorkspacePathPairMismatch {
-                operation_id: bound_operation_id,
-            }) => bound_operation_id == operation_id,
-            _ => false,
-        };
-    let (resolution, lock_work_items_path) = if resolve_legacy {
-        (
-            resolve_legacy_split_workspace_state_external_commit(
-                project_root,
-                work_event_root,
-                operation_id,
-                decision,
-            )?,
-            &legacy_work_items_path,
-        )
-    } else {
-        (canonical?, &canonical_work_items_path)
-    };
-    let retry_hint = (resolution == ExternalWorkspaceCommitResolution::Busy).then(|| {
-        gwt_core::workspace_projection::external_workspace_operation_retry_hint_at(
-            &current_path,
-            lock_work_items_path,
-            operation_id,
-        )
-    });
-    Ok((resolution, retry_hint))
-}
-
-fn resolve_legacy_split_workspace_state_external_commit(
-    project_root: &Path,
-    work_event_root: &Path,
-    operation_id: &str,
-    decision: gwt_core::workspace_projection::ExternalWorkspaceCommitDecision,
-) -> gwt_core::error::Result<gwt_core::workspace_projection::ExternalWorkspaceCommitResolution> {
-    gwt_core::workspace_projection::resolve_legacy_workspace_state_external_commit_for_work_event_root(
-        project_root,
-        work_event_root,
-        operation_id,
-        decision,
-    )
-}
-
 fn split_workspace_state_external_commit_resolution(
     project_root: &Path,
     work_event_root: &Path,
@@ -1224,16 +1128,6 @@ impl AppRuntime {
         .with_project_root(launch_cwd)
         .into_parts();
         gwt_core::usage::grok::grok_home_from_env(&effective_env, launch_cwd)
-    }
-}
-
-fn path_matches(left: &Path, right: &Path) -> bool {
-    match (dunce::canonicalize(left), dunce::canonicalize(right)) {
-        (Ok(left), Ok(right)) => {
-            gwt_core::paths::normalize_windows_child_process_path(&left)
-                == gwt_core::paths::normalize_windows_child_process_path(&right)
-        }
-        _ => false,
     }
 }
 
@@ -1704,17 +1598,6 @@ pub(super) fn pending_fresh_execution_attempt_status(
     .ok()
     .flatten()
     .map(|attempt| attempt.status)
-}
-
-#[derive(Debug)]
-struct DurableFreshExecutionCandidate {
-    project_root: PathBuf,
-    worktree_path: PathBuf,
-    owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    attempt: gwt::cli::execution_state::ContinuationAttempt,
-    binding: gwt_agent::SessionExecutionBinding,
-    session_identity: gwt_agent::SessionExecutionIdentity,
-    agent_id: gwt_agent::AgentId,
 }
 
 #[derive(Clone, Copy)]
@@ -2236,151 +2119,6 @@ fn compensate_genesis_workspace_projection(
     )?;
     gwt_core::workspace_projection::mark_workspace_agent_stopped(project_root, session_id, None)
         .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn durable_fresh_execution_candidate(
-    session: &gwt_agent::Session,
-) -> Result<Option<DurableFreshExecutionCandidate>, String> {
-    let Some(binding) = session.execution_binding.clone() else {
-        return Ok(None);
-    };
-    if binding.schema_version != gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
-        || binding.session_id != session.id
-        || session.linked_issue_number != Some(binding.owner_number)
-        || session.repo_hash.as_deref() != Some(binding.repo_hash.as_str())
-    {
-        return Err("persisted fresh-launch Session binding is not canonical".to_string());
-    }
-    let owner_kind = match binding.owner_kind.as_str() {
-        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
-        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        _ => return Err("persisted fresh-launch owner kind is not canonical".to_string()),
-    };
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: owner_kind,
-        number: binding.owner_number,
-    };
-    let project_root = gwt::validated_project_state_root_for_session_recovery(session)
-        .map_err(|error| error.to_string())?;
-    let Some(attempt) = gwt::cli::execution_state::fresh_linked_owner_launch_for_session(
-        &session.worktree_path,
-        owner,
-        &session.id,
-    )
-    .map_err(|error| error.to_string())?
-    else {
-        return Ok(None);
-    };
-    if binding.identity.generation_id != attempt.candidate_generation_id
-        || binding.identity.binding_id != attempt.request.session_binding_id
-    {
-        return Err(
-            "persisted fresh-launch Session does not match its durable candidate generation"
-                .to_string(),
-        );
-    }
-    Ok(Some(DurableFreshExecutionCandidate {
-        project_root,
-        worktree_path: session.worktree_path.clone(),
-        owner,
-        attempt,
-        binding,
-        session_identity: gwt_agent::SessionExecutionIdentity::from_session(session)
-            .map_err(|error| {
-                format!("persisted fresh-launch Session identity is invalid: {error}")
-            })?
-            .ok_or_else(|| "persisted fresh-launch Session identity is missing".to_string())?,
-        agent_id: session.agent_id.clone(),
-    }))
-}
-
-/// Inspect only this owner's current Prepared attempts, not Session history.
-/// Receipt-backed recovery stays with the existing startup reconciler.
-pub(super) fn reconcile_unindexed_prepared_fresh_launches(
-    sessions_dir: &Path,
-    worktree: &Path,
-    owner: gwt::cli::execution_state::ExecutionOwnerKey,
-) -> Result<(), String> {
-    let Some(ledger) = gwt::cli::execution_state::load_generation_ledger(worktree, owner)
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(());
-    };
-    let mut seen = std::collections::HashSet::new();
-    for attempt in ledger.continuation_attempts.iter().rev() {
-        if !seen.insert(&attempt.request.operation_id)
-            || attempt.status != gwt::cli::execution_state::ContinuationAttemptStatus::Prepared
-            || attempt.predecessor.generation_id != ledger.current_generation_id
-            || !gwt::cli::execution_state::is_owner_launch_successor_attempt(attempt)
-            || durable_launch_recovery_exists(sessions_dir, &attempt.request.initial_session_id)
-        {
-            continue;
-        }
-        let path = sessions_dir.join(format!("{}.toml", attempt.request.initial_session_id));
-        let session = match gwt_agent::inspect_session_path(&path) {
-            gwt_agent::SessionPathState::Present(session) => session,
-            gwt_agent::SessionPathState::Missing => {
-                tracing::warn!(owner = owner.number, operation_id = %attempt.request.operation_id,
-                    session_id = %attempt.request.initial_session_id,
-                    "retained Prepared launch without receipt or Session: abandonment cannot be proven");
-                continue;
-            }
-            gwt_agent::SessionPathState::Error(error) => {
-                tracing::warn!(owner = owner.number, operation_id = %attempt.request.operation_id,
-                    session_id = %attempt.request.initial_session_id, %error,
-                    "retained Prepared launch without receipt: Session evidence is unreadable");
-                continue;
-            }
-        };
-        let Some(candidate) = durable_fresh_execution_candidate(&session)? else {
-            continue;
-        };
-        if candidate.owner != owner
-            || !path_matches(&candidate.worktree_path, worktree)
-            || candidate.attempt.request != attempt.request
-        {
-            continue;
-        }
-        let Some(receipt_project_root) = candidate.session_identity.project_state_root.as_deref()
-        else {
-            continue;
-        };
-        let cleaned = gwt::cli::execution_state::abort_abandoned_prepared_successor_with(
-            worktree,
-            owner,
-            &attempt.request,
-            sessions_dir,
-            &candidate.session_identity,
-            || {
-                persist_durable_launch_recovery_with_identity(
-                    sessions_dir,
-                    DurableLaunchRecoveryKind::FreshSuccessor {
-                        operation_id: attempt.request.operation_id.clone(),
-                    },
-                    &session.id,
-                    receipt_project_root,
-                    &candidate.worktree_path,
-                    owner,
-                    Some(&candidate.binding),
-                    Some(&candidate.agent_id),
-                    Some(&candidate.session_identity),
-                )
-                .map_err(std::io::Error::other)
-            },
-            || {
-                reject_continue_work_workspace_commit(
-                    &candidate.project_root,
-                    worktree,
-                    &attempt.request.operation_id,
-                )
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        if cleaned {
-            clear_durable_launch_recovery(sessions_dir, &session.id)?;
-        }
-    }
     Ok(())
 }
 
