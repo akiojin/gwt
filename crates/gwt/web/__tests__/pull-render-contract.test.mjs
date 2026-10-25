@@ -577,6 +577,23 @@ test("rewritten shared models fail closed per lexical binding", () => {
   }
 });
 
+test("lexical loop headers shadow shared models only within the loop", () => {
+  for (const header of ["for (const model of values)", "for (let model in values)",
+    "for (let model = value; model; model = null)"]) {
+    const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+      const model = createUiStateStore(null);
+      ${header} {
+        function receive(event) { model.update(event); }
+      }
+      function applyIssueMonitorStatus(event) { model.update(event); }`, "entry.js");
+    assert.deepEqual(findings.map(finding => [finding.root, finding.kind]),
+      [["receive", "unresolved-call"]], header);
+  }
+  assert.deepEqual(scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+    for (var model = createUiStateStore(null); false;) {}
+    function receive(event) { model.update(event); }`, "entry.js"), []);
+});
+
 test("factory return aliases resolve model handlers without trusting controller.update", () => {
   const module = `import { createUiStateStore } from "./ui-state-store.js";
     export function createSurface() {
