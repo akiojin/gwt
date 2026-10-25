@@ -2733,6 +2733,8 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         "Push the existing event commit through the repository's normal delivery path, then retry once the compared upstream contains it. Later source-only commits do not need to be pushed.".to_string()
     } else if matches!(blocker, WorkEventSettlementBlocker::RemoteDiverged) {
         "Integrate the existing event commit with the compared upstream without rewriting it, using the repository's normal delivery path, then retry once that upstream contains the event commit. Later source-only commits do not need to be pushed.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::MissingUpstream) {
+        "Restore the owning branch environment and its usable configured upstream through the repository's normal work-environment path, then retry. Keep the existing event commit and source unchanged.".to_string()
     } else {
         format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
     };
@@ -14737,6 +14739,8 @@ fn default_integration_test_builds_a_guarded_binary() {
     #[test]
     fn work_event_settlement_rejects_missing_configured_upstream() {
         let fixture = WorkEventGitFixture::tracked();
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
         fixture.git_ok(&["branch", "--unset-upstream"]);
 
         let status = evaluate_work_event_settlement(&fixture.repo);
@@ -14745,6 +14749,30 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::MissingUpstream)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::MissingUpstream,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("Restore the owning branch environment")
+                && description.contains("usable configured upstream"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fixture.git_ok(&["branch", "--set-upstream-to=origin/main"]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
 
         let detached = WorkEventGitFixture::tracked();
         detached.git_ok(&["checkout", "--detach", "-q"]);
