@@ -51,7 +51,7 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
-test("Issue #3165: no-profile Start explains recovery without optimistic success", async ({ page }, info) => {
+test("Issue #3165: Start explains missing settings and waits for confirmed enable", async ({ page }, info) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -87,10 +87,23 @@ test("Issue #3165: no-profile Start explains recovery without optimistic success
     { ...status, launch_profile_source: "saved" });
   await expect(guidance).toBeHidden();
   await expect(start).toBeVisible();
+  const savedCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  await start.click();
+  const savedControls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), savedCursor);
+  expect(savedControls, "saved-profile Start must only request monitoring enable").toEqual([
+    { kind: "set_issue_monitor_enabled", enabled: true },
+  ]);
+  await expect(start).toBeVisible();
+  await expect(guidance).toBeHidden();
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Stopped");
   await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
     { ...status, launch_profile_source: "saved", enabled: true, state: "idle" });
   await expect(surface.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
   await expect(guidance).toBeHidden();
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveAttribute("data-state", "idle");
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Running");
+  await info.attach(`monitor-saved-start-${theme}`, { body: await surface.screenshot(), contentType: "image/png" });
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
