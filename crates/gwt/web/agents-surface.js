@@ -7,7 +7,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
 export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel,
-  scheduleModel, onReassign = () => {}, onRefreshSchedule = () => {},
+  scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
@@ -16,9 +16,11 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     <p class="roster-description">Named members are reused across issues. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
-  let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule;
+  let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
-  let submittedSnapshot = null, scheduleNotice = "";
+  let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
+  const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
+  const switchState = () => switchModel?.read() || emptySwitch;
   const scheduleState = () => scheduleModel?.read() || { snapshot: null, error: null, pending: false };
   function liveWork(member) {
     if (!member?.assignment?.session_id) return null;
@@ -60,11 +62,65 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const member = rosterModel.read().members.find(member => member.member_id === selectedId && member.enabled);
     if (member && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
   }
+  function syncSwitchControls(section, member, current) {
+    const switching = switchState(), intent = switching.intents.find(intent => intent.member_id === member.member_id);
+    const request = switching.pending?.kind === "request" && switching.pending.member_id === member.member_id ? switching.pending : null;
+    const notice = switching.notice?.member_id === member.member_id ? switching.notice.message : null;
+    const host = section.querySelector(".roster-switch");
+    let progress = host.querySelector(".roster-switch-status");
+    if (intent || request || switching.error || notice) {
+      if (!progress) { progress = document.createElement("p"); progress.className = "roster-plan-status roster-switch-status"; progress.setAttribute("role", "status"); progress.setAttribute("aria-live", "polite"); host.prepend(progress); }
+      const source = request ? pendingSource?.operation_id === request.operation_id ? pendingSource.issue_number : current?.issue_number : intent?.source_issue_number;
+      const target = request?.target_issue_number ?? intent?.target_issue_number;
+      const stage = { requested: "Waiting to save current work", checkpointing: "Saving current work…", checkpoint_verified: "Current work saved", stopping_current: "Stopping current work…", launching_next: "Launching next issue…", completed: "Switch completed", cancelled: "Switch cancelled", failed: "Switch failed", unknown: "Unknown. Refresh to check the switch." }[intent?.stage] || "Awaiting switch receipt…";
+      progress.textContent = !request && !switching.error && notice && (!intent || ["completed", "cancelled", "failed"].includes(intent.stage)) ? notice : `${source ? `#${source}` : "Current issue"} → ${target ? `#${target}` : "Next issue"} · ${switching.disconnected ? "Unknown. Reconnect and refresh to check the switch." : switching.error || (request ? "Awaiting switch receipt…" : stage)}${!switching.disconnected && !request && intent?.reason ? ` · ${intent.reason}` : ""}`;
+    } else progress?.remove();
+    let cancel = host.querySelector('[data-action="cancel-switch"]');
+    const cancellable = intent && !switching.disconnected && ["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage);
+    if (cancel && (!cancellable || cancel.dataset.operationId !== intent.operation_id)) { cancel.remove(); cancel = null; }
+    if (cancellable) {
+      if (!cancel) {
+        cancel = document.createElement("button"); cancel.type = "button"; cancel.dataset.action = "cancel-switch"; cancel.dataset.operationId = intent.operation_id; cancel.textContent = "Cancel switch";
+        cancel.addEventListener("click", () => {
+          const latest = switchState(), active = latest.intents.find(value => value.operation_id === intent.operation_id);
+          if (!latest.pending && !latest.disconnected && active && ["requested", "checkpointing", "checkpoint_verified"].includes(active.stage)) { onSwitch({ kind: "cancel", operation_id: intent.operation_id }); sync(); }
+        }); host.append(cancel);
+      }
+      cancel.disabled = !!switching.pending;
+    }
+    let recover = host.querySelector('[data-action="open-saved-work"]');
+    if (recover && (intent?.stage !== "failed" || recover.dataset.operationId !== intent.operation_id)) { recover.remove(); recover = null; }
+    if (intent?.stage === "failed" && !recover) {
+      recover = document.createElement("button"); recover.type = "button"; recover.dataset.action = "open-saved-work"; recover.dataset.operationId = intent.operation_id; recover.textContent = "Open saved work in Works";
+      recover.addEventListener("click", () => {
+        const source = liveWork(rosterModel.read().members.find(value => value.member_id === member.member_id));
+        if (source && source.issue_number === intent.source_issue_number && (!intent.source_session_id || source.session_id === intent.source_session_id)) openCurrent(member.member_id, source);
+        else onOpenSavedWork(intent);
+      }); host.append(recover);
+    }
+    let continueSaved = host.querySelector('[data-action="continue-saved-work"]');
+    const savedWorkId = intent?.can_resume_saved === true && typeof intent.saved_work_id === "string" && intent.saved_work_id.trim() ? intent.saved_work_id : null;
+    if (continueSaved && (!savedWorkId || continueSaved.dataset.operationId !== intent.operation_id || continueSaved.dataset.workId !== savedWorkId)) { continueSaved.remove(); continueSaved = null; }
+    if (savedWorkId) {
+      if (!continueSaved) {
+        continueSaved = document.createElement("button"); continueSaved.type = "button"; continueSaved.dataset.action = "continue-saved-work";
+        continueSaved.dataset.operationId = intent.operation_id; continueSaved.dataset.workId = savedWorkId;
+        continueSaved.addEventListener("click", () => {
+          const latest = switchState(), active = latest.intents.find(value => value.operation_id === intent.operation_id);
+          if (!latest.disconnected && active?.can_resume_saved === true && active.saved_work_id === savedWorkId && !isContinuePending(savedWorkId)) { onContinueSavedWork(savedWorkId); sync(); }
+        }); host.append(continueSaved);
+      }
+      continueSaved.disabled = switching.disconnected || isContinuePending(savedWorkId);
+      continueSaved.textContent = isContinuePending(savedWorkId) ? "Continuing saved work…" : "Continue saved work";
+    }
+    for (const change of section.querySelectorAll('[data-action="switch-next"]')) change.disabled = !!switching.pending || switching.disconnected || !!switching.error || !!intent && !["completed", "cancelled", "failed"].includes(intent.stage);
+  }
   function renderPlans(member) {
     const state = scheduleState(), snapshot = state.snapshot;
     const pending = state.pending || submittedSnapshot === snapshot && snapshot !== null;
-    const inputs = [member.member_id, member.enabled, rosterModel.read().revision, snapshot, state.error, pending, scheduleNotice];
-    if (renderedPlans?.inputs.every((value, index) => value === inputs[index])) return renderedPlans.section;
+    const current = liveWork(member);
+    const inputs = [member.member_id, member.enabled, rosterModel.read().revision, rosterModel.read().error, snapshot, state.error, pending, scheduleNotice, current?.window_id, current?.session_id, current?.runtime_incarnation, current?.issue_number];
+    if (renderedPlans?.inputs.every((value, index) => value === inputs[index])) { syncSwitchControls(renderedPlans.section, member, current); return renderedPlans.section; }
     const section = document.createElement("section"); section.className = "roster-plans";
     renderedPlans = { inputs, section };
     const header = document.createElement("header"), heading = document.createElement("h4"), refresh = document.createElement("button");
@@ -76,9 +132,10 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const status = document.createElement("p"); status.className = "roster-plan-status"; status.setAttribute("role", "status");
     status.textContent = state.error || scheduleNotice || (pending ? "Updating plans…" : stale ? "Plans changed. Refresh plans before reassigning." : "");
     status.hidden = !status.textContent; section.append(status);
+    const switchHost = document.createElement("div"); switchHost.className = "roster-switch"; section.append(switchHost);
     if (!plan?.issues.length) {
       const empty = document.createElement("p"); empty.className = "roster-plan-empty";
-      empty.textContent = plan ? "No queued issue" : "Plans unavailable. Refresh plans to try again."; section.append(empty); return section;
+      empty.textContent = plan ? "No queued issue" : "Plans unavailable. Refresh plans to try again."; section.append(empty); syncSwitchControls(section, member, current); return section;
     }
     const list = document.createElement("ol");
     for (const issue of plan.issues) {
@@ -110,9 +167,27 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
           expected_roster_revision: snapshot.roster_revision, expected_queue_revision: snapshot.queue_revision, expected_schedule_revision: snapshot.schedule_revision });
         sync();
       });
-      controls.append(select, reassign); item.append(title, reason, controls); list.append(item);
+      controls.append(select, reassign);
+      if (switchModel && issue === plan.issues[0] && current && Number.isSafeInteger(current.issue_number) && current.issue_number > 0 && !blocked && !rosterModel.read().error) {
+        const change = document.createElement("button"); change.type = "button"; change.dataset.action = "switch-next"; change.textContent = "Switch to next issue";
+        change.setAttribute("aria-label", `Switch from issue #${current.issue_number} to next issue #${issue.issue_number}`);
+        change.disabled = true;
+        change.addEventListener("click", () => {
+          const latest = scheduleState(), roster = rosterModel.read(), switching = switchState();
+          const source = roster.members.find(value => value.member_id === member.member_id && value.enabled && !value.is_pm), live = liveWork(source);
+          if (switching.pending || switching.disconnected || switching.error || switching.intents.some(value => value.member_id === member.member_id && !["completed", "cancelled", "failed"].includes(value.stage))) return;
+          if (latest.pending || submittedSnapshot || latest.error || roster.error || latest.snapshot !== snapshot || roster.revision !== snapshot.roster_revision ||
+              !live || live.window_id !== current.window_id || live.session_id !== current.session_id || live.runtime_incarnation !== current.runtime_incarnation || live.issue_number !== current.issue_number) {
+            scheduleNotice = "Plans or current work changed. Refresh plans before switching."; sync(); return;
+          }
+          const operationId = globalThis.crypto.randomUUID(); pendingSource = { operation_id: operationId, issue_number: current.issue_number };
+          onSwitch({ kind: "request", operation_id: operationId, member_id: member.member_id,
+            expected_roster_revision: snapshot.roster_revision, target_issue_number: issue.issue_number }); sync();
+        }); controls.append(change);
+      }
+      item.append(title, reason, controls); list.append(item);
     }
-    section.append(list); return section;
+    section.append(list); syncSwitchControls(section, member, current); return section;
   }
   function renderDetail(member) {
     const panel = element.querySelector(".roster-detail"), plans = member ? renderPlans(member) : null;
@@ -226,7 +301,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
     element.dataset.catalogVersion = String(catalog.version);
-    renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; renderedSchedule = schedule; syncPreview();
+    renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; renderedSchedule = schedule; renderedSwitch = switchState(); syncPreview();
   }
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => onAddMember());
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
@@ -237,5 +312,6 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   sync();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
+  if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
   return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
 }

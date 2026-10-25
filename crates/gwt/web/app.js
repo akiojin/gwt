@@ -1,6 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -429,6 +429,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
+      const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
       const worksTelemetryModel = createUiStateStore({ sessions: [] });
       const sessionUsageModel = createUiStateStore([]);
       let routeProjectMissing = false;
@@ -910,6 +911,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
+        // A switch is valid only on this live Host connection. Never replay
+        // an unacknowledged request or cancellation after a Host restart.
+        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+          if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
+          try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
+        }
         if (socket && socket.readyState === WebSocket.OPEN
           && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
@@ -1163,7 +1170,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -3601,6 +3608,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // / *_error; the timeout re-enables the UI when no reply ever arrives.
       const launchPending = createLaunchPendingController({
         onChange: () => {
+          agentsSurface?.sync();
           try {
             workspaceOverviewSurface.renderWindows(true);
           } catch {
@@ -5194,6 +5202,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "agent_roster":
             applyAgentRosterSnapshot(event.roster);
             break;
+          case "agent_switch":
+            applyAgentSwitchSnapshot(event.snapshot);
+            break;
+          case "agent_switch_error":
+            applyAgentSwitchError(event);
+            break;
           case "agent_schedule":
             applyAgentScheduleSnapshot(event.schedule);
             break;
@@ -5518,6 +5532,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
         agentActivityModel.dispose();
+        switchModel.dispose();
         launchWizardVisibilityModel.dispose();
       }, { once: true });
 
@@ -5746,6 +5761,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         if (beginAgentScheduleRequest(action)) send({ kind: "agent_schedule", action });
       }
+      function requestAgentSwitch(action = { kind: "read" }) {
+        if (beginAgentSwitchRequest(action) && send({ kind: "agent_switch", action }) !== "sent" && action.kind !== "read") clearAgentSwitch();
+      }
       function setRosterHost(host, previewHost = null) {
         const changed = rosterHost !== host;
         rosterHost = host;
@@ -5753,7 +5771,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const targetHost = host || document.querySelector(".surface-area");
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
-        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); }
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5762,11 +5780,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, activityModel: agentActivityModel, windowCatalogModel,
+      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel,
         onAddMember: () => requestAgentRoster({ kind: "add" }),
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onSwitch: requestAgentSwitch,
+        onOpenSavedWork: () => openSurface("works"),
+        onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
+        isContinuePending: (workId) => launchPending.isPending(`continue:${workId}`),
         onReassign: requestAgentSchedule,
-        onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); },
+        onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); },
         onOpenWork: openAssignedWork,
       });
       agentsSurface.element.hidden = true;

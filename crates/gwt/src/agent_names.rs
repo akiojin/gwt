@@ -505,6 +505,7 @@ pub fn reserve_project_member(
     inherited_member_id: Option<&str>,
 ) -> Result<AgentMember, String> {
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+    let host = crate::process::current_hostname();
     let dead = dead_project_assignments(&path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let historical_member = if inherited_member_id.is_none() {
@@ -514,6 +515,13 @@ pub fn reserve_project_member(
     };
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        let switch_exclusions: std::collections::BTreeMap<_, _> = prefs.agent_roster.as_ref().expect("initialized roster").members.iter().filter_map(|member| {
+            prefs.agent_switch_admission_exclusion(issue_number, &member.agent_member_id,
+                inherited_member_id == Some(member.agent_member_id.as_str()), &host).map(|reason| (member.agent_member_id.clone(), reason))
+        }).collect();
+        if let Some(reason) = inherited_member_id.and_then(|member| switch_exclusions.get(member)) {
+            return Err(std::io::Error::other(reason.clone()));
+        }
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
         let existing = roster.members.iter().position(|member| {
             member.assignment.as_ref().is_some_and(|assignment| {
@@ -522,6 +530,9 @@ pub fn reserve_project_member(
             })
         });
         if let Some(index) = existing {
+            if let Some(reason) = switch_exclusions.get(&roster.members[index].agent_member_id) {
+                return Err(std::io::Error::other(reason.clone()));
+            }
             let assignment = roster.members[index]
                 .assignment
                 .as_mut()
@@ -552,7 +563,9 @@ pub fn reserve_project_member(
                     "Agent member is reserved by another host",
                 ));
             }
-            return Ok(roster.members[index].clone());
+            let result = roster.members[index].clone();
+            prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
+            return Ok(result);
         }
         for member in &mut roster.members {
             if member
@@ -575,7 +588,6 @@ pub fn reserve_project_member(
                 "Agent roster capacity is occupied, including resting members",
             ));
         }
-        let host = crate::process::current_hostname();
         let scheduled = if inherited_member_id.is_none() {
             if issue_number.is_some_and(|number| prefs.agent_issue_schedule.reservations.iter().any(|entry| entry.issue_number == number && entry.host_id != host)) {
                 return Err(std::io::Error::other("Issue is scheduled on another host; read issue.monitor.schedule.read on its queue owner"));
@@ -583,7 +595,7 @@ pub fn reserve_project_member(
             delivery_id.and_then(|id| prefs.pending_launch_deliveries.iter().find(|entry| entry.delivery_id == id && Some(entry.issue_number) == issue_number).and_then(|entry| entry.agent_member_id.clone()))
                 .or_else(|| prefs.agent_issue_schedule.reservations.iter().find(|entry| Some(entry.issue_number) == issue_number && entry.host_id == host && prefs.terminal_queues.get(&host).is_some_and(|queue| queue.entries.iter().any(|queued| queued.number == entry.issue_number))).map(|entry| entry.agent_member_id.clone()))
         } else { None };
-        let pinned_elsewhere = |member_id: &str| prefs.pending_launch_deliveries.iter().any(|entry| entry.agent_member_id.as_deref() == Some(member_id) && Some(entry.issue_number) != issue_number);
+        let pinned_elsewhere = |member_id: &str| switch_exclusions.contains_key(member_id) || prefs.pending_launch_deliveries.iter().any(|entry| entry.agent_member_id.as_deref() == Some(member_id) && Some(entry.issue_number) != issue_number);
         let index = if let Some(member_id) = inherited_member_id {
             roster.members.iter().position(|member| {
                 member.agent_member_id == member_id && member.assignment.is_none()
@@ -636,6 +648,7 @@ pub fn reserve_project_member(
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
         if let Some(number) = issue_number { prefs.agent_issue_schedule.consume(&host, number)?; }
+        prefs.abandon_agent_switch_for_source_resume(issue_number, &result.agent_member_id, inherited_member_id == Some(result.agent_member_id.as_str()), &host);
         Ok(result)
     })
     .map_err(|error| error.to_string())?;

@@ -1987,6 +1987,7 @@ enum UserEvent {
     IssueMonitorLaunchDeliveryAcknowledged(
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
+    AgentSwitchSourceExited(Box<app_runtime::AgentSwitchSourceExited>),
     DrainAppEvents,
     TransientBrowserEnded {
         generation: u64,
@@ -11144,6 +11145,9 @@ fn main() -> std::io::Result<()> {
                         .unwrap_or(GuiShutdownReason::QuitApp);
                     let _ = proxy.send_event(UserEvent::QuitApp { reason });
                 }
+            }
+            Event::UserEvent(UserEvent::AgentSwitchSourceExited(exited)) => {
+                clients.dispatch(app.agent_switch_source_exited_events(*exited));
             }
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
                 clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));

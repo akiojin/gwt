@@ -5021,3 +5021,122 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         (true, true, Some("Falcon"))
     );
 }
+
+fn switch_source_retirement_fixture(
+    root: &Path,
+) -> (
+    AppRuntime,
+    Arc<Mutex<Vec<UserEvent>>>,
+    super::super::AgentSwitchSourceExited,
+) {
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_repo(&project);
+    let mut tab = sample_project_tab_with_window_at(
+        "source",
+        "agent",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    tab.workspace
+        .set_session_id("agent", Some("source-session".into()));
+    let (mut runtime, events) = sample_runtime_with_events(root, vec![tab], Some("source"));
+    let window_id = combined_window_id("source", "agent");
+    let mut active = sample_active_agent_session("source", &window_id);
+    active.session_id = "source-session".into();
+    active.worktree_path = project.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let current = &runtime.runtimes[&window_id];
+    let pty = Arc::clone(&current.pty);
+    let child_pid = pty.process_id().unwrap();
+    let proof = serde_json::from_value(serde_json::json!({
+        "issue_number":43,"window_id":window_id,"session_id":"source-session","host_pid":std::process::id(),"host_started_at":gwt::process::host_process_start_time(std::process::id()).unwrap(),"runtime_incarnation":current.incarnation,"child_pid":child_pid,"child_started_at":gwt::process::host_process_start_time(child_pid).unwrap(),"requested_at":"2026-10-26T00:00:00Z",
+        "execution_identity":{"session_id":"source-session","worktree_path":project,"branch":"work/source","agent_id":{"type":"Codex"},"linked_issue_number":43,"execution_binding":{"schema_version":1,"session_id":"source-session","repo_hash":"project","owner_kind":"issue","owner_number":43,"identity":{"generation_id":"generation","binding_id":"binding","ledger_head_hash":"ledger"},"capability_generation":1}}
+    })).unwrap();
+    let lifecycle_generation = runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
+    (
+        runtime,
+        events,
+        super::super::AgentSwitchSourceExited {
+            operation_id: "operation".into(),
+            proof,
+            lifecycle_generation,
+            pty,
+        },
+    )
+}
+
+#[test]
+fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
+    for keep_runtime in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, events, exited) = switch_source_retirement_fixture(temp.path());
+        let id = exited.proof.window_id.clone();
+        let (spawner, finalizers) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        assert!(
+            runtime
+                .agent_switch_source_exited_events(exited.clone())
+                .is_empty(),
+            "a live tree is never retirement authority"
+        );
+        assert!(runtime.window_lookup.contains_key(&id));
+        assert!(exited
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        if !keep_runtime {
+            runtime.runtimes.remove(&id);
+            runtime.active_agent_sessions.remove(&id);
+        }
+        assert!(!runtime.agent_switch_source_exited_events(exited.clone()).is_empty(), "the exact physically exited source must leave the canvas even without a writer registration");
+        assert!(!runtime.window_lookup.contains_key(&id));
+        assert_eq!(finalizers.lock().unwrap().len(), 1);
+        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
+        assert_eq!(finalizers.lock().unwrap().len(), 1);
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, UserEvent::IssueMonitorScheduledTick)),
+            "normal admission must see the released canvas slot"
+        );
+    }
+}
+
+#[test]
+fn switch_source_exit_preserves_reused_session_and_runtime() {
+    for replace_session in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, _, exited) = switch_source_retirement_fixture(temp.path());
+        let id = exited.proof.window_id.clone();
+        assert!(exited
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        if replace_session {
+            runtime
+                .tab_mut("source")
+                .unwrap()
+                .workspace
+                .set_session_id("agent", Some("successor-session".into()));
+        } else {
+            insert_test_pane_runtime(&mut runtime, &id);
+        }
+        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
+        assert!(runtime.window_lookup.contains_key(&id));
+        if !replace_session {
+            runtime.runtimes[&id]
+                .pty
+                .terminate_and_wait_for_tree(Duration::from_secs(5))
+                .unwrap();
+        }
+    }
+}

@@ -134,6 +134,7 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         UserEvent::AgentFrontend { .. }
         | UserEvent::FreshExecutionReadyResend { .. }
         | UserEvent::CommitAgentSelfClose { .. }
+        | UserEvent::AgentSwitchSourceExited(_)
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
@@ -636,6 +637,8 @@ pub(crate) use issue_monitor_profiles::{
     IssueMonitorProfileSaveLane, IssueMonitorProfilesSaveCompletion,
 };
 pub(crate) mod agent_maintenance;
+mod agent_switch;
+pub(crate) use agent_switch::AgentSwitchSourceExited;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -10182,7 +10185,8 @@ impl AppRuntime {
         if !self.issue_monitor_materializer_ready() {
             return Vec::new();
         }
-        let mut events = self.reconcile_activated_issue_monitor_launches();
+        let mut events = self.agent_switch_tick_events();
+        events.extend(self.reconcile_activated_issue_monitor_launches());
         events.extend(self.advance_issue_monitor_launch_queue_events());
         let mut seen_prefs_paths = HashSet::new();
         let projects: Vec<(PathBuf, PathBuf, String)> = self
@@ -12616,6 +12620,7 @@ impl AppRuntime {
             | FrontendEvent::RestartPmAgent
             | FrontendEvent::AgentRoster { .. }
             | FrontendEvent::AgentSchedule { .. }
+            | FrontendEvent::AgentSwitch { .. }
             | FrontendEvent::ListIssueMonitor
             | FrontendEvent::IssueMonitorLaunchNow { .. }
             | FrontendEvent::IssueMonitorQueuePush { .. }
@@ -13085,6 +13090,9 @@ impl AppRuntime {
             } => self.agent_roster_events(context, &client_id, action, expected_revision),
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
+            }
+            FrontendEvent::AgentSwitch { action } => {
+                self.agent_switch_events(context, &client_id, action)
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady {} => {

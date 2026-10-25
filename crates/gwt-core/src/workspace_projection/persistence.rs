@@ -9355,6 +9355,23 @@ pub fn resolve_workspace_work_event_from_board_entry(
     event.display_name = non_empty_clone(Some(agent.display_name.as_str()));
     event.board_entry_id = Some(entry.id.clone());
     event.execution_container = Some(execution_container);
+    // A Board refresh is not new Work activity. Ignore the generated UUID
+    // when recognizing a revision already reflected in the locked Work.
+    if target
+        .events
+        .iter()
+        .filter(|previous| {
+            previous.board_entry_id == event.board_entry_id
+                && previous.updated_at == event.updated_at
+        })
+        .any(|previous| {
+            let mut candidate = event.clone();
+            candidate.id.clone_from(&previous.id);
+            candidate == *previous
+        })
+    {
+        return None;
+    }
     Some(event)
 }
 

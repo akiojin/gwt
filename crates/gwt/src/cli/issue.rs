@@ -247,6 +247,16 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             action,
         } => run_monitor_schedule(env, project_root.as_deref(), action, out)?,
+        IssueCommand::MonitorSwitch {
+            project_root,
+            action,
+        } => run_monitor_switch(env, project_root.as_deref(), action, out)?,
+        IssueCommand::MonitorSwitchAck {
+            operation_id,
+            head,
+            work_id,
+            board_entry_id,
+        } => run_monitor_switch_ack(env, &operation_id, &head, &work_id, &board_entry_id, out)?,
         IssueCommand::MonitorQueuePush {
             project_root,
             issue_numbers,
@@ -1651,6 +1661,159 @@ fn run_monitor_schedule<E: CliEnv>(
     )
     .map_err(|error| io_as_api_error(io::Error::other(error)))?;
     out.push_str(&serde_json::to_string(&schedule).map_err(super::serde_as_api_error)?);
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_switch<E: CliEnv>(
+    env: &E,
+    project_root: Option<&Path>,
+    action: crate::issue_monitor::AgentSwitchAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    if !matches!(
+        &action,
+        crate::issue_monitor::AgentSwitchAction::Read { .. }
+    ) && !super::pm::caller_is_registered_pm(&root)
+    {
+        return Err(SpecOpsError::Validation(
+            "Switch requests and cancellations require the registered project PM".into(),
+        ));
+    }
+    let snapshot = crate::issue_monitor::mutate_project_agent_switch(
+        &root,
+        &gwt_core::paths::gwt_sessions_dir(),
+        action,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    out.push_str(&serde_json::to_string(&snapshot).map_err(super::serde_as_api_error)?);
+    out.push('\n');
+    Ok(0)
+}
+
+fn switch_ack_runtime_for_caller(
+    prefs: &crate::IssueMonitorPrefs,
+    operation_id: &str,
+    caller: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<crate::issue_monitor::IssueMonitorRuntimeStopRequest> {
+    let intent = prefs
+        .agent_switch_intents
+        .get(operation_id)
+        .ok_or_else(|| io::Error::other("Unknown switch operation"))?;
+    let stop = intent
+        .runtime_stop
+        .as_ref()
+        .ok_or_else(|| io::Error::other("Switch checkpoint has no captured runtime identity"))?;
+    if stop.execution_identity != *caller
+        || intent.source.assignment.session_id.as_deref() != Some(caller.session_id.as_str())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Only the exact source Session execution identity may acknowledge this switch",
+        ));
+    }
+    Ok(stop.clone())
+}
+
+fn verify_switch_ack_runtime(
+    saved: &crate::issue_monitor::IssueMonitorRuntimeStopRequest,
+    observed: Option<&crate::issue_monitor::IssueMonitorRuntimeStopRequest>,
+) -> io::Result<()> {
+    if observed != Some(saved) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "The captured source runtime is no longer exactly observable; checkpoint acknowledgement was refused"));
+    }
+    Ok(())
+}
+
+fn verify_switch_ack_host_proof(
+    probe: super::host_contract::HostContractProbe,
+    request: &crate::AgentHostContractRequest,
+    caller: &gwt_agent::SessionExecutionIdentity,
+) -> io::Result<()> {
+    let generation = match &probe {
+        super::host_contract::HostContractProbe::Answered(receipt) => {
+            Some(receipt.capability_generation)
+        }
+        _ => None,
+    };
+    let verdict = super::host_contract::classify_for_session(probe, request, &caller.session_id);
+    if !verdict.is_compatible() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Source ACK Host capability proof was refused ({})",
+                verdict.outcome.code()
+            ),
+        ));
+    }
+    if generation != Some(caller.execution_binding.capability_generation) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Source ACK Host capability generation does not match its exact execution binding",
+        ));
+    }
+    Ok(())
+}
+
+fn run_monitor_switch_ack<E: CliEnv>(
+    env: &E,
+    operation_id: &str,
+    head: &str,
+    work_id: &str,
+    board_entry_id: &str,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            SpecOpsError::Validation(
+                "Switch checkpoint acknowledgement requires the ambient source Session".into(),
+            )
+        })?;
+    let context = crate::agent_project_state::resolve_execution_recovery_context(
+        env.repo_path(),
+        &session_id,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error.to_string())))?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(context.session())
+        .map_err(|error| io_as_api_error(io::Error::other(error)))?
+        .ok_or_else(|| {
+            SpecOpsError::Validation(
+                "Switch checkpoint acknowledgement requires a bound source Session".into(),
+            )
+        })?;
+    // Unlike generation preflight, source ACKs have no unbridged or Host bypass.
+    let target = crate::daemon_runtime::HookForwardTarget::from_env_strict()
+        .map_err(|_| SpecOpsError::Validation("Source ACK requires a complete authenticated Host bridge; the bridge environment is malformed".into()))?
+        .ok_or_else(|| SpecOpsError::Validation("Source ACK requires a complete authenticated Host bridge; no local fallback is allowed".into()))?;
+    let request = super::host_contract::request_for("issue.monitor.switch.ack");
+    let probe = crate::daemon_runtime::fetch_host_contract_via_agent_bridge(&target, &request);
+    verify_switch_ack_host_proof(probe, &request, &identity).map_err(io_as_api_error)?;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(context.project_state_root());
+    let initial = crate::load_issue_monitor_prefs(&path).map_err(io_as_api_error)?;
+    let stop = switch_ack_runtime_for_caller(&initial, operation_id, &identity)
+        .map_err(io_as_api_error)?;
+    let snapshot = super::execution_state::with_current_active_session_execution_identity_lease(
+        &gwt_core::paths::gwt_sessions_dir(), &identity, || -> io::Result<crate::issue_monitor::AgentSwitchSnapshot> {
+            crate::issue_monitor::verify_switch_git_checkpoint(context.worktree(), head)?;
+            crate::issue_monitor::verify_switch_continuation(context.worktree(), &session_id, operation_id, work_id, board_entry_id)?;
+            let observed = crate::monitor_duplicate_runtime::capture_stop_request(context.project_state_root(), stop.issue_number, &stop.window_id, Some(&session_id), &stop.requested_at)?;
+            verify_switch_ack_runtime(&stop, observed.as_ref())?;
+            let (saved, _) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+                if switch_ack_runtime_for_caller(prefs, operation_id, &identity)? != stop {
+                    return Err(io::Error::other("Switch runtime identity changed before checkpoint acknowledgement"));
+                }
+                prefs.verify_agent_switch_checkpoint(operation_id, crate::issue_monitor::AgentSwitchCheckpoint {
+                    verified_head: head.into(), work_id: work_id.into(), board_entry_id: board_entry_id.into(),
+                }, stop.clone(), &crate::process::current_hostname()).map_err(io::Error::other)
+            })?;
+            Ok(saved.agent_switch_snapshot(gwt_core::paths::project_scope_hash(context.project_state_root()).as_str()))
+        },
+    ).map_err(io_as_api_error)?.ok_or_else(|| SpecOpsError::Validation("Source Session is no longer the current active execution; checkpoint acknowledgement was refused".into()))?
+        .map_err(io_as_api_error)?;
+    out.push_str(&serde_json::to_string(&snapshot).map_err(super::serde_as_api_error)?);
     out.push('\n');
     Ok(0)
 }
@@ -7425,6 +7588,131 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn issue_monitor_switch_ack_missing_or_foreign_session_preserves_prefs() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut env = crate::cli::TestEnv::new(repo);
+        for caller in [None, Some("foreign-session")] {
+            let _session = match caller {
+                Some(id) => {
+                    gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, id)
+                }
+                None => gwt_core::test_support::ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV),
+            };
+            let super::super::CliCommand::Issue(command) = super::super::json_envelope::parse_operation("issue.monitor.switch.ack", &serde_json::json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "head":"a".repeat(40), "work_id":"work", "board_entry_id":"board"})).expect("typed self ACK") else { panic!("Issue command") };
+            assert!(run(&mut env, command, &mut String::new()).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
+    fn switch_ack_stop_fixture() -> crate::issue_monitor::IssueMonitorRuntimeStopRequest {
+        serde_json::from_value(serde_json::json!({
+            "issue_number":41,"window_id":"window","session_id":"source","host_pid":1,"host_started_at":2,"runtime_incarnation":3,"child_pid":4,"child_started_at":5,"requested_at":"2026-10-25T00:00:00Z",
+            "execution_identity":{"session_id":"source","worktree_path":"/repo","branch":"issue-41","agent_id":{"type":"Codex"},"linked_issue_number":41,"execution_binding":{"schema_version":1,"session_id":"source","repo_hash":"repo","owner_kind":"issue","owner_number":41,"identity":{"generation_id":"generation","binding_id":"binding","ledger_head_hash":"ledger"},"capability_generation":1}}
+        })).unwrap()
+    }
+
+    #[test]
+    fn issue_monitor_switch_ack_host_proof_requires_exact_source_and_generation() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let path = tmp.path().join("monitor.json");
+        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let before = fs::read(&path).unwrap();
+        let stop = switch_ack_stop_fixture();
+        let request = super::super::host_contract::request_for("issue.monitor.switch.ack");
+        let receipt = crate::describe_authenticated_host_contract(
+            &request,
+            &stop.session_id,
+            "host-instance",
+            stop.execution_identity
+                .execution_binding
+                .capability_generation,
+        )
+        .unwrap();
+        let mut foreign = receipt.clone();
+        foreign.session_id = "foreign".into();
+        let mut stale = receipt.clone();
+        stale.capability_generation += 1;
+        for probe in [
+            super::super::host_contract::HostContractProbe::Unreachable {
+                detail: "missing proof".into(),
+            },
+            super::super::host_contract::HostContractProbe::Answered(Box::new(foreign)),
+            super::super::host_contract::HostContractProbe::Answered(Box::new(stale)),
+        ] {
+            let result = crate::try_mutate_issue_monitor_prefs(&path, |_| {
+                verify_switch_ack_host_proof(probe, &request, &stop.execution_identity)
+            });
+            assert!(
+                result.is_err(),
+                "missing, foreign or stale Host proof cannot acknowledge a checkpoint"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        verify_switch_ack_host_proof(
+            super::super::host_contract::HostContractProbe::Answered(Box::new(receipt)),
+            &request,
+            &stop.execution_identity,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_monitor_switch_ack_foreign_binding_preserves_captured_intent() {
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let path = tmp.path().join("monitor.json");
+        let stop = switch_ack_stop_fixture();
+        let intent: crate::issue_monitor::AgentSwitchIntent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":"operation","member_id":"member","expected_roster_revision":1,"target_issue_number":42},
+            "source":{"assignment":{"reservation_id":"reservation","session_id":"source","issue_number":41,"delivery_id":"delivery","host_id":"host","host_pid":1,"host_started_at":2},"window_id":"window","claim_id":"claim","confirmation":{"window_id":"window","claim_id":"claim","delivery_id":"delivery","confirmed_at":"2026-10-25T00:00:00Z"}},
+            "stage":"checkpointing","runtime_stop":stop
+        })).unwrap();
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs
+            .agent_switch_intents
+            .insert("operation".into(), intent);
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut foreign = stop.execution_identity.clone();
+        foreign.execution_binding.capability_generation += 1;
+        let result = crate::try_mutate_issue_monitor_prefs(&path, |latest| {
+            switch_ack_runtime_for_caller(latest, "operation", &foreign)
+        });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exact source Session"));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(
+            switch_ack_runtime_for_caller(&prefs, "operation", &stop.execution_identity).unwrap(),
+            stop
+        );
+        let mut replaced = stop.clone();
+        replaced.runtime_incarnation += 1;
+        for observed in [None, Some(&replaced)] {
+            let result = crate::try_mutate_issue_monitor_prefs(&path, |_| {
+                verify_switch_ack_runtime(&stop, observed)
+            });
+            assert!(
+                result.is_err(),
+                "missing or replaced runtime cannot acknowledge the captured child"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        verify_switch_ack_runtime(&stop, Some(&stop)).unwrap();
+    }
 
     fn s(value: &str) -> String {
         value.to_string()
