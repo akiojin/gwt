@@ -1,6 +1,53 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.143.0] - 2026-10-25
+
+### Bug Fixes
+
+- **monitor:** 同数の新規予定では空きメンバーを優先する
+- **monitor:** Preserve member while claim is in flight
+- **gui:** Align issue kanban with approved layout
+- **gui:** Kanbanの優先度ラベルをカード内で折り返す
+- **work:** Preserve evaluated settlement comparisons in diagnostics
+- **agents:** 現在タスクの後に予定操作を配置する
+- **work:** 未pushの既存event commitだけを復旧案内する
+- **pm:** Reject aborted scans as policy comparison evidence
+- **work:** 分岐した既存event commitの復旧案内を限定する
+- **pm:** WIP 比較の時刻精度を既存契約に揃える
+- **launch:** Keep Codex Issue Monitor launches inside the window budget
+
+### Features
+
+- **monitor:** メンバー別の担当予定と原子的な再割当を保存する
+- **pm:** Queue 滞留時間を保存閾値と照合する
+- **agents:** 予定操作と現在タスクリンクの実装を保存
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 4777 schedule delivery handoff
+- **work:** PR #6271の関連付け記録を保存
+- **work:** Issue 5016の配信再開記録を確定する
+- **work:** Deliver issue 5016 work records
+- **work:** Reconcile completed kanban task accounting
+- **work:** Record kanban accounting pull request
+- **work:** Record PR 6288 delivery metadata
+- **work:** Deliver issue 3431 PR link
+- **work:** Settlement診断の後継世代を精算する
+- **work:** Record issue 3431 PR delivery link
+- **work:** Issue #3431 の PR 関連付けを記録する
+
+### Refactor
+
+- **ui:** Render Hub catalog from shared state
+- **ui:** Render Hub open results from shared state
+- **ui:** Render workspace snapshots from shared state
+
+### Testing
+
+- **monitor:** Isolate scheduled admission fixture home
+- **issue:** Kanban選択とlaunch_nowの回帰を固定
+
 ## [9.142.0] - 2026-10-25
 
 ### Bug Fixes
