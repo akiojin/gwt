@@ -1887,8 +1887,8 @@ test("app state rendering dismisses Mission Briefing so startup cannot stay on s
     "expected app.js to expose a fail-open Mission Briefing dismiss helper",
   );
   assert.match(
-    appSource,
-    /function\s+renderAppState\(nextState\)\s*\{\s*dismissOperatorBriefing\(\)/,
+    extractFunctionBody(appSource, "renderAppState"),
+    /^\s*dismissOperatorBriefing\(\)/,
     "expected first app state render to unblock Welcome/Workspace surfaces",
   );
 });

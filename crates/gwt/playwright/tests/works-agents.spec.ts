@@ -190,8 +190,12 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("0");
     await expect(page.locator("#op-strip-idle")).toHaveText("1");
     await openRail(page, "works");
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     await expect(works(page).locator(".work-row")).toHaveCount(1);
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("waiting"));
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Waiting");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
     await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "running"));
     await expect(page.locator("#op-strip-running")).toHaveText("1");
     await expect(works(page).locator('[data-count="running"]')).toHaveText("1");
@@ -545,6 +549,7 @@ async function installWorksAgentsBackend(page: Page) {
         socket.emit(event);
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
+      workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },

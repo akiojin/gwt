@@ -1796,7 +1796,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderAppState({ ...appState, app_version: hub.app_version });
       }
 
-      function renderAppState(nextState) {
+      function renderAppState(nextState, incomingRuntimeStatus = false) {
         dismissOperatorBriefing();
         return traceMeasure(
           UI_TRACE_EVENT.renderAppState,
@@ -1811,6 +1811,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             });
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
+            if (incomingRuntimeStatus) {
+              const wasReconciling = reconcilingWindowCatalog;
+              reconcilingWindowCatalog = true;
+              try {
+                for (const tab of nextState?.tabs || []) for (const window of tab.workspace?.windows || []) {
+                  applyStatus(window.id, window.status, detailMap.get(window.id));
+                }
+              } finally {
+                reconcilingWindowCatalog = wasReconciling;
+              }
+            }
             setVersionState(appState.app_version, versionState.latest);
             const tab = activeProjectTab();
             document.getElementById("split-view-button").disabled = !tab;
@@ -4707,7 +4718,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         } else {
           delete element.dataset.agentColor;
         }
-        applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        const status = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id) : windowData.status;
+        applyStatus(windowData.id, status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (presetSurface(windowData.preset) === "terminal") {
           scheduleTerminalFit(windowData.id, true);
@@ -5123,7 +5136,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       workspaceStateModel.subscribe(state => state, snapshot => {
         if (!snapshot) return;
         projectError = "";
-        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);
+        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);
         projectPageMetadata.setProjectName(activeProjectTab()?.title);
         // Keep launcher, pending navigation and startup ACKs in render order.
         updatePmLauncher(activeWorkspace());
