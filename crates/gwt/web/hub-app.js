@@ -51,6 +51,7 @@ function createHubApp({ document: doc, window: win }) {
   let queued = [];
   let cloneTab = null;
   const cloneResults = createUiStateStore(null);
+  const catalogResults = createUiStateStore(null);
 
   const root = node("main", "gwt-hub");
   root.dataset.hub = "";
@@ -196,6 +197,10 @@ function createHubApp({ document: doc, window: win }) {
     render();
   }
 
+  catalogResults.subscribe(state => state, hub => {
+    if (hub) receiveCatalog(hub);
+  });
+
   function beginOpenRequest() {
     notice.hidden = true;
     showError("");
@@ -330,7 +335,7 @@ function createHubApp({ document: doc, window: win }) {
     if (event && closeController.receive(event)) return;
     if (!event || !HUB_RESULT_KINDS.has(event.kind)) return;
     if (event.kind === "hub_state") {
-      receiveCatalog(event.hub);
+      catalogResults.update(() => ({ ...event.hub }));
     } else if (event.kind === "project_opened") {
       showNotice(event);
     } else if (event.kind === "project_open_error") {

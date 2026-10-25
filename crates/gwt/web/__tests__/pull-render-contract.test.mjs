@@ -10,6 +10,21 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Hub catalog receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/hub-app.js';
+  const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding => finding.root === 'receive');
+  const clean = findings(hub);
+  assert.deepEqual(clean.filter(finding => finding.path.includes('>receiveCatalog')), []);
+  const existing = new Set(keys(clean));
+  for (const bypass of ['version.textContent = event.hub.app_version;', 'receiveCatalog(event.hub);']) {
+    const mutated = hub.replace('if (event.kind === "hub_state") {',
+      `if (event.kind === "hub_state") { ${bypass}`);
+    assert.notEqual(mutated, hub);
+    assert.ok(findings(mutated).some(finding => !existing.has(finding.key)));
+  }
+});
+
 test("Project hub catalog receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
