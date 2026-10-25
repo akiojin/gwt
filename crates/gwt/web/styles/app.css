@@ -6789,6 +6789,10 @@ body.route-body {
 .issue-queue-column[data-queue-column="active"] .issue-queue-heading,
 .issue-queue-column[data-queue-column="done"] .issue-queue-heading { color: var(--color-text-muted); }
 .issue-queue-column .knowledge-row { border-left: 3px solid var(--color-border); }
+.issue-queue-column .knowledge-row-secondary-item[data-key="queue-priority"] {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .issue-queue-column[data-queue-column="queued"] .knowledge-row[data-queue-source="manual"] { border-left-color: var(--color-state-needs-input); }
 .issue-queue-column[data-queue-column="queued"] .knowledge-row[data-queue-source="auto"] { border-left-color: var(--color-state-active); }
 .issue-queue-column[data-queue-column="active"] .knowledge-row { border-left-color: var(--color-state-success); }
