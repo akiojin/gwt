@@ -11593,6 +11593,7 @@ mod agent_schedule_admission_tests {
     #[test]
     fn agent_schedule_prepared_admission_fences_member_change_but_not_other_plans() {
         let temp = tempfile::tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let path = temp.path().join("issue-monitor.json");
         let mut value = serde_json::json!({"agent_issue_schedule":{"revision":1,"reservations":[
             {"host_id":gwt::process::current_hostname(),"agent_member_id":"a","issue_number":42,"reason":"queue_order"},
