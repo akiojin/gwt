@@ -1241,7 +1241,7 @@ test("terminal queue broadcasts control membership, provenance and confirmed ord
   assert.deepEqual(queued(),[1,2]);
 });
 
-test("Issue #3165: dependency-blocked rows retain their queue position and explain the blocker", async (t) => {
+test("Issue #3165: dependency warnings update without changing queue order", async (t) => {
   const { body, surface, load } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
   surface.applyKnowledgeReceiveEvent({ kind: "knowledge_entries", id: "win-1", knowledge_kind: "issue",
@@ -1249,15 +1249,33 @@ test("Issue #3165: dependency-blocked rows retain their queue position and expla
     refresh_enabled: true });
   surface.applyIssueMonitorStatus({ terminal_queue: [{ number: 42 }, { number: 43 }] });
   surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "blocked_by_dependency",
-    exclusion_reason: "Blocked by #44", dependency: { blocked_by: [{ number: 44 }], cycle: [] } }]);
-  const row = body.querySelector('[data-queue-column="queued"] [data-issue-number="42"]');
-  assert.ok(row);
-  assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
-  assert.equal(row.querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
-  assert.match(row.textContent, /Blocked by #44/);
-  assert.doesNotMatch(row.textContent, /\(hold\)/);
-  assert.deepEqual([...body.querySelectorAll('[data-queue-column="queued"] .knowledge-row')]
+    exclusion_reason: "Blocked by #44", dependency: { blocked_by: [{ number: 44 }], cycle: false, bundle_with: [] } }]);
+  const row = () => body.querySelector('[data-queue-column="queued"] [data-issue-number="42"]');
+  const assertOrder = () => assert.deepEqual([...body.querySelectorAll('[data-queue-column="queued"] .knowledge-row')]
     .map(item => Number(item.dataset.issueNumber)), [42, 43]);
+  assert.ok(row());
+  assert.equal(row().querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
+  assert.equal(row().querySelector(".knowledge-row-badge").dataset.tone, "needs-input");
+  assert.match(row().textContent, /Blocked by #44/);
+  assert.doesNotMatch(row().textContent, /\(hold\)/);
+  assertOrder();
+  const warning = "Dependency cycle detected; cyclic dependencies ignored";
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "blocked_by_dependency",
+    exclusion_reason: `Blocked by #44; ${warning}`,
+    dependency: { blocked_by: [{ number: 44 }], cycle: true, bundle_with: [] } }]);
+  assert.match(row().textContent, /Blocked by #44; Dependency cycle detected; cyclic dependencies ignored/);
+  assert.equal(row().querySelector(".knowledge-row-badge").textContent, "Blocked by dependency");
+  assertOrder();
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "queued", exclusion_reason: warning,
+    dependency: { blocked_by: [], cycle: true, bundle_with: [] } }]);
+  assert.equal(row().querySelector(".knowledge-row-badge").textContent, "Queued");
+  assert.ok(row().textContent.includes(warning));
+  assert.doesNotMatch(row().textContent, /Blocked by #44/);
+  assertOrder();
+  surface.applyIssueMonitorInbox([{ issue: { number: 42 }, state: "queued", exclusion_reason: null,
+    dependency: { blocked_by: [], cycle: false, bundle_with: [] } }]);
+  assert.doesNotMatch(row().textContent, /Dependency cycle|Blocked by #44/);
+  assertOrder();
 });
 
 test("AC34 a proven local child moves a queued row to Active while retaining terminal queue operations", async (t) => {
