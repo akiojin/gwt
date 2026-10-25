@@ -218,13 +218,20 @@ test("switch refresh selects the latest timestamped operation without terminal r
 });
 
 
-test("only a correlated Unknown read may release an absent local switch for a new explicit request", async () => {
+test("only a correlated Unknown read may release an absent local switch for a new explicit request", async t => {
+  const crypto = globalThis.crypto, descriptor = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+  t.after(() => {
+    if (descriptor) Object.defineProperty(crypto, "randomUUID", descriptor);
+    else delete crypto.randomUUID;
+  });
+  Object.defineProperty(crypto, "randomUUID", { configurable: true, value: undefined });
   const { createAgentSwitchModel } = await import("../agent-activity-model.js");
   const { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, clearAgentSwitch } = createAgentSwitchModel("project");
   const action = { kind: "request", operation_id: "operation-one", member_id: "m1", expected_roster_revision: 3, target_issue_number: 5002 };
   beginAgentSwitchRequest(action);
   const earlierRead = { kind: "read" }; beginAgentSwitchRequest(earlierRead);
-  assert.match(earlierRead.request_id, /^[0-9a-f-]{36}$/i);
+  assert.equal(typeof earlierRead.request_id, "string");
+  assert.ok(earlierRead.request_id.length > 0, "read correlation does not require the secure-context UUID API");
   clearAgentSwitch();
   applyAgentSwitchSnapshot({ project_key: "project", request_id: earlierRead.request_id, intents: [] });
   assert.deepEqual(model.read().pending, action, "a read issued before Unknown is not recovery evidence");

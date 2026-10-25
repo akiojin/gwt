@@ -1,4 +1,5 @@
 import { createUiStateStore } from "./ui-state-store.js";
+import { createLaunchOperationId } from "./launch-pending-controller.js";
 
 const unknownActivity = () => ({ snapshot: null, agents: [], byIssue: {}, count: null, issueCount: 0, pmCount: 0 });
 
@@ -49,7 +50,7 @@ export function createAgentSwitchModel(projectKey) {
   function beginAgentSwitchRequest(action) {
     const state = model.read();
     if (action?.kind === "read") {
-      action.request_id = globalThis.crypto.randomUUID();
+      action.request_id = createLaunchOperationId("switch-read");
       pendingRead = { request_id: action.request_id, operation_id: state.pending?.operation_id, disconnected: state.disconnected };
       return true;
     }
