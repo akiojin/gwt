@@ -503,7 +503,12 @@ function positionIssuesLaunchControls(body) {
     const slot = body.querySelector(`[data-settings-launch-action="${action}"] > :last-child`);
     if (!control) continue;
     if (open) slot?.appendChild(control);
-    else summary?.insertBefore(control, summary.querySelector('[data-action="monitor-settings"]'));
+    else if (summary) {
+      const anchor = action === "monitor-autonomous"
+        ? summary.querySelector('.issue-monitor-limit, [data-action="monitor-settings"]')
+        : summary.querySelector('[data-action="monitor-diagnostics"], .knowledge-monitor-capacity-badge');
+      summary.insertBefore(control, anchor);
+    }
   }
 }
 
@@ -1443,7 +1448,7 @@ export function createSettingsSurface({
         const candidates = createDiv();
         candidates.dataset.settingsCandidates = "";
         issuesOptions.appendChild(candidates);
-        issuesRoot.querySelector(".knowledge-monitor-bar").after(issuesOptions);
+        issuesRoot.querySelector(".workspace-toolbar").after(issuesOptions);
         const gear = issuesRoot.querySelector('[data-action="monitor-settings"]');
         gear.setAttribute("aria-expanded", "false");
         issuesOptions.addEventListener("toggle", () => {

@@ -869,7 +869,7 @@ test("Issue #3561: Autonomous switch exposes aria-checked and shows server state
 // User ruling 2026-09-04: the Issue window shows no error surface of its own.
 // It reports every error to the notification center and renders nothing.
 
-test("FR-017 / #5284: current Monitor error is read in the center through the state badge", async (t) => {
+test("FR-017 / #5284: current Monitor error is read in the center through the labelled diagnostics action", async (t) => {
   const spies = errorSpies();
   const { body, surface, opened } = await makeFixture(spies.options);
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));
@@ -881,7 +881,7 @@ test("FR-017 / #5284: current Monitor error is read in the center through the st
     { key: "issue-monitor:last_error", title: "Issue Monitor", message: "issue #3785: scan failed" },
   ]);
   assert.equal(body.querySelector(".surface-error-indicator"), null, "still nothing in the surface");
-  monitorBand(body).pill.click();
+  body.querySelector('[data-action="monitor-diagnostics"]').click();
   assert.equal(opened.at(-1), "issue-monitor:last_error");
 
   // issue_monitor_status is re-broadcast constantly — an unchanged error is
@@ -1060,6 +1060,76 @@ test("Issue board has four queue columns, labelled controls and one filter row",
     assert.ok(controls.querySelector(`[data-action="${action}"]`).textContent.includes(label), `${action} has a visible label`);
   }
 
+});
+
+test("AC-M1: approved header reads status, actions, then one filter row", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const root = body.querySelector(".issue-bridge-root");
+  const band = root.querySelector(".knowledge-monitor-bar");
+  const status = band.querySelector(".knowledge-monitor-status");
+  const controls = band.querySelector(".knowledge-monitor-controls");
+  const filter = root.querySelector(".workspace-toolbar");
+  assert.ok(root.firstElementChild === band, "status band precedes filter");
+  assert.ok(status.nextElementSibling === controls, "actions follow status");
+  assert.ok(band.nextElementSibling === filter, "filter follows actions");
+  assert.equal(status.querySelector("button, input, select"), null, "status is read-only");
+  assert.deepEqual([...status.querySelectorAll(".issue-monitor-stat-label")].map(node => node.textContent),
+    ["Monitor", "Agent slots", "Queued", "Backlog", "Verification slots", "Last scan"]);
+  surface.applyIssueMonitorStatus({enabled:true,state:"idle",active_count:1,max_active_agents:3,
+    max_active_agents_override:3,queue_len:2,unqueued_open_count:8,last_scan_at:"2026-10-25T00:00:00Z"});
+  assert.equal(status.querySelector('[data-metric="capacity"]').textContent,"1 of 3");
+  assert.equal(status.querySelector('[data-metric="backlog"]').textContent,"8");
+  assert.equal(status.querySelector('[data-metric="last-scan"]').textContent,"00:00:00 UTC");
+  assert.equal(status.querySelector('[data-metric="verification"]').textContent,"Not reported");
+  const limit = controls.querySelector('[data-action="monitor-limit"]');
+  assert.equal(limit.value,"3");
+  limit.value="4";
+  limit.dispatchEvent(new window.Event("change",{bubbles:true}));
+  assert.deepEqual(sent.at(-1),{kind:"set_issue_monitor_max_active_agents",max_active_agents:4});
+  assert.equal(controls.querySelector('[data-action="monitor-toggle"]').classList.contains("destructive"),true);
+  limit.value="5";
+  limit.dispatchEvent(new window.Event("input",{bubbles:true}));
+  surface.applyIssueMonitorStatus({max_active_agents:3,max_active_agents_override:3});
+  assert.equal(limit.value,"5","periodic status retains the draft");
+  limit.dispatchEvent(new window.Event("change",{bubbles:true}));
+  assert.equal(limit.value,"3","change waits for server confirmation");
+  surface.applyIssueMonitorStatus({agent_roster_capacity:2,max_active_agents:1,max_active_agents_override:9});
+  assert.equal(limit.value,"2","roster-managed capacity takes priority over machine override");
+  assert.equal(limit.disabled,true);
+  surface.applyIssueMonitorStatus({max_active_agents:3,max_active_agents_override:3});
+  assert.equal(limit.disabled,false,"omitted roster capacity does not retain stale ownership");
+  limit.dispatchEvent(new window.Event("input",{bubbles:true}));
+  limit.dispatchEvent(new window.Event("blur"));
+  surface.applyIssueMonitorStatus({max_active_agents:6,max_active_agents_override:6});
+  assert.equal(limit.value,"6","an unchanged final draft cannot mask later confirmed updates");
+});
+
+test("AC-M2: column rules, five-item Backlog and explicit card provenance match the mock", async (t) => {
+  const { body, surface, load } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  surface.applyKnowledgeReceiveEvent({kind:"knowledge_entries",id:"win-1",knowledge_kind:"issue",request_id:load.request_id,
+    entries:[...Array.from({length:7},(_,index)=>knowledgeEntry(index+1,null)),
+      {...knowledgeEntry(8,"queued",1),queued_by:"operator"},
+      {...knowledgeEntry(9,"queued",2),queued_by:"auto-refill"}],refresh_enabled:true});
+  const backlog=body.querySelector('[data-queue-column="backlog"]');
+  assert.ok(backlog.querySelector('.issue-queue-rule'), 'column rule is visible text');
+  assert.match(backlog.querySelector('.issue-queue-rule').textContent,/Will not launch/);
+  assert.match(body.querySelector('[data-queue-column="queued"] .issue-queue-rule').textContent,/top to bottom/);
+  for (const phase of ["active","done"]) assert.match(body.querySelector(`[data-queue-column="${phase}"] .issue-queue-rule`).textContent,/System controlled/);
+  assert.equal(backlog.querySelectorAll('.knowledge-row').length,5);
+  const more=backlog.querySelector('[data-action="show-backlog"]');
+  assert.match(more.textContent,/2 more/);
+  more.click();
+  assert.equal(backlog.querySelectorAll('.knowledge-row').length,7);
+  for (const [number,source,label] of [[8,"manual","You"],[9,"auto","Auto"]]) {
+    const row=body.querySelector(`[data-issue-number="${number}"]`);
+    assert.equal(row.dataset.queueSource,source);
+    assert.equal(row.querySelector('.issue-card-provenance').textContent,label);
+    assert.equal(row.querySelector('.issue-card-label').textContent,"bug");
+    const numberNode=row.querySelector('.knowledge-row-number');
+    assert.equal(numberNode.nextElementSibling.className,"knowledge-row-title");
+  }
 });
 
 test("Issue board auto-refill renders confirmed state and preserves the configured limit", async (t) => {

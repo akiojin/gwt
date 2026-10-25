@@ -27034,6 +27034,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn launch_now_priority_only_empty_queue_does_not_launch() {
+        let now = "2026-09-29T00:00:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                priority_order: vec![42],
+                terminal_queue_auto_refill: false,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        let target = issue(42);
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(!is_auto_improve_candidate(
+            &target,
+            monitor.terminal_queue_contains(42)
+        ));
+
+        // The raw scanner must not admit a priority-only instruction.
+        scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&target), now);
+        assert!(monitor.inbox_item(42).is_none());
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.next_launch_request(now).is_none());
+        assert_eq!(monitor.prefs().priority_order, vec![42]);
+
+        // The same ready issue launches once explicit membership is added.
+        monitor.terminal_queue_push(&[42], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &[target], now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![42]);
+        assert_eq!(
+            monitor
+                .next_launch_request(now)
+                .expect("explicit admission")
+                .issue_number,
+            42
+        );
+    }
+
     // SPEC-3431 T-023 (AS2 / FR-006): the PM's launch_now writes the target to
     // the head of priority_order and asks for a scan. This pins the two
     // properties that make it safe: the reordered issue is the one the very

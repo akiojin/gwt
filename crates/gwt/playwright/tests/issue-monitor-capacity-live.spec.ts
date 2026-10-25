@@ -374,7 +374,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await apply({ ...status, state: "error", last_error: "GitHub scan failed" });
       await expect(pill).toHaveText("⚠ Error");
       await expect(surface).not.toContainText("GitHub scan failed");
-      await pill.click();
+      await surface.locator('[data-action="monitor-diagnostics"]').click();
       const currentError = page.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
       await expect(currentError).toBeFocused();
       await expect(currentError).toContainText("GitHub scan failed");

@@ -774,7 +774,7 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(pill).toHaveText("⚠ Error");
     await expect(pill).toHaveAttribute("title", "Details in notifications");
     await expect(pill).toHaveAttribute("data-notification-key", "issue-monitor:agent_blackout");
-    await pill.click();
+    await issueSurface.locator('[data-action="monitor-diagnostics"]').click();
     const outage = page.locator('.notification-center__item[data-error-key="issue-monitor:agent_blackout"]');
     await expect(outage).toBeFocused();
     await expect(outage).toContainText("the fleet has been down since");
@@ -807,7 +807,7 @@ test.describe("Issue Bridge load recovery", () => {
   // SPEC #3885 Phase 5 (Issue #4559, T-032..T-035 / AC-23..AC-25): two
   // toolbar bands, the "+ New" popover on the shared modal primitive, the ⚠
   // monitor pill, and the detail pane order with its state action band.
-  test("lays the Issue window out as two bands, a + New popover and an AC-first detail pane", async ({
+  test("lays the Issue window out as status/actions/filters, a + New popover and an AC-first detail pane", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -863,7 +863,7 @@ test.describe("Issue Bridge load recovery", () => {
     await expect(bar.locator('[data-action="monitor-setup"]')).toBeHidden();
     const barBox = await bar.boundingBox();
     const toolbarBox = await root.locator(":scope > .workspace-toolbar").boundingBox();
-    expect(barBox && toolbarBox && barBox.y).toBeGreaterThan(toolbarBox?.y ?? 0);
+    expect(barBox!.y + barBox!.height).toBeLessThanOrEqual(toolbarBox!.y);
 
     // AC-25: the detail pane order and the queue action band.
     await issueSurface.locator('.knowledge-row[data-issue-number="3095"]').click();
@@ -940,7 +940,7 @@ test.describe("Issue Bridge load recovery", () => {
       "title",
       "Details in notifications",
     );
-    await bar.locator(".knowledge-monitor-pill").click();
+    await bar.locator('[data-action="monitor-diagnostics"]').click();
     const errorNotice = page.locator('.notification-center__item[data-error-key="issue-monitor:last_error"]');
     await expect(errorNotice).toBeFocused();
     await expect(errorNotice).toContainText("issue #3785: scan failed");
@@ -1254,6 +1254,16 @@ const SELECTION_ROW_COUNT = 500;
 const SELECTION_P95_BUDGET_MS = 50;
 
 test.describe("SPEC #3170 immediate selection under delayed and reversed responses", () => {
+  const errors = new WeakMap<object, string[]>();
+  test.beforeEach(async ({ page }) => {
+    const captured: string[] = [];
+    errors.set(page, captured);
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+  });
+  test.afterEach(async ({ page }) => {
+    expect(errors.get(page), "zero console/page errors").toEqual([]);
+  });
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
@@ -1271,6 +1281,10 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
 
       await page.goto(APP_URL);
       await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      // Reach the 500-entry virtual list through the same visible action as an
+      // operator before measuring selection, just as rowFor scrolls beforehand.
+      await page.locator('.surface-knowledge [data-action="show-backlog"]').click();
+      await expect(page.locator('.surface-knowledge .knowledge-virtual-spacer')).not.toHaveCount(0);
       expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       // Distinct rows, striding across the list so consecutive clicks never
@@ -1342,6 +1356,10 @@ test.describe("SPEC #3170 immediate selection under delayed and reversed respons
 
       await page.goto(APP_URL);
       await expect(page.locator(`.surface-knowledge .knowledge-row[data-issue-number="${SELECTION_FIRST_NUMBER}"]`)).toBeVisible();
+      // Reach the 500-entry virtual list through the same visible action as an
+      // operator before measuring selection, just as rowFor scrolls beforehand.
+      await page.locator('.surface-knowledge [data-action="show-backlog"]').click();
+      await expect(page.locator('.surface-knowledge .knowledge-virtual-spacer')).not.toHaveCount(0);
       expect(await page.locator(".surface-knowledge .knowledge-row").count()).toBeLessThan(200);
 
       const first = SELECTION_FIRST_NUMBER + 3;

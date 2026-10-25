@@ -139,7 +139,7 @@ test("Issues Settings keeps labels and values together and sends existing projec
 });
 
 test("Issues disclosure reuses authoritative launch controls and returns them to the compact summary", () => {
-  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-autonomous">Autonomous</button><button data-action="monitor-toggle">Start</button><button data-action="monitor-settings">⚙</button></div><details class="settings-issues-options"><section></section></details></div>');
+  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-auto-refill">Refill</button><button data-action="monitor-autonomous">Autonomous</button><label class="issue-monitor-limit">Limit</label><button data-action="monitor-settings">Settings</button><button data-action="monitor-toggle">Start</button></div><details class="settings-issues-options"><section></section></details></div>');
   const body = document.querySelector(".settings-root");
   const panel = body.querySelector("section");
   const disclosure = body.querySelector("details");
@@ -158,7 +158,8 @@ test("Issues disclosure reuses authoritative launch controls and returns them to
   }
   disclosure.removeAttribute("open");
   position(body);
-  assert.equal(body.querySelector(".knowledge-monitor-controls").firstElementChild, launchControls[0]);
+  assert.ok(body.querySelector('[data-action="monitor-auto-refill"]').nextElementSibling === launchControls[0], "toggles remain adjacent after closing Settings");
+  assert.ok(launchControls[0].nextElementSibling.matches('.issue-monitor-limit'));
   assert.equal(body.querySelectorAll('[data-action="monitor-toggle"]').length, 1);
   assert.equal(clicked, 2, "original listeners survive status rerenders");
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
@@ -566,7 +567,7 @@ test("Candidates use shared built-ins and the fresh custom catalog before versio
     focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {},
     renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) {
-      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>';
     },
   });
   surface.renderSettingsWindow(document.querySelector("main"), { id: "settings" });
