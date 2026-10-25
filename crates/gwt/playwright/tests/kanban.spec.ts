@@ -51,6 +51,49 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
+test("Issue #3165: no-profile Start explains recovery without optimistic success", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installIssueBridgeBackend(page, { theme });
+  await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const surface = page.locator(".surface-knowledge");
+  const guidance = surface.locator('[data-role="monitor-setup-guidance"]');
+  const start = surface.getByRole("button", { name: "Start", exact: true });
+  await expect(guidance).toBeHidden();
+  const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3, max_active_agents: 2 };
+  for (const source of ["default", "last_settings"]) {
+    await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+      { ...status, launch_profile_source: source });
+    await expect(guidance).toBeVisible();
+    await expect(guidance).toHaveAttribute("role", "status");
+    await expect(guidance).toHaveText(
+      "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
+  }
+  const cursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  await start.click();
+  await expect(start).toBeVisible();
+  await expect(guidance).toBeVisible();
+  await expect(surface.locator('[data-metric="capacity"]')).toHaveText("0 of 2");
+  const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_)/.test(message.kind)), cursor);
+  expect(controls).toEqual([{ kind: "set_issue_monitor_enabled", enabled: true }]);
+  await info.attach(`monitor-setup-${theme}`, { body: await surface.screenshot(), contentType: "image/png" });
+  await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+    { ...status, launch_profile_source: "saved" });
+  await expect(guidance).toBeHidden();
+  await expect(start).toBeVisible();
+  await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+    { ...status, launch_profile_source: "saved", enabled: true, state: "idle" });
+  await expect(surface.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await expect(guidance).toBeHidden();
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("Legacy SPEC preset Work Item compatibility", () => {
   test.use({
     deviceScaleFactor: 1,
