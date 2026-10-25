@@ -2739,7 +2739,7 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
             *monitor = preparation_baseline.clone();
             monitor.rebase_gui_observer_prefs(&observed);
             let result = mutation(monitor);
-            monitor.reconcile_unowned_not_ready_launches(observed.last_scan_at.as_deref());
+            monitor.reconcile_unowned_excluded_launches(observed.last_scan_at.as_deref());
             let proposed = monitor.prefs();
             // A long scan's budget does not grant a long writer-lock wait.
             let _commit_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(

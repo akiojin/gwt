@@ -17372,9 +17372,9 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
     }
 
-    /// Commit readiness cancellation only from a newer complete live scan,
+    /// Commit candidate-exclusion cancellation only from a newer complete live scan,
     /// after the caller has adopted the latest durable ownership under its CAS.
-    pub fn reconcile_unowned_not_ready_launches(&mut self, last_committed_scan: Option<&str>) {
+    pub fn reconcile_unowned_excluded_launches(&mut self, last_committed_scan: Option<&str>) {
         if !matches!(
             self.queue_label_observation,
             Some((IssueMonitorCandidateSource::Live, _))
@@ -17396,7 +17396,10 @@ impl IssueMonitorState {
                 let number = item.issue.number;
                 matches!(
                     issue_monitor_candidate_exclusion(&item.issue, self.source_repository),
-                    Some((MonitorInboxState::NotReady, _))
+                    Some((
+                        MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
+                        _
+                    ))
                 ) && !self.launched_windows.contains_key(&number)
                     && !self.process_held_issues.contains(&number)
                     && !self.has_monitor_pane_for_issue(number)
