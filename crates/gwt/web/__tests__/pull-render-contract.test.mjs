@@ -655,7 +655,7 @@ test("baseline cannot grow and first introduction is bounded by base source find
 });
 
 test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () => {
-  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js"]) {
+  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js", "operator-shell.js"]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
     const migrated = scanModule(source, file).filter(finding =>
       /^(applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/.test(finding.root)
@@ -671,6 +671,14 @@ test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () 
   const status = { enabled: true, state: 'active' };
   applyStatus(status);
   assert.deepEqual(committed, [status]);
+});
+
+test("Monitor renderer remains a DOM sink when reached from a receiver", () => {
+  const file = 'operator-shell.js';
+  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+  const bypass = source + '\nfunction receive(event) { renderIssueMonitorStatus(document, event); }';
+  assert.ok(scanModule(bypass, file).some(finding =>
+    finding.root === 'receive' && finding.kind.startsWith('dom-')));
 });
 
 test("Reports and raw terminal receivers resolve only shared model updates", () => {

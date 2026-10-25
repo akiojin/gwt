@@ -24,7 +24,6 @@
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/knowledge_entries\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/knowledge_error\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"receive\",\"/knowledge_entries|knowledge_search_results|knowledge_detail|terminal_preview/knowledge_search_results\"]",
-  "[\"crates/gwt/web/operator-shell.js\",\"applyIssueMonitorStatus\",\"\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy\"]",
   "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_opened\"]"
 ]
