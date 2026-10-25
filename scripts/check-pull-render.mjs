@@ -88,7 +88,10 @@ export function scanModule(source, file, { modules, rootName } = {}) {
     } else if (["ClassDeclaration", "ClassExpression"].includes(node.type)) {
       current = scope(current);
       if (node.id) current.bindings.set(node.id.name, null);
-    } else if (node.type === "BlockStatement" || node.type === "CatchClause") current = scope(current);
+    } else if (node.type === "BlockStatement" || node.type === "CatchClause"
+      || (["ForStatement", "ForOfStatement", "ForInStatement"].includes(node.type)
+        && (node.init || node.left)?.type === "VariableDeclaration"
+        && (node.init || node.left).kind !== "var")) current = scope(current);
     scopes.set(node, current);
     if (node.type === "CatchClause") for (const target of bindingTargets(node.param)) current.bindings.set(target.name, null);
     if (node.type === "ImportDeclaration") {
