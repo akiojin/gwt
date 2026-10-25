@@ -373,6 +373,7 @@ async function installAgentScrollBackend(page: Page): Promise<void> {
             {
               id: "tab-1",
               title: "Scroll Fixture",
+              project_key: location.pathname.split("/").filter(Boolean).at(-1),
               project_root: "/fixture",
               kind: "git",
               workspace: {

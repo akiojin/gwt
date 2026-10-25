@@ -14,12 +14,12 @@ const windows = [
 const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
   current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
-async function fixture(telemetry = null) {
+async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const { createWorksSurface } = await import(moduleUrl);
   const { document, window } = parseHTML("<main></main>");
   const frames = new Set();
   const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
-  const windowCatalogModel = createUiStateStore({ catalog: catalog(windows) }, options);
+  const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activityModel = createUiStateStore({ agents: live, count: 2 }, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
   const runtimes = new Map(), mounts = [], previews = new Set(), selected = [], focused = [];
@@ -72,6 +72,75 @@ test("Works keeps stable member order after PM when census arrival order changes
   f.windowCatalogModel.update(() => ({ catalog: catalog([...windows, two], 2) }));
   f.activityModel.update(() => ({ agents: [{ window_id: "two", session_id: "s2", runtime_incarnation: 3 }, ...live], count: 3 })); f.flush();
   assert.deepEqual([...f.surface.element.querySelectorAll(".work-row")].map(row => row.dataset.windowId), ["pm", "one", "two"]);
+  f.surface.dispose();
+});
+
+test("Works retains live rows across partial catalogs without granting terminal access", async () => {
+  const f = await fixture(null, catalog([]));
+  const rows = () => [...f.surface.element.querySelectorAll(".work-row")];
+  assert.equal(rows().length, 2, "activity arriving before the first catalog still has live rows");
+  assert.equal(f.mounts.length, 0);
+  assert.equal(f.previews.size, 0);
+  assert.equal(f.surface.openWork(live[0]), false);
+  assert.ok(rows().every(row => row.querySelector(".work-open").disabled));
+
+  f.windowCatalogModel.update(() => ({ catalog: catalog(windows, 2) })); f.flush();
+  assert.equal(f.surface.openWork(live[0]), true);
+  const mountCount = f.mounts.length;
+  const next = { ...live[0], session_id: "next-session", runtime_incarnation: 5 };
+  const previewsBeforeGap = f.previews.size;
+  const previewHost = f.document.createElement("aside"); f.document.querySelector("main").append(previewHost);
+  f.activityModel.update(() => ({ agents: [next], count: 1 }));
+  // Public navigation can run before the queued render has refreshed entries.
+  f.surface.setPreviewHost(previewHost);
+  assert.equal(f.previews.size, previewsBeforeGap, "full previews must consult current model authority");
+  f.surface.showList();
+  f.surface.setPreviewHost(null);
+  f.surface.setPreviewHost(previewHost);
+  assert.equal(f.mounts.length, mountCount, "list navigation must consult current model authority");
+  assert.equal(f.previews.size, previewsBeforeGap, "split previews must consult current model authority");
+  assert.ok(f.runtimes.get("one").closest("[inert]"), "the selected terminal must park in its inert cache");
+  f.flush();
+  assert.equal(rows().length, 1, "activity-first replacement must not disappear");
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
+  assert.equal(f.surface.openWork(live[0]), false);
+  assert.equal(f.surface.openWork(next), false);
+  assert.equal(f.mounts.length, mountCount, "no terminal mount may use a mismatched catalog");
+  assert.equal(f.previews.size, 0);
+
+  const nextWindow = { ...windows[0], session_id: next.session_id };
+  const otherTab = { ...catalog([], 3), appState: { active_tab_id: "empty", tabs: [
+    { id: "empty", workspace: { windows: [] } },
+    { id: "background", workspace: { windows: [nextWindow] } },
+  ] } };
+  f.windowCatalogModel.update(() => ({ catalog: otherTab })); f.flush();
+  assert.equal(f.surface.openWork(next), true, "a matching live window on another tab remains usable");
+  const retainedRow = rows()[0], mountsBeforeGap = f.mounts.length;
+  f.windowCatalogModel.update(() => ({ catalog: { ...otherTab, appState: { tabs: [] } } })); f.flush();
+  assert.equal(rows()[0], retainedRow, "catalog resync must retain the same live row");
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
+  assert.equal(f.mounts.length, mountsBeforeGap);
+  assert.equal(f.previews.size, 0);
+  assert.equal(f.surface.openWork(next), false);
+
+  f.windowCatalogModel.update(() => ({ catalog: catalog([{ ...nextWindow, session_id: "newer-session" }], 5) })); f.flush();
+  assert.equal(rows().length, 1, "catalog-first replacement must not disappear");
+  const newer = { ...next, session_id: "newer-session", runtime_incarnation: 6 };
+  f.activityModel.update(() => ({ agents: [newer], count: 1 })); f.flush();
+  assert.equal(f.surface.openWork(next), false);
+  assert.equal(f.surface.openWork(newer), true);
+  f.activityModel.update(() => ({ agents: [newer], count: 1, snapshot: { project_key: "this-project" } }));
+  const foreign = catalog([{ ...nextWindow, session_id: newer.session_id }], 6);
+  foreign.appState.tabs[0].project_key = "another-project";
+  f.windowCatalogModel.update(() => ({ catalog: foreign })); f.flush();
+  assert.equal(rows().length, 1);
+  assert.equal(f.surface.openWork(newer), false, "another project's catalog cannot authorize a terminal");
+  foreign.appState.tabs[0].project_key = "this-project";
+  f.windowCatalogModel.update(() => ({ catalog: foreign })); f.flush();
+  assert.equal(f.surface.openWork(newer), true);
+  f.activityModel.update(() => ({ agents: [], count: 0 })); f.flush();
+  assert.equal(rows().length, 0, "only live activity, never a retained catalog, owns membership");
+  assert.equal(f.surface.openWork(newer), false);
   f.surface.dispose();
 });
 
