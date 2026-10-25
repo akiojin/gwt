@@ -100,7 +100,7 @@ test.describe("Issue Bridge load recovery", () => {
     await page.screenshot({ path: testInfo.outputPath("knowledge-event-refresh.png") });
   });
 
-  test("Issue #3165: dependency-blocked queue rows show their blocker", async ({ page }, testInfo) => {
+  test("Issue #3165: dependency warnings update without changing queue order", async ({ page }, testInfo) => {
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
@@ -121,12 +121,43 @@ test.describe("Issue Bridge load recovery", () => {
       }] });
     });
     const row = page.locator('.surface-knowledge [data-queue-column="queued"] [data-issue-number="3273"]');
+    const assertQueueOrder = () => expect.poll(() => page.locator('.surface-knowledge [data-queue-column="queued"] .knowledge-row')
+      .evaluateAll(rows => rows.map(row => row.getAttribute("data-issue-number")))).toEqual(["3273", "3095"]);
     await expect(row.locator(".knowledge-row-badge")).toHaveText("Blocked by dependency");
     await expect(row.locator(".knowledge-row-badge")).toHaveAttribute("data-tone", "needs-input");
     await expect(row).toContainText("Blocked by #44");
     await expect(row).not.toContainText("(hold)");
+    await assertQueueOrder();
+    const warning = "Dependency cycle detected; cyclic dependencies ignored";
+    await page.evaluate(warning => window.__issueBridgeFixtureSocket.emit({
+      kind: "issue_monitor_inbox", items: [{ issue: { number: 3273 }, state: "blocked_by_dependency",
+        exclusion_reason: `Blocked by #44; ${warning}`,
+        dependency: { blocked_by: [{ number: 44 }], cycle: true, bundle_with: [] },
+      }],
+    }), warning);
+    await expect(row.locator(".knowledge-row-badge")).toHaveText("Blocked by dependency");
+    await expect(row).toContainText(`Blocked by #44; ${warning}`);
+    await assertQueueOrder();
+    await page.screenshot({ path: testInfo.outputPath("dependency-cycle-blocked.png") });
+    await page.evaluate(warning => window.__issueBridgeFixtureSocket.emit({
+      kind: "issue_monitor_inbox", items: [{ issue: { number: 3273 }, state: "queued",
+        exclusion_reason: warning, dependency: { blocked_by: [], cycle: true, bundle_with: [] },
+      }],
+    }), warning);
+    await expect(row.locator(".knowledge-row-badge")).toHaveText("Queued");
+    await expect(row).toContainText(warning);
+    await expect(row).not.toContainText("Blocked by #44");
+    await assertQueueOrder();
+    await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({
+      kind: "issue_monitor_inbox", items: [{ issue: { number: 3273 }, state: "queued",
+        exclusion_reason: null, dependency: { blocked_by: [], cycle: false, bundle_with: [] },
+      }],
+    }));
+    await expect(row).not.toContainText(warning);
+    await expect(row).not.toContainText("Blocked by #44");
+    await assertQueueOrder();
     expect(errors, "zero console/page errors").toEqual([]);
-    await page.screenshot({ path: testInfo.outputPath("dependency-blocked.png") });
+    await page.screenshot({ path: testInfo.outputPath("dependency-resolved.png") });
   });
 
   test("renders cached issues as an Issue list instead of lifecycle Kanban", async ({
