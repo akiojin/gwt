@@ -22,15 +22,16 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   const scheduleState = () => scheduleModel?.read() || { snapshot: null, error: null, pending: false };
   function liveWork(member) {
     if (!member?.assignment?.session_id) return null;
-    const catalog = windowCatalogModel.read().catalog, app = catalog.appState;
-    const windows = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows || [];
-    return (activityModel.read().agents || []).find(assignment => !assignment.is_pm && assignment.session_id === member.assignment.session_id &&
-      windows.some(data => data.id === assignment.window_id && data.session_id === assignment.session_id && data.preset !== "shell")) || null;
+    // The project-scoped child census proves membership independently of
+    // catalog hydration and whichever project tab is currently selected.
+    return (activityModel.read().agents || []).find(assignment => !assignment.is_pm
+      && assignment.session_id === member.assignment.session_id) || null;
   }
   function workTitle(assignment) {
     const app = windowCatalogModel.read().catalog.appState;
-    const data = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows.find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
-    return data?.dynamic_title || data?.title || "—";
+    const data = app.tabs.flatMap(tab => tab.workspace?.windows || [])
+      .find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
+    return assignment.current_task || data?.dynamic_title || data?.title || (assignment.issue_number ? `Issue #${assignment.issue_number}` : "—");
   }
   function openCurrent(memberId, expected) {
     const member = rosterModel.read().members.find(member => member.member_id === memberId);
@@ -182,7 +183,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   function sync() {
     if (disposed) return;
     const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
-    const windows = catalog.appState.tabs.find(project => project.id === catalog.appState.active_tab_id)?.workspace?.windows || [];
+    const windows = catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || []);
     const pm = windows.find(window => (activity.agents || []).some(assignment => assignment.is_pm
       && assignment.window_id === window.id && assignment.session_id === window.session_id));
     const identity = element.querySelector(".roster-pm-identity");
@@ -202,7 +203,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
     element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
     const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
-    element.querySelector(".roster-capacity-note").textContent = `Busy ${members.filter(member => liveWork(member)).length} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
+    element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
     element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"); list.replaceChildren();

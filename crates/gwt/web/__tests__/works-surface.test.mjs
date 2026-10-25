@@ -75,6 +75,19 @@ test("Works keeps stable member order after PM when census arrival order changes
   f.surface.dispose();
 });
 
+test("Issue #6362 Works includes observed launches from sibling project tabs", async () => {
+  const f = await fixture();
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog([], 2), appState: {
+    active_tab_id: "p", tabs: [
+      { id: "p", workspace: { windows: [] } },
+      { id: "sibling", workspace: { windows } },
+    ],
+  } } })); f.flush();
+  assert.deepEqual([...f.surface.element.querySelectorAll(".work-row")].map(row => row.dataset.windowId), ["pm", "one"]);
+  assert.equal(f.surface.openWork(live[0]), true);
+  f.surface.dispose();
+});
+
 test("Works full view reuses one runtime, preserves Esc and returns to the list with presentation controls", async () => {
   const { surface, document, window, runtimes, mounts } = await fixture();
   const nativeRoot = surface.element.querySelector('.works-terminal[data-window-id="one"]');

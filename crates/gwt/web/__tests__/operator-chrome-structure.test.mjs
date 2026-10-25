@@ -333,12 +333,47 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
+test("Issue #6362 Status Strip counts the observed census before terminals mount", () => {
+  let activity = { count: 2, agents: [
+    { window_id: "agent", session_id: "current" },
+    { window_id: "pm", session_id: "manager", is_pm: true },
+  ] };
+  const windows = [
+    { id: "agent", session_id: "current", preset: "codex", status: "running" },
+    { id: "pm", session_id: "manager", preset: "claude", status: "waiting" },
+    { id: "old", session_id: "retired", preset: "codex", status: "running" },
+    { id: "board", preset: "board", status: "running" },
+  ];
+  let counts, activeWorks = [{ active_agents: 9 }];
+  const dependencies = { window: { __operatorShell: { applyTelemetryCounts() {} } },
+    agentActivityModel: { read: () => activity },
+    windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
+      { id: "active", workspace: { windows: [] } }, { id: "sibling", workspace: { windows } },
+    ] }, runtimeStates: {} } }) },
+    allProjectWindowIds: () => windows.map(window => window.id),
+    activeWorkItemsFromProjection: () => activeWorks,
+    activeWorkProjection: { active_agents: 9 }, windowMap: new Map(),
+    workspaceWindowById: id => windows.find(window => window.id === id),
+    presetSupportsWaitingStatus: preset => ["codex", "claude"].includes(preset),
+    applyOperatorTelemetryCounts: value => { counts = value; },
+  };
+  const recompute = Function(...Object.keys(dependencies),
+    `return () => { ${extractFunctionBody(appSource, "recomputeOperatorTelemetry")} };`)(...Object.values(dependencies));
+  recompute();
+  assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
+  assert.equal(counts.waiting, 1);
+  assert.equal(counts.agents, 2);
+  activity = { count: 0, agents: [] }; recompute();
+  assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
+  activity = { count: null, agents: [] }; recompute();
+  assert.equal(counts.running, "—", "unknown is never a measured zero");
+  activeWorks = []; recompute();
+  assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
+});
+
 test("Status Strip RUNNING counter filters non-agent preset windows", () => {
-  // SPEC-2356 follow-up: recomputeOperatorTelemetry walked windowMap.values()
-  // without checking preset, so every workspace window with data-agent-state
-  // (Board / Workspace / Logs / Branches / etc.) inflated counts.agents and
-  // the Status Strip RUNNING cell showed e.g. 4 when only 2 agent panes were
-  // live. The DOM walk must scope to presets that represent agent panes.
+  // Membership comes from the host census. Non-agent catalog windows must
+  // never inflate telemetry, even when their DOM carries agent-state fields.
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -349,8 +384,8 @@ test("Status Strip RUNNING counter filters non-agent preset windows", () => {
   const body = fnMatch[0];
   assert.match(
     body,
-    /windowMap\.entries\(\)/,
-    "recomputeOperatorTelemetry must iterate windowMap.entries() so it can resolve each window's preset before counting it as an agent",
+    /for\s*\(const agent of activity\.agents\)/,
+    "recomputeOperatorTelemetry must count only the observed agent census",
   );
   assert.match(
     body,
@@ -366,10 +401,10 @@ test("Status Strip does not count empty active Work projection as an idle agent"
     /category\s*===\s*"idle"[\s\S]{0,120}counts\.idle\s*=\s*Math\.max\(counts\.idle,\s*1\)/,
     "an active_work_projection with zero agents must not make the Status Strip show IDLE 1",
   );
-  assert.match(
+  assert.doesNotMatch(
     body,
-    /category\s*===\s*"idle"[\s\S]{0,180}activeAgents\s*>\s*0[\s\S]{0,180}counts\.idle/,
-    "the idle fallback must be guarded by a real active agent count",
+    /activeWorkProjection\.(?:status_category|active_agents|blocked_agents)/,
+    "historical Work status cannot supply live agent state",
   );
 });
 
@@ -3245,7 +3280,7 @@ test("FR-039 (安心): WAITING cell drives a LOUD waiting alert pulse like ERROR
   assert.match(operatorShellSource, /counts\.waiting/);
 });
 
-test("active work projection only upgrades live work to RUNNING telemetry", () => {
+test("active work projection cannot upgrade absent agents to RUNNING telemetry", () => {
   const fnMatch = appSource.match(
     /function\s+recomputeOperatorTelemetry[\s\S]*?(?=\n\s+function\s+\w)/,
   );
@@ -3254,10 +3289,10 @@ test("active work projection only upgrades live work to RUNNING telemetry", () =
     "expected recomputeOperatorTelemetry definition in app.js",
   );
   const body = fnMatch[0];
-  assert.match(
+  assert.doesNotMatch(
     body,
-    /counts\.running\s*=\s*Math\.max\(counts\.running,\s*activeAgents\s*\|\|\s*activeWorks\.length\)/,
-    "active work projection should lift live work into RUNNING telemetry",
+    /counts\.running\s*=\s*Math\.max/,
+    "historical Work must not lift absent agents into RUNNING telemetry",
   );
   assert.doesNotMatch(
     body,

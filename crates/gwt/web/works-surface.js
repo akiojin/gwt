@@ -8,7 +8,7 @@ const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 // that a local terminal still belongs to the observed session.
 function currentWorks(catalog, activity, roster) {
   const app = catalog.appState, members = roster.members || [];
-  const windows = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows || [];
+  const windows = app.tabs.flatMap(tab => tab.workspace?.windows || []);
   const order = work => work.member ? members.indexOf(work.member) : members.length + windows.findIndex(data => data.id === work.data.id);
   return (activity.agents || []).flatMap(assignment => {
     const data = windows.find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);

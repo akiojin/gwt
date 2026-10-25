@@ -78,6 +78,28 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(workRow(page, "agent-one").locator(".work-purpose")).toHaveText("Shared workspace title");
   });
 
+  test("Issue #6362 standalone census keeps Busy and status counts aligned through background work", async ({ page }, info) => {
+    await expect(page.locator("#op-strip-running")).toHaveText("2");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.output("agent-one", "Waiting for background terminal\r\n"));
+    await openRail(page, "agents");
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 2 / Team 3");
+    await expect(roster(page).locator('.roster-row[data-member-id="m-one"] .roster-state')).toContainText("In Works");
+    await page.screenshot({ path: info.outputPath("issue-6362-background-busy.png") });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(null));
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy — / Team 3");
+    await expect(page.locator("#op-strip-running")).toHaveText("—");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.census(["pm-window", "agent-one"]));
+    await expect(roster(page).locator(".roster-capacity-note")).toContainText("Busy 1 / Team 3");
+    await expect(page.locator("#op-strip-running")).toHaveText("2");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("0");
+    await openRail(page, "works");
+    await expect(works(page).locator(".work-row")).toHaveCount(2);
+    await expect(works(page).locator('[data-count="running"]')).toHaveText("2");
+    await expect(workRow(page, "agent-one")).toBeVisible();
+    await page.screenshot({ path: info.outputPath("issue-6362-shared-census.png") });
+  });
+
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
     await expect(works(page).locator(".work-row")).toHaveCount(3);
     expect(await works(page).locator(".work-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.windowId))).toEqual(["pm-window", "agent-one", "agent-two"]);
@@ -391,6 +413,11 @@ async function installWorksAgentsBackend(page: Page) {
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
       releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },
       output(id: string, text: string) { socket.emit({ kind: "terminal_output", id, data_base64: btoa(text) }); },
+      census(ids: string[] | null) {
+        if (ids !== null) agents = agents.filter(agent => ids.includes(agent.window_id));
+        const snapshot = activity().projection.local_agent_activity;
+        socket.emit({ kind: "local_agent_activity", activity: { ...snapshot, agents: ids === null ? null : agents } });
+      },
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },

@@ -104,6 +104,31 @@ test("Agents current pill, row task and Now task open the exact assignment, whil
   f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
 });
 
+test("Issue #6362 Agents keeps census-proven work busy before catalog hydration and across project tabs", async () => {
+  const f = await fixture();
+  const catalog = f.windowCatalogModel.read().catalog;
+  const project = catalog.appState.tabs[0];
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 2,
+    appState: { ...catalog.appState, tabs: [{ ...project, workspace: { windows: [] } }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/,
+    "an observed child stays busy while its window catalog is hydrating");
+  assert.doesNotMatch(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent,
+    /Waiting for the next issue|Activity unavailable/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent, "Issue #4777");
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 3,
+    appState: { ...catalog.appState, tabs: [
+      { ...project, workspace: { windows: [] } }, { ...project, id: "sibling" },
+    ] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
+  assert.equal(task.textContent, "Current issue", "window metadata enriches the same observed assignment across tabs");
+  task.click();
+  assert.deepEqual(f.opened, [current]);
+  f.surface.dispose();
+});
+
 const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
   members: [{ agent_member_id: "m1", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }, { issue_number: 5004, reason: "assigned_by_you" }], empty_reason: null },
     { agent_member_id: "m2", issues: [], empty_reason: "No queued issue" }] }, error: null, pending: false });
@@ -222,6 +247,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-past-kpis .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
   assert.match(f.surface.element.textContent, /Read unavailable/);
   f.activityModel.update(() => ({ agents: [], count: null })); f.surface.selectMember("m1"); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy — \/ Team 2/);
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Activity unavailable/);
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current, .roster-detail .roster-open'), null);
   assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Activity unavailable/);
