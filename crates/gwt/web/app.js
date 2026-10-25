@@ -3829,6 +3829,11 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
         if (response) recoveryCenterController?.handleState(response);
       });
 
+      const recoveryCenterBoardModel = createUiStateStore(null);
+      recoveryCenterBoardModel.subscribe(state => state, response => {
+        if (response) recoveryCenterController?.handleBoardEntry(response);
+      });
+
       function openIssueLaunchWizard(windowId, issueNumber) {
         send({
           kind: "open_issue_launch_wizard",
@@ -5313,7 +5318,7 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
             recoveryCenterStateModel.update(() => ({ ...event }));
             break;
           case "recovery_center_board_entry":
-            recoveryCenterController?.handleBoardEntry(event);
+            recoveryCenterBoardModel.update(() => ({ ...event }));
             break;
           case "project_board_config":
             // SPEC-2963 FR-030: per-project Board routing → Board window chip.
