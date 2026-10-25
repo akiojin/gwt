@@ -35295,6 +35295,13 @@ exit 1
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();
             crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            // Establish the no-UI integration baseline before recording verification.
+            assert!(gwt_core::process::hidden_command("git")
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
             let owner = ExecutionOwnerKey {
                 kind: ExecutionOwnerKind::Spec,
                 number: 3248,
