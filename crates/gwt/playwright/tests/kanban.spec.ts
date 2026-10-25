@@ -157,6 +157,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().errorReceipt;
+            if (receipt) window.__knowledgeErrorReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -189,6 +208,12 @@ test.describe("Issue Bridge load recovery", () => {
         error_domain: "non_semantic", message: "Cache search failed" });
     });
     await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeErrorReceipt;
+      return receipt && { frozen: Object.isFrozen(receipt), kind: receipt.kind,
+        message: receipt.message, query: receipt.query, errorDomain: receipt.error_domain };
+    })).toEqual({ frozen: true, kind: "knowledge_error", message: "Cache search failed",
+      query: "Issue", errorDomain: "non_semantic" });
     await expect(search).toBeFocused();
     await page.evaluate(() => {
       const request = window.__knowledgeLoadMessages.find(message => message.kind === "load_knowledge_bridge");

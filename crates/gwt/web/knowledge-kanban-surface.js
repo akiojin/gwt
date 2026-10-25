@@ -5681,84 +5681,7 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_error": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (!state) {
-              break;
-            }
-            const isSearchError =
-              typeof event.request_id === "number" && typeof event.query === "string";
-            if (isSearchError) {
-              const activeIntent = state.inFlightSearchIntent;
-              if (!activeIntent || event.request_id !== activeIntent.requestId) {
-                break;
-              }
-              state.inFlightSearchIntent = null;
-              state.searchInFlight = false;
-              state.inFlightSearchRequestId = 0;
-              const responseMatchesIntent =
-                normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
-                event.query.trim() === activeIntent.query &&
-                knowledgeSearchIntentIsCurrent(state, activeIntent);
-              if (!responseMatchesIntent) {
-                dispatchLatestKnowledgeSearchIntent(event.id, state);
-                break;
-              }
-              state.queuedSearchIntent = null;
-              state.queuedSearchQuery = "";
-              state.searching = false;
-              invalidateKnowledgeSemanticRetry(state);
-              if (
-                isSilentSemanticKind(activeIntent.kind) &&
-                event.error_domain !== "non_semantic"
-              ) {
-                // Legacy/untyped semantic failures are deliberately silent
-                // and never start the typed indefinite retry ladder.
-                knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "status" }));
-              } else {
-                state.error = event.message;
-                knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
-              }
-              break;
-            }
-
-            if (
-              normalizeKnowledgeKind(event.knowledge_kind) !==
-                normalizeKnowledgeKind(state.kind)
-            ) {
-              break;
-            }
-            const matchesLoadRequest = event.request_id === state.loadRequestId;
-            const matchesDetailRequest =
-              event.request_id === state.detailRequestId &&
-              state.detailRequestSelectionGeneration === state.selectionGeneration &&
-              state.detailRequestNumber === state.selectedNumber;
-            const matchesInitialIdless =
-              !event.request_id && state.selectionGeneration === 0;
-            if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
-              break;
-            }
-            if (
-              matchesLoadRequest &&
-              state.loadSelectionGeneration !== state.selectionGeneration
-            ) {
-              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
-              break;
-            }
-            const startedQueuedRefresh = matchesLoadRequest
-              ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
-              : false;
-            if (matchesLoadRequest) {
-              state.error = startedQueuedRefresh ? "" : event.message;
-            } else {
-              state.error = event.message;
-            }
-            state.searching = false;
-            state.detailLoading = false;
-            if (matchesLoadRequest) {
-              knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
-            } else {
-              knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "detail" }));
-            }
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorReceipt: event }));
             break;
           }
           default:
@@ -5814,7 +5737,7 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailReceipt, errorCompletion, terminalPreview, searchReceipt }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailReceipt, errorReceipt, terminalPreview, searchReceipt }) => {
         if (terminalPreview) {
           const text = terminalPreviewText.get(windowId);
           for (const element of windowMap.values()) {
@@ -5828,6 +5751,85 @@ export function createKnowledgeKanbanSurface({
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (errorReceipt) {
+          const event = errorReceipt;
+          const isSearchError =
+            typeof event.request_id === "number" && typeof event.query === "string";
+          if (isSearchError) {
+            const activeIntent = state.inFlightSearchIntent;
+            if (!activeIntent || event.request_id !== activeIntent.requestId) {
+              return;
+            }
+            state.inFlightSearchIntent = null;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            const responseMatchesIntent =
+              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+              event.query.trim() === activeIntent.query &&
+              knowledgeSearchIntentIsCurrent(state, activeIntent);
+            if (!responseMatchesIntent) {
+              dispatchLatestKnowledgeSearchIntent(event.id, state);
+              return;
+            }
+            state.queuedSearchIntent = null;
+            state.queuedSearchQuery = "";
+            state.searching = false;
+            invalidateKnowledgeSemanticRetry(state);
+            if (
+              isSilentSemanticKind(activeIntent.kind) &&
+              event.error_domain !== "non_semantic"
+            ) {
+              // Legacy/untyped semantic failures are deliberately silent
+              // and never start the typed indefinite retry ladder.
+              renderKnowledgeStatusOnly(windowId, state);
+            } else {
+              state.error = event.message;
+              renderKnowledgeBridge(windowId);
+            }
+            return;
+          }
+
+          if (
+            normalizeKnowledgeKind(event.knowledge_kind) !==
+              normalizeKnowledgeKind(state.kind)
+          ) {
+            return;
+          }
+          const matchesLoadRequest = event.request_id === state.loadRequestId;
+          const matchesDetailRequest =
+            event.request_id === state.detailRequestId &&
+            state.detailRequestSelectionGeneration === state.selectionGeneration &&
+            state.detailRequestNumber === state.selectedNumber;
+          const matchesInitialIdless =
+            !event.request_id && state.selectionGeneration === 0;
+          if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
+            return;
+          }
+          if (
+            matchesLoadRequest &&
+            state.loadSelectionGeneration !== state.selectionGeneration
+          ) {
+            finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+            return;
+          }
+          const startedQueuedRefresh = matchesLoadRequest
+            ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
+            : false;
+          if (matchesLoadRequest) {
+            state.error = startedQueuedRefresh ? "" : event.message;
+          } else {
+            state.error = event.message;
+          }
+          state.searching = false;
+          state.detailLoading = false;
+          if (matchesLoadRequest) {
+            renderKnowledgeBridge(windowId);
+          } else {
+            renderKnowledgeStatusOnly(windowId, state);
+            renderKnowledgeDetailOnly(windowId, state);
+          }
+          return;
+        }
         if (detailReceipt) {
           const event = detailReceipt;
           if (normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind) ||
@@ -5892,11 +5894,6 @@ export function createKnowledgeKanbanSurface({
           if (selectionIsCurrent && state.selectionGeneration === 0) {
             state.detail = null;
           }
-        }
-        if (errorCompletion) {
-          renderKnowledgeStatusOnly(windowId, state);
-          if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);
-          return;
         }
         if (detailReceipt) {
           renderKnowledgeSelection(windowId, state, previousNumber);
