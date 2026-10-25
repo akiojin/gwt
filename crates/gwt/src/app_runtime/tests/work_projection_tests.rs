@@ -15,8 +15,14 @@ fn local_agent_activity_reports_an_observed_empty_project() {
         .is_some());
     assert_eq!(
         tasks.lock().unwrap().len(),
-        1,
-        "first hydration schedules the census"
+        2,
+        "first hydration schedules independent census and Work preparation"
+    );
+    runtime.active_work_projection_reply("reconnected-client", "tab-1");
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        2,
+        "refresh bursts keep one census and one Work worker"
     );
     let view = runtime
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])

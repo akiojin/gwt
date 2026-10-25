@@ -4897,7 +4897,10 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.active_work_projection_broadcast_for_tab("tab");
-    tasks.lock().unwrap().remove(0)();
+    for _ in 0..2 {
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+    }
     let old_completion = recorded
         .lock()
         .unwrap()
