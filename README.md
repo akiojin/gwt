@@ -978,6 +978,15 @@ status for zero declarations and omit resolved or unknown blockers. No usable ob
 returns null; a supplied empty inbox returns []. Keep the Monitor source, scan time and
 coverage limits when interpreting this partial snapshot. It does not establish a fresh
 project-wide graph, bundle completeness, priority, milestone health or launch permission.
+`policy.dependency_impacts` reverses only the supplied canonical blocker edges. Each row's
+`issue_number` is the blocker and `dependent_issues` lists distinct direct dependents;
+both levels use ascending Issue numbers. Original observations keep their order and repeats.
+All supplied rows contribute, including conflicting states for a repeated Issue. Chains,
+cycle flags and bundle references add no inferred edges. Absent Monitor yields null;
+supplied snapshots with no blocker edges yield []. Degraded or aborted snapshots retain
+these facts with the enclosing Monitor provenance and coverage limits. This partial inverse
+does not prove no impact, current blockage, importance, transitive delay or critical path,
+and does not authorize priority, readiness or launch changes.
 Each milestone's `dependency_observations` selects these rows for its effective member
 Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
 Row order, repeats and missing dependency data remain visible; absent Monitor yields null,

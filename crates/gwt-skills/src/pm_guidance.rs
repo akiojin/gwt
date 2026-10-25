@@ -224,6 +224,15 @@ Keep the enclosing Monitor source, scan time and coverage limits. A reported cyc
 Monitor's observed verdict, not a fresh project-wide graph assessment; bundle declarations
 do not prove bundle completeness. Never recompute readiness or change priority, health or launches
 from these observations.
+`policy.dependency_impacts` reverses only supplied canonical blocked_by edges.
+Each row's `issue_number` is the blocker; `dependent_issues` lists distinct direct dependents.
+Both are in numeric order; the original observations keep their row order and repeats.
+Direct impact observations never expand transitive chains or cycle/bundle declarations.
+All supplied rows contribute without reclassifying their state, even when repeated rows conflict.
+Absent Monitor yields null; supplied snapshots with no blocker edges yield [].
+Degraded or aborted snapshots retain these facts with the enclosing Monitor provenance and limits.
+An empty inverse does not prove no impact, and dependent counts do not establish importance,
+current blockage, critical path, priority, readiness or permission to act.
 Each milestone's `dependency_observations` selects only its effective member Issues:
 direct references plus roadmap links resolved through a unique nonempty milestone ID.
 It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
@@ -4517,6 +4526,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "An aborted scan can retain older observations while advancing last_scan_at",
             "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
             "`policy.dependency_observations` preserves every supplied inbox row",
+            "`policy.dependency_impacts` reverses only supplied canonical blocked_by edges",
+            "Direct impact observations never expand transitive chains or cycle/bundle declarations",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
