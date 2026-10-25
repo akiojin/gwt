@@ -1132,20 +1132,9 @@ test("Knowledge search completions commit shared state and reject direct renderi
   const local = text => searches(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => searches(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Existing directive validation, window lookup and injected search sends
-  // are unresolved data calls; retain their exact base fingerprints.
-  const dataCalls = [
-    '0a22d6c58763360e17b5f67308c83a29a1872c995ba84906a5bd93fa3dc8147c',
-    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
-    '4641b75eb58eadb1809225500910f9e1dffc0deb7bf23ef7a60db35583e00869',
-    '4f169a3e6d482e1b3be66cb97e3fbe4a83372a8c57a214f23589a97e0a9e9e10',
-    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-  ].sort();
+  // The full receipt crosses the immutable store before synchronous ingestion.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && !finding.path.includes('>renderKnowledgeBridge')));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   const bypass = source.replace('case "knowledge_search_results": {',
     'case "knowledge_search_results": { renderKnowledgeBridge(event.id);');

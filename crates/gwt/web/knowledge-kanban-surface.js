@@ -5624,56 +5624,7 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_search_results": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (!state) {
-              break;
-            }
-            const activeIntent = state.inFlightSearchIntent;
-            if (!activeIntent || event.request_id !== activeIntent.requestId) {
-              break;
-            }
-            state.inFlightSearchIntent = null;
-            state.searchInFlight = false;
-            state.inFlightSearchRequestId = 0;
-            const responseMatchesIntent =
-              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
-              String(event.query || "").trim() === activeIntent.query &&
-              knowledgeSearchIntentIsCurrent(state, activeIntent);
-            if (!responseMatchesIntent) {
-              dispatchLatestKnowledgeSearchIntent(event.id, state);
-              break;
-            }
-            state.queuedSearchIntent = null;
-            state.queuedSearchQuery = "";
-
-            state.entries = event.entries || [];
-            const selectionIsCurrent =
-              activeIntent.selectionGeneration === state.selectionGeneration;
-            if (selectionIsCurrent && state.selectionGeneration === 0) {
-              state.selectedNumber = event.selected_number ?? null;
-            }
-            state.emptyMessage = event.empty_message || "";
-            state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.error = "";
-            state.searching = false;
-            const directive = event.semantic_retry;
-            const transientDirective =
-              isSilentSemanticKind(activeIntent.kind) &&
-              isKnowledgeSemanticRetryDirective(directive);
-            if (transientDirective) {
-              state.semanticRetryTyped = true;
-              scheduleKnowledgeSemanticRetry(
-                event.id,
-                activeIntent.kind,
-                state,
-              );
-            } else if (isSilentSemanticKind(activeIntent.kind)) {
-              invalidateKnowledgeSemanticRetry(state);
-            }
-            if (selectionIsCurrent && state.selectionGeneration === 0) {
-              state.detail = null;
-            }
-            knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, searchReceipt: event }));
             break;
           }
           case "knowledge_detail": {
@@ -5887,7 +5838,7 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion, terminalPreview }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion, terminalPreview, searchReceipt }) => {
         if (terminalPreview) {
           const text = terminalPreviewText.get(windowId);
           for (const element of windowMap.values()) {
@@ -5901,6 +5852,55 @@ export function createKnowledgeKanbanSurface({
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (searchReceipt) {
+          const event = searchReceipt;
+          const activeIntent = state.inFlightSearchIntent;
+          if (!activeIntent || event.request_id !== activeIntent.requestId) {
+            return;
+          }
+          state.inFlightSearchIntent = null;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          const responseMatchesIntent =
+            normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+            String(event.query || "").trim() === activeIntent.query &&
+            knowledgeSearchIntentIsCurrent(state, activeIntent);
+          if (!responseMatchesIntent) {
+            dispatchLatestKnowledgeSearchIntent(event.id, state);
+            return;
+          }
+          state.queuedSearchIntent = null;
+          state.queuedSearchQuery = "";
+
+          // Phase ACKs and optimistic moves replace slots in the local list.
+          state.entries = (event.entries || []).slice();
+          const selectionIsCurrent =
+            activeIntent.selectionGeneration === state.selectionGeneration;
+          if (selectionIsCurrent && state.selectionGeneration === 0) {
+            state.selectedNumber = event.selected_number ?? null;
+          }
+          state.emptyMessage = event.empty_message || "";
+          state.refreshEnabled = Boolean(event.refresh_enabled);
+          state.error = "";
+          state.searching = false;
+          const directive = event.semantic_retry;
+          const transientDirective =
+            isSilentSemanticKind(activeIntent.kind) &&
+            isKnowledgeSemanticRetryDirective(directive);
+          if (transientDirective) {
+            state.semanticRetryTyped = true;
+            scheduleKnowledgeSemanticRetry(
+              event.id,
+              activeIntent.kind,
+              state,
+            );
+          } else if (isSilentSemanticKind(activeIntent.kind)) {
+            invalidateKnowledgeSemanticRetry(state);
+          }
+          if (selectionIsCurrent && state.selectionGeneration === 0) {
+            state.detail = null;
+          }
+        }
         if (errorCompletion) {
           renderKnowledgeStatusOnly(windowId, state);
           if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);

@@ -250,6 +250,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().searchReceipt;
+            if (receipt) window.__knowledgeSearchReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -269,6 +288,12 @@ test.describe("Issue Bridge load recovery", () => {
     });
     await expect(surface.locator(".knowledge-row")).toHaveCount(1);
     await expect(row.locator(".knowledge-row-title")).toHaveText("Authoritative semantic result");
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeSearchReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.entries),
+        Object.isFrozen(receipt.entries[0]), Object.isFrozen(receipt.entries[0].labels),
+        receipt.entries[0].title];
+    })).toEqual([true, true, true, true, "Authoritative semantic result"]);
     await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
     await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
     await expect(search).toBeFocused();
