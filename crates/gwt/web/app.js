@@ -5119,6 +5119,13 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
       }
       branchEntriesViewModel.subscribe(state => state, renderBranchEntries);
 
+      const hubCatalogModel = createUiStateStore(null);
+      hubCatalogModel.subscribe(state => state, catalog => {
+        if (!catalog) return;
+        receiveHubState(catalog);
+        updatePmLauncher(activeWorkspace());
+      });
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5127,8 +5134,7 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
         }
         switch (event.kind) {
           case "hub_state": {
-            receiveHubState(event.hub);
-            updatePmLauncher(activeWorkspace());
+            hubCatalogModel.update(() => event.hub);
             break;
           }
           case "project_not_found": {
