@@ -14,7 +14,7 @@ crates/gwt-agent/src/detect.rs|detect_by_command_bounds_a_hanging_version_probe|
 crates/gwt-agent/src/detect.rs|detect_by_command_bounds_a_hanging_version_probe|assert!(elapsed>=VERSION_PROBE_TIMEOUT,)|1
 crates/gwt-agent/src/prepare.rs|assert_completed_runner_probe_reaps_stdio_detached_descendant|letexit_deadline=Instant::now()+Duration::from_secs(1)|1
 crates/gwt-agent/src/prepare.rs|assert_completed_runner_probe_reaps_stdio_detached_descendant|whileunix_process_exists(pid)&&Instant::now()<exit_deadline|1
-crates/gwt-agent/src/prepare.rs|public_prepare_bounds_a_hanging_direct_runner_probe|assert!(started.elapsed()<std::time::Duration::from_secs(7),,started.elapsed())|1
+crates/gwt-agent/src/prepare.rs|public_prepare_bounds_a_hanging_direct_runner_probe|assert!(started.elapsed()<DIRECT_RUNNER_PROBE_TIMEOUT+std::time::Duration::from_secs(5),,started.elapsed())|1
 crates/gwt-agent/src/prepare.rs|runner_probe_deadline_includes_pipe_eof_and_kills_descendants|letdeadline=Instant::now()+Duration::from_secs(2)|1
 crates/gwt-agent/src/prepare.rs|runner_probe_rejects_completion_observed_after_absolute_deadline|assert!(started.elapsed()<Duration::from_millis(400),)|1
 crates/gwt-agent/src/session.rs|session_lease_contention_returns_retryable_timeout_then_succeeds|lease_acquired_rx.recv_timeout(std::time::Duration::from_secs(1)).expect()|1
@@ -189,7 +189,7 @@ crates/gwt/src/app_runtime/tests/continuation_completion_tests.rs|managed_hook_h
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|assert!(Instant::now()<deadline,)|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|letclient=reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().unwrap()|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|fresh_execution_continue_resends_ready_and_commits_work|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|production_codex_health_failure_runs_once_before_managed_asset_or_session_mutation|assert!(elapsed>=std::time::Duration::from_secs(4),,)|1
+crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|production_codex_health_failure_runs_once_before_managed_asset_or_session_mutation|assert!(elapsed>=gwt_agent::DIRECT_RUNNER_PROBE_TIMEOUT-std::time::Duration::from_secs(1),,)|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention|completions.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention|contention.recv_timeout(Duration::from_secs(30)).expect()|1
 crates/gwt/src/app_runtime/tests/execution_readiness_tests.rs|restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention|letclient=reqwest::blocking::Client::builder().timeout(Duration::from_secs(30)).build().unwrap()|1

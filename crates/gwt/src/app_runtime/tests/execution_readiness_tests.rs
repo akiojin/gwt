@@ -3402,7 +3402,7 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
     let direct = bin.join("codex");
     fs::write(
         &direct,
-        "#!/bin/sh\nprintf 'probe\\n' >> \"${0%/*}/../codex-invocations.txt\"\n/bin/sleep 8\necho 'runner broken' >&2\nexit 1\n",
+        "#!/bin/sh\nprintf 'probe\\n' >> \"${0%/*}/../codex-invocations.txt\"\n/bin/sleep 25\necho 'runner broken' >&2\nexit 1\n",
     )
     .expect("write broken Codex runner");
     fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
@@ -3445,8 +3445,8 @@ fn production_codex_health_failure_runs_once_before_managed_asset_or_session_mut
         "canonical health must be the only Codex version invocation",
     );
     assert!(
-        elapsed >= std::time::Duration::from_secs(4),
-        "production launch must not return before the canonical five-second deadline: {elapsed:?}",
+        elapsed >= gwt_agent::DIRECT_RUNNER_PROBE_TIMEOUT - std::time::Duration::from_secs(1),
+        "production launch must not return before the canonical probe deadline: {elapsed:?}",
     );
     assert!(
         !repo.join(".codex").exists(),
