@@ -345,7 +345,8 @@ fn prepared_continuation_issues_observation_only_capability_without_activating_s
 }
 
 use gwt::project_runtime::launch_finalization::{
-    pending_fresh_execution_launch_from_session, rollback_materialized_fresh_execution_launch,
+    pending_fresh_execution_activation_status, pending_fresh_execution_launch_from_session,
+    rollback_materialized_fresh_execution_launch, rollback_worker_fresh_execution,
 };
 
 /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse
@@ -531,4 +532,34 @@ fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candid
     assert_eq!(std::fs::read(other_path).unwrap(), other_before);
     assert_eq!(remaining.generations, ledger.generations);
     assert_eq!(remaining.lifecycle_events, ledger.lifecycle_events);
+
+    let other_pending = pending_fresh_execution_launch_from_session(
+        &launch.sessions_dir,
+        &other.id,
+        &launch.project,
+        launch.project.to_str().unwrap(),
+        Some(launch.owner.number),
+        None,
+        None,
+        None,
+        nonce,
+        &gwt_agent::AgentId::Codex,
+    )
+    .expect("recover the remaining worker candidate");
+    assert_eq!(
+        pending_fresh_execution_activation_status(&other_pending),
+        Some(false)
+    );
+    assert!(
+        rollback_worker_fresh_execution(&launch.sessions_dir, &other_pending)
+            .expect("worker rollback must remove only its exact Prepared candidate")
+    );
+    assert!(!launch
+        .sessions_dir
+        .join(format!("{}.toml", other.id))
+        .exists());
+    assert!(!gwt::session_launch::durable_launch_recovery_exists(
+        &launch.sessions_dir,
+        &other.id,
+    ));
 }
