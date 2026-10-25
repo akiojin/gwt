@@ -35,7 +35,8 @@ pub struct RegisteredMonitorRuntime {
 
 /// Capture a live holder's complete runtime identity before revoking its launch.
 /// No OS process is signalled here; the owning host uses its retained PTY later.
-pub(crate) fn capture_stop_request(
+#[doc(hidden)]
+pub fn capture_stop_request(
     project_root: &Path,
     issue_number: u64,
     window_id: &str,
@@ -371,7 +372,8 @@ fn runtime_proof(entry: &RegisteredMonitorRuntime) -> io::Result<MonitorDuplicat
     })
 }
 
-fn stop_requested_runtimes(
+#[doc(hidden)]
+pub fn stop_requested_runtimes(
     project_root: &Path,
     entries: &[RegisteredMonitorRuntime],
 ) -> io::Result<bool> {
@@ -436,7 +438,28 @@ fn stop_requested_runtimes(
                 },
             ).and_then(|result| result.transpose());
             match result {
-                Ok(Some(true)) => break,
+                Ok(Some(true)) => {
+                    // This receipt is written only after the exact captured
+                    // process tree was reaped and its terminal Session saved.
+                    crate::try_mutate_issue_monitor_prefs(
+                        &crate::issue_monitor_prefs_path_for_repo_path(project_root),
+                        |prefs| {
+                            for intent in prefs.agent_switch_intents.values_mut() {
+                                if matches!(
+                                    intent.stage,
+                                    crate::issue_monitor::AgentSwitchStage::StoppingCurrent
+                                        | crate::issue_monitor::AgentSwitchStage::Unknown
+                                ) && intent.runtime_stop.as_ref() == Some(request)
+                                    && intent.checkpoint.is_some()
+                                {
+                                    intent.runtime_exit_confirmed = true;
+                                }
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    break;
+                }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(target: "gwt.monitor.runtime", session_id = %registration.session_id, window_id = %registration.window_id, %error, "runtime stop did not complete; retaining captured runtime and continuing reconciliation");
@@ -1171,6 +1194,20 @@ mod stop_tests {
             let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
             assert_eq!(prefs.monitor_runtime_stop_requests.len(), 1);
             let request = prefs.monitor_runtime_stop_requests[0].clone();
+            let switch_operation = "a283fc81-50bc-47d2-b65f-55a515815231";
+            // A requested stop is deliberately not an exit acknowledgement.
+            let switch_intent = serde_json::from_value(serde_json::json!({
+                "request": {"operation_id":switch_operation,"member_id":"member","expected_roster_revision":1,"target_issue_number":4169},
+                "source": {"assignment":{"reservation_id":"reservation","session_id":request.session_id,"issue_number":4168,"host_id":crate::process::current_hostname(),"host_pid":request.host_pid,"host_started_at":request.host_started_at},
+                    "window_id":request.window_id,"claim_id":"claim","confirmation":{"window_id":request.window_id,"claim_id":"claim","confirmed_at":"2026-10-25T00:00:00Z"}},
+                "stage":"stopping_current", "runtime_stop":request,
+                "checkpoint":{"verified_head":"1111111111111111111111111111111111111111","work_id":"work","board_entry_id":"board"}
+            })).unwrap();
+            let mut prefs = prefs;
+            prefs
+                .agent_switch_intents
+                .insert(switch_operation.into(), switch_intent);
+            crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
             assert!(
                 request.window_id.is_empty(),
                 "window identity is diagnostic only"
@@ -1220,9 +1257,21 @@ mod stop_tests {
                     entry.handle.try_wait().unwrap().is_none(),
                     "{mismatch} mismatch killed PTY"
                 );
+                assert!(
+                    !crate::load_issue_monitor_prefs(&path)
+                        .unwrap()
+                        .agent_switch_intents[switch_operation]
+                        .runtime_exit_confirmed
+                );
             }
             let mut prefs = crate::load_issue_monitor_prefs(&path).unwrap();
             prefs.monitor_runtime_stop_requests = vec![request];
+            // A prior cleanup attempt may have left its outcome unknown.
+            prefs
+                .agent_switch_intents
+                .get_mut(switch_operation)
+                .unwrap()
+                .stage = crate::issue_monitor::AgentSwitchStage::Unknown;
             crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
             let process_alive = || is_process_alive(*child_pid);
             // The leader can exit, and its exit observer can persist Stopped, before
@@ -1261,6 +1310,13 @@ mod stop_tests {
             assert!(
                 !process_alive(),
                 "retained stop left descendant {child_pid} alive"
+            );
+            assert!(
+                crate::load_issue_monitor_prefs(&path)
+                    .unwrap()
+                    .agent_switch_intents[switch_operation]
+                    .runtime_exit_confirmed,
+                "only the owning Host's exact kill/reap can acknowledge switch exit"
             );
             assert_eq!(
                 Session::load(&sessions.join("holder.toml")).unwrap().status,

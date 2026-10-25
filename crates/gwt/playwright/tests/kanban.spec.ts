@@ -51,6 +51,62 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   expect(errors, "zero console/page errors").toEqual([]);
 });
 
+test("Issue #3165: Start explains missing settings and waits for confirmed enable", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installIssueBridgeBackend(page, { theme });
+  await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const surface = page.locator(".surface-knowledge");
+  const guidance = surface.locator('[data-role="monitor-setup-guidance"]');
+  const start = surface.getByRole("button", { name: "Start", exact: true });
+  await expect(guidance).toBeHidden();
+  const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3, max_active_agents: 2 };
+  for (const source of ["default", "last_settings"]) {
+    await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+      { ...status, launch_profile_source: source });
+    await expect(guidance).toBeVisible();
+    await expect(guidance).toHaveAttribute("role", "status");
+    await expect(guidance).toHaveText(
+      "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
+  }
+  const cursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  await start.click();
+  await expect(start).toBeVisible();
+  await expect(guidance).toBeVisible();
+  await expect(surface.locator('[data-metric="capacity"]')).toHaveText("0 of 2");
+  const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_)/.test(message.kind)), cursor);
+  expect(controls).toEqual([{ kind: "set_issue_monitor_enabled", enabled: true }]);
+  await info.attach(`monitor-setup-${theme}`, { body: await surface.screenshot(), contentType: "image/png" });
+  await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+    { ...status, launch_profile_source: "saved" });
+  await expect(guidance).toBeHidden();
+  await expect(start).toBeVisible();
+  const savedCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  await start.click();
+  const savedControls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), savedCursor);
+  expect(savedControls, "saved-profile Start must only request monitoring enable").toEqual([
+    { kind: "set_issue_monitor_enabled", enabled: true },
+  ]);
+  await expect(start).toBeVisible();
+  await expect(guidance).toBeHidden();
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Stopped");
+  await page.evaluate(status => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status }),
+    { ...status, launch_profile_source: "saved", enabled: true, state: "idle" });
+  await expect(surface.getByRole("button", { name: "Stop", exact: true })).toBeVisible();
+  await expect(guidance).toBeHidden();
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveAttribute("data-state", "idle");
+  await expect(surface.locator(".knowledge-monitor-pill")).toHaveText("Running");
+  await info.attach(`monitor-saved-start-${theme}`, { body: await surface.screenshot(), contentType: "image/png" });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("Legacy SPEC preset Work Item compatibility", () => {
   test.use({
     deviceScaleFactor: 1,
@@ -160,6 +216,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().detailReceipt;
+            if (receipt) window.__knowledgeDetailReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -175,11 +250,18 @@ test.describe("Issue Bridge load recovery", () => {
       window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_detail", detail: {
         number: 3096, title: "Completed shared detail", subtitle: "#3096", state: "open", labels: ["bug"],
         sections: [{ title: "Description", body: "Completed shared Markdown", body_html: "<p>Completed shared <strong>Markdown</strong></p>" }],
+        related_works: [],
         launch_issue_number: 3096,
       } });
     });
     await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
     await expect(pane.locator("strong")).toHaveText("Markdown");
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeDetailReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.detail),
+        Object.isFrozen(receipt.detail.labels), Object.isFrozen(receipt.detail.sections),
+        Object.isFrozen(receipt.detail.sections[0]), Object.isFrozen(receipt.detail.related_works)];
+    })).toEqual([true, true, true, true, true, true]);
     await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
     await expect(search).toBeFocused();
     await page.evaluate(() => {
@@ -207,6 +289,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().searchReceipt;
+            if (receipt) window.__knowledgeSearchReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -226,6 +327,12 @@ test.describe("Issue Bridge load recovery", () => {
     });
     await expect(surface.locator(".knowledge-row")).toHaveCount(1);
     await expect(row.locator(".knowledge-row-title")).toHaveText("Authoritative semantic result");
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeSearchReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.entries),
+        Object.isFrozen(receipt.entries[0]), Object.isFrozen(receipt.entries[0].labels),
+        receipt.entries[0].title];
+    })).toEqual([true, true, true, true, "Authoritative semantic result"]);
     await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
     await expect(surface.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
     await expect(search).toBeFocused();

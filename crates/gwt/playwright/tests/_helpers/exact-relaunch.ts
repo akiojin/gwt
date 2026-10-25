@@ -55,10 +55,13 @@ export type ExactRelaunchInvocation = {
 };
 
 /** Real checkout/backend/PTY; only the provider executable is a recorder.
- * Never writes durable gwt Sessions, execution ledgers, or Work records.
+ * Never fabricates durable gwt Sessions, execution ledgers, or Work records.
+ * The optional source actor uses the provider's ordinary authenticated commands.
  * Each invocation owns a fresh HOME, retained as evidence after cleanup.
  */
 export type ExactRelaunchSetup = {
+  freshNativeIds?: boolean;
+  switching?: { sourceIssueNumber: number; positive: boolean };
   prepare?: (context: { home: string; bin: string; project: string; env: NodeJS.ProcessEnv }) => Promise<void>;
   monitorPreferences?: Record<string, unknown>;
   beforeStart?: (context: { home: string; project: string; env: NodeJS.ProcessEnv; preferences: string }) => Promise<void>;
@@ -106,6 +109,124 @@ export async function startExactRelaunchFixture(testInfo: TestInfo, setup: Exact
     if (result.status !== 0) throw new Error(`Fixture project git ${args[0]} failed: ${result.stderr}`);
   }
 
+  // This actor follows the Host's instruction with its own ambient bridge.
+  // The runner receives observations, never the launch capability or an ACK handle.
+  const switchActor = setup.switching ? `const switching=${JSON.stringify(setup.switching)};\n` + String.raw`
+const cp = require('node:child_process');
+const sourceDirectory = process.cwd();
+const idleDirectory = path.join(process.env.HOME, 'provider-idle', process.env.GWT_SESSION_ID);
+const actorLog = path.join(process.env.HOME, 'switch-actor.jsonl');
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const actorEvent = (stage, extra = {}) => fs.appendFileSync(actorLog, JSON.stringify({stage,
+  pid:process.pid,gwt_session_id:process.env.GWT_SESSION_ID,provider_session_id:native,cwd:process.cwd(),...extra})+'\n');
+const sourceEnvelope = (operation, params = {}) => {
+  const result = cp.spawnSync(process.env.GWT_BIN_PATH, [], {cwd:sourceDirectory,env:process.env,
+    encoding:'utf8',timeout:60000,input:JSON.stringify({schema_version:1,operation,params})});
+  let envelope;
+  try { envelope = JSON.parse(result.stdout); } catch {}
+  if (result.status !== 0 || !envelope?.ok) {
+    actorEvent('operation_refused', {operation,exit_status:result.status});
+    throw new Error('Source operation refused: '+operation);
+  }
+  return envelope;
+};
+const sourceOperation = (operation, params = {}) => {
+  const output = sourceEnvelope(operation,params).output;
+  if (typeof output !== 'string') return output;
+  try { return JSON.parse(output); } catch { return output; }
+};
+const git = (...gitArgs) => {
+  const result = cp.spawnSync('git',gitArgs,{cwd:sourceDirectory,env:process.env,encoding:'utf8',timeout:60000});
+  if (result.status !== 0) throw new Error('Source git failed: '+gitArgs[0]);
+  return result.stdout.trim();
+};
+const nativeHook = (event, prompt) => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(sourceDirectory,'.codex','hooks.json'),'utf8'));
+  const input = JSON.stringify({session_id:native,hook_event_name:event,cwd:sourceDirectory,
+    transcript_path:rollout,prompt,stop_hook_active:false});
+  for (const group of hooks.hooks?.[event] ?? []) for (const hook of group.hooks ?? []) {
+    if (hook.type !== 'command') continue;
+    const result = cp.spawnSync('/bin/sh',['-c',hook.command],{cwd:sourceDirectory,env:process.env,
+      input,encoding:'utf8',timeout:60000});
+    if (result.status !== 0 || /"decision"\s*:\s*"block"/.test(result.stdout)) {
+      throw new Error('Native hook refused: '+event);
+    }
+  }
+  actorEvent('native_hook',{event});
+};
+const observe = async (read, description) => {
+  const deadline = Date.now()+60000;
+  while (Date.now()<deadline) {
+    const value = read();
+    if (value) return value;
+    await pause(100);
+  }
+  throw new Error('Source observation timed out: '+description);
+};
+const actorReady = (async () => {
+  const owner = sourceOperation('execution.status').owner_number;
+  nativeHook('UserPromptSubmit',args.at(-1));
+  if (owner === switching.sourceIssueNumber && !fs.existsSync(path.join(sourceDirectory,'source-in-progress.txt'))) {
+    fs.writeFileSync(path.join(sourceDirectory,'source-in-progress.txt'),'Unfinished source implementation awaiting its next step.\n');
+    git('add','--','source-in-progress.txt');
+    git('-c','user.name=Switch fixture','-c','user.email=switch@example.invalid','commit','-m','fixture: unfinished source progress');
+  }
+  sourceOperation('issue.monitor.wait',{number:owner,reason:'Awaiting fixture operator',resume_condition:'Operator requests checkpoint or resumes current work'});
+  nativeHook('Stop');
+  let treeChild;
+  if (switching.positive && owner === switching.sourceIssueNumber) {
+    fs.mkdirSync(idleDirectory,{recursive:true});
+    treeChild = cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)','GWT_SWITCH_TREE_CHILD',process.env.HOME],
+      {cwd:idleDirectory,env:{PATH:process.env.PATH,HOME:process.env.HOME},stdio:'ignore'}).pid;
+    process.chdir(idleDirectory);
+  }
+  actorEvent('idle',{owner_number:owner,tree_child_pid:treeChild});
+})().catch(error=>{actorEvent('actor_failed',{message:error.message});throw error;});
+// Prevent an unhandled-rejection exit while stdin is waiting for the real Host instruction.
+actorReady.catch(()=>{});
+const checkpointed = new Set();
+const checkpoint = async line => {
+  await actorReady;
+  const operation = /GWT checkpoint request ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(line)?.[1];
+  if (!operation || checkpointed.has(operation)) return;
+  checkpointed.add(operation);
+  process.chdir(sourceDirectory);
+  nativeHook('UserPromptSubmit',line);
+  const intent = sourceOperation('issue.monitor.switch.read').intents.find(value=>value.operation_id===operation);
+  if (!intent || intent.stage !== 'checkpointing') {
+    sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,clear:true});
+    nativeHook('Stop');
+    if (switching.positive) process.chdir(idleDirectory);
+    actorEvent('checkpoint_cancelled',{operation});
+    return;
+  }
+  actorEvent('checkpoint_received',{operation});
+  sourceOperation('board.post',{kind:'handoff',owners:[String(switching.sourceIssueNumber)],
+    body:'Saved current source checkpoint '+operation+'\nNext action: resume the unfinished source implementation.'});
+  const entry = sourceOperation('board.show',{all:true}).board.entries.find(value=>
+    value.origin_session_id===process.env.GWT_SESSION_ID && value.body.split(/\s+/).includes(operation));
+  if (!entry) throw new Error('Own checkpoint Board entry missing');
+  const hash = sourceEnvelope('issue.monitor.status').project_store.hash;
+  const worksPath = path.join(process.env.HOME,'.gwt','projects',hash,'project-state','works.json');
+  const work = await observe(()=>JSON.parse(fs.readFileSync(worksPath,'utf8')).work_items.find(value=>
+    value.events.some(event=>event.agent_session_id===process.env.GWT_SESSION_ID)
+    && value.board_refs.includes(entry.id)),'canonical Board link');
+  sourceOperation('workspace.update',{status:'idle',summary:'Saved source checkpoint '+operation,
+    progress_summary:'Saved the actual source and immutable Work shards',next_action:'Resume the unfinished source implementation'});
+  fs.writeFileSync(path.join(sourceDirectory,'checkpoint-source.txt'),'Saved source checkpoint '+operation+'\n');
+  git('add','--all');
+  git('-c','user.name=Switch fixture','-c','user.email=switch@example.invalid','commit','-m','fixture: saved source checkpoint '+operation);
+  git('push','-u','origin','HEAD');
+  const head = git('rev-parse','HEAD');
+  sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id});
+  actorEvent('checkpoint_acked',{operation,head,work_id:work.id,board_entry_id:entry.id});
+  sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,reason:'Saved checkpoint awaits switch',resume_condition:'Switch cancelled or saved work resumed'});
+  nativeHook('Stop');
+  process.chdir(idleDirectory);
+  actorEvent('checkpoint_idle',{operation});
+};
+` : "";
+
   // The fake provider owns only native conversation metadata. In particular,
   // its native conversation UUID is independent from GWT_SESSION_ID.
   const provider = `#!${process.execPath}
@@ -135,7 +256,7 @@ const option = name => {
 const resumeAt = args.indexOf('resume');
 const resumed = resumeAt < 0 ? null : (args.slice(resumeAt + 1).find(a => /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(a)) ?? null);
 const requested = option('--session-id');
-const native = resumed || requested || ${JSON.stringify(nativeId)};
+const native = resumed || requested || ${setup.freshNativeIds ? "require('node:crypto').randomUUID()" : JSON.stringify(nativeId)};
 const at = new Date().toISOString();
 const directory = path.join(process.env.HOME, '.codex', 'sessions', ...at.slice(0,10).split('-'));
 fs.mkdirSync(directory, {recursive:true});
@@ -157,8 +278,10 @@ try {
     if (result.error || result.status !== 0) throw new Error('SessionStart hook failed: ' + (result.error?.message || result.status));
   }
 } catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
+${switchActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
+  ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
   if (line.trim() === 'GWT_FIXTURE_DONE') {
     const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
@@ -274,6 +397,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
       }
       throw new Error(`Fixture provider ${pid} remained after shutdown`);
     }));
+    // Cleanup only descendants recorded by this actor and carrying its unique HOME.
+    const actorEvents = (await readFile(join(home, "switch-actor.jsonl"), "utf8").catch(() => ""))
+      .split("\n").filter(Boolean).map(line => JSON.parse(line));
+    for (const event of actorEvents) {
+      if (!event.tree_child_pid) continue;
+      const command = spawnSync("ps", ["-p", String(event.tree_child_pid), "-o", "command="], { encoding: "utf8" });
+      if (command.stdout.includes("GWT_SWITCH_TREE_CHILD") && command.stdout.includes(home)) {
+        try { process.kill(event.tree_child_pid, "SIGTERM"); } catch { /* exited */ }
+      }
+    }
     if (ownedPid) {
       const remaining = processCommand(ownedPid);
       await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining }), contentType: "application/json" });

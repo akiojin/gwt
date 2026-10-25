@@ -2,6 +2,8 @@
 
 #[path = "../agent_process_resolution_contract_test.rs"]
 mod agent_process_resolution_contract_test;
+#[path = "../agent_switch_checkpoint_test.rs"]
+mod agent_switch_checkpoint_test;
 #[path = "../autostart_protocol_test.rs"]
 mod autostart_protocol_test;
 #[path = "../branch_cleanup_protocol_test.rs"]
