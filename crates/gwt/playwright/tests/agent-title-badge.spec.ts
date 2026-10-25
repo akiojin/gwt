@@ -453,6 +453,7 @@ async function installAgentTitleBadgeBackend(
           {
             id: "tab-1",
             title: "Agent Badge Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {

@@ -173,6 +173,8 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
     const value = document.getElementById("op-strip-issue-monitor-value");
     assert.ok(cell, "expected Issue Monitor status cell in the strip");
     assert.ok(value, "expected Issue Monitor status value in the strip");
+    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Off");
+    assert.match(cell.getAttribute("title"), /^Open Monitor.*Issue Monitor: Off/);
 
     const commands = [];
     document.addEventListener("op:command", (event) => {
@@ -189,7 +191,8 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
 
     assert.equal(value.textContent, "Run Q3 A1/2");
     assert.equal(cell.dataset.state, "launching");
-    assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
+    assert.equal(cell.getAttribute("aria-label"), "Open Monitor: Run Q3 A1/2");
+    assert.match(cell.getAttribute("title"), /^Open Monitor.*Run Q3 A1\/2/);
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
 
     renderIssueMonitorStatus(document, {

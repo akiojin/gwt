@@ -249,8 +249,8 @@ export function renderIssueMonitorStatus(doc, status = {}) {
   const view = issueMonitorStatusStripView(status);
   value.textContent = view.value;
   cell.dataset.state = view.state;
-  cell.setAttribute("aria-label", `Issue Monitor: ${view.value}`);
-  cell.setAttribute("title", view.title);
+  cell.setAttribute("aria-label", `Open Monitor: ${view.value}`);
+  cell.setAttribute("title", `Open Monitor | ${view.title}`);
   if (view.alert) {
     cell.classList.add("op-status-strip__cell--alert");
   } else {

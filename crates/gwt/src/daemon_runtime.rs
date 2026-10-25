@@ -37,6 +37,10 @@ const HOOK_LIVE_RETRY_DELAY_MS: u64 = 25;
 /// Share of the aggregate UserPromptSubmit budget hook-live may consume.
 pub const USER_PROMPT_SUBMIT_HOOK_LIVE_BUDGET: DeadlineBudget =
     DeadlineBudget::new("USER_PROMPT_SUBMIT_HOOK_LIVE", Duration::from_millis(25));
+/// A loaded Windows Host can take 40 seconds to validate Work materialization.
+/// Keep the wait finite, with headroom beyond that observed delay (Issue #6301).
+pub(crate) const WORK_MATERIALIZATION_PROBE_BUDGET: DeadlineBudget =
+    DeadlineBudget::new("WORK_MATERIALIZATION_PROBE", Duration::from_secs(60));
 const AGENT_BRIDGE_ERROR_BODY_MAX_BYTES: u64 = 64 * 1024;
 
 static HOOK_LIVE_HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -1309,8 +1313,9 @@ pub(crate) fn send_work_materialization_probe_via_agent_bridge(
     let url = target
         .work_materialization_probe_url()
         .map_err(AgentBridgeRequestError::NotSent)?;
+    let timeout = WORK_MATERIALIZATION_PROBE_BUDGET.resolve();
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| {
@@ -1324,12 +1329,18 @@ pub(crate) fn send_work_materialization_probe_via_agent_bridge(
         .bearer_auth(&target.token)
         .json(request)
         .send()
-        .map_err(|_| {
+        .map_err(|error| {
             observation.record(true);
-            AgentBridgeRequestError::Unknown(
+            let reason = if error.is_timeout() {
+                format!(
+                    "Host Work materialization probe timed out after {} ms waiting for the Host response; the Host may be overloaded; no build lifecycle state was created",
+                    timeout.as_millis()
+                )
+            } else {
                 "Host Work materialization probe is unavailable; no build lifecycle state was created"
-                    .to_string(),
-            )
+                    .to_string()
+            };
+            AgentBridgeRequestError::Unknown(reason)
         })?;
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {

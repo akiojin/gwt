@@ -39,7 +39,8 @@ pub(crate) use gwt::project_runtime::launch_finalization::heal_lost_generation_p
 use gwt::project_runtime::launch_finalization::persist_genesis_session_binding_with;
 use gwt::project_runtime::launch_finalization::{
     materialized_genesis_launch_from_session, pending_fresh_execution_launch_from_session,
-    rollback_materialized_fresh_execution_launch, terminalize_materialized_genesis_launch,
+    rollback_materialized_fresh_execution_launch, rollback_worker_continue_work,
+    rollback_worker_fresh_execution, terminalize_materialized_genesis_launch,
     FinalizedAgentCapabilityLaunch, MaterializedGenesisLaunch,
 };
 pub use gwt::project_runtime::launch_payload::{
@@ -59,12 +60,11 @@ use super::agent_maintenance;
 #[cfg(test)]
 use super::continuation::persist_durable_launch_recovery;
 use super::continuation::{
-    abort_prepared_execution_and_remove_exact_session,
     bind_durable_launch_recovery_session_identity, clear_durable_launch_recovery,
     compensate_terminalized_genesis_workspace_projection, durable_launch_recovery_exists,
     pending_continue_work_session_identity, pending_execution_activation_status,
     pending_fresh_execution_activation_status, persist_durable_launch_recovery_with_identity,
-    resolve_split_workspace_state_external_commit, DurableLaunchRecoveryKind,
+    DurableLaunchRecoveryKind,
 };
 
 use super::{
@@ -729,115 +729,6 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
         issuer: input.issuer,
         blocking_tasks: input.blocking_tasks,
     }))
-}
-
-/// Return false only for an irreversible Activated generation. Exact candidate
-/// conflicts and unreadable authority retain their evidence for reconciliation.
-fn rollback_worker_continue_work(
-    sessions_dir: &Path,
-    pending: &PendingContinueWork,
-) -> Result<bool, String> {
-    match pending_execution_activation_status(pending) {
-        Some(true) => return Ok(false),
-        Some(false) => {}
-        None => return Err("continuation activation status is unreadable".into()),
-    }
-    let identity = pending_continue_work_session_identity(pending)?;
-    let cleanup = abort_prepared_execution_and_remove_exact_session(
-        &pending.worktree_path,
-        pending.owner,
-        &pending.execution,
-        "continuation launch failed before SessionStart",
-        sessions_dir,
-        &identity,
-        || {
-            reject_worker_launch_projection_commit(
-                &pending.project_root,
-                &pending.worktree_path,
-                &pending.operation_id,
-            )
-        },
-    );
-    match cleanup {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err("continuation candidate Session changed before exact rollback".into())
-        }
-        Err(_) if pending_execution_activation_status(pending) == Some(true) => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    }
-    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
-    Ok(true)
-}
-
-fn rollback_worker_fresh_execution(
-    sessions_dir: &Path,
-    pending: &PendingFreshExecutionLaunch,
-) -> Result<bool, String> {
-    match pending_fresh_execution_activation_status(pending) {
-        Some(true) => return Ok(false),
-        Some(false) => {}
-        None => return Err("fresh launch activation status is unreadable".into()),
-    }
-    let cleanup = gwt::cli::execution_state::abort_successor_and_remove_exact_session(
-        &pending.worktree_path,
-        pending.owner,
-        &pending.request,
-        "fresh linked-owner launch failed before SessionStart",
-        sessions_dir,
-        &pending.session_identity,
-        || {
-            reject_worker_launch_projection_commit(
-                &pending.project_root,
-                &pending.worktree_path,
-                &pending.operation_id,
-            )
-        },
-    );
-    match cleanup {
-        Ok(true) => {}
-        Ok(false) => return Err("fresh candidate Session changed before exact rollback".into()),
-        Err(_) if pending_fresh_execution_activation_status(pending) == Some(true) => {
-            return Ok(false)
-        }
-        Err(error) => return Err(error.to_string()),
-    }
-    if !pending
-        .launch_feedback_context
-        .as_ref()
-        .is_some_and(|context| {
-            context
-                .issue_monitor_launch_binding_issue_number()
-                .is_some()
-                && context.issue_monitor_delivery_id.is_some()
-                && context.issue_monitor_autonomous_handoff.is_none()
-        })
-    {
-        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
-    }
-    Ok(true)
-}
-
-fn reject_worker_launch_projection_commit(
-    project_root: &Path,
-    worktree: &Path,
-    operation_id: &str,
-) -> std::io::Result<()> {
-    match resolve_split_workspace_state_external_commit(
-        project_root,
-        worktree,
-        operation_id,
-        gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
-    ) {
-        Ok(
-            gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
-            | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing,
-        ) => Ok(()),
-        Ok(resolution) => Err(std::io::Error::other(format!(
-            "continuation Work rejection returned {resolution:?}"
-        ))),
-        Err(error) => Err(std::io::Error::other(error.to_string())),
-    }
 }
 
 fn prepare_agent_launch_inner(

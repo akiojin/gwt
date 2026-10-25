@@ -202,6 +202,7 @@ async function installTabbedAgentsBackend(page) {
           {
             id: "tab-1",
             title: "Tab Title Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {
