@@ -77,8 +77,11 @@ test("Works keeps stable member order after PM when census arrival order changes
 
 test("Works retains live rows across partial catalogs without granting terminal access", async () => {
   const f = await fixture(null, catalog([]));
+  f.activityModel.update(() => ({ agents: [live[0]], count: 1 })); f.flush();
   const rows = () => [...f.surface.element.querySelectorAll(".work-row")];
-  assert.equal(rows().length, 2, "activity arriving before the first catalog still has live rows");
+  assert.equal(rows().length, 1, "one observed launch stays visible before the first catalog");
+  assert.equal(f.surface.element.querySelector(".works-empty").hidden, true);
+  assert.equal(rows()[0].querySelector(".work-open").textContent, "Syncing terminal…");
   assert.equal(f.mounts.length, 0);
   assert.equal(f.previews.size, 0);
   assert.equal(f.surface.openWork(live[0]), false);
@@ -102,6 +105,8 @@ test("Works retains live rows across partial catalogs without granting terminal 
   assert.ok(f.runtimes.get("one").closest("[inert]"), "the selected terminal must park in its inert cache");
   f.flush();
   assert.equal(rows().length, 1, "activity-first replacement must not disappear");
+  assert.equal(f.surface.element.querySelector(".works-empty").hidden, true);
+  assert.equal(rows()[0].querySelector(".work-open").textContent, "Syncing terminal…");
   assert.equal(f.surface.element.querySelector(".works-full").hidden, true);
   assert.equal(f.surface.openWork(live[0]), false);
   assert.equal(f.surface.openWork(next), false);

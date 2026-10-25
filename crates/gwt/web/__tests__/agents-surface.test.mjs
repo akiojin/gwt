@@ -66,6 +66,11 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
   withPm("Yuu updated"); f.flush();
   assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: state.catalog.version + 1,
+    appState: { ...state.catalog.appState, tabs: state.catalog.appState.tabs.map(tab => ({ ...tab, project_key: "another-project" })) } } }));
+  f.flush();
+  assert.equal(identity.hidden, true, "another project's catalog cannot supply the current PM's name");
   f.activityModel.update(() => ({ count: 1, agents: [current] })); f.flush();
   assert.equal(identity.hidden, true, "a stale PM catalog window cannot supply a live identity");
 });
@@ -102,6 +107,38 @@ test("Agents current pill, row task and Now task open the exact assignment, whil
   task.click();
   assert.equal(f.opened.length, 3, "links captured before the frame must recheck live membership");
   f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
+});
+
+test("Issue #6362 Agents keeps census-proven work busy before catalog hydration and across project tabs", async () => {
+  const f = await fixture();
+  const catalog = f.windowCatalogModel.read().catalog;
+  const project = catalog.appState.tabs[0];
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 2,
+    appState: { ...catalog.appState, tabs: [{ ...project, workspace: { windows: [] } }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/,
+    "an observed child stays busy while its window catalog is hydrating");
+  assert.doesNotMatch(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent,
+    /Waiting for the next issue|Activity unavailable/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent, "Issue #4777");
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 3,
+    appState: { ...catalog.appState, tabs: [
+      { ...project, workspace: { windows: [] } }, { ...project, id: "sibling" },
+    ] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
+  assert.equal(task.textContent, "Current issue", "window metadata enriches the same observed assignment across tabs");
+  task.click();
+  assert.deepEqual(f.opened, [current]);
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 4,
+    appState: { ...catalog.appState, tabs: [{ ...project, project_key: "another-project" }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent,
+    "Issue #4777", "another project's catalog cannot enrich the observed assignment");
+  f.surface.dispose();
 });
 
 const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
@@ -222,6 +259,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-past-kpis .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
   assert.match(f.surface.element.textContent, /Read unavailable/);
   f.activityModel.update(() => ({ agents: [], count: null })); f.surface.selectMember("m1"); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy — \/ Team 2/);
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Activity unavailable/);
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current, .roster-detail .roster-open'), null);
   assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Activity unavailable/);

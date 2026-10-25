@@ -11368,7 +11368,12 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::ProjectDispatch { context, events }) if app.project_context_is_current(&context) => {
-                clients.dispatch(events);
+                clients.dispatch(events.into_iter().filter(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => app
+                        .retain_current_local_agent_activity(&context.tab_id, Some(activity.clone()))
+                        .as_ref() == Some(activity),
+                    _ => true,
+                }).collect());
             }
             Event::UserEvent(UserEvent::PreparedActiveWorkDispatch {
                 context,
