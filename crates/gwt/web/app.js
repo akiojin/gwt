@@ -3941,9 +3941,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         launchPending,
       });
 
-      const workspaceResumeOutcomeModel = createUiStateStore(null);
-      workspaceResumeOutcomeModel.subscribe(outcome => outcome, outcome => {
-        if (outcome) handleWorkspaceResumeAgentOutcome(outcome);
+      const workspaceResumeModel = createUiStateStore(null);
+      workspaceResumeModel.subscribe(event => event, event => {
+        if (!event) return;
+        if (event.kind === "workspace_resumable_agents") workspaceResumePicker.handleAgentsList(event);
+        else handleWorkspaceResumeAgentOutcome(event);
       });
 
       function handleWorkspaceResumeAgentOutcome(event) {
@@ -5399,7 +5401,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
-            workspaceResumePicker.handleAgentsList(event);
+            workspaceResumeModel.update(() => ({ ...event }));
             break;
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
@@ -5411,7 +5413,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "workspace_resume_agent_error":
           case "workspace_resume_agent_started":
-            workspaceResumeOutcomeModel.update(() => ({ ...event }));
+            workspaceResumeModel.update(() => ({ ...event }));
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation

@@ -6,6 +6,7 @@
  * process, GitHub cache state, or the user's local workspace.
  */
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
 test.describe("Legacy SPEC preset Work Item compatibility", () => {
@@ -1037,6 +1038,103 @@ test.describe("Issue Related Work Resume", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
+  });
+
+  test("Resume list receipt preserves immutable candidates, correlation, and focus", async ({ page }, info) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+    page.on("pageerror", error => pageErrors.push(String(error)));
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await page.route("**/workspace-resume-picker-modal.js", async route => {
+      // Canonical headed runs instrument the actual checkout-served module.
+      const response = liveBase ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/workspace-resume-picker-modal.js", "utf8");
+      const anchor = "export function createWorkspaceResumePickerController(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalWorkspaceResumePickerController(") + `
+        export function createWorkspaceResumePickerController(...args) {
+          const controller = originalWorkspaceResumePickerController(...args);
+          window.__resumeListController = controller;
+          window.__resumeListReceipts = [];
+          const receive = controller.handleAgentsList;
+          controller.handleAgentsList = event => {
+            window.__resumeListReceipts.push(event);
+            return receive(event);
+          };
+          return controller;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
+    await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__resumeListController))).toBe(true);
+    // The production picker remains dormant; only this fixture opens it.
+    const operationId = await page.evaluate(() =>
+      (window as any).__resumeListController.open("resume-list-workspace"));
+    const list = {
+      kind: "workspace_resumable_agents", workspace_id: "resume-list-workspace", operation_id: operationId,
+      agents: [{ session_id: "resume-list-session", agent_id: "codex", display_name: "Fixture Resume",
+        resume_kind: "conversation", metadata: { source: "original" } }],
+    };
+    await page.evaluate(payload => {
+      (window as any).__resumeListOriginal = payload;
+      window.__issueBridgeFixtureSocket.emit(payload);
+    }, list);
+    const modal = page.locator("#workspace-resume-picker-modal");
+    const row = modal.locator('.workspace-resume-picker-row[data-session-id="resume-list-session"]');
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Fixture Resume");
+    await row.focus();
+    await page.evaluate(() => {
+      const payload = (window as any).__resumeListOriginal;
+      payload.agents[0].display_name = "Updated Resume";
+      window.__issueBridgeFixtureSocket.emit(payload);
+    });
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    await expect(row).toBeFocused();
+    expect(await page.evaluate(() => {
+      const original = (window as any).__resumeListOriginal;
+      const receipts = (window as any).__resumeListReceipts;
+      const receipt = receipts.at(-1);
+      return [receipt, receipt.agents, receipt.agents[0], receipt.agents[0].metadata].every(Object.isFrozen)
+        && receipt !== original && receipt.agents !== original.agents
+        && receipt.agents[0] !== original.agents[0]
+        && receipt.agents[0].metadata !== original.agents[0].metadata
+        && receipts[0] !== receipt && receipts[0].agents[0].display_name === "Fixture Resume";
+    })).toBe(true);
+    await page.evaluate(() => {
+      const original = (window as any).__resumeListOriginal;
+      original.agents[0].display_name = "Mutated caller";
+      original.agents[0].metadata.source = "mutated";
+      (window as any).__resumeListController.render();
+    });
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    expect(await page.evaluate(() => (window as any).__resumeListReceipts.at(-1).agents[0].metadata.source)).toBe("original");
+    const emitAndFlush = async (events: object[]) => {
+      const processed = page.waitForEvent("dialog");
+      await page.evaluate(events => {
+        for (const event of events) window.__issueBridgeFixtureSocket.emit(event);
+        window.__issueBridgeFixtureSocket.emit({ kind: "workspace_projection_prune_error", message: "Resume list processed" });
+      }, events);
+      const dialog = await processed;
+      expect(dialog.message()).toBe("Work Projection Prune error: Resume list processed");
+      await dialog.dismiss();
+    };
+    await emitAndFlush([{ ...list, workspace_id: "stale-workspace" }, { ...list, operation_id: "stale-operation" }]);
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    const screenshot = info.outputPath("resume-list-receipt.png");
+    await page.screenshot({ path: screenshot });
+    await info.attach("resume-list-receipt", { path: screenshot, contentType: "image/png" });
+    await modal.locator(".workspace-resume-picker-cancel").click();
+    await emitAndFlush([list]);
+    await expect(modal).toHaveAttribute("aria-hidden", "true");
+    await expect(row).toHaveCount(0);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 
   test("correlates one real click, ignores stale error, and visibly recovers from the exact error", async ({

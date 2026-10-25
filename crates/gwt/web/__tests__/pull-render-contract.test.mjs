@@ -178,16 +178,18 @@ test("Remote branch receiver commits shared state and rejects bypass rendering",
   }
 });
 
-test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
+test("Session resume receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && /^\/workspace_resume_agent_(error|started)(\||\/|$)/.test(finding.context));
+    finding.root === 'receive' && /^\/(workspace_resumable_agents|workspace_resume_agent_(error|started))(\||\/|$)/.test(finding.context));
   assert.deepEqual(findings(app), []);
   const start = app.indexOf('function receive(event)');
   assert.ok(start > 0);
-  for (const kind of ['workspace_resume_agent_error', 'workspace_resume_agent_started']) {
-    for (const bypass of ['document.body.textContent = event.message;', 'handleWorkspaceResumeAgentOutcome(event);']) {
+  for (const kind of ['workspace_resumable_agents', 'workspace_resume_agent_error', 'workspace_resume_agent_started']) {
+    const handler = kind === 'workspace_resumable_agents'
+      ? 'workspaceResumePicker.handleAgentsList(event);' : 'handleWorkspaceResumeAgentOutcome(event);';
+    for (const bypass of ['document.body.textContent = event.message;', handler]) {
       const mutated = app.slice(0, start) + app.slice(start)
         .replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
       assert.notEqual(mutated, app);
