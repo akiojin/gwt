@@ -2739,6 +2739,11 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         "Restore the Git environment and access to the configured upstream so it can be fetched and read back, then retry. Keep the existing event commit and source unchanged.".to_string()
     } else if matches!(blocker, WorkEventSettlementBlocker::GitStatusError) {
         "Restore the Git environment so the Work event store and existing commit information can be inspected, then retry. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(
+        blocker,
+        WorkEventSettlementBlocker::PathDirtyInUnreachableEnvironment { .. }
+    ) {
+        "Restore the Git environment and access to the configured upstream, then retry to inspect the remaining Work event changes before committing or pushing them. Keep the existing event commit and source unchanged.".to_string()
     } else {
         format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
     };
@@ -14962,6 +14967,8 @@ fn default_integration_test_builds_a_guarded_binary() {
     fn dirty_work_event_is_warning_while_remote_is_unreachable() {
         let fixture = WorkEventGitFixture::tracked();
         fixture.append_event("offline-dirty-event");
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
         let missing_remote = fixture._root.path().join("missing-upstream.git");
         fixture.git_ok(&[
             "remote",
@@ -14985,6 +14992,30 @@ fn default_integration_test_builds_a_guarded_binary() {
             work_event_settlement_refusal(&fixture.repo).is_none(),
             "an offline environment must not turn a dirty fact into an unreachable Stop block"
         );
+        let WorkEventSettlementStatus::Blocked(blocker) = &status else {
+            unreachable!()
+        };
+        let description = work_event_settlement_blocker_description_with_gate(blocker, false, None);
+        assert!(
+            description.contains("Restore the Git environment")
+                && description.contains("then retry to inspect the remaining Work event changes"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("with the related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fixture.git_ok(&[
+            "remote",
+            "set-url",
+            "origin",
+            fixture.remote.to_str().unwrap(),
+        ]);
+        assert_path_dirty(&fixture, vec![WorkEventPathState::Unstaged]);
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
     }
 
     #[test]
