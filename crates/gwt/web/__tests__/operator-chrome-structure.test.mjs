@@ -345,13 +345,14 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
     { id: "old", session_id: "retired", preset: "codex", status: "running" },
     { id: "board", preset: "board", status: "running" },
   ];
+  const runtimeStates = { old: "stopped" };
   let counts, activeWorks = [{ active_agents: 9 }];
   const dependencies = { window: { __operatorShell: { applyTelemetryCounts() {} } },
     agentActivityModel: { read: () => activity },
     windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
       { id: "active", project_key: "this-project", workspace: { windows: [] } },
       { id: "sibling", project_key: "this-project", workspace: { windows } },
-    ] }, runtimeStates: { old: "stopped" } } }) },
+    ] }, runtimeStates } }) },
     allProjectWindowIds: () => windows.map(window => window.id),
     activeWorkItemsFromProjection: () => activeWorks,
     activeWorkProjection: { active_agents: 9 }, windowMap: new Map(),
@@ -367,6 +368,14 @@ test("Issue #6362 Status Strip counts live census separately from catalog missio
   assert.equal(counts.waiting, 1);
   assert.equal(counts.agents, 3, "MISSION includes the project's agent panes without requiring a census");
   assert.equal(counts.done, 1, "runtime state overrides catalog status for completed panes");
+  const [implementation, pm] = activity.agents;
+  activity = { count: 1, agents: [pm] }; runtimeStates.pm = "running"; recompute();
+  assert.equal(counts.running, 1, "a PM-only census still contributes to runtime telemetry");
+  activity = { count: 1, agents: [implementation] }; runtimeStates.agent = "idle"; recompute();
+  assert.equal(counts.running, 0, "an assigned idle implementation child is not running");
+  assert.equal(counts.idle, 1);
+  runtimeStates.agent = "running"; recompute();
+  assert.equal(counts.running, 1, "an implementation child resuming work returns to RUNNING");
   activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
   assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
   assert.equal(counts.agents, 0, "another project's catalog cannot supply MISSION progress");
