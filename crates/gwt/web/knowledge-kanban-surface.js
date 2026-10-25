@@ -1383,6 +1383,13 @@ export function createKnowledgeKanbanSurface({
           explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
         }
         const status = issueMonitorModel.read().status;
+        const setupGuidance = element.querySelector('[data-role="monitor-setup-guidance"]');
+        if (setupGuidance) {
+          setupGuidance.hidden = !(status.enabled === false && status.active_count === 0
+            && ["default", "last_settings"].includes(status.launch_profile_source));
+          setupGuidance.textContent = setupGuidance.hidden ? ""
+            : "Agent not started: no saved Agent settings. Save Agent settings, then select Start.";
+        }
         const capacity = bar.querySelector('[data-metric="capacity"]');
         if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
         const backlog = bar.querySelector('[data-metric="backlog"]');
@@ -5333,6 +5340,7 @@ export function createKnowledgeKanbanSurface({
                     <button class="wizard-button is-compact" data-action="refresh-knowledge" aria-label="Refresh cached work items" title="Refresh cached work items">↻ Refresh</button>
                   </div>
                 </div>
+                <p class="issue-queue-rule" data-role="monitor-setup-guidance" role="status" hidden></p>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
                     <div class="knowledge-list" role="list" aria-label="Cached work items"></div>
