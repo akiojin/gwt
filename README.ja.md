@@ -889,6 +889,15 @@ Monitor は宣言がない場合に診断を省略し、解消済み・不明の
 なければ null、供給された inbox が空なら [] です。取得元・スキャン時刻・観測範囲を
 併せて確認してください。この部分観測はプロジェクト全体の最新グラフ、bundle の充足、
 優先順位・マイルストーン health・起動許可を証明しません。
+`policy.dependency_impacts` は、供給された正本の blocker 辺だけを逆引きします。
+各行の `issue_number` が blocker、`dependent_issues` が直接依存する Issue の一覧で、
+両階層とも Issue 番号の昇順・重複なしです。元の観測は行順・重複を保持します。
+同じ Issue に矛盾した状態の行があっても全供給行を使い、状態を再判定しません。
+推移的な依存・cycle フラグ・bundle 参照から辺を追加しません。Monitor 不在は null、
+供給された辺がなければ [] です。degraded・中断 snapshot でも事実を保持するため、
+Monitor の取得元・スキャン時刻・観測範囲の制約を併せて確認してください。
+この部分的な逆引きから影響なし・現在の阻害・重要度・推移的な遅延・critical path は
+判断できず、優先順位・起動可能性・起動の変更を許可しません。
 各 milestone の `dependency_observations` は、直接参照した Issue と、一意な非空
 milestone ID で解決した roadmap 所属 Issue の行を抽出します。供給順・重複・依存情報の
 欠測を保持し、Monitor 不在は null、一致行がなければ [] です。`unobserved_issues` と
