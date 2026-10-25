@@ -40,8 +40,9 @@ use gwt::project_runtime::launch_finalization::persist_genesis_session_binding_w
 use gwt::project_runtime::launch_finalization::{
     materialized_genesis_launch_from_session, pending_fresh_execution_launch_from_session,
     rollback_materialized_fresh_execution_launch, rollback_worker_continue_work,
-    rollback_worker_fresh_execution, terminalize_materialized_genesis_launch,
-    FinalizedAgentCapabilityLaunch, MaterializedGenesisLaunch,
+    rollback_worker_fresh_execution, rollback_worker_genesis,
+    terminalize_materialized_genesis_launch, FinalizedAgentCapabilityLaunch,
+    MaterializedGenesisLaunch,
 };
 pub use gwt::project_runtime::launch_payload::{
     AgentLaunchCompletion, AgentLaunchError, AgentLaunchResult, AgentLaunchRuntimeContext,
@@ -61,10 +62,9 @@ use super::agent_maintenance;
 use super::continuation::persist_durable_launch_recovery;
 use super::continuation::{
     bind_durable_launch_recovery_session_identity, clear_durable_launch_recovery,
-    compensate_terminalized_genesis_workspace_projection, durable_launch_recovery_exists,
-    pending_continue_work_session_identity, pending_execution_activation_status,
-    pending_fresh_execution_activation_status, persist_durable_launch_recovery_with_identity,
-    DurableLaunchRecoveryKind,
+    durable_launch_recovery_exists, pending_continue_work_session_identity,
+    pending_execution_activation_status, pending_fresh_execution_activation_status,
+    persist_durable_launch_recovery_with_identity, DurableLaunchRecoveryKind,
 };
 
 use super::{
@@ -540,43 +540,6 @@ struct PreparedAgentLaunchSuccess {
     session_snapshot: Option<gwt_agent::Session>,
     predecessor_session_id: Option<String>,
     materialized_genesis: Option<MaterializedGenesisLaunch>,
-}
-
-fn rollback_worker_genesis(
-    sessions_dir: &Path,
-    project_root: &Path,
-    active: &ActiveAgentSession,
-    genesis: &MaterializedGenesisLaunch,
-    reason: &str,
-    removed_session: &mut Option<gwt_agent::SessionExecutionIdentity>,
-) -> Result<(), String> {
-    let removed = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
-        &genesis.worktree_path,
-        genesis.owner,
-        &genesis.session_id,
-        &genesis.binding.identity,
-        reason,
-        sessions_dir,
-        &genesis.session_identity,
-        || {
-            compensate_terminalized_genesis_workspace_projection(
-                project_root,
-                &genesis.worktree_path,
-                genesis.owner,
-                &genesis.session_id,
-                Some(&genesis.binding),
-                Some(&active.branch_name),
-            )
-            .map_err(std::io::Error::other)
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    if !removed {
-        return Err("failed genesis Session changed before exact rollback".into());
-    }
-    // Preserve exact removal even if the durable receipt still needs cleanup.
-    *removed_session = Some(genesis.session_identity.clone());
-    clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
 }
 
 fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch {

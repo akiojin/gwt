@@ -563,3 +563,95 @@ fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candid
         &other.id,
     ));
 }
+
+use gwt::project_runtime::launch_finalization::compensate_terminalized_genesis_workspace_projection;
+
+#[test]
+fn terminalized_genesis_compensation_does_not_synthesize_state_for_unrelated_work() {
+    let _env_guard = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo-genesis-no-target");
+    std::fs::create_dir_all(&repo).expect("create repo");
+    init_execution_repo(&repo, "work/issue-2359");
+    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 2359,
+    };
+    let session_id = "genesis-without-work-target";
+    gwt::cli::execution_state::materialize_at_launch(
+        &repo,
+        owner.kind,
+        owner.number,
+        session_id,
+        "$gwt-execute #2359",
+        false,
+    )
+    .expect("materialize genesis execution");
+    gwt::cli::execution_state::ensure_generation_ledger(
+        &repo,
+        owner,
+        gwt::cli::execution_state::LegacyActiveDisposition::Live,
+    )
+    .expect("materialize genesis ledger");
+    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
+        .expect("read genesis binding")
+        .expect("genesis binding");
+    let binding = gwt_agent::SessionExecutionBinding {
+        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+        session_id: session_id.to_string(),
+        repo_hash: gwt_core::repo_hash::detect_repo_hash(&repo)
+            .expect("repo hash")
+            .to_string(),
+        owner_kind: owner.kind.as_str().to_string(),
+        owner_number: owner.number,
+        identity,
+        capability_generation: 1,
+    };
+    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        "unrelated-work",
+        chrono::Utc::now(),
+    );
+    unrelated.agent_session_id = Some("unrelated-session".to_string());
+    gwt_core::workspace_projection::record_workspace_work_event(&repo, unrelated)
+        .expect("persist unrelated Work without current projection");
+    assert!(
+        gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read absent current projection")
+            .is_none(),
+    );
+    gwt::cli::execution_state::block_uncommitted_genesis_launch(
+        &repo,
+        owner,
+        session_id,
+        &binding.identity,
+        "test no-target compensation",
+    )
+    .expect("terminalize failed genesis");
+
+    compensate_terminalized_genesis_workspace_projection(
+        &repo,
+        &repo,
+        owner,
+        session_id,
+        Some(&binding),
+        None,
+    )
+    .expect("leave unrelated Work untouched");
+
+    assert!(
+        gwt_core::workspace_projection::load_workspace_projection(&repo)
+            .expect("read current projection after no-target compensation")
+            .is_none(),
+        "no-target compensation must not synthesize a current projection",
+    );
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .expect("read unrelated WorkItems")
+        .expect("unrelated WorkItems");
+    assert_eq!(work_items.work_items.len(), 1);
+    assert_eq!(work_items.work_items[0].id, "unrelated-work");
+    assert!(!work_items.work_items[0].discarded);
+}
