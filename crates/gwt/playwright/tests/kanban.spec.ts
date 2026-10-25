@@ -216,6 +216,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().detailReceipt;
+            if (receipt) window.__knowledgeDetailReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -231,11 +250,18 @@ test.describe("Issue Bridge load recovery", () => {
       window.__issueBridgeFixtureSocket.emit({ ...request, kind: "knowledge_detail", detail: {
         number: 3096, title: "Completed shared detail", subtitle: "#3096", state: "open", labels: ["bug"],
         sections: [{ title: "Description", body: "Completed shared Markdown", body_html: "<p>Completed shared <strong>Markdown</strong></p>" }],
+        related_works: [],
         launch_issue_number: 3096,
       } });
     });
     await expect(pane.locator(".knowledge-detail-title")).toHaveText("Completed shared detail");
     await expect(pane.locator("strong")).toHaveText("Markdown");
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeDetailReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.detail),
+        Object.isFrozen(receipt.detail.labels), Object.isFrozen(receipt.detail.sections),
+        Object.isFrozen(receipt.detail.sections[0]), Object.isFrozen(receipt.detail.related_works)];
+    })).toEqual([true, true, true, true, true, true]);
     await expect(row.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
     await expect(search).toBeFocused();
     await page.evaluate(() => {

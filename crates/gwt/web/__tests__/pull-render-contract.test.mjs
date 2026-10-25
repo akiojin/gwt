@@ -1325,20 +1325,9 @@ test("Knowledge detail completions commit shared state and reject direct renderi
   const local = text => details(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => details(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Existing queued-load and recovery calls remain synchronous data paths.
-  const dataCalls = [
-    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
-    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
-    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
-    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
-    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
-  ].sort();
+  // The full receipt crosses the immutable store before synchronous ingestion.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && !finding.path.includes('>renderKnowledgeSelection')));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   const bypass = source.replace('case "knowledge_detail": {',
     'case "knowledge_detail": { renderKnowledgeSelection(event.id, state, null);');
