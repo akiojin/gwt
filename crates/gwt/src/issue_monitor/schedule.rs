@@ -53,6 +53,8 @@ pub struct AgentMemberSchedule {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentScheduleSnapshot {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_key: String,
     pub roster_revision: u64,
     pub queue_revision: String,
     pub schedule_revision: u64,
@@ -180,6 +182,7 @@ impl IssueMonitorPrefs {
             })
             .collect();
         Ok(AgentScheduleSnapshot {
+            project_key: String::new(),
             roster_revision: roster.revision,
             queue_revision: self.agent_schedule_queue_revision(),
             schedule_revision: self.agent_issue_schedule.revision,
@@ -396,12 +399,13 @@ pub fn mutate_project_agent_schedule(
     let accepted = saved
         .agent_schedule_snapshot(&host)
         .map_err(|error| error.to_string())?;
-    let canonical = readback
+    let mut canonical = readback
         .agent_schedule_snapshot(&host)
         .map_err(|error| error.to_string())?;
     if accepted != canonical {
         return Err("Agent schedule changed during readback; read issue.monitor.schedule.read before retrying (the previous move may already be saved)".into());
     }
+    canonical.project_key = gwt_core::paths::project_scope_hash(root).to_string();
     Ok(canonical)
 }
 
@@ -597,6 +601,11 @@ mod tests {
         let before =
             mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
         assert_eq!(
+            before.project_key,
+            gwt_core::paths::project_scope_hash(&root).to_string(),
+            "canonical schedules identify their project before the UI can mutate them"
+        );
+        assert_eq!(
             before.members[0]
                 .issues
                 .iter()
@@ -643,11 +652,11 @@ mod tests {
             .unwrap()
             .remove("agent_issue_schedule");
         assert!(serde_json::from_value::<IssueMonitorState>(legacy_state).is_ok());
-        assert_eq!(
-            cold.agent_schedule_snapshot(&crate::process::current_hostname())
-                .unwrap(),
-            moved
-        );
+        let mut cold_snapshot = cold
+            .agent_schedule_snapshot(&crate::process::current_hostname())
+            .unwrap();
+        cold_snapshot.project_key = gwt_core::paths::project_scope_hash(&root).to_string();
+        assert_eq!(cold_snapshot, moved);
         let valid = move_action(
             &moved,
             41,

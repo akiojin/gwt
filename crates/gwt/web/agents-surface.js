@@ -7,6 +7,7 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
 export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel,
+  scheduleModel, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
@@ -14,7 +15,10 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     <p class="roster-description">Named members are reused across issues. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
-  let renderedRoster, renderedActivity, renderedCatalog;
+  let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule;
+  let renderedPlans = null;
+  let submittedSnapshot = null, scheduleNotice = "";
+  const scheduleState = () => scheduleModel?.read() || { snapshot: null, error: null, pending: false };
   function liveWork(member) {
     if (!member?.assignment?.session_id) return null;
     const catalog = windowCatalogModel.read().catalog, app = catalog.appState;
@@ -53,12 +57,70 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const member = rosterModel.read().members.find(member => member.member_id === selectedId && member.enabled);
     if (member && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
   }
+  function renderPlans(member) {
+    const state = scheduleState(), snapshot = state.snapshot;
+    const pending = state.pending || submittedSnapshot === snapshot && snapshot !== null;
+    const inputs = [member.member_id, member.enabled, rosterModel.read().revision, snapshot, state.error, pending, scheduleNotice];
+    if (renderedPlans?.inputs.every((value, index) => value === inputs[index])) return renderedPlans.section;
+    const section = document.createElement("section"); section.className = "roster-plans";
+    renderedPlans = { inputs, section };
+    const header = document.createElement("header"), heading = document.createElement("h4"), refresh = document.createElement("button");
+    heading.textContent = "Next planned issues"; refresh.type = "button"; refresh.dataset.action = "refresh-plans"; refresh.textContent = "Refresh plans";
+    refresh.addEventListener("click", () => { submittedSnapshot = null; scheduleNotice = ""; onRefreshSchedule(); sync(); });
+    header.append(heading, refresh); section.append(header);
+    const plan = snapshot?.members.find(plan => plan.agent_member_id === member.member_id);
+    const stale = snapshot && snapshot.roster_revision !== rosterModel.read().revision;
+    const status = document.createElement("p"); status.className = "roster-plan-status"; status.setAttribute("role", "status");
+    status.textContent = state.error || scheduleNotice || (pending ? "Updating plans…" : stale ? "Plans changed. Refresh plans before reassigning." : "");
+    status.hidden = !status.textContent; section.append(status);
+    if (!plan?.issues.length) {
+      const empty = document.createElement("p"); empty.className = "roster-plan-empty";
+      empty.textContent = plan ? "No queued issue" : "Plans unavailable. Refresh plans to try again."; section.append(empty); return section;
+    }
+    const list = document.createElement("ol");
+    for (const issue of plan.issues) {
+      const item = document.createElement("li"); item.className = "roster-plan"; item.dataset.issueNumber = String(issue.issue_number);
+      const title = document.createElement("strong"), reason = document.createElement("span");
+      title.textContent = `#${issue.issue_number}`; reason.className = "roster-plan-reason";
+      reason.textContent = { same_spec_continuation: "Same SPEC continuation", queue_order: "Queue order", assigned_by_you: "Assigned by you" }[issue.reason] || "Reason unavailable";
+      const controls = document.createElement("div"); controls.className = "roster-plan-controls";
+      const select = document.createElement("select"), reassign = document.createElement("button");
+      select.setAttribute("aria-label", `Assign issue #${issue.issue_number} to member`);
+      const placeholder = document.createElement("option"); placeholder.value = ""; placeholder.textContent = "Choose member"; select.append(placeholder);
+      for (const target of rosterModel.read().members.filter(target => target.enabled && target.member_id !== member.member_id)) {
+        const option = document.createElement("option"); option.value = target.member_id; option.textContent = target.name; select.append(option);
+      }
+      const blocked = pending || !!state.error || stale || !member.enabled;
+      select.disabled = blocked || select.options.length <= 1;
+      reassign.type = "button"; reassign.textContent = "Reassign"; reassign.setAttribute("aria-label", `Reassign issue #${issue.issue_number}`); reassign.disabled = true;
+      select.addEventListener("change", () => { reassign.disabled = blocked || !select.value; });
+      reassign.addEventListener("click", () => {
+        const latest = scheduleState(), roster = rosterModel.read();
+        if (latest.pending || submittedSnapshot || latest.error) return;
+        const source = roster.members.find(target => target.member_id === member.member_id && target.enabled);
+        const target = roster.members.find(target => target.member_id === select.value && target.enabled && target.member_id !== member.member_id);
+        if (latest.snapshot !== snapshot || roster.revision !== snapshot.roster_revision || !source || !target) {
+          scheduleNotice = "Plans changed. Refresh plans before reassigning."; sync(); return;
+        }
+        submittedSnapshot = snapshot;
+        onReassign({ kind: "reassign", issue_number: issue.issue_number, source_member_id: member.member_id, target_member_id: target.member_id,
+          expected_roster_revision: snapshot.roster_revision, expected_queue_revision: snapshot.queue_revision, expected_schedule_revision: snapshot.schedule_revision });
+        sync();
+      });
+      controls.append(select, reassign); item.append(title, reason, controls); list.append(item);
+    }
+    section.append(list); return section;
+  }
   function renderDetail(member) {
-    const panel = element.querySelector(".roster-detail"); panel.replaceChildren();
+    const panel = element.querySelector(".roster-detail"), plans = member ? renderPlans(member) : null;
+    // Keep unchanged native plan controls attached while telemetry and current
+    // work refresh around them, preserving selection and browser keyboard focus.
+    for (const child of [...panel.childNodes]) if (child !== plans) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
+    if (plans.parentElement !== panel) panel.append(plans);
     const head = document.createElement("header"); head.className = "roster-detail-heading";
     const who = document.createElement("div"); const name = document.createElement("h3"), meta = document.createElement("p");
-    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.append(head, stats(member));
+    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.insertBefore(head, plans); panel.insertBefore(stats(member), plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol"), current = liveWork(member);
     if (current) {
@@ -103,7 +165,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     if (!previewElement) return;
     const clone = element.cloneNode(true); clone.classList.add("agents-surface--preview"); clone.setAttribute("aria-label", "Agents read-only preview");
     for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
-    for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
+    for (const control of clone.querySelectorAll("button, select")) { control.disabled = true; control.tabIndex = -1; }
     for (const row of clone.querySelectorAll(".roster-row")) row.tabIndex = -1;
     previewElement.replaceChildren(clone);
   }
@@ -116,6 +178,8 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   function sync() {
     if (disposed) return;
     const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
+    const schedule = scheduleState();
+    if (submittedSnapshot && (schedule.error || schedule.snapshot !== submittedSnapshot)) submittedSnapshot = null;
     const enabledMembers = (roster.members || []).filter(member => member.enabled && !member.is_pm);
     const members = (roster.members || []).filter(member => !member.is_pm && (member.enabled || liveWork(member)));
     const enabledCount = enabledMembers.length;
@@ -135,7 +199,9 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     for (const member of members) {
       const row = document.createElement("article"); row.className = "roster-row"; row.dataset.memberId = member.member_id; row.setAttribute("role", "listitem"); row.tabIndex = 0; row.setAttribute("aria-selected", String(member.member_id === selectedId));
       const current = liveWork(member), unavailable = member.assignment?.session_id && activity.count === null, who = document.createElement("div"); who.className = "roster-who";
-      const name = document.createElement("h3"), purpose = document.createElement("span"); name.textContent = member.name; purpose.className = "roster-purpose"; purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent; who.append(name, purpose, stats(member, "roster-row-stats"));
+      const name = document.createElement("h3"), purpose = document.createElement(current ? "button" : "span"); name.textContent = member.name; purpose.className = "roster-purpose"; purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
+      if (current) { purpose.type = "button"; purpose.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); }); }
+      who.append(name, purpose, stats(member, "roster-row-stats"));
       const state = document.createElement(current ? "button" : "span"); state.className = `roster-state${current ? " roster-current" : ""}`; state.textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
       if (current) { state.type = "button"; state.title = "Open current work in Works"; state.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); }); }
       row.append(avatar(member), who, state);
@@ -147,7 +213,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
     element.dataset.catalogVersion = String(catalog.version);
-    renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; syncPreview();
+    renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; renderedSchedule = schedule; syncPreview();
   }
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => onAddMember());
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
@@ -157,5 +223,6 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   }
   sync();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
+  if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
 }

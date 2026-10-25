@@ -4214,6 +4214,7 @@ mod tests {
             BackendEventBackpressurePolicy::ClientScopedSnapshot,
         );
         let schedule = serde_json::json!({
+            "project_key": "0123456789abcdef",
             "roster_revision": 3, "queue_revision": "queue-3", "schedule_revision": 2,
             "members": [{
                 "agent_member_id": "member-a",
