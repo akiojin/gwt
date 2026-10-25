@@ -6,6 +6,7 @@ pub mod launch_authority;
 pub mod launch_finalization;
 pub mod launch_output_mirror;
 pub mod launch_payload;
+pub mod launch_readiness;
 
 use gwt_terminal::{
     pty::{ProcessPolicy, SpawnConfig},
