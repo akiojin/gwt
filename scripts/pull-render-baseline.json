@@ -1,6 +1,5 @@
 [
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resumable_agents\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_entries|board_history_page|log_entries|log_entry_appended/board_entries\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"receive\",\"/board_error|log_error/board_entries\"]",
   "[\"crates/gwt/web/knowledge-kanban-surface.js\",\"applyKnowledgeReceiveEvent\",\"/branch_cleanup_result|branch_cleanup_progress|branch_error\"]",
