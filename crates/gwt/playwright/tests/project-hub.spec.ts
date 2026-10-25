@@ -217,6 +217,34 @@ test.describe("Project Hub and routes", () => {
     await expect(page.locator(".gwt-hub img")).toHaveCount(0);
     expect(await page.evaluate(() => (window as any).__hubRootExecuted)).toBeUndefined();
     expect(await page.locator(".gwt-hub").textContent()).not.toContain("/private/catalog-path");
+    const notice = page.locator(".gwt-hub__notice");
+    const error = page.locator(".gwt-hub__error");
+    for (const project of [projectA, { ...projectB, title: literal }]) {
+      await page.evaluate(project => (window as any).__gwtHubReply({ ...project, kind: "project_opened" }), project);
+      await expect(notice).toHaveText(`Opened ${project.title}. Open in a new tab`);
+      await expect(notice).toBeVisible();
+      await expect(notice.locator("a")).toHaveAttribute("href", `/p/${project.project_key}`);
+      await expect(notice.locator("a")).toHaveAttribute("target", "_blank");
+      await expect(notice.locator("a")).toHaveAttribute("rel", "noopener");
+      await expect(control).toBeFocused();
+    }
+    // A new local open clears the prior result; the same server failure must
+    // render again after that reset rather than being treated as unchanged.
+    await page.getByText("Enter folder path…", { exact: true }).click();
+    for (const message of [literal, literal, ""]) {
+      await page.locator("[data-open-project-path]").fill("/private/open-path");
+      await page.locator("[data-open-project-submit]").click();
+      await expect(notice).toBeHidden();
+      await expect(error).toBeHidden();
+      await control.focus();
+      await page.evaluate(message => (window as any).__gwtHubReply({ kind: "project_open_error", message }), message);
+      await expect(error).toHaveText(message || "Could not open the project.");
+      await expect(error).toBeVisible();
+      await expect(control).toBeFocused();
+      expect(await control.evaluate(element => element === (window as any).__hubRootControl)).toBe(true);
+    }
+    await expect(page.locator(".gwt-hub img")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__hubRootExecuted)).toBeUndefined();
     await page.screenshot({ path: testInfo.outputPath("hub-root-catalog.png"), fullPage: true });
     expect(errors).toEqual([]);
   });
