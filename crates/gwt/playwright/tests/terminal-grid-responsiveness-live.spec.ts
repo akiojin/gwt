@@ -23,8 +23,8 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
       try {
         const id = await createShell(page, created);
         const focusedId = await createShell(page, created);
-        const target = page.locator(`.agent-tile[data-agent-id="${id}"]`);
-        const focusedTerminal = page.locator(`.agent-tile[data-agent-id="${focusedId}"] .xterm-helper-textarea`);
+        const target = page.locator(`.workspace-window[data-id="${id}"]`);
+        const focusedTerminal = page.locator(`.workspace-window[data-id="${focusedId}"] .xterm-helper-textarea`);
         await focusedTerminal.focus();
         await expect(focusedTerminal).toBeFocused();
         await expect(target).toBeVisible();
@@ -36,7 +36,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
               && new URL(candidate.url).pathname === "/ws"
               && new URL(candidate.url).searchParams.has("repo_hash"));
           if (!socket) throw new Error("no live project socket");
-          const target = document.querySelector(`.agent-tile[data-agent-id="${id}"]`)!;
+          const target = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
           const originalFrame = window.requestAnimationFrame;
           const originalCancel = window.cancelAnimationFrame;
           const captured = new Map<number, FrameRequestCallback>();
@@ -101,6 +101,11 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         const evidence = info.outputPath(`${theme}-terminal-output-fallback.json`);
         await writeFile(evidence, JSON.stringify({ theme, observation, errors }));
         await info.attach("terminal-output-fallback-observation", { contentType: "application/json", path: evidence });
+        // Park auxiliary terminals on the empty Works host before removal so
+        // Settings does not create replacement windows during fixture teardown.
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {
           await sendLiveGwtEvent(page, { kind: "close_window", id });
           await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
@@ -255,6 +260,11 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
             socketTraffic, burstTrace,
             sockets: await page.evaluate(() => ((window as any).__gwtPlaywrightSockets ?? []).map((socket: WebSocket) =>
               ({ url: socket.url, readyState: socket.readyState, bufferedAmount: socket.bufferedAmount }))), errors }) });
+        // Park auxiliary terminals on the empty Works host before removal so
+        // Settings does not create replacement windows during fixture teardown.
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator("#split-surfaces").getAttribute("data-split") === "true")
+          await page.locator("#split-view-button").click();
         for (const id of created.reverse()) {
           await sendLiveGwtEvent(page, { kind: "close_window", id });
           // Finish a successful repetition before the next page can discover
@@ -267,20 +277,45 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
   });
 });
 
+async function projectWindows(page: Page): Promise<Array<{ id: string; preset: string }>> {
+  return page.evaluate(() => {
+    const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
+    return workspace.tabs.flatMap((tab: any) => tab.workspace.windows);
+  });
+}
+
+async function showShell(page: Page, id: string) {
+  const windows = await projectWindows(page);
+  const index = windows.findIndex(window => window.id === id);
+  expect(index, "the exact Shell is in the project catalog").toBeGreaterThanOrEqual(0);
+  await page.locator("#window-list-button").click();
+  const rows = page.locator("#window-list-panel .window-list-row");
+  await expect(rows).toHaveCount(windows.length);
+  await rows.nth(index).click();
+  await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+}
+
 async function createShell(page: Page, created: string[]): Promise<string> {
-  // The first terminal fit releases output only after its surface has a layout box.
-  await page.locator('.op-rail__surface[data-surface="agents"]').click();
-  await page.getByRole("tab", { name: "All agents", exact: true }).click();
-  const before = new Set(await page.locator(".workspace-window").evaluateAll(nodes =>
-    nodes.map(node => (node as HTMLElement).dataset.id)));
-  await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell",
-    });
-  const id = await page.waitForFunction(seen => {
-    const shell = [...document.querySelectorAll<HTMLElement>('.workspace-window[data-preset="shell"]')]
-      .find(node => !seen.includes(node.dataset.id!));
-    return shell?.dataset.id;
-  }, [...before], { timeout: 30_000 }).then(handle => handle.jsonValue());
+  const before = new Set((await projectWindows(page)).map(window => window.id));
+  await sendLiveGwtEvent(page, { kind: "create_window", preset: "shell" });
+  await expect.poll(async () => (await projectWindows(page)).filter(window => window.preset === "shell" && !before.has(window.id)))
+    .toHaveLength(1);
+  const id = (await projectWindows(page)).find(window => window.preset === "shell" && !before.has(window.id))!.id;
   created.push(id);
+  await showShell(page, id);
+  if (created.length === 2) {
+    // Shells are auxiliary Settings terminals. Keep both exact PTYs visible in
+    // separate panes so focus, viewport fitting and queue measurements remain real.
+    const beforeSplit = new Set((await projectWindows(page)).map(window => window.id));
+    await page.locator("#split-view-button").click();
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await expect(right.locator('.workspace-window[data-preset="board"]')).toBeVisible();
+    for (const window of await projectWindows(page)) if (!beforeSplit.has(window.id)) created.push(window.id);
+    await right.locator(".split-pane__header").click({ position: { x: 8, y: 8 } });
+    await showShell(page, created[0]);
+    await expect(page.locator('.split-pane[data-surface="settings"]:visible')).toHaveCount(2);
+    await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
+  }
   await expect.poll(() => page.evaluate(id =>
     window.__gwtTerminalTestApi.bufferText(id).trim(), id), { timeout: 30_000 }).toMatch(/[^\n]+[>$#%]$/);
   return id;

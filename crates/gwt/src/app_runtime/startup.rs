@@ -1688,7 +1688,7 @@ impl AppRuntime {
     pub(super) fn spawn_prepared_restored_agent_session(
         &mut self,
         tab_id: &str,
-        session: gwt_agent::Session,
+        mut session: gwt_agent::Session,
         workspace_resume_context: Option<WorkspaceResumeContext>,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
@@ -1703,6 +1703,62 @@ impl AppRuntime {
                     self.remove_refused_session_restore(tab_id, &session.id, None, reason);
                 }
                 return Vec::new();
+            }
+        }
+        let member_root = (!gwt::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
+            && !session.review_dispatch)
+            .then(|| self.tab(tab_id).map(|tab| tab.project_root.clone()))
+            .flatten();
+        if let Some(root) = member_root.as_ref() {
+            if session.agent_name.is_none() {
+                // Only a Session already admitted for this restore may migrate.
+                // A saved placeholder is exact Session provenance, not a name join.
+                let previous = session.clone();
+                let existing_name = self.tab(tab_id).and_then(|tab| {
+                    tab.workspace
+                        .persisted()
+                        .windows
+                        .iter()
+                        .find(|window| window.session_id.as_deref() == Some(session.id.as_str()))
+                        .and_then(|window| window.agent_name.clone())
+                });
+                let name = match existing_name {
+                    Some(name) => Ok(name),
+                    None => {
+                        let known = self
+                            .tab(tab_id)
+                            .map(|tab| {
+                                tab.workspace
+                                    .persisted()
+                                    .windows
+                                    .iter()
+                                    .filter_map(|window| window.agent_name.clone())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        let language = gwt_config::Settings::load()
+                            .map(|settings| settings.ai.effective_language())
+                            .unwrap_or("en");
+                        let history = gwt_core::paths::gwt_project_dir_for_repo_path(root)
+                            .join("agent-names.jsonl");
+                        gwt::agent_names::allocate(&history, language, &HashSet::new(), &known)
+                    }
+                };
+                let result = name.and_then(|name| {
+                    session.agent_name = Some(name);
+                    session.save_if_unchanged(&self.sessions_dir, &previous).map_err(|error| error.to_string())
+                        .and_then(|saved| saved.then_some(()).ok_or_else(|| "Session changed during restore naming; retry with the current Session".to_string()))
+                });
+                if let Err(error) = result {
+                    return self.restore_launch_error_events(tab_id, &session, origin, error);
+                }
+            }
+            if let Err(error) = gwt::agent_names::adopt_project_member_session(
+                root,
+                &self.sessions_dir,
+                &mut session,
+            ) {
+                return self.restore_launch_error_events(tab_id, &session, origin, error);
             }
         }
         let mut config = launch_config_from_persisted_session(&session);
@@ -1731,45 +1787,44 @@ impl AppRuntime {
                     .and_then(|window| window.agent_name.clone())
             })
             .or_else(|| session.agent_name.clone());
-        let fresh_issue_restart =
-            origin == RestoreOrigin::UserRequested && session.linked_issue_number.is_some();
-        let (mut known, active) = self.agent_name_reservations(Some(&session.id));
-        if fresh_issue_restart
-            || agent_name.as_ref().is_some_and(|name| {
-                gwt::agent_names::ensure_available_initial(name, &active).is_err()
-            })
-        {
-            // Reserve the replacement before removing the diagnostic placeholder.
-            // A legacy identity may exist only in the saved Session, so remember
-            // both sources before assigning a new lifetime's name (Issue #3824).
-            known.extend(session.agent_name.iter().chain(agent_name.iter()).cloned());
-            let replacement = self
-                .tab(tab_id)
-                .ok_or_else(|| "Project is closed".to_string())
-                .and_then(|tab| {
-                    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&tab.project_root)
-                        .join("agent-names.jsonl");
-                    let language = gwt_config::Settings::load()
-                        .map(|settings| settings.ai.effective_language())
-                        .unwrap_or("en");
-                    gwt::agent_names::allocate(&history, language, &active, &known)
-                });
-            match replacement {
-                Ok(replacement) => {
-                    tracing::info!(
-                        session_id = %session.id,
-                        previous_name = ?agent_name,
-                        agent_name = %replacement,
-                        fresh_issue_restart,
-                        "assigned a fresh restored Agent name"
-                    );
-                    agent_name = Some(replacement);
-                }
+        let reserved_member = if let Some(root) = member_root.as_ref() {
+            let token = uuid::Uuid::new_v4().to_string();
+            let member = match gwt::agent_names::reserve_project_member(
+                root,
+                &self.sessions_dir,
+                &token,
+                session.linked_issue_number,
+                session.linked_issue_number.and_then(|number| {
+                    gwt::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
+                }),
+                None,
+                session.agent_member_id.as_deref(),
+            ) {
+                Ok(member) => member,
                 Err(error) => {
-                    return self.restore_launch_error_events(tab_id, &session, origin, error);
+                    return self.restore_launch_error_events(tab_id, &session, origin, error)
                 }
-            }
-        }
+            };
+            let reservation = member
+                .assignment
+                .as_ref()
+                .expect("reserved restore assignment")
+                .reservation_id
+                .clone();
+            config
+                .env_vars
+                .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id.clone());
+            config
+                .env_vars
+                .insert("GWT_AGENT_RESERVATION_ID".into(), reservation.clone());
+            agent_name = Some(member.name);
+            Some((root.clone(), member.agent_member_id, reservation))
+        } else {
+            None
+        };
+        // A member survives a new provider conversation and explicit Issue
+        // restart. Exact member reservation below rejects an occupied identity;
+        // display-name initials never authorize replacing it.
         self.remove_stale_paused_agent_window(tab_id, &session.id, None);
         // Snapshot the window registry *after* the paused placeholder is
         // removed: the freshly spawned window may reuse the placeholder's id
@@ -1786,32 +1841,13 @@ impl AppRuntime {
             workspace_resume_context,
             agent_name.clone(),
         ) {
-            Ok(mut events) => {
+            Ok(events) => {
                 if let Some(window_id) = self
                     .window_lookup
                     .keys()
                     .find(|window_id| !existing_windows.contains(*window_id))
                     .cloned()
                 {
-                    if let Some(name) = agent_name {
-                        if let Some(address) = self.window_lookup.get(&window_id).cloned() {
-                            if let Some(tab) = self.tab_mut(&address.tab_id) {
-                                tab.workspace.set_agent_name(&address.raw_id, Some(name));
-                            }
-                            if let Some(context) = self.project_context(&address.tab_id) {
-                                let named_state = self.workspace_state_broadcast(&context);
-                                for event in &mut events {
-                                    if matches!(
-                                        event.event,
-                                        gwt::BackendEvent::WorkspaceState { .. }
-                                    ) {
-                                        *event = named_state.clone();
-                                    }
-                                }
-                            }
-                            let _ = self.persist();
-                        }
-                    }
                     // Issue #4143 (AC-3): mark the in-flight automatic restore
                     // so a failure before PTY start closes the empty pane
                     // instead of persisting it into the next generation. A
@@ -1827,7 +1863,17 @@ impl AppRuntime {
                 }
                 events
             }
-            Err(error) => self.restore_launch_error_events(tab_id, &session, origin, error),
+            Err(error) => {
+                if let Some((root, member, reservation)) = reserved_member {
+                    let _ = gwt::agent_names::release_project_member(
+                        &root,
+                        &self.sessions_dir,
+                        &member,
+                        &reservation,
+                    );
+                }
+                self.restore_launch_error_events(tab_id, &session, origin, error)
+            }
         }
     }
 

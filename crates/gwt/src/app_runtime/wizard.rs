@@ -6354,7 +6354,7 @@ impl AppRuntime {
             || self.pending_launch_completions.contains_key(window_id)
     }
 
-    fn issue_monitor_window_is_live(&self, window_id: &str) -> bool {
+    pub(super) fn issue_monitor_window_is_live(&self, window_id: &str) -> bool {
         // In-place restart retains the prior runtime until the new Pane is
         // installed. Its exit receipt cannot release the current launch's writer.
         if self.issue_monitor_window_launch_pending(window_id) {
@@ -8735,28 +8735,19 @@ fn issue_monitor_owner_launch_profile_choice(
         .map(|option| option.id)
         .collect::<Vec<_>>();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let holds = prefs.launch_admission_provider_quota_holds();
-    let work_tags = vec![if linked_issue_kind == gwt::LinkedIssueKind::Spec {
-        "kind:spec".to_string()
-    } else {
-        "kind:issue".to_string()
-    }];
-    let selection = prefs
-        .select_auto_launch_profile(
-            issue_number,
-            linked_issue_kind == gwt::LinkedIssueKind::Spec,
-            Some(&available),
-            |pool| {
-                select_issue_monitor_profiles_with_codex_config(pool, codex_config_error, |pool| {
-                    gwt::select_launch_profile(pool, &holds, &work_tags, None, &now)
-                })
-            },
-        )
-        .ok_or_else(|| {
-            codex_config_error
-                .unwrap_or("No eligible Issue Monitor automatic tier candidate")
-                .to_string()
-        })?;
+    let selection = select_issue_monitor_automatic_profile(
+        &prefs,
+        &available,
+        issue_number,
+        linked_issue_kind == gwt::LinkedIssueKind::Spec,
+        codex_config_error,
+        &now,
+    )
+    .ok_or_else(|| {
+        codex_config_error
+            .unwrap_or("No eligible Issue Monitor automatic tier candidate")
+            .to_string()
+    })?;
     Ok(IssueMonitorLaunchProfileChoice {
         profiles: gwt::LaunchWizardPreviousProfiles::from_profile(Some(
             selection.profile.clone().into(),
@@ -8764,6 +8755,29 @@ fn issue_monitor_owner_launch_profile_choice(
         selected_agent_id: Some(selection.profile.agent_id),
         skipped: selection.skipped,
         tier: Some(selection.tier),
+    })
+}
+
+/// Shared current-candidate selector. Preview callers use cached availability
+/// and leave provider preflight to the launch worker.
+pub(super) fn select_issue_monitor_automatic_profile(
+    prefs: &gwt::IssueMonitorPrefs,
+    available: &[String],
+    issue_number: u64,
+    is_spec: bool,
+    codex_config_error: Option<&str>,
+    now: &str,
+) -> Option<gwt::issue_monitor::IssueMonitorTierSelection> {
+    let holds = prefs.launch_admission_provider_quota_holds();
+    let work_tags = vec![if is_spec {
+        "kind:spec".to_string()
+    } else {
+        "kind:issue".to_string()
+    }];
+    prefs.select_auto_launch_profile(issue_number, is_spec, Some(available), |pool| {
+        select_issue_monitor_profiles_with_codex_config(pool, codex_config_error, |pool| {
+            gwt::select_launch_profile(pool, &holds, &work_tags, None, now)
+        })
     })
 }
 

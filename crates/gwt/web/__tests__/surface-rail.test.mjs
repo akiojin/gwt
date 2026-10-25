@@ -31,10 +31,10 @@ test("surfaceForPreset folds every window preset into one of the four surfaces",
     index: "issues",
     work: "issues",
     workspace: "issues",
-    agent: "agents",
-    claude: "agents",
-    codex: "agents",
-    shell: "agents",
+    agent: "works",
+    claude: "works",
+    codex: "works",
+    shell: "settings",
     console: "settings",
     board: "board",
     settings: "settings",
@@ -56,7 +56,7 @@ test("surfaceForPreset folds every window preset into one of the four surfaces",
 test("surfaceForWindow puts the PM apart from the agents by its role marker", async () => {
   const { surfaceForWindow } = await importSurfaceRail();
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: true }), "pm");
-  assert.equal(surfaceForWindow({ preset: "claude", is_pm: false }), "agents");
+  assert.equal(surfaceForWindow({ preset: "claude", is_pm: false }), "works");
   assert.equal(surfaceForWindow({ preset: "board" }), "board");
   assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues");
   assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "system" }), "settings");
@@ -67,12 +67,12 @@ test("surface ownership retains authoritative roles and only routes the dedicate
   const { surfaceForWindow } = await importSurfaceRail();
   assert.equal(surfaceForWindow({ preset: "shell", is_pm: true, surface_owner: "agents" }), "pm");
   for (const preset of ["agent", "claude", "codex"]) {
-    assert.equal(surfaceForWindow({ preset, surface_owner: "pm", agent_name: null }), "agents");
+    assert.equal(surfaceForWindow({ preset, surface_owner: "pm", agent_name: null }), "works");
   }
   assert.equal(surfaceForWindow({ preset: "settings", surface_owner: "pm", settingsSection: "issues" }), "pm");
   assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues", "legacy Settings retains its existing section classification");
-  assert.equal(surfaceForWindow({ preset: "shell", surface_owner: "agents" }), "agents");
-  assert.equal(surfaceForWindow({ preset: "shell" }), "agents", "ordinary Shell has a rail host");
+  assert.equal(surfaceForWindow({ preset: "shell", surface_owner: "agents" }), "settings");
+  assert.equal(surfaceForWindow({ preset: "shell" }), "settings", "ordinary Shell has a rail host");
 });
 
 test("the PM sits alone above the rule, then the Surfaces group of Issues / Agents / Board / Settings", () => {
@@ -96,16 +96,16 @@ test("the PM sits alone above the rule, then the Surfaces group of Issues / Agen
   const items = Array.from(surfacesGroup.querySelectorAll("[data-surface]"));
   assert.deepEqual(
     items.map((item) => item.dataset.surface),
-    ["issues", "agents", "board", "settings"],
+    ["issues", "works", "agents", "board", "settings"],
   );
   assert.deepEqual(
     items.map((item) => item.querySelector(".op-rail__surface-label")?.textContent.trim()),
-    ["Issues", "Agents", "Board", "Settings"],
+    ["Issues", "Works", "Agents", "Board", "Settings"],
   );
   for (const item of items) {
     assert.equal(item.tagName, "BUTTON");
     assert.equal(item.getAttribute("type"), "button");
-    assert.ok(item.querySelector("svg"), `${item.dataset.surface} carries an SVG icon`);
+    assert.ok(item.querySelector(".op-rail__surface-icon"), `${item.dataset.surface} carries an icon`);
     assert.equal(item.getAttribute("aria-pressed"), "false");
     assert.ok(item.getAttribute("title"), `${item.dataset.surface} explains itself on hover`);
   }

@@ -254,6 +254,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -285,6 +287,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             update_drain_release: None,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,

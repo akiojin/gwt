@@ -10,6 +10,50 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Project hub catalog receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/hub_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.hub.app_version;',
+    'receiveHubState(event.hub);']) {
+    const mutated = app.replace('case "hub_state": {', `case "hub_state": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Recovery Center Board receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/recovery_center_board_entry');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.error;',
+    'recoveryCenterController?.handleBoardEntry(event);']) {
+    const mutated = app.replace('case "recovery_center_board_entry":',
+      `case "recovery_center_board_entry": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Recovery Center state receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/recovery_center_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.status;',
+    'recoveryCenterController?.handleState(event);']) {
+    const mutated = app.replace('case "recovery_center_state":',
+      `case "recovery_center_state": ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
 test("Launch wizard state receiver commits shared state and rejects bypass rendering", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surfaceFile = 'crates/gwt/web/launch-wizard-surface.js';
@@ -149,7 +193,9 @@ test("Active Work projection receivers commit shared state and reject bypass ren
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const modelFile = 'crates/gwt/web/issue-other-surface.js';
   const model = readFileSync(new URL('../issue-other-surface.js', import.meta.url), 'utf8');
-  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model]]) }).filter(finding =>
+  const activityFile = 'crates/gwt/web/agent-activity-model.js';
+  const activity = readFileSync(new URL('../agent-activity-model.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file, { modules: new Map([[modelFile, model], [activityFile, activity]]) }).filter(finding =>
     /^\/active_work_projection(?:_patch)?(?:\||$)/.test(finding.context));
   assert.deepEqual(findings(app), []);
   for (const kind of ['active_work_projection', 'active_work_projection_patch']) {
@@ -1021,4 +1067,130 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge detail completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const details = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_detail'));
+  const local = text => details(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => details(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Existing queued-load and recovery calls remain synchronous data paths.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ].sort();
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
+      && !finding.path.includes('>renderKnowledgeSelection')));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  const bypass = source.replace('case "knowledge_detail": {',
+    'case "knowledge_detail": { renderKnowledgeSelection(event.id, state, null);');
+  assert.notEqual(bypass, source);
+  assert.ok(local(bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  assert.ok(delegated(app, bypass).some(finding => finding.path.includes('>renderKnowledgeSelection')));
+  for (const label of ['knowledge_detail', 'terminal_preview']) {
+    const appBypass = app.replace(`case "${label}":`,
+      `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+test("Active card preview receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const previews = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('terminal_preview'));
+  const local = text => previews(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => previews(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  assert.deepEqual(local(source), []);
+  assert.deepEqual(delegated(app), []);
+  const bypass = source.replace('case "terminal_preview": {',
+    'case "terminal_preview": { document.body.textContent = event.text;');
+  assert.notEqual(bypass, source);
+  for (const findings of [local(bypass), delegated(app, bypass)]) {
+    assert.ok(findings.some(finding => finding.kind === 'dom-write'));
+  }
+  const appBypass = app.replace('case "terminal_preview":',
+    'case "terminal_preview": document.body.textContent = event.text;');
+  assert.notEqual(appBypass, app);
+  assert.ok(delegated(appBypass).some(finding => finding.kind === 'dom-write'));
+});
+
+test("Knowledge error completions commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const errors = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_error'));
+  const local = text => errors(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => errors(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Search dispatch and load recovery stay synchronous, including the
+  // recovery timer's model update; only direct receiver rendering moves.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ].sort();
+  const directRender = finding => /(?:^|>)applyKnowledgeReceiveEvent>renderKnowledge(?:Bridge|StatusOnly)(?:>|$)/.test(finding.path);
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call' && !directRender(finding)));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  for (const call of ['renderKnowledgeBridge(event.id);', 'document.body.textContent = event.message;']) {
+    const bypass = source.replace('case "knowledge_error": {', `case "knowledge_error": { ${call}`);
+    assert.notEqual(bypass, source);
+    for (const findings of [local(bypass), delegated(app, bypass)]) {
+      assert.ok(findings.some(finding => finding.kind.startsWith('dom-') || directRender(finding)));
+    }
+  }
+  for (const label of ['knowledge_error']) {
+    const bypass = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(bypass, app);
+    assert.ok(delegated(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
+
+test("Branch entry receivers commit shared state and reject direct rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/branch_entries');
+  // The existing state lookup, pure ingest and selection normalization stay synchronous.
+  const dataCalls = [
+    '06cc29f0a75de93d059de5c527a04967d87070031924e5869c4b23a4091837d3',
+    'aa6152497be4307a6487effac25ca2b1f6c60c783b33a9fa9e44790765b56278',
+    'ab5d1ad7bc29d19bedd30294402bc6d9e9bc3f639854ea775759b01c741de37d',
+  ];
+  assert.ok(findings(app).every(finding => finding.kind === 'unresolved-call'));
+  assert.deepEqual(findings(app).map(finding => finding.hash).sort(), dataCalls);
+  for (const bypass of ['document.body.textContent = event.id;',
+    'frontendUnits.branchesFileTreeSurface.renderBranches(event.id);']) {
+    const mutated = app.replace('case "branch_entries": {', `case "branch_entries": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).some(finding => !dataCalls.includes(finding.hash)));
+  }
 });

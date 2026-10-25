@@ -1,304 +1,161 @@
-import { surfaceForWindow } from "./surface-rail.js";
-import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
-import { normalizeWindowRuntimeState, windowRuntimeLabel, windowRuntimeDescription } from "./window-runtime-state.js";
+const finite = value => typeof value === "number" && Number.isFinite(value);
+const number = value => finite(value) ? new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value) : "—";
+const hours = value => finite(value) ? `${Math.round(value / 3600 * 10) / 10}h` : "—";
+const activityPresentation = state => JSON.stringify([state.count, (state.agents || []).map(agent =>
+  [agent.window_id, agent.session_id, agent.runtime_incarnation, agent.issue_number, agent.is_pm])
+  .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
+const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-// The grid owns presentation only. Sessions and terminal runtimes remain shared
-// with the existing window model; column changes are owned by the Agents layout.
-export function createAgentsSurface({ document, windowCatalogModel, getWindows, windowDisplayTitle,
-  isMounted = () => true, mountTerminal, mountPreview, onLayout,
-  onFocus = () => {}, onPreviewFocus = onFocus }) {
-  const element = document.createElement("section");
-  element.className = "agents-surface";
-  element.setAttribute("aria-label", "Agents");
-  element.innerHTML = `<header class="agents-toolbar"><h2>Agents</h2>
-    <label>Columns <input type="number" min="1" max="4" step="1" value="2" aria-label="Agent columns"></label></header>
-    <div class="agents-tabs" role="tablist" aria-label="Agent views"></div>
-    <div class="agents-grid" id="agents-panel" role="tabpanel"></div><p class="agents-empty">No agents. Launch an agent from Issues.</p>`;
-  const grid = element.querySelector(".agents-grid");
-  const tablist = element.querySelector(".agents-tabs");
-  const columns = element.querySelector("input");
-  const explanations = bindControlExplanations({ document, root: element, id: "agents-control-explanation" });
-  const columnsKey = "gwt:ui:agent-columns";
-  try {
-    const saved = document.defaultView.localStorage?.getItem(columnsKey);
-    if (saved !== null && saved !== undefined) columns.value = saved;
-  } catch { /* Keep the default when browser storage is unavailable. */ }
-  const tiles = new Map();
-  const tabs = new Map();
-  const previews = new Map();
-  let previewElement = null;
-  let previewExplanations = null;
-  let selectedId = null;
-  let renderedCatalog = null;
-  function setTitle(node, title, name) {
-    if (!node.classList.contains("agent-title")) {
-      node.classList.add("agent-title");
-      node.innerHTML = '<span class="agent-title__name"></span><span class="agent-title__purpose"></span>';
+export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel,
+  onAddMember = () => {}, onRestMember = () => {}, onOpenWork = () => {} }) {
+  const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
+  element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><button type="button" data-action="add">＋ Add member</button></div>
+    <p class="roster-description">Named members are reused across issues. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
+    <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
+  let selectedId = null, tab = "team", previewElement = null, disposed = false;
+  let renderedRoster, renderedActivity, renderedCatalog;
+  function liveWork(member) {
+    if (!member?.assignment?.session_id) return null;
+    const catalog = windowCatalogModel.read().catalog, app = catalog.appState;
+    const windows = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows || [];
+    return (activityModel.read().agents || []).find(assignment => !assignment.is_pm && assignment.session_id === member.assignment.session_id &&
+      windows.some(data => data.id === assignment.window_id && data.session_id === assignment.session_id && data.preset !== "shell")) || null;
+  }
+  function workTitle(assignment) {
+    const app = windowCatalogModel.read().catalog.appState;
+    const data = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows.find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
+    return data?.dynamic_title || data?.title || "—";
+  }
+  function openCurrent(memberId, expected) {
+    const member = rosterModel.read().members.find(member => member.member_id === memberId);
+    const current = liveWork(member);
+    if (current && current.window_id === expected.window_id && current.session_id === expected.session_id && current.runtime_incarnation === expected.runtime_incarnation) onOpenWork(current);
+  }
+  function stats(member, className = "") {
+    const result = document.createElement("div"); result.className = `roster-stats ${className}`;
+    for (const [label, value] of [["Assigned issues", number(member.issue_count)], ["Landed", number(member.landed_count)], ["Active time", hours(member.active_seconds)], ["Tokens", number(member.tokens)]]) {
+      const stat = document.createElement("div"); stat.className = "roster-stat";
+      const b = document.createElement("b"), span = document.createElement("span"); b.textContent = value; span.textContent = label; stat.append(b, span); result.append(stat);
     }
-    node.querySelector(".agent-title__name").textContent = name;
-    node.querySelector(".agent-title__purpose").textContent = title.slice(name.length);
-    node.setAttribute("aria-label", title);
-    setControlExplanation(node, title);
+    return result;
   }
-  function createRuntimeChip() {
-    const chip = document.createElement("span");
-    chip.className = "status-chip";
-    chip.innerHTML = '<span class="status-dot" aria-hidden="true"></span><span class="status-label"></span>';
-    return chip;
+  function avatar(member) {
+    const result = document.createElement("span"); result.className = "roster-avatar"; result.setAttribute("aria-hidden", "true"); result.textContent = Array.from(member.name || "?")[0]; return result;
   }
-  function setRuntimeChip(chip, data) {
-    const state = normalizeWindowRuntimeState(data.status, data.preset);
-    const label = windowRuntimeLabel(state);
-    const description = windowRuntimeDescription(state, data.preset);
-    chip.className = `status-chip ${state}`;
-    chip.querySelector(".status-label").textContent = label;
-    chip.title = description;
-    chip.setAttribute("aria-label", label === description ? label : `${label}: ${description}`);
+  function selectMember(memberId) {
+    if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId && (member.enabled || liveWork(member)))) return false;
+    selectedId = memberId; tab = "team"; sync();
+    [...element.querySelectorAll(".roster-row")].find(row => row.dataset.memberId === memberId)?.focus({ preventScroll: true });
+    return true;
+  }
+  function restSelected() {
+    const member = rosterModel.read().members.find(member => member.member_id === selectedId && member.enabled);
+    if (member && rosterModel.read().members.filter(member => member.enabled).length > 1) onRestMember(member.member_id);
+  }
+  function renderDetail(member) {
+    const panel = element.querySelector(".roster-detail"); panel.replaceChildren();
+    if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
+    const head = document.createElement("header"); head.className = "roster-detail-heading";
+    const who = document.createElement("div"); const name = document.createElement("h3"), meta = document.createElement("p");
+    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.append(head, stats(member));
+    const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
+    const ol = history.querySelector("ol"), current = liveWork(member);
+    if (current) {
+      const li = document.createElement("li"); li.className = "roster-now";
+      const label = document.createElement("small"), button = document.createElement("button"), result = document.createElement("span");
+      label.textContent = "Now"; button.type = "button"; button.textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
+      button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result); ol.append(li);
+    }
+    const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
+    for (const item of historyEntries) {
+      const li = document.createElement("li"), time = document.createElement("small"), title = document.createElement("span"), result = document.createElement("small");
+      time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
+      li.append(time, title, result); ol.append(li);
+    }
+    if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
+    if (member.assignment?.session_id && activityModel.read().count === null) {
+      const unavailable = document.createElement("p"); unavailable.className = "roster-description"; unavailable.textContent = "Activity unavailable"; panel.append(unavailable);
+    }
+    panel.append(history);
+    const actions = document.createElement("div"); actions.className = "roster-actions";
+    if (current) { const open = document.createElement("button"); open.type = "button"; open.className = "roster-open"; open.textContent = "Open terminal in Works"; open.addEventListener("click", () => openCurrent(member.member_id, current)); actions.append(open); }
+    const rest = document.createElement("button"); rest.type = "button"; rest.dataset.action = "rest"; rest.textContent = "Rest member"; rest.disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1; rest.addEventListener("click", restSelected); actions.append(rest); panel.append(actions);
+  }
+  function renderPast(contributors, complete) {
+    const kpis = element.querySelector(".roster-past-kpis"); kpis.replaceChildren();
+    for (const [label, value] of [["Contributors", contributors.length], ["Implementation", contributors.filter(item => item.kind === "implementation").length], ["Review", contributors.filter(item => item.kind === "review").length], ["Posts", contributors.every(item => finite(item.post_count)) ? contributors.reduce((total, item) => total + item.post_count, 0) : null]]) {
+      const stat = document.createElement("div"); stat.className = "roster-stat"; const b = document.createElement("b"), span = document.createElement("span"); b.textContent = number(complete === false ? null : value); span.textContent = label; stat.append(b, span); kpis.append(stat);
+    }
+    const body = element.querySelector(".roster-past tbody"); body.replaceChildren();
+    for (const contributor of contributors) {
+      const row = document.createElement("tr");
+      const kind = { implementation: "Implementation", review: "Review" }[contributor.kind] || contributor.kind || "—";
+      for (const [index, value] of [contributor.name || "—", kind, contributor.issue_numbers?.length ? contributor.issue_numbers.map(n => `#${n}`).join(", ") : "—", `${date(contributor.first_posted_at)} – ${date(contributor.last_posted_at)}`, number(contributor.post_count)].entries()) {
+        const td = document.createElement("td"); td.dataset.label = ["Agent", "Kind", "Issues", "Period (UTC)", "Posts"][index]; td.textContent = value; row.append(td);
+      }
+      body.append(row);
+    }
+    element.querySelector(".roster-past-empty").hidden = contributors.length > 0;
+    element.querySelector(".roster-past-empty").textContent = complete === false ? "Previous contributor data is unavailable." : "No previous contributors are recorded.";
   }
   function syncPreview() {
     if (!previewElement) return;
-    const previewGrid = previewElement.querySelector(".agents-grid");
-    for (const [id, preview] of previews) {
-      if (!tiles.has(id)) { preview.cleanup?.(); preview.tile.remove(); previews.delete(id); }
-    }
-    for (const [id, source] of tiles) {
-      let preview = previews.get(id);
-      if (!preview) {
-        const tile = document.createElement("article");
-        tile.className = "agent-tile";
-        tile.dataset.agentId = id;
-        tile.tabIndex = 0;
-        tile.innerHTML = `<header class="agent-tile__header"><h3 tabindex="0"></h3><span>Read-only preview</span></header>
-          <div class="agent-tile__terminal terminal-root"></div>`;
-        for (const event of ["pointerdown", "focusin"]) {
-          tile.addEventListener(event, event => {
-            // The preview moves to the other pane during activation. Do not
-            // let the browser focus that moved node after focusing the xterm.
-            if (event.type === "pointerdown") event.preventDefault();
-            // Native events can run microtasks between listeners. Focus only
-            // after the ancestor pane has activated and moved the live host.
-            requestAnimationFrame(() => {
-              if (!previewElement || !tiles.has(id)) return;
-              if (event.type === "focusin" && event.target.closest(".agent-title")) {
-                tiles.get(id).querySelector("h3").focus({ preventScroll: true });
-              } else {
-                onPreviewFocus(id);
-              }
-            });
-          });
-        }
-        previewGrid.appendChild(tile);
-        preview = { tile, cleanup: mountPreview(id, tile.querySelector(".terminal-root")) };
-        previews.set(id, preview);
-      }
-      const title = source.querySelector("h3");
-      setTitle(preview.tile.querySelector("h3"), title.textContent, title.querySelector(".agent-title__name").textContent);
-      const chip = source.querySelector(".status-chip").cloneNode(true);
-      const previousChip = preview.tile.querySelector(".status-chip");
-      if (previousChip) previousChip.replaceWith(chip);
-      else preview.tile.querySelector("h3").after(chip);
-      preview.tile.hidden = source.hidden;
-    }
-    previewGrid.classList.toggle("is-single", selectedId !== null);
-    previewGrid.style.gridTemplateColumns = grid.style.gridTemplateColumns;
-    previewElement.querySelector(".agents-empty").hidden = tiles.size > 0;
-    previewElement.dataset.catalogVersion = element.dataset.catalogVersion;
-    previewExplanations.refresh();
+    const clone = element.cloneNode(true); clone.classList.add("agents-surface--preview"); clone.setAttribute("aria-label", "Agents read-only preview");
+    for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
+    for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
+    for (const row of clone.querySelectorAll(".roster-row")) row.tabIndex = -1;
+    previewElement.replaceChildren(clone);
   }
   function setPreviewHost(host) {
-    if (!host) {
-      previewExplanations?.dispose();
-      previewExplanations = null;
-      for (const preview of previews.values()) preview.cleanup?.();
-      previews.clear();
-      previewElement?.remove();
-      previewElement = null;
-      return;
-    }
     if (previewElement?.parentElement === host) return;
-    if (!previewElement) {
-      previewElement = document.createElement("section");
-      previewElement.className = "agents-surface agents-surface--preview";
-      previewElement.setAttribute("aria-label", "Agents read-only preview");
-      previewElement.innerHTML = `<header class="agents-toolbar"><h2>Agents</h2><span>Read-only preview · Select this pane to interact</span></header>
-        <div class="agents-grid"></div><p class="agents-empty">No agents. Launch an agent from Issues.</p>`;
-      previewExplanations = bindControlExplanations({ document, root: previewElement, id: "agents-preview-control-explanation" });
-    }
-    if (previewElement.parentElement !== host) host.appendChild(previewElement);
-    syncPreview();
-    explanations.refresh();
+    previewElement?.remove(); previewElement = null;
+    if (!host || disposed) return;
+    previewElement = document.createElement("div"); previewElement.className = "roster-preview-host"; host.append(previewElement); syncPreview();
   }
-  function updateSelection() {
-    for (const [id, tile] of tiles) {
-      tile.hidden = selectedId !== null && id !== selectedId;
-      tile.querySelector(".agent-tile__open").hidden = tabs.has(id);
-    }
-    for (const [id, tab] of tabs) {
-      tab.setAttribute("aria-selected", String(id === selectedId));
-      tab.setAttribute("tabindex", id === selectedId ? "0" : "-1");
-    }
-    grid.setAttribute("aria-labelledby", tabs.get(selectedId).id);
-    grid.classList.toggle("is-single", selectedId !== null);
-    columns.closest("label").hidden = selectedId !== null;
-    grid.style.gridTemplateColumns = `repeat(${selectedId === null ? columns.value : 1}, minmax(0, 1fr))`;
-    syncPreview();
-    explanations.refresh();
-  }
-  function select(id) {
-    if (selectedId === id) return;
-    selectedId = id;
-    updateSelection();
-    if (id !== null) onFocus(id);
-    onLayout();
-  }
-  function closeTab(id) {
-    if (id === null || !tabs.has(id)) return;
-    const entry = tabs.get(id).parentElement;
-    const restoreFocus = id === selectedId || entry.contains(document.activeElement);
-    entry.remove();
-    tabs.delete(id);
-    if (selectedId === id) selectedId = null;
-    updateSelection();
-    if (restoreFocus) tabs.get(selectedId).focus();
-    onLayout();
-  }
-  function openTab(id) {
-    // Navigation can arrive before the catalog's presentation frame.
-    if (windowCatalogModel.read().catalog !== renderedCatalog) sync();
-    const tile = tiles.get(id);
-    if (!tile) return false;
-    if (!tabs.has(id)) {
-      const title = tile.querySelector("h3");
-      addTab(id, title.textContent, title.querySelector(".agent-title__name").textContent);
-    }
-    select(id);
-    tabs.get(id).focus();
-    return true;
-  }
-  function addTab(id, label, name = "") {
-    const entry = document.createElement("div");
-    entry.className = "agents-tab";
-    const tab = document.createElement("button");
-    tab.type = "button";
-    tab.id = id === null ? "agents-tab-all" : `agents-tab-${id}`;
-    tab.setAttribute("role", "tab");
-    tab.setAttribute("aria-controls", grid.id);
-    if (id === null) tab.textContent = label;
-    else setTitle(tab, label, name);
-    tab.addEventListener("click", () => select(id));
-    tab.addEventListener("keydown", event => {
-      if (event.key === "Delete" && id !== null) {
-        event.preventDefault();
-        closeTab(id);
-        return;
-      }
-      const ids = [...tabs.keys()];
-      const index = ids.indexOf(id);
-      const next = { ArrowLeft: (index + ids.length - 1) % ids.length,
-        ArrowRight: (index + 1) % ids.length, Home: 0, End: ids.length - 1 }[event.key];
-      if (next === undefined) return;
-      event.preventDefault();
-      select(ids[next]);
-      tabs.get(ids[next]).focus();
-    });
-    tabs.set(id, tab);
-    entry.appendChild(tab);
-    if (id !== null) {
-      entry.appendChild(tiles.get(id).querySelector(".status-chip").cloneNode(true));
-      const close = document.createElement("button");
-      close.type = "button";
-      close.className = "icon-button agents-tab-close";
-      close.textContent = "×";
-      close.setAttribute("aria-label", `Close ${label} tab`);
-      close.title = "Close tab (agent keeps running)";
-      close.addEventListener("click", () => closeTab(id));
-      entry.appendChild(close);
-    }
-    tablist.appendChild(entry);
-    return tab;
-  }
-  addTab(null, "All agents");
-  function setColumns() {
-    const value = Number(columns.value);
-    const count = Math.max(1, Math.min(4, Number.isFinite(value) ? Math.trunc(value) : 1));
-    columns.value = String(count);
-    updateSelection();
-    onLayout();
-  }
-  columns.addEventListener("input", () => {
-    setColumns();
-    try { document.defaultView.localStorage?.setItem(columnsKey, columns.value); }
-    catch { /* The in-memory preference remains usable without storage. */ }
-  });
-  setColumns();
-
   function sync() {
-    if (!isMounted()) return;
-    const catalog = windowCatalogModel.read().catalog;
-    const windows = getWindows(catalog);
-    const agents = windows.filter((data) => surfaceForWindow(data) === "agents");
-    const ids = new Set(agents.map((data) => data.id));
-    let changed = false;
-    let restoreFocus = false;
-    for (const [id, tile] of tiles) {
-      if (!ids.has(id)) {
-        restoreFocus ||= tile.contains(document.activeElement) || !!tabs.get(id)?.parentElement.contains(document.activeElement);
-        tile.remove(); tiles.delete(id);
-        tabs.get(id)?.parentElement.remove(); tabs.delete(id);
-        changed = true;
-      }
+    if (disposed) return;
+    const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
+    const enabledMembers = (roster.members || []).filter(member => member.enabled && !member.is_pm);
+    const members = (roster.members || []).filter(member => !member.is_pm && (member.enabled || liveWork(member)));
+    const enabledCount = enabledMembers.length;
+    if (!members.some(member => member.member_id === selectedId)) selectedId = members[0]?.member_id || null;
+    const selected = members.find(member => member.member_id === selectedId);
+    element.querySelector(".roster-count").textContent = String(enabledCount);
+    element.querySelector(".roster-capacity-value").textContent = number(roster.capacity);
+    element.querySelector(".roster-active").textContent = `Active ${number(activity.count)}`;
+    const scale = Math.max(enabledCount, roster.recommended_capacity || 0, roster.capacity || 0, 1) * 1.25;
+    const bar = element.querySelector(".roster-capacity-bar"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", String(scale)); bar.setAttribute("aria-valuenow", String(enabledCount));
+    element.querySelector(".roster-capacity-fill").style.width = `${enabledCount / scale * 100}%`;
+    const limit = element.querySelector(".roster-capacity-limit"); limit.hidden = !finite(roster.recommended_capacity); limit.style.left = `${(roster.recommended_capacity || 0) / scale * 100}%`;
+    element.querySelector(".roster-capacity-note").textContent = `Busy ${members.filter(member => liveWork(member)).length} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
+    element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
+    const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
+    const list = element.querySelector(".roster-list"); list.replaceChildren();
+    for (const member of members) {
+      const row = document.createElement("article"); row.className = "roster-row"; row.dataset.memberId = member.member_id; row.setAttribute("role", "listitem"); row.tabIndex = 0; row.setAttribute("aria-selected", String(member.member_id === selectedId));
+      const current = liveWork(member), unavailable = member.assignment?.session_id && activity.count === null, who = document.createElement("div"); who.className = "roster-who";
+      const name = document.createElement("h3"), purpose = document.createElement("span"); name.textContent = member.name; purpose.className = "roster-purpose"; purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent; who.append(name, purpose, stats(member, "roster-row-stats"));
+      const state = document.createElement(current ? "button" : "span"); state.className = `roster-state${current ? " roster-current" : ""}`; state.textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
+      if (current) { state.type = "button"; state.title = "Open current work in Works"; state.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); }); }
+      row.append(avatar(member), who, state);
+      row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
+      row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
+      list.append(row);
     }
-    for (const data of agents) {
-      let tile = tiles.get(data.id);
-      if (!tile) {
-        tile = document.createElement("article");
-        tile.className = "agent-tile";
-        tile.dataset.agentId = data.id;
-        tile.addEventListener("pointerdown", () => onFocus(data.id));
-        tile.addEventListener("focusin", () => onFocus(data.id));
-        tile.innerHTML = `<header class="agent-tile__header"><h3 tabindex="0"></h3><button type="button" class="agent-tile__open">Open tab</button><span class="agent-tile__mode">Interactive</span></header>
-          <div class="agent-tile__terminal terminal-root"></div>`;
-        tile.querySelector("h3").after(createRuntimeChip());
-        tile.querySelector(".agent-tile__open").addEventListener("click", () => openTab(data.id));
-        tiles.set(data.id, tile);
-        grid.appendChild(tile);
-        addTab(data.id, "");
-        changed = true;
-      }
-      const title = windowDisplayTitle(data);
-      const name = ["agent", "claude", "codex"].includes(data.preset)
-        ? String(data.agent_name || "").trim() : "";
-      const open = tile.querySelector(".agent-tile__open");
-      setTitle(tile.querySelector("h3"), title, name);
-      setRuntimeChip(tile.querySelector(".status-chip"), data);
-      open.setAttribute("aria-label", `Open ${title} tab`);
-      const tab = tabs.get(data.id);
-      if (tab) {
-        setTitle(tab, title, name);
-        setRuntimeChip(tab.parentElement.querySelector(".status-chip"), data);
-        tab.parentElement.querySelector(".agents-tab-close").setAttribute("aria-label", `Close ${title} tab`);
-      }
-      const shell = data.preset === "shell";
-      const disabled = (!data.session_id && !shell) || ["stopped", "error", "interrupted"].includes(data.status);
-      tile.querySelector(".agent-tile__mode").textContent = disabled ? "Input unavailable" : "Interactive";
-      mountTerminal(data.id, tile.querySelector(".terminal-root"));
-    }
-    if (selectedId !== null && !ids.has(selectedId)) selectedId = null;
+    renderDetail(selected); renderPast(roster.past_contributors || [], roster.past_complete);
+    for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
+    element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
     element.dataset.catalogVersion = String(catalog.version);
-    updateSelection();
-    if (restoreFocus) tabs.get(selectedId).focus();
-    element.querySelector(".agents-empty").hidden = agents.length > 0;
-    if (changed) onLayout();
-    renderedCatalog = catalog;
+    renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; syncPreview();
   }
-  const unsubscribe = windowCatalogModel.subscribeFrame(state => state.catalog, catalog => {
-    // Explicit sync must still rehost terminals when returning to Agents.
-    if (catalog !== renderedCatalog) sync();
-  });
-  return { element, sync, setPreviewHost, openTab,
-    dispose() { unsubscribe(); explanations.dispose(); setPreviewHost(null); },
-    contains: (id) => tiles.has(id),
-    isVisible: (id) => tiles.has(id) && !tiles.get(id).hidden,
-    reveal: (id) => { if (tiles.has(id) && (!tabs.has(id) || selectedId !== null)) openTab(id); },
-  };
+  for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => onAddMember());
+  element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
+  for (const button of element.querySelectorAll("[data-tab]")) {
+    button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });
+    button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });
+  }
+  sync();
+  const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
+  return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };
 }

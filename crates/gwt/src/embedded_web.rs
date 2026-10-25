@@ -88,6 +88,7 @@ root_js_modules! {
     "project-clone-modal.js" => "renderProjectCloneModal",
     "board-surface.js" => "boardEntryMentionsSelf",
     "agent-kanban-surface.js" => "createAgentKanbanSurface",
+    "agent-activity-model.js" => "createAgentActivityModel",
     "issue-other-surface.js" => "createIssueOtherSurface",
     "workspace-resume-picker-modal.js" => "createWorkspaceResumePickerController",
     "update-cta.js" => "createUpdateCtaController",
@@ -210,6 +211,7 @@ root_js_modules! {
     "surface-rail.js" => "installSurfaceRail",
     "split-surfaces.js" => "createSplitSurfaces",
     "agents-surface.js" => "createAgentsSurface",
+    "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",
     // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
     // cross-tab open-window set by owning project tab so the list matches the
@@ -315,6 +317,12 @@ pub const STATIC_ASSETS: &[StaticAsset] = &[
         content_type: CSS_CONTENT_TYPE,
         cache_control: Some(MUTABLE_CACHE_CONTROL),
         body: AssetBody::Text(include_str!("../web/styles/components.css")),
+    },
+    StaticAsset {
+        route: "/styles/works-agents.css",
+        content_type: CSS_CONTENT_TYPE,
+        cache_control: Some(MUTABLE_CACHE_CONTROL),
+        body: AssetBody::Text(include_str!("../web/styles/works-agents.css")),
     },
     // Issue #2694 Phase D — extracted from the formerly-inline index.html
     // <style> block (~91KB) so initial HTML parse stays fast.

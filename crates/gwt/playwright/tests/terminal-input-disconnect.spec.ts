@@ -56,6 +56,9 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
         this.readyState = FixtureWebSocket.OPEN;
         this.dispatchEvent(new Event("open"));
         this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(workspace) }));
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "disconnect-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'agent-1-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } }) }));
       }
       send(raw) {
         if (this.readyState !== FixtureWebSocket.OPEN) throw new Error("send on a closed socket");
@@ -82,9 +85,9 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
     };
   });
   await page.goto(appUrl);
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
-  await page.getByRole("tab", { name: "Codex", exact: true }).click();
-  const tile = page.locator(".agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id='agent-1']");
+  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+  const tile = page.locator(".works-surface:not(.works-surface--preview) .works-terminal[data-window-id='agent-1']");
   await expect(tile).toBeVisible();
   const terminal = tile.locator(".xterm-helper-textarea");
   await expect(terminal).toBeAttached();
@@ -118,6 +121,8 @@ test("disconnected terminal typing is discarded with a persistent retype notice"
   await expect(notice).toContainText("Connection restored");
   await expect(notice).toContainText("Input typed while disconnected was discarded and was not resent. Retype it when ready.");
   expect(await received()).toBe("before");
+  // Disconnect makes membership Unknown; reopening revalidates the fresh census.
+  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await terminal.focus();
   await page.keyboard.type("after");
   await expect.poll(received).toBe("beforeafter");

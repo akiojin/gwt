@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn issue_restart_can_replace_its_own_initial_when_every_initial_is_reserved() {
+fn issue_restart_preserves_its_member_when_every_initial_is_reserved() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let mut settings = Settings::default();
@@ -27,6 +27,8 @@ fn issue_restart_can_replace_its_own_initial_when_every_initial_is_reserved() {
     session.agent_session_id = Some("native-restart".into());
     session.agent_name = Some("FLegacy".into());
     session.linked_issue_number = Some(3824);
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.save(&runtime.sessions_dir).unwrap();
 
     runtime.spawn_restored_agent_session(
         "tab-1",
@@ -46,13 +48,13 @@ fn issue_restart_can_replace_its_own_initial_when_every_initial_is_reserved() {
         .iter()
         .filter_map(|window| window.agent_name.as_deref())
         .find(|name| name.starts_with('F'))
-        .expect("replacement uses the only available initial");
-    assert_ne!(replacement, "FLegacy");
+        .expect("the same member keeps its saved name");
+    assert_eq!(replacement, "FLegacy");
     assert!(!replacement.chars().any(|ch| ch.is_ascii_digit()));
 }
 
 #[test]
-fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_window() {
+fn automatic_restore_preserves_names_even_when_saved_initials_collide() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -86,7 +88,7 @@ fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_windo
     runtime.queue_startup_auto_resume_sessions(&HashSet::new());
     let events = runtime.startup_auto_resume_ready_events();
 
-    assert_eq!(runtime.pending_auto_resume_sources.len(), 2);
+    assert_eq!(runtime.pending_auto_resume_sources.len(), 2, "{events:?}");
     assert_eq!(runtime.restore_launch_windows.len(), 2);
     let windows = &runtime.tabs[0].workspace.persisted().windows;
     assert_eq!(windows.len(), 2);
@@ -94,8 +96,19 @@ fn automatic_restore_reassigns_colliding_saved_initials_and_launches_every_windo
         .iter()
         .map(|window| window.agent_name.as_deref().expect("restored name"))
         .collect();
-    assert_ne!(names[0].chars().next(), names[1].chars().next());
-    assert!(names.contains(&"モナ") || names.contains(&"モミジ"));
+    assert_ne!(names[0], names[1]);
+    assert!(names.contains(&"モナ") && names.contains(&"モミジ"));
+    let roster = gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir).unwrap();
+    assert_eq!(
+        roster.enabled_count(),
+        1,
+        "restore does not enlarge the configured capacity"
+    );
+    assert_eq!(
+        roster.members.len(),
+        2,
+        "the excess restored member is retained"
+    );
     assert!(events
         .iter()
         .all(|event| !matches!(event.event, BackendEvent::LaunchWizardOpenError { .. })));
@@ -1594,7 +1607,8 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
     assert_eq!(
         runtime.pending_auto_resume_sources.len(),
         OPEN,
-        "only windows whose Work is still open and whose Session can resume may spawn"
+        "only windows whose Work is still open and whose Session can resume may spawn; errors: {:?}",
+        logs.iter().filter(|event| event.fields.get("message").is_some_and(|message| message.contains("failed to spawn restored agent window"))).map(|event| &event.fields).collect::<Vec<_>>()
     );
     assert!(
         runtime

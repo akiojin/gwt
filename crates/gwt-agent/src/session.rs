@@ -354,6 +354,9 @@ pub struct Session {
     /// Stable, gwt-assigned window name, distinct from the provider identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Project roster identity, preserved across provider conversations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     pub agent_session_id: Option<String>,
     /// Forward-only history of agent-tool conversation sessions (the Session
     /// level of Workspace → Work → Session). Appended by
@@ -553,6 +556,7 @@ impl Session {
             branch: branch.into(),
             agent_id,
             agent_name: None,
+            agent_member_id: None,
             agent_session_id: None,
             session_history: Vec::new(),
             status: AgentStatus::Unknown,
@@ -3086,11 +3090,13 @@ mod tests {
         let session = Session::new("/tmp/wt", "main", AgentId::Codex);
         let mut value = serde_json::to_value(&session).unwrap();
         value["agent_name"] = serde_json::json!("ハヤテ");
+        value["agent_member_id"] = serde_json::json!("stable-member");
         let named: Session = serde_json::from_value(value).unwrap();
         let persisted = toml::to_string(&named).unwrap();
         let restored: Session = toml::from_str(&persisted).unwrap();
         let mut value = serde_json::to_value(restored).unwrap();
         assert_eq!(value["agent_name"], "ハヤテ");
+        assert_eq!(value["agent_member_id"], "stable-member");
         value.as_object_mut().unwrap().remove("agent_name");
         let legacy: Session = serde_json::from_value(value).unwrap();
         assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());

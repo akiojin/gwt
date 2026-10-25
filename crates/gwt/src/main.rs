@@ -3301,6 +3301,8 @@ mod tests {
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
             max_active_agents_scope: "machine".to_string(),
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -3327,6 +3329,8 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
             github_budget: None,
@@ -11259,7 +11263,9 @@ fn main() -> std::io::Result<()> {
                 tab_id,
                 target,
                 payload,
-            }) if tab_id == context.tab_id && app.project_context_is_current(&context) => {
+            }) if tab_id == context.tab_id
+                && app.project_context_is_current(&context)
+                && app.prepared_active_work_dispatch_is_current(&tab_id, &payload) => {
                 clients.dispatch_prepared_active_work(payload, target);
             }
             // A background projection from a closed or replaced owner generation

@@ -982,6 +982,13 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    let roster =
+        gwt::agent_names::read_project_roster(&fixture.project_root, &fixture.runtime.sessions_dir)
+            .expect("initialize the persistent roster before GUI capture");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let names_before = fs::read(&history_path).expect("pre-existing member names");
     let previous_spawner = fixture.runtime.blocking_tasks.clone();
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
@@ -996,11 +1003,17 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         );
     drain_queued_blocking_tasks(&queued);
     fixture.runtime.blocking_tasks = previous_spawner;
-    // Admission must reserve the name on its worker. Holding the real history
-    // file makes any GUI-side reallocation fail immediately and causally.
-    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
-    fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .agent_roster
+            .as_ref(),
+        Some(&roster),
+        "read-only preparation must not consume a member"
+    );
+    assert_eq!(fs::read(&history_path).unwrap(), names_before);
+    // Existing members need no per-launch name allocation. Holding history
+    // makes any GUI-side allocation fail immediately and causally.
     let history = fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -1025,10 +1038,7 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         .iter()
         .any(|window| {
             window.linked_issue_number == Some(3165)
-                && window
-                    .agent_name
-                    .as_ref()
-                    .is_some_and(|name| !name.is_empty())
+                && window.agent_name.as_deref() == Some(roster.members[0].name.as_str())
         });
     fs2::FileExt::unlock(&history).expect("release name history");
     // A busy history refusal creates no pane or LaunchComplete. Reap only an
@@ -1037,9 +1047,18 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
         .then(|| take_monitor_launch_complete("prepared-fresh", &fixture.recorded_events));
     assert!(
         named_pane,
-        "prepared completion must publish its worker-reserved name while history is locked"
+        "prepared completion must use the existing canonical member while history is locked"
     );
     assert!(result.as_ref().unwrap().is_ok(), "fresh launch: {result:?}");
+    let completion = result.as_ref().unwrap().as_ref().unwrap();
+    let session =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{}.toml", completion.1)))
+            .expect("load launched member identity");
+    assert_eq!(
+        session.agent_member_id.as_deref(),
+        Some(roster.members[0].agent_member_id.as_str())
+    );
+    assert_eq!(fs::read(&history_path).unwrap(), names_before);
     assert_eq!(
         git_spawns, 0,
         "prepared completion spawned Git on the GUI thread"
@@ -1047,7 +1066,7 @@ fn issue5596_prepared_fresh_launch_does_not_run_git_on_gui_thread() {
 }
 
 #[test]
-fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane() {
+fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1057,13 +1076,24 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
     let mut fixture = monitor_relaunch_fixture_with_settlement(
         temp.path(),
-        "prepared-name-collision",
+        "prepared-roster-revision",
         MonitorProviderConversationFixture::Present,
         MonitorNativeHolderFixture::None,
         false,
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    let roster = gwt::agent_names::mutate_project_roster(
+        &fixture.project_root,
+        &fixture.runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Resize { size: 3 },
+        None,
+    )
+    .expect("initialize enough persistent members for the stale preparation");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let member_names = fs::read(&history_path).expect("pre-existing member names");
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
     let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3166));
@@ -1089,16 +1119,27 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
-    let history = fs::read_to_string(&history_path).expect("worker-reserved name history");
-    let reserved: String = serde_json::from_str(history.lines().last().unwrap()).unwrap();
-    // The existing pane and proposed window ID stay the same. Only its name
-    // changes after capture, so the initial collision must trigger the retry.
-    let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    assert!(tab
-        .workspace
-        .set_agent_name(&other.id, Some(reserved.clone())));
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .agent_roster
+            .as_ref(),
+        Some(&roster),
+        "read-only preparation must not consume a member"
+    );
+    // Keep the existing pane and proposed window ID unchanged. Resting the
+    // first member changes canonical admission without exhausting capacity.
+    let current = gwt::agent_names::mutate_project_roster(
+        &fixture.project_root,
+        &fixture.runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Rest {
+            member_id: roster.members[0].agent_member_id.clone(),
+        },
+        Some(roster.revision),
+    )
+    .expect("rest the first member after preparation");
+    assert!(current.revision > roster.revision);
+    assert_eq!(fs::read(&history_path).unwrap(), member_names);
     let before = gwt_core::process::thread_git_spawn_count();
     assert!(fixture
         .runtime
@@ -1115,11 +1156,30 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
             .windows
             .len(),
         1,
-        "a conflicting reserved initial must not publish a pane"
+        "a stale roster preparation must not publish a pane"
     );
-    run_queued_monitor_gui_diagnostics(&queued, &[3, 1, 0]);
-    assert_eq!(queued.lock().unwrap().len(), 1, "reprepare on a worker");
-    drain_queued_blocking_tasks(&queued);
+    let revalidation = capture_tracing_events(|| drain_queued_blocking_tasks(&queued));
+    assert_eq!(
+        revalidation
+            .iter()
+            .filter(|event| {
+                event.fields.get("phase").map(String::as_str) == Some("monitor_gui_revalidate")
+            })
+            .count(),
+        1,
+        "revalidate exactly once on a worker"
+    );
+    assert_eq!(
+        fixture
+            .recorded_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
+            .count(),
+        1,
+        "the stale roster needs exactly one worker revalidation"
+    );
     fixture
         .runtime
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
@@ -1136,9 +1196,26 @@ fn issue5596_prepared_name_initial_collision_reprepares_before_publishing_a_pane
         .iter()
         .find(|window| window.linked_issue_number == Some(3165))
         .and_then(|window| window.agent_name.as_ref())
-        .expect("reprepared pane has a reserved name");
-    assert_ne!(launched_name.chars().next(), reserved.chars().next());
+        .expect("revalidated pane has a persistent member name");
+    assert_eq!(launched_name, &current.members[1].name);
     assert_eq!(windows.len(), 2);
+    let assigned = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .agent_roster
+        .unwrap();
+    assert!(!assigned.members[0].enabled);
+    assert!(assigned.members[0].assignment.is_none());
+    assert!(assigned.members[1].enabled);
+    assert_eq!(
+        assigned.members[1]
+            .assignment
+            .as_ref()
+            .expect("the enabled canonical member was reserved")
+            .issue_number,
+        Some(3165)
+    );
+    assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    assert_eq!(fs::read(&history_path).unwrap(), member_names);
 }
 
 #[test]
@@ -1256,6 +1333,13 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    let roster =
+        gwt::agent_names::read_project_roster(&fixture.project_root, &fixture.runtime.sessions_dir)
+            .expect("initialize the persistent roster before admission");
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
+        .join("agent-names.jsonl");
+    let member_names = fs::read(&history).expect("pre-existing member names");
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     fixture
@@ -1269,9 +1353,15 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
-        .join("agent-names.jsonl");
-    let reserved_names = fs::read(&history).expect("worker reserved identity");
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .agent_roster
+            .as_ref(),
+        Some(&roster),
+        "read-only preparation must not consume a member"
+    );
+    assert_eq!(fs::read(&history).unwrap(), member_names);
     // The host sampler creates/renews this file independently of launch facts.
     // Issue #6096: a renewal that grants the same slot limit is settled on the
     // GUI by that decision, so a host slower than the ~5s renewal cadence
@@ -1288,9 +1378,25 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
     );
     assert_eq!(
         fs::read(&history).unwrap(),
-        reserved_names,
-        "capacity renewal must retain the prepared identity"
+        member_names,
+        "capacity renewal must reuse the persistent member names"
     );
+    assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    let assigned = gwt::load_issue_monitor_prefs(&prefs_path)
+        .unwrap()
+        .agent_roster
+        .unwrap();
+    let member = assigned
+        .members
+        .iter()
+        .find(|member| {
+            member
+                .assignment
+                .as_ref()
+                .is_some_and(|assignment| assignment.issue_number == Some(3165))
+        })
+        .expect("capacity renewal admits one canonical member");
+    assert_eq!(member.agent_member_id, roster.members[0].agent_member_id);
 
     let input = fixture.runtime.capture_issue_monitor_spawn_admission(
         &fixture.project_root,

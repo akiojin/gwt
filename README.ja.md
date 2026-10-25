@@ -435,7 +435,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issue Monitor が自動起動した Agent は、
   Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
-  したいときは `Windowize` で同じセッションを Agents の個別タブに開けます。各行には対応する Work
+  したいときは `Windowize` で同じセッションを Works のネイティブ端末に開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
 - `Logs` — project diagnostics と live log surface
@@ -473,13 +473,11 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 `Load earlier entries` を選ぶと、古い投稿を再取得できます。過去の履歴を閲覧中は
 `Back to latest entries` で最新の更新へ戻れます。
 
-gwt は作業 Agent の起動時に、出力言語に合う覚えやすい名前をランダムに割り当てます。
-バッジ・ウィンドウタイトル・Fleet・Kanban・Board に表示し、PM も名前で状況を報告します。
-名前はプロジェクトの過去の担当名と重複せず、番号の接尾辞は付けません。
-候補を使い切ると言語に合う姓を組み合わせて候補を広げます。
-自動復元では既存の名前を維持し、Issue を担当する Agent の明示的な再起動では新しい名前を割り当てます。
-担当開始・引継ぎ・PR 作成・完了は担当名付きで Issue のコメントに残り、PR 本文にも担当名を載せます。
-常駐 PM は独自の固定表示を維持します。
+実装 Agent はプロジェクト単位の永続メンバーとして、出力言語に合う名前を持ちます。
+新しい Issue では空いているメンバーを再利用し、SPEC の続きでは前回の担当が空いていれば優先します。
+新しいメンバー名はプロジェクト内で重複せず、候補が尽きると言語に合う姓で候補を広げます。
+復元や再起動でもメンバー ID と名前を維持します。Works、Agents、Fleet、Kanban、Board、
+Issue コメント、PR の担当者表示に名前が現れ、常駐 PM は役割としての表示を維持します。
 
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
 PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ内のシェルを使います。
@@ -514,15 +512,22 @@ Monitor はキュー内の位置を維持し、**Blocked by dependency** と未�
 前提の情報が無い場合や判定できない場合は依存待機を適用せず、循環は警告を表示して
 循環する辺だけを無効にします。マーカーを削除した場合も次の scan で待機を解除します。
 
+Active 列には、この端末でエージェントプロセスの生存を確認した Issue を表示します。
+Active バッジは PM を含むエージェント人数を数え、Issue 数と PM 人数を別に示します。
+同じ Issue にエージェントが 2 人いてもカードは 1 枚です。`Active —` は生存情報の取得待ちです。
+過去の活動は **Recorded work**、別の担当者の claim は **Claimed elsewhere** と表示し、
+いずれもローカルで動くエージェントには数えません。
+
 検索と Kanban / Split の切り替えは同じ行に並びます。要約帯には Running（稼働中）、
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
-容量通知へのリンク、Autonomous、Start / Stop、⚙ を表示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。⚙ で同じペインの設定行を展開し、
+容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
+スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
+エラーの詳細と履歴は通知センターで確認できます。**Issues settings** で同じペインの設定行を展開し、
 **Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
-設定を閉じると Autonomous と Start / Stop は要約帯に戻ります。Auto-apply updates は **System** で設定します。
-Max active は **Manual** で数値を編集し、**Apply** で最終値を保存します。
-**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
+設定を閉じても要約帯のスイッチを操作できます。Auto-apply updates は **System** で設定します。
+Agents 名簿のあるプロジェクトでは **Max active** で有効メンバー数を編集し、**Apply** で名簿を増減します。**Auto** は選べません。
+名簿のない旧設定では **Manual** で数値を編集できます。**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
 稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
 Auto-refill は**既定で OFF**です。
 有効にすると、条件を満たす open Issue を設定したキュー上限まで自動補充します。
@@ -530,11 +535,16 @@ Auto-refill は**既定で OFF**です。
 
 Kanban は既定で全幅です。カードを選ぶとプレビューが開き、**Issue / Output** で
 本文・受け入れ基準とエージェントの読み取り専用出力を切り替えます。
-**Windowize** でエージェントを Agents の個別タブに開けます。**Close preview** または Escape で
+段の自動選択が有効な場合、カードには実行中の段、または現在の次回段の候補を表示します。
+両タブのプレビューで provider・model・effort を確認でき、**Raise one tier** は
+その Issue の次回起動の最低段だけを一段上げます。実行中のエージェントの設定は変わりません。
+変更はサーバーで受理された後に反映され、最上段では上げられない理由を表示します。
+次回段の候補は起動時の検証で変わることがあります。
+**Windowize** でエージェントを Works のネイティブ端末に開けます。**Close preview** または Escape で
 全幅に戻ります。狭い幅ではプレビューをボードの上に重ね、列は縮めず横スクロールします。
 従来の `issue_monitor` preset も同じ Issue サーフェスを開きます。
 
-**Max active** は新規設定で **Auto** を使用します。推奨値には CPU、空きメモリとディスク、
+共有の **Machine budget** は、名簿が要求するメンバー数とは別の設定です。既定の **Auto** は CPU、空きメモリとディスク、
 GUI の CPU 使用量、他プロジェクトの稼働中エージェントを反映します。稼働中のエージェントが
 ない登録済みプロジェクトは配分を消費しません。**Machine budget** には制約になった資源を
 表示し、Monitor の実装・レビュー上限と PM を含む総数を区別します。計測が未完了または
@@ -542,15 +552,18 @@ GUI の CPU 使用量、他プロジェクトの稼働中エージェントを�
 `target` が存在しない場合や計測中の場合も、それを理由に新規起動を止めません。
 完全な実測により上限が 0 になることはあります。容量を下げた資源や稼働中エージェントの
 消費は status とエラー台帳に記録します。
-**Manual** で正の数値を入力して **Apply** を押すと固定上限を保存し、**Auto** で推奨値への追従に戻せます。
-Auto / Manual と手動の要求上限は、このマシンの全プロジェクトで共通です。Manual は
+名簿の作成前は、旧 **Max active** 操作で **Manual** の固定上限または推奨値へ追従する **Auto** を選べます。
+この machine policy は全プロジェクトで共通です。Manual は
 実装・レビュー窓の合計上限で、他プロジェクトの消費を引いた残りを各プロジェクトへ配分します。
 PM 窓の会計は別に表示し、Settings には自プロジェクトの割当と他プロジェクトの消費を併記します。
 共通の容量設定の仕様は [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) を参照してください。推奨値を超える入力も許可しますが、
 検証が完走しない可能性と、時間に依存するテストの失敗が無関係な PR を妨げる可能性を警告します。
-自動化では `issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
+名簿のあるプロジェクトでは `issue.monitor.config.set` に `{"max_active":4}` を渡すと有効メンバーを4人へ増減します。
+人数と要求上限を一致させるため、Auto への変更は拒否します。名簿のない旧設定では、
+`issue.monitor.config.set` に `{"max_active_mode":"auto"}` を渡すと Auto、
 `{"max_active":4}` を渡すと上限 4 の Manual になります。`issue.monitor.status` は実効上限、
 `max_active_agents_override`（共有の要求値）、`max_active_agents_scope: "machine"`、共有実測値の `agent_capacity` を返します。
+名簿のあるプロジェクトでは `agent_roster_capacity` と `agent_roster_revision` がプロジェクトの人数設定を表します。
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
@@ -888,13 +901,19 @@ milestone のみ・category のみ・他 Goal の参照から所属を広げま�
 `unobserved_issues` と Monitor の取得元・観測範囲も確認してください。この観測は
 Goal や指標の達成・critical path・起動可能性を証明せず、優先順位や起動の変更を
 許可しません。
+各ロードマップ項目の `dependency_observations` は、その行に直接保存された Issue の
+診断だけを選び、供給された行順・重複・依存情報の欠落を保持します。空・重複 ID や
+不正な紐付けも行ごとの所属を維持し、Goal・milestone・他の行から所属を広げません。
+Monitor がなければ空所属でも null、供給された snapshot に一致する行がなければ [] です。
+`unobserved_issues` と Monitor の取得元・スキャン時刻・対象範囲の制限を併せて確認します。
+この照合だけで完全なグラフ・critical path・起動可能性・優先順位・health は判断しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
 空・重複 ID や不正な紐付けも行を分けて保持し、Goal・Milestone・他の行から所属を
 広げません。queue/active 所属だけでは inbox 状態を推定しません。Monitor がなければ
-直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属は
-空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
+直接所属の全 Issue を未観測とし、degraded 観測では取得元を保持します。空所属の状態・
+未観測配列は空配列です。この観測だけで health・完了・優先順位・起動許可を判断しません。
 マイルストーンの `target_date_observation` は、厳密な `YYYY-MM-DD` の目標日と、
 記録済みスキャンの UTC 暦日を比較します。`days_past_target_at_scan` は目標日の当日・
 以前なら 0、日付が欠落・不正なら不足情報名とともに不明を返し、現在時計を使いません。
@@ -1575,26 +1594,27 @@ project 固有の規約を明示的に渡すには、
 
 ## サーフェス操作
 
-- レールから **Issues**、**Agents**、**Board**、**Settings** を選ぶと、コンテンツ領域全体に表示します。
-- **PM** は独立したレール入口から開き、単一ペインで表示します。
-- 各面に窓のクローズ・最小化・移動・リサイズ操作はありません。Agent タブを閉じても表示だけが閉じられ、セッションは動作を続けます。
-- プロジェクトバーの **Split view** で左右のペインを表示し、それぞれのサーフェスを選びます。
-- **Close split** でアクティブなサーフェスを単一ペインに戻します。
-- **Agents** では同じライブターミナルを維持して、**All agents** と個別タブを切り替えます。
+- レールから **Issues**、**Works**、**Agents**、**Board**、**Settings** を選びます。
+- **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。
+- **Works** は端末上で稼働する Agent を1人1行で表示し、直近3行の出力を載せます。行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
+- **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
+- **Add member** はプロジェクトの希望同時実行数を1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
+- **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
 
-旧自由配置形式で保存したワークスペースも、窓とセッションを現在の各面へ復元します。旧位置・サイズ・カメラ設定は再保存時に破棄します。
+Works には Session に帰属する入力・キャッシュ・出力、直近30分の活動グラフ、
+ブランチと検証の状態を表示します。取得できない値は **—** とし、コンテキスト残量は
+provider の直接報告がある場合だけ表示します。Today はこのプロジェクトの実測会話を集計し、
+アカウント全体の使用量を転用しません。個別 PR 情報は表示しません。
+
+保存した Session は現在の各面へ復元します。旧端末タブ・grid・Columns 指定は再読み込みや
+再起動後も復活せず、名簿の Team/Past タブは維持します。
 
 ## Agent の巡回
 
-`Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、個別 Agent タブを
-状態順（running/starting → waiting/idle → その他）に選択します。
-Issue 内に表示された Agent と Shell のターミナルも含み、PM はスキップします。
-分割表示を維持し、選んだターミナルに入力フォーカスを移します。
-選択中のタブを閉じると Agent を停止せず All agents に戻り、巡回で同じターミナルを
-再び開けます。
-
-Agent のカードとタブのタイトルは1行表示で、先頭の名前は固定されます。
-作業内容を横にスクロールするか、タイトルへのホバー・キーボードフォーカスで全文を読めます。
+`Cmd/Ctrl+Shift+Right` と `Cmd/Ctrl+Shift+Left` で、稼働中の実装 Agent を
+状態順に選択し、分割表示を維持します。PM と補助 Shell はスキップします。
+選択したネイティブ端末へ入力でき、一覧へ戻っても Session は動作を続けます。
+名前は1行に固定し、長い作業内容は横スクロールやホバーで全文を読めます。
 Issue と Project Manager の設定項目も、ホバーとキーボードフォーカスで説明を表示します。
 
 ## Operator デザイン言語 (SPEC-2356)

@@ -722,3 +722,20 @@ test("failed update preference save restores the last authoritative toggle value
   assert.equal(state.auto_apply_updates, true);
   assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\)/);
 });
+
+
+test("persistent roster edits project member capacity while retaining the separate effective allocation", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" }, status: {
+    agent_roster_capacity: 5, agent_roster_revision: 3, max_active_agents: 2, max_active_agents_override: null,
+  }, send: () => {} });
+  const max = panel.querySelector('[aria-label="Max active"]');
+  const mode = panel.querySelector('[aria-label="Max active mode"]');
+  assert.equal(max.value, "5");
+  assert.equal(max.disabled, false);
+  assert.equal(mode.disabled, true);
+  assert.match(max.dataset.issueExplanation, /members.*project/i);
+  panel.updateMaxActiveStatus({ agent_roster_capacity: 6, agent_roster_revision: 4, max_active_agents: 1 });
+  assert.equal(max.value, "6");
+});

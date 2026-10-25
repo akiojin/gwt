@@ -4319,6 +4319,12 @@ fn apply_monitor_config_set(
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
+    if max_active_auto && prefs.agent_roster.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Project Agent roster capacity is controlled by its enabled members",
+        ));
+    }
     validate_monitor_config_set(
         allowed_labels,
         enabled,
@@ -4546,7 +4552,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 caller_is_resident_pm,
             )?;
             let requested = candidate.max_active_last_change.as_ref()
-                .filter(|_| max_active.is_some() || max_active_auto);
+                .filter(|_| (max_active.is_some() || max_active_auto) && candidate.agent_roster.is_none());
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
                 prefs, expected_config_token, requested, &control_id,
@@ -4674,27 +4680,6 @@ fn run_monitor_tiers_set<E: CliEnv>(
     Ok(0)
 }
 
-fn apply_monitor_tier_set(
-    prefs: &mut crate::IssueMonitorPrefs,
-    number: u64,
-    tier: u8,
-) -> io::Result<()> {
-    if usize::from(tier) >= prefs.effective_launch_tiers().len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "tier is outside the configured launch tiers",
-        ));
-    }
-    prefs
-        .advance_effect_authority_epoch()
-        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    let mut monitor =
-        crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
-    monitor.set_issue_minimum_launch_tier(number, tier);
-    *prefs = monitor.prefs();
-    Ok(())
-}
-
 fn run_monitor_tier_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -4706,11 +4691,7 @@ fn run_monitor_tier_set<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        crate::issue_monitor::check_expected_issue_monitor_config_token(
-            prefs,
-            expected_config_token,
-        )?;
-        apply_monitor_tier_set(prefs, number, tier)
+        prefs.apply_issue_minimum_launch_tier(number, tier, expected_config_token)
     })
     .map_err(io_as_api_error)?;
     out.push_str(&monitor_tiers_projection(&prefs).to_string());

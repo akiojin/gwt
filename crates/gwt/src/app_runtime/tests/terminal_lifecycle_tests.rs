@@ -3021,18 +3021,20 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
 fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_scan() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let drain_root = temp.path().join("drain");
-    let target_root = temp.path().join("target");
-    fs::create_dir_all(&drain_root).unwrap();
-    fs::create_dir_all(&target_root).unwrap();
-    init_repo(&drain_root);
-    init_repo(&target_root);
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
-    let tabs = vec![
-        sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
-        sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
-    ];
-    for version in [env!("CARGO_PKG_VERSION"), "0.1.0"] {
+    for (case, version) in [env!("CARGO_PKG_VERSION"), "0.1.0"].into_iter().enumerate() {
+        // Each case owns its project store and launch worker Session directory.
+        let case_root = temp.path().join(format!("case-{case}"));
+        let drain_root = case_root.join("drain");
+        let target_root = case_root.join("target");
+        fs::create_dir_all(&drain_root).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        init_repo(&drain_root);
+        init_repo(&target_root);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
+        let tabs = vec![
+            sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
+            sample_project_tab("target", "target", target_root, ProjectKind::Git, &[]),
+        ];
         let mut prefs = gwt::IssueMonitorPrefs {
             update_drain: Some(gwt::IssueMonitorUpdateDrain {
                 version: version.into(),
@@ -3044,7 +3046,7 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
             ..Default::default()
         };
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
-        let mut runtime = sample_runtime(temp.path(), tabs.clone(), Some("target"));
+        let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .branch("work/issue-5351-test")
             .build();

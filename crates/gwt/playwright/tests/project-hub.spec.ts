@@ -181,6 +181,53 @@ async function installRouteBackend(page: Page) {
 }
 
 test.describe("Project Hub and routes", () => {
+  test("Project hub catalog pulls consecutive snapshots without replacing active controls", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL(`/p/${projectA.project_key}`, base || ORIGIN_URL).href);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect(page.locator("#close-project-button")).toBeVisible();
+    const control = page.locator("#window-list-button");
+    await control.focus();
+    await control.evaluate(element => { (window as any).__hubCatalogControl = element; });
+    const emit = (hub: Record<string, unknown>) => page.evaluate(hub => {
+      (window as any).__gwtHubReply({ kind: "hub_state", hub });
+    }, hub);
+    for (const version of ["9.9.10", "9.9.11"]) {
+      await emit({ app_version: version, projects: [projectA, projectB], recent_projects: [] });
+      await expect(page.locator("#app-version")).toHaveText(`v${version}`);
+      await expect(page.locator("#close-project-button")).toBeVisible();
+      await expect(page.locator("#project-picker")).not.toHaveClass(/visible/);
+      await expect(control).toBeFocused();
+      expect(await control.evaluate(element => element === (window as any).__hubCatalogControl)).toBe(true);
+    }
+    expect(await page.evaluate(() => (window as any).__gwtRouteSockets.filter((socket: any) =>
+      socket.projectKey === "0123456789abcdef").length)).toBe(1);
+    // The recent list belongs to the picker, so expose it by removing the
+    // current Project from the catalog before updating its entries.
+    const literal = '<img src=x onerror="window.__hubCatalogExecuted=true"> Recent catalog';
+    for (const [index, title] of ["First recent catalog", literal].entries()) {
+      await emit({ app_version: `9.9.${12 + index}`, projects: [projectB],
+        recent_projects: [{ path: "/fixture/recent", title, kind: "git" }] });
+      await expect(page.locator("#app-version")).toHaveText(`v9.9.${12 + index}`);
+      await expect(page.locator("#project-picker")).toBeVisible();
+      await expect(page.locator(".recent-project-row")).toHaveCount(1);
+      await expect(page.locator(".recent-project-title")).toHaveText(title);
+    }
+    await expect(page.locator(".recent-project-row img")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__hubCatalogExecuted)).toBeUndefined();
+    await page.locator(".recent-project-row").click();
+    await expect.poll(() => page.evaluate(() => (window as any).__gwtSent.some((entry: any) =>
+      entry.scope === null && entry.message.kind === "reopen_recent_project"
+      && entry.message.path === "/fixture/recent"))).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("hub-catalog.png"), fullPage: true });
+    expect(errors).toEqual([]);
+  });
+
   test("Work Projection Prune feedback preserves results and repeated errors", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     const messages: string[] = [];

@@ -382,7 +382,11 @@ impl HostRunnerProbeOutcome {
     }
 }
 
-const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for the installed-runner health probe. Windows `npm` shims for
+/// Codex take over five seconds to answer `--version` on loaded hosts, so a
+/// healthy runner must not be rejected for being slow (#6276); a runner that
+/// is still silent at this deadline keeps failing closed.
+pub const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Stable phrase for transient launch failures that Issue Monitor retries.
 pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
@@ -3846,7 +3850,7 @@ fi
         // SPEC-3864: Antigravity has no runtime package route, so a hanging
         // direct runner cannot be rescued by a bunx/npx fallback.
         let direct = temp.path().join("agy");
-        fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
+        fs::write(&direct, "#!/bin/sh\nsleep 60\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
         let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
@@ -3859,10 +3863,39 @@ fi
 
         assert!(result.is_err(), "hanging direct runner must fail closed");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(7),
-            "direct runner health must honor the five-second deadline: {:?}",
+            started.elapsed() < DIRECT_RUNNER_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+            "direct runner health must honor the probe deadline: {:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_prepare_admits_a_slow_but_healthy_direct_runner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // #6276: a runner that answers `--version` after the old five-second
+        // deadline is healthy and must launch on slow hosts.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        let direct = temp.path().join("codex");
+        fs::write(&direct, "#!/bin/sh\nsleep 6\necho 'codex-cli 0.164.0'\n")
+            .expect("write slow runner");
+        fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).expect("chmod slow runner");
+        config.command = direct.display().to_string();
+
+        let report = resolve_host_runner_health_checked_with_probe(
+            &mut config,
+            |kind, command, args, env, remove_env, cwd| match kind {
+                HostRunnerProbeKind::Direct => {
+                    probe_host_runner_outcome(kind, command, args, env, remove_env, cwd)
+                }
+                HostRunnerProbeKind::CodexConfig => HostRunnerProbeOutcome::success(),
+            },
+        )
+        .expect("slow healthy runner must be admitted");
+
+        assert_eq!(report.version_output.as_deref(), Some("0.164.0"));
     }
 
     #[test]

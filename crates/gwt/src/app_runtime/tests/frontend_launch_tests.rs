@@ -2666,11 +2666,18 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
-        repo,
+        repo.clone(),
         ProjectKind::Git,
         &[WindowPreset::Issue],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    gwt::agent_names::mutate_project_roster(
+        &repo,
+        &runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Resize { size: 2 },
+        None,
+    )
+    .expect("two independent manual launch routes need two members");
 
     runtime
         .spawn_agent_window(

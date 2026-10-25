@@ -87,52 +87,51 @@ test.describe("Issue preview placement", () => {
       await expect(output.locator(".xterm, input, textarea, third")).toHaveCount(0);
     }
     expect(await page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview-2").hasRuntime)).toBe(false);
+    const search = page.locator(".surface-knowledge .knowledge-search");
+    await search.focus();
+    await outputs.nth(1).evaluate(element => element.setAttribute("data-preview-retained", "true"));
     await page.evaluate(() => window.__fixtureSocket.emit({
       kind: "terminal_preview", id: "tab-issue::agent-preview-2", text: "second\n<third>\nnewest",
     }));
     await expect(outputs.nth(1).locator("pre")).toHaveText("second\n<third>\nnewest");
+    await expect(outputs.nth(1)).toHaveAttribute("data-preview-retained", "true");
+    await expect(outputs.first().locator("pre")).toHaveText("agent 1 first\n  second\n<third>");
+    await expect(outputs.nth(2).locator("pre")).toHaveText("agent 3 first\n  second\n<third>");
+    await expect(search).toBeFocused();
     await page.screenshot({ path: info.outputPath("active-live-tails.png") });
     await outputs.first().locator("pre").click();
     await page.keyboard.type("no input");
     expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input"))).toEqual([]);
   });
 
-  test("Agents shows all inline agents while Issue preview stays read-only", async ({ page }, testInfo) => {
+  test("Works shows inline agents while the Issue preview stays read-only", async ({ page }, info) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installIssuePreviewBackend(page);
-    await page.goto(liveUrl || APP_URL);
-    await openIssueOutput(page);
+    await installIssuePreviewBackend(page); await page.goto(liveUrl || APP_URL); await openIssueOutput(page);
     await page.getByRole("button", { name: "Split view", exact: true }).click();
-    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
-    const tiles = page.locator(".agent-tile");
-    await expect(tiles).toHaveCount(3);
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("works");
+    await expect(right.locator(".work-row")).toHaveCount(3);
     const preview = page.locator(".issue-preview .terminal-text-preview");
-    await expect(preview).toBeVisible();
-    await expect(page.locator(".issue-preview-mode")).toHaveText("Read-only preview");
+    await expect(preview).toBeVisible(); await expect(page.locator(".issue-preview-mode")).toHaveText("Read-only preview");
     await page.evaluate(() => window.__emitAgentOutput("SIMULTANEOUS LIVE OUTPUT"));
     await expect(preview).toContainText("SIMULTANEOUS LIVE OUTPUT");
-    await expect(tiles.first().locator(".xterm-rows")).toContainText("SIMULTANEOUS LIVE OUTPUT");
-    await page.getByRole("tablist", { name: "Agent views" }).getByRole("tab").nth(2).click();
-    await expect(tiles.first()).toBeHidden();
+    await expect(right.locator('.work-row[data-window-id="tab-issue::agent-preview"] .work-tail > pre')).toContainText("SIMULTANEOUS LIVE OUTPUT");
+    await right.locator('.work-row[data-window-id="tab-issue::agent-preview-2"] .work-open').click();
     await page.evaluate(() => window.__emitAgentOutput("HIDDEN AGENT LIVE PREVIEW"));
     await expect(preview).toContainText("HIDDEN AGENT LIVE PREVIEW");
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
-    await preview.click();
-    await page.keyboard.type("preview cannot send");
+    await preview.click(); await page.keyboard.type("preview cannot send");
     expect(await page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input"))).toEqual([]);
+    await right.locator('.works-full [data-action="back"]').click();
+    await right.locator('.work-row[data-window-id="tab-issue::agent-preview"] .work-open').click();
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").isReady)).toBe(true);
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi.metrics("tab-issue::agent-preview").readOnly)).toBe(false);
-    await tiles.first().locator(".terminal-root").click();
-    await tiles.first().locator(".xterm-helper-textarea").focus();
-    await page.keyboard.type("x");
+    await right.locator('.works-full .xterm-helper-textarea').focus(); await page.keyboard.type("x");
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages.filter(message => message.kind === "terminal_input").length)).toBeGreaterThan(0);
-    await page.screenshot({ path: testInfo.outputPath("agents-with-preview.png") });
+    await page.screenshot({ path: info.outputPath("works-with-preview.png") });
     await page.locator(".surface-knowledge [data-issue-view='split']").click();
-    await expect(tiles.locator(".xterm")).toHaveCount(3);
+    await expect(right.locator('.works-terminal .xterm')).toHaveCount(3);
     await expect(page.locator(".issue-split-pair .terminal-text-preview")).toHaveCount(3);
-    await page.locator(".surface-knowledge [data-issue-view='list']").click();
-    await openIssueOutput(page);
-    // Unsplit keeps the active surface; select Issues before collapsing.
+    await page.locator(".surface-knowledge [data-issue-view='list']").click(); await openIssueOutput(page);
     await page.getByRole("combobox", { name: "Left pane surface" }).focus();
     await page.getByRole("button", { name: "Close split", exact: true }).click();
     await expect(page.locator(".issue-preview .xterm")).toBeVisible();
@@ -141,24 +140,22 @@ test.describe("Issue preview placement", () => {
     await expect(page.locator(".issue-preview")).toContainText("RESTORED READ ONLY");
   });
 
-  test("a new agent in a hidden Agents tab updates its visible Issue preview", async ({ page }) => {
+  test("a new agent outside the selected fullscreen work updates its visible Issue preview", async ({ page }) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
-    await installIssuePreviewBackend(page);
-    await page.goto(liveUrl || APP_URL);
-    await openIssueOutput(page);
+    await installIssuePreviewBackend(page); await page.goto(liveUrl || APP_URL); await openIssueOutput(page);
     await page.getByRole("button", { name: "Split view", exact: true }).click();
-    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
-    const selectedTab = page.getByRole("tab", { name: "Birch — Issue #3672 agent", exact: true });
-    await selectedTab.click();
-    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview", {
-      id: "tab-issue::new-agent", session_id: "new-session", title: "New preview agent",
-      agent_name: "Dune", purpose_title: "New preview agent",
-    }));
-    await expect(page.getByRole("tab", { name: "Dune — New preview agent", exact: true })).toBeVisible();
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("works");
+    await right.locator('.work-row[data-window-id="tab-issue::agent-preview-2"] .work-open').click();
+    await page.evaluate(() => {
+      window.__patchWindow("tab-issue::agent-preview", { id: "tab-issue::new-agent", session_id: "new-session", title: "New preview agent", agent_name: "Dune", purpose_title: "New preview agent" });
+      window.__patchLiveAgent("tab-issue::agent-preview", { window_id: "tab-issue::new-agent", session_id: "new-session", runtime_incarnation: 2 });
+    });
+    await expect(right.locator('.work-row[data-window-id="tab-issue::new-agent"] .work-name')).toHaveText("Dune");
     await page.evaluate(() => window.__emitAgentOutput("NEW AGENT LIVE PREVIEW", "tab-issue::new-agent"));
     await expect(page.locator(".issue-preview .terminal-text-preview")).toContainText("NEW AGENT LIVE PREVIEW");
-    await expect(selectedTab).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator('[data-agent-id="tab-issue::new-agent"]')).toBeHidden();
+    await expect(right.locator('.works-full-name')).toHaveText("Birch");
+    await expect(right.locator('.works-terminal[data-window-id="tab-issue::new-agent"]')).toBeHidden();
   });
 
   // 受け入れシナリオ 1 / FR-004.
@@ -237,7 +234,7 @@ test.describe("Issue preview placement", () => {
   });
 
   // 受け入れシナリオ 4 / FR-010.
-  test("Windowize opens the mirrored agent in Agents", async ({ page }) => {
+  test("Windowize opens the mirrored agent in Works", async ({ page }) => {
     if (!liveUrl) await installEmbeddedRoutes(page);
     await installIssuePreviewBackend(page);
 
@@ -257,13 +254,13 @@ test.describe("Issue preview placement", () => {
     expect(undocked).toHaveLength(1);
     expect(undocked[0].id).toBe("tab-issue::agent-preview");
 
-    await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
+    await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect(page.locator(".surface-knowledge .issue-preview")).toHaveCount(0);
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     const detail = page.locator(".knowledge-detail-pane");
-    await expect(detail.locator(".issue-preview-empty")).toHaveText("Shown in Agents. Use Focus window to view the agent output.");
+    await expect(detail.locator(".issue-preview-empty")).toHaveText("Shown in Works. Use Focus window to view the agent output.");
     await detail.locator('[data-action="focus-surface-window"]').click();
-    await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
+    await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "focus_window").at(-1)?.id))
       .toBe("tab-issue::agent-preview");
@@ -274,21 +271,24 @@ test.describe("Issue preview placement", () => {
     await installIssuePreviewBackend(page, { includeWorkProjection: false });
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
-    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview-2", {
-      linked_issue_number: 3671, placement: { kind: "canvas" },
-    }));
+    await page.evaluate(() => {
+      window.__patchWindow("tab-issue::agent-preview-2", {
+        linked_issue_number: 3671, placement: { kind: "canvas" },
+      });
+      window.__patchLiveAgent("tab-issue::agent-preview-2", { issue_number: 3671 });
+    });
 
     const row = page.locator('.knowledge-row[data-issue-number="3671"]');
     const detail = page.locator(".knowledge-detail-pane");
     await expect(row.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
     await expect(detail.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await expect(detail.locator(".issue-preview-empty")).toContainText("Shown in Agents");
+    await expect(detail.locator(".issue-preview-empty")).toContainText("Shown in Works");
     await page.screenshot({ path: info.outputPath("issue-4804-existing-window.png") });
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
       await detail.locator('[data-action="focus-surface-window"]').click();
-      await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview-2"] .xterm')).toBeVisible();
-      await expect(page.locator(".agent-tile")).toHaveCount(3);
+      await expect(page.locator('.works-terminal[data-window-id="tab-issue::agent-preview-2"] .xterm')).toBeVisible();
+      await expect(page.locator(".work-row")).toHaveCount(3);
       await page.locator('.op-rail__surface[data-surface="issues"]').click();
     }
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
@@ -316,12 +316,15 @@ test.describe("Issue preview placement", () => {
       .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
 
     // Model a backend session removal; fixed surfaces no longer close runtimes.
-    await page.evaluate(() => window.__removeFixtureWindow("tab-issue::agent-preview-2"));
+    await page.evaluate(() => {
+      window.__removeFixtureWindow("tab-issue::agent-preview-2");
+      window.__patchLiveAgent("tab-issue::agent-preview-2", null);
+    });
     await expect(cardAction).toHaveAttribute("aria-label", "Undock agent window");
     await cardAction.evaluate(button => { button.click(); button.click(); });
-    await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview"] .xterm')).toBeVisible();
-    await expect(page.locator('.agent-tile[data-agent-id="tab-issue::agent-preview-2"]')).toHaveCount(0);
-    await expect(page.locator(".agent-tile")).toHaveCount(2);
+    await expect(page.locator('.works-terminal[data-window-id="tab-issue::agent-preview"] .xterm')).toBeVisible();
+    await expect(page.locator('.works-terminal[data-window-id="tab-issue::agent-preview-2"]')).toHaveCount(0);
+    await expect(page.locator(".work-row")).toHaveCount(2);
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window").map(message => message.id)))
       .toEqual(["tab-issue::agent-preview", "tab-issue::agent-preview"]);
@@ -336,9 +339,12 @@ test.describe("Issue preview placement", () => {
     await installIssuePreviewBackend(page, { includeWorkProjection: false });
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
-    await page.evaluate(() => window.__patchWindow("tab-issue::agent-preview-2", {
-      linked_issue_number: 3671, placement: { kind: "canvas" }, status: "stopped",
-    }));
+    await page.evaluate(() => {
+      window.__patchWindow("tab-issue::agent-preview-2", {
+        linked_issue_number: 3671, placement: { kind: "canvas" }, status: "stopped",
+      });
+      window.__patchLiveAgent("tab-issue::agent-preview-2", null);
+    });
 
     const row = page.locator('.knowledge-row[data-issue-number="3671"]');
     const detail = page.locator(".knowledge-detail-pane");
@@ -347,24 +353,17 @@ test.describe("Issue preview placement", () => {
     await expect(preview.locator(".issue-preview-mode")).toHaveText("Read-only preview");
     await expect(preview.locator(".knowledge-monitor-chip")).toHaveText("Running");
     await expect(row.locator(".knowledge-row-badge")).toHaveText("Running");
-    await expect(row.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await expect(detail.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
+    await expect(row.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await expect(preview.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await expect(row.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+    await expect(detail.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
     await expect.poll(() => page.evaluate(() => window.__gwtTerminalTestApi
       .metrics("tab-issue::agent-preview").readOnly)).toBe(true);
     await page.evaluate(() => window.__emitAgentOutput("LIVE INLINE WITH RETAINED CANVAS"));
     await expect(preview.locator(".terminal-root")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
-    await preview.locator('[data-action="focus-surface-window"]').click();
-    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
-      .filter(message => message.kind === "focus_window").at(-1)?.id))
-      .toBe("tab-issue::agent-preview-2");
-    await page.locator('.op-rail__surface[data-surface="issues"]').click();
-
     await detail.locator('[data-issue-detail-view="issue"]').click();
-    await detail.locator('[data-action="open-window"]').click();
-    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
-      .filter(message => message.kind === "focus_window").at(-1)?.id))
-      .toBe("tab-issue::agent-preview-2");
-    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+    await expect(detail.locator('[data-action="open-window"]')).toBeVisible();
+    await expect(detail.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
 
     await page.locator('[data-issue-view="split"]').click();
     const pair = page.locator('.issue-split-pair[data-issue-number="3671"]');
@@ -372,11 +371,8 @@ test.describe("Issue preview placement", () => {
     await expect(pair.locator(".knowledge-row-badge")).toHaveText("Running");
     await expect(pair.locator(".issue-split-terminal .terminal-root")).toBeVisible();
     await expect(pair.locator(".issue-split-terminal")).toContainText("LIVE INLINE WITH RETAINED CANVAS");
-    await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
-    await pair.locator('[data-action="focus-surface-window"]').click();
-    await expect.poll(() => page.evaluate(() => window.__knowledgeLoadMessages
-      .filter(message => message.kind === "focus_window").at(-1)?.id))
-      .toBe("tab-issue::agent-preview-2");
+    await expect(pair.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await expect(pair.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window"))).toEqual([]);
 
@@ -389,6 +385,17 @@ test.describe("Issue preview placement", () => {
     await expect(preview).toHaveAttribute("data-window-id", "tab-issue::agent-preview");
     await expect(row.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
     await expect(preview.locator('[data-action="windowize-issue-preview"]')).toBeVisible();
+    await preview.locator('[data-action="windowize-issue-preview"]').click();
+    const terminal = page.locator('.works-terminal[data-window-id="tab-issue::agent-preview"] .xterm');
+    await expect(terminal).toBeVisible();
+    await expect(terminal).toContainText("LIVE INLINE WITH RETAINED CANVAS");
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "undock_agent_window").map(message => message.id)))
+      .toEqual(["tab-issue::agent-preview"]);
+    expect(await page.evaluate(() => window.__knowledgeLoadMessages
+      .filter(message => message.kind === "close_window" || message.kind === "stop_window" ||
+        (message.kind === "focus_window" && message.id === "tab-issue::agent-preview-2"))))
+      .toEqual([]);
   });
 
   // 受け入れシナリオ 5 / FR-011.
@@ -510,27 +517,27 @@ test.describe("Issue preview placement", () => {
         ".surface-knowledge [data-issue-number='3671'] .issue-agent-status [data-action='windowize-issue-preview']",
       )
       .click();
-    await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
+    await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(page.locator("#op-strip-running")).toHaveText("3");
     await expect(inline).toHaveText("2 inline");
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
 
     // SPEC #3885 T-005 / FR-012: the row keeps the Issue ↔ agent link as a
-    // "Shown in Agents" face with no second input face for the PTY.
+    // "Shown in Works" face with no second input face for the PTY.
     const face = page.locator(
       ".surface-knowledge [data-issue-number='3671'] .issue-agent-status",
     );
     await expect(face).toHaveCount(1);
     await expect(face).toHaveClass(/is-in-agents/);
-    await expect(face).toContainText("Shown in Agents");
+    await expect(face).toContainText("Shown in Works");
     await expect(face.locator(".terminal-root")).toHaveCount(0);
     await expect(face.locator("[data-action='windowize-issue-preview']")).toHaveCount(0);
     await expect(
       page.locator(".surface-knowledge [data-issue-number='3671'] .knowledge-row-badge"),
     ).toHaveText("Running");
     await face.locator("[data-action='focus-surface-window']").click();
-    await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
+    await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -708,7 +715,7 @@ test.describe("Issue preview placement", () => {
   });
 
   // SPEC #3885 US-4 (Issue #4082 T-005): Windowize from the split view.
-  test("Issue #4082: Windowize from the split view opens Agents and leaves its linked face", async ({
+  test("Issue #4082: Windowize from the split view opens Works and leaves its linked face", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -731,11 +738,11 @@ test.describe("Issue preview placement", () => {
       ".workspace-window.surface-terminal[data-id='tab-issue::agent-preview']",
     );
     await expect(agentWindow).toBeAttached();
-    await expect(page.locator(".agent-tile[data-agent-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
+    await expect(page.locator(".works-terminal[data-window-id='tab-issue::agent-preview'] .xterm")).toBeVisible();
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair).toBeVisible();
     await expect(pair).toHaveClass(/is-in-agents/);
-    await expect(pair.locator(".issue-split-placeholder")).toContainText("Shown in Agents");
+    await expect(pair.locator(".issue-split-placeholder")).toContainText("Shown in Works");
     await expect(pair.locator(".terminal-root")).toHaveCount(0);
     await expect(pair.locator("[data-action='focus-surface-window']")).toBeVisible();
     await expect(page.locator(".surface-knowledge .issue-split-pair")).toHaveCount(3);
@@ -841,6 +848,18 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
         agentWindow("tab-issue::agent-preview-2", 3672, "Issue #3672 agent"),
         agentWindow("tab-issue::agent-preview-3", 3673, "Issue #3673 agent"),
       ];
+      // Fixture-controlled child proof is separate from window metadata/status.
+      let liveAgents = [
+        { window_id: "tab-issue::agent-preview", session_id: "tab-issue::agent-preview-session", runtime_incarnation: 1, is_pm: false, issue_number: 3671 },
+        { window_id: "tab-issue::agent-preview-2", session_id: "tab-issue::agent-preview-2-session", runtime_incarnation: 1, is_pm: false, issue_number: 3672 },
+        { window_id: "tab-issue::agent-preview-3", session_id: "tab-issue::agent-preview-3-session", runtime_incarnation: 1, is_pm: false, issue_number: 3673 },
+      ];
+      const localActivityProjection = () => ({ ...(includeWorkProjection ? activeWorkProjection : {
+        id: "local-activity", active_works: [], agents: [], works: [], unassigned_agents: [], journal_entries: [],
+      }), local_agent_activity: {
+        project_key: projectKey, host_id: "preview-fixture-host", observed_at: new Date().toISOString(),
+        agents: liveAgents,
+      } });
 
       const workspaceState = () => ({
         kind: "workspace_state",
@@ -943,9 +962,9 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
           window.__knowledgeLoadMessages.push(message);
           if (message.kind === "frontend_ready") {
             this.emit(workspaceState());
-            if (includeWorkProjection) this.emit({
+            this.emit({
               kind: "active_work_projection",
-              projection: activeWorkProjection,
+              projection: localActivityProjection(),
             });
             return;
           }
@@ -1065,6 +1084,11 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
       window.__patchWindow = (id, patch) => {
         windows = windows.map((entry) => (entry.id === id ? { ...entry, ...patch } : entry));
         window.__fixtureSocket?.emit(workspaceState());
+      };
+      window.__patchLiveAgent = (id, patch) => {
+        liveAgents = patch === null ? liveAgents.filter(agent => agent.window_id !== id)
+          : liveAgents.map(agent => agent.window_id === id ? { ...agent, ...patch } : agent);
+        window.__fixtureSocket?.emit({ kind: "active_work_projection_patch", projection: localActivityProjection() });
       };
       // Expose the terminal test bridge (readiness / buffer probes).
       window.__gwtPlaywrightTestBridge = true;

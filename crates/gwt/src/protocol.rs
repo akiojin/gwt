@@ -416,6 +416,12 @@ pub enum FrontendEvent {
     },
     /// Request an immediate usage refresh (SPEC-2970 FR-022).
     RefreshUsage,
+    /// Project-bound member controls. The client cannot select a filesystem root.
+    AgentRoster {
+        action: crate::agent_names::AgentRosterAction,
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
     StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
@@ -955,6 +961,11 @@ pub enum FrontendEvent {
     SetIssueMonitorAutoRefill {
         enabled: bool,
         limit: usize,
+    },
+    SetIssueMonitorTier {
+        issue_number: u64,
+        tier: u8,
+        expected_config_token: String,
     },
     ListIssueMonitor,
     QuickRegisterIssue {
@@ -1823,6 +1834,28 @@ pub struct ActiveWorkItemView {
     pub cleanup_blocked_reason: Option<String>,
 }
 
+/// Read-only membership measured from this GUI host's current agent children.
+/// This does not grant launch, close, or Issue Monitor slot authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityView {
+    pub project_key: String,
+    pub host_id: String,
+    pub observed_at: String,
+    /// `None` is an attempted observation with unknown membership; an empty
+    /// vector is an observed zero, not missing census data.
+    #[serde(default)]
+    pub agents: Option<Vec<LocalAgentActivityAgentView>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityAgentView {
+    pub window_id: String,
+    pub session_id: String,
+    pub runtime_incarnation: u64,
+    pub issue_number: Option<u64>,
+    pub is_pm: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
@@ -1856,6 +1889,8 @@ pub struct ActiveWorkProjectionView {
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_agent_activity: Option<LocalAgentActivityView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1974,6 +2009,64 @@ pub struct FleetPaneView {
     pub is_pm: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterView {
+    pub project_key: String,
+    pub revision: u64,
+    pub members: Vec<AgentRosterMemberView>,
+    pub capacity: usize,
+    pub recommended_capacity: Option<usize>,
+    pub past_contributors: Vec<AgentPastContributorView>,
+    pub past_complete: bool,
+    pub by_session: std::collections::BTreeMap<String, AgentWorkFactsView>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterMemberView {
+    #[serde(flatten)]
+    pub member: crate::agent_names::AgentMember,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub history: Vec<AgentAssignmentHistoryView>,
+    pub issue_count: Option<usize>,
+    pub landed_count: Option<usize>,
+    pub active_seconds: Option<u64>,
+    pub tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAssignmentHistoryView {
+    pub session_id: String,
+    pub issue_number: Option<u64>,
+    pub title: Option<String>,
+    pub result: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPastContributorView {
+    pub session_id: String,
+    pub name: String,
+    pub kind: String,
+    pub issue_numbers: Vec<u64>,
+    pub first_posted_at: Option<String>,
+    pub last_posted_at: Option<String>,
+    pub post_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWorkFactsView {
+    pub branch: String,
+    pub ahead_of_develop: Option<usize>,
+    pub model: Option<String>,
+    pub provider: String,
+    pub last_action: Option<String>,
+    pub elapsed_seconds: Option<u64>,
+    pub warning_count: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
@@ -2042,6 +2135,14 @@ pub enum BackendEvent {
         board_entry_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// Project-scoped persistent membership and assignment history.
+    AgentRoster {
+        roster: AgentRosterView,
+    },
+    AgentRosterError {
+        project_key: String,
+        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -2985,6 +3086,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "agent_roster",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_roster_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3500,6 +3611,8 @@ impl BackendEvent {
             BackendEvent::FleetPaneList { .. } => "fleet_pane_list",
             BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
             BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
+            BackendEvent::AgentRoster { .. } => "agent_roster",
+            BackendEvent::AgentRosterError { .. } => "agent_roster_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -3843,6 +3956,23 @@ mod tests {
             assert_eq!(event.delivery_policy().kind, event.event_kind());
             assert!(!event.delivery_policy().coalesces_on_frontend());
         }
+    }
+
+    #[test]
+    fn issue_monitor_tier_set_requires_an_observed_configuration() {
+        let event = serde_json::json!({
+            "kind": "set_issue_monitor_tier",
+            "issue_number": 4499,
+            "tier": 1,
+            "expected_config_token": "observed-tier-config"
+        });
+        assert!(serde_json::from_value::<FrontendEvent>(event.clone()).is_ok());
+        let mut unguarded = event;
+        unguarded
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_config_token");
+        assert!(serde_json::from_value::<FrontendEvent>(unguarded).is_err());
     }
 
     #[test]
@@ -4722,6 +4852,7 @@ mod tests {
                     remote_delete_available: true,
                 }),
                 managed_hook_health: None,
+                local_agent_activity: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
                     linked_issue_numbers: Vec::new(),
@@ -4850,9 +4981,50 @@ mod tests {
             Some(false),
             "Work cleanup must default to local-only deletion"
         );
-        let BackendEvent::ActiveWorkProjection { projection } = event else {
+        let BackendEvent::ActiveWorkProjection { mut projection } = event else {
             unreachable!("constructed full projection")
         };
+        assert!(
+            serde_json::to_value(&projection)
+                .unwrap()
+                .get("local_agent_activity")
+                .is_none(),
+            "non-observing producers omit the census"
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:unknown",
+                "observed_at": "2026-10-24T00:00:00Z",
+                "agents": null
+            }))
+            .expect("an Unknown observation retains its metadata"),
+        );
+        let unknown = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            unknown.pointer("/local_agent_activity/agents"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            unknown
+                .pointer("/local_agent_activity/host_id")
+                .and_then(Value::as_str),
+            Some("123:unknown")
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:456",
+                "observed_at": "2026-10-24T00:00:01Z",
+                "agents": []
+            }))
+            .expect("an observed zero remains distinct from Unknown"),
+        );
+        let zero = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            zero.pointer("/local_agent_activity/agents"),
+            Some(&serde_json::json!([]))
+        );
         let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
             .expect("serialize bounded active work projection patch");
         assert_eq!(
@@ -4952,6 +5124,20 @@ mod tests {
             FrontendEvent::RefreshIndexStatus { project_root }
                 if project_root == "/repo/worktree"
         ));
+    }
+
+    #[test]
+    fn frontend_event_accepts_project_roster_actions() {
+        for action in [
+            serde_json::json!({"kind":"read"}),
+            serde_json::json!({"kind":"add"}),
+            serde_json::json!({"kind":"rest","member_id":"member-1"}),
+        ] {
+            let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind":"agent_roster", "action":action, "expected_revision":3
+            }));
+            assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
+        }
     }
 
     #[test]

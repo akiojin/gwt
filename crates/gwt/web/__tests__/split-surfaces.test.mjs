@@ -404,8 +404,7 @@ test("showWindow selects any classified view by id without geometry or tab-group
   assert.equal(controller.showWindow(consoleView.id), true);
   assert.equal(controller.containsWindow(consoleView.id), true, "console keeps its own live view");
   assert.equal(controller.showWindow("a"), true);
-  assert.equal(controller.activeSurface(), "agents");
-  assert.ok(agents.closest(".split-pane"), "agents retain the dedicated live grid");
+  assert.equal(controller.activeSurface(), "works");
   assert.equal(controller.containsWindow("a"), false);
   assert.equal(controller.showWindow("missing"), false);
 });
@@ -440,4 +439,15 @@ test("Settings and Issues reuse one canonical view and follow its internal secti
   flush();
   assert.equal(controller.activeSurface(), "settings");
   assert.equal(controller.containsWindow("issues"), true);
+});
+
+// Works and the member roster own separate hosts; neither creates a backend window.
+test("Works and Agents split independently without legacy terminal tabs", async () => {
+  const { controller, document, opened } = await fixture();
+  controller.open("works");
+  assert.equal(controller.activeSurface(), "works");
+  assert.equal(controller.select("agents", 1), true);
+  assert.deepEqual([...document.querySelectorAll(".split-pane")].map(p => p.dataset.surface), ["works", "agents"]);
+  assert.deepEqual(opened, []);
+  assert.equal(document.querySelector(".agents-tabs, .agents-grid, [aria-label='Agent columns']"), null);
 });

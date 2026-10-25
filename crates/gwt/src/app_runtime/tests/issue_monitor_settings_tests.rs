@@ -1,6 +1,167 @@
 use super::*;
 
 #[test]
+fn app_runtime_issue_monitor_tier_control_is_project_scoped_and_cas_guarded() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let roots = [temp.path().join("first"), temp.path().join("other")];
+    let prefs = gwt::IssueMonitorPrefs {
+        launch_auto: true,
+        launch_tiers: vec![
+            vec![sample_issue_monitor_launch_profile()],
+            vec![sample_issue_monitor_launch_profile()],
+        ],
+        ..Default::default()
+    };
+    for root in &roots {
+        fs::create_dir_all(root).unwrap();
+        init_repo_with_initial_commit(root);
+        gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root), &prefs)
+            .unwrap();
+    }
+    let tabs = roots
+        .iter()
+        .zip(["first", "other"])
+        .map(|(root, id)| sample_project_tab(id, id, root.clone(), ProjectKind::Git, &[]))
+        .collect();
+    let mut runtime = sample_runtime(temp.path(), tabs, Some("first"));
+    let context = runtime.project_context("other").unwrap();
+    let event = || {
+        serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "set_issue_monitor_tier", "issue_number": 4499, "tier": 1,
+            "expected_config_token": prefs.config_token(),
+        }))
+        .expect("guarded tier request")
+    };
+    let scope = ClientScope::Project(context.project_key.clone());
+    runtime.handle_frontend_event_in_scope("client-other".into(), event(), &scope);
+    let committed =
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&roots[1]))
+            .unwrap();
+    assert_eq!(committed.tier_overrides.get(&4499), Some(&1));
+    assert_eq!(
+        committed.effect_authority_epoch,
+        prefs.effect_authority_epoch + 1
+    );
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&roots[0]),)
+            .unwrap(),
+        prefs
+    );
+    let (latest, ()) = gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&roots[1]),
+        |prefs| {
+            prefs.launch_tiers[1][0].model = Some("changed-configured-model".to_string());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_ne!(latest.config_token(), prefs.config_token());
+    let events = runtime.handle_frontend_event_in_scope("client-other".into(), event(), &scope);
+    assert!(events.iter().any(|event| matches!(
+        &event.event, BackendEvent::IssueMonitorToast { level, issue_number: Some(4499), .. }
+            if level == "error"
+    )));
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&roots[1]),)
+            .unwrap(),
+        latest
+    );
+}
+
+#[test]
+fn app_runtime_issue_tier_projection_uses_available_candidates_and_exact_live_session() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent",
+        repo.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(
+        &temp.path().join("sessions"),
+        vec![gwt::AgentOption {
+            id: "codex".into(),
+            name: "Codex".into(),
+            available: true,
+            installed_version: None,
+            custom_agent: None,
+        }],
+    );
+    let window_id = combined_window_id("tab-1", "agent");
+    let mut session =
+        gwt_agent::Session::new(&repo, "work/issue-4499", gwt_agent::AgentId::ClaudeCode);
+    session.model = Some("actually-running-model".into());
+    session.reasoning_level = Some("high".into());
+    session.linked_issue_number = Some(4499);
+    let mut active = sample_active_agent_session("tab-1", &window_id);
+    active.session_id = session.id.clone();
+    active.agent_id = "claude".into();
+    active.worktree_path = repo.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    runtime.launch_wizard_cache.record_session(session);
+    let mut status =
+        serde_json::to_value(test_monitor(gwt::IssueMonitorConfig::default()).status_view())
+            .unwrap();
+    status["launch_tiers"] = serde_json::json!([
+        [{"agent_id":"uninstalled", "model":"unavailable-model"}],
+        [{"agent_id":"codex", "model":"next-model", "reasoning":"medium"}]
+    ]);
+    status["tier_facts"] = serde_json::json!([{
+        "issue_number":4499, "history_floor":0, "agent_failures":0,
+        "is_spec":false, "next_minimum_tier":0, "tier_count":2,
+        "confirmed_launch":{"tier":0,"window_id":window_id,"delivery_id":"delivery-4499"}
+    }]);
+    let status: gwt::IssueMonitorStatusView = serde_json::from_value(status).unwrap();
+    let events = runtime.issue_monitor_daemon_status_events(&repo, Box::new(status));
+    let projected = events
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => Some((**status).clone()),
+            _ => None,
+        })
+        .expect("project status");
+    let wire = serde_json::to_value(&projected).unwrap();
+    assert_eq!(
+        wire["tier_facts"][0]["next_launch"],
+        serde_json::json!({
+            "tier":1,"agent_id":"codex","model":"next-model","reasoning":"medium"
+        })
+    );
+    assert_eq!(
+        wire["tier_facts"][0]["confirmed_launch"]["profile"],
+        serde_json::json!({
+            "agent_id":"claude","model":"actually-running-model","reasoning":"high"
+        })
+    );
+    runtime.active_agent_sessions.remove(&window_id);
+    let stale = runtime.issue_monitor_daemon_status_events(&repo, Box::new(projected));
+    let stale_wire = stale
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::IssueMonitorStatus { status } => {
+                Some(serde_json::to_value(status).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(stale_wire["tier_facts"][0]["confirmed_launch"]["profile"].is_null());
+}
+
+#[test]
 fn app_runtime_issue_monitor_profiles_choices_reuse_wizard_sources_without_rewriting_profiles() {
     let _env_lock = env_test_lock()
         .lock()
