@@ -79,13 +79,12 @@ use super::{
     AttachmentProgressPhase, BlockingTaskSpawner, BlockingTestTaskQueue, CachedContinueWorkOutcome,
     ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
-    LaunchPaneDisposition, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
-    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenControlFailure,
-    ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision, ReadinessPaneEvidence,
-    RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent, WindowAddress,
-    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    PreparedProjectSwitch, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenControlFailure, ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision,
+    ReadinessPaneEvidence, RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent,
+    WindowAddress, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::app_runtime::initial_project_tab_incarnations;
 use crate::embedded_server::{
