@@ -165,6 +165,15 @@ an observation then. Legacy omitted queue lists also decode to []; neither prove
 Queue residency is not execution waiting time, full queue coverage or permission to act.
 Never derive SLA, starvation, priority, preemption or launch decisions from this duration alone.
 
+`age_limits` compares each queue row with every saved starvation_after_seconds threshold.
+It retains saved policy order, ID, version and optional threshold without selecting an active policy.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete daemon
+Monitor coverage. All other cases yield `unknown`, never a within-limit PASS, with named
+missing inputs for absent, invalid, ambiguous or degraded evidence. No policies yields [].
+The comparison is only host queue membership at the supplied scan, not end-to-end starvation,
+SLA or permission to change priority, launch or preempt. Keep the enclosing scan age and provenance.
+
 `idle_windows` preserves every supplied Monitor idle window in order, including repeats
 and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
 `pane_present`; it does not reproduce rebind or requeue proposals.
@@ -4535,6 +4544,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
             "`terminal_queue` preserves the supplied host queue projection order, repeated Issues and raw queued_at",
             "Queue residency is not execution waiting time, full queue coverage or permission to act",
+            "`age_limits` compares each queue row with every saved starvation_after_seconds threshold",
+            "`observed_age_threshold_reached` means age >= threshold, including equality and zero",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
