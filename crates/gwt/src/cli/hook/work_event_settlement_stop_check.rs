@@ -33,25 +33,28 @@ pub fn handle_with_input(
     if !record.obligation_open || record.session_id != current_session {
         return HookOutput::Silent;
     }
-    let refreshed = match crate::cli::verification_record::save_work_event_settlement_record(
-        &resolved,
-        &record.session_id,
-        false,
-    ) {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::warn!(%error, "work event settlement could not be refreshed");
-            if crate::cli::verification_record::pending_shard_refresh_failure_must_block(&record) {
-                return HookOutput::stop_block(format!(
+    let (refreshed, comparison) =
+        match crate::cli::verification_record::save_work_event_settlement_record_with_comparison(
+            &resolved,
+            &record.session_id,
+            false,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%error, "work event settlement could not be refreshed");
+                if crate::cli::verification_record::pending_shard_refresh_failure_must_block(
+                    &record,
+                ) {
+                    return HookOutput::stop_block(format!(
                     "A terminal Work update is still awaiting delivery. {} gwt will not commit or push automatically.",
                     crate::cli::verification_record::pending_shard_refresh_failure_description()
                 ));
-            }
-            return HookOutput::system_message(format!(
+                }
+                return HookOutput::system_message(format!(
                 "Warning: Work event settlement could not be refreshed ({error}). Stop is not blocked by this infrastructure failure."
             ));
-        }
-    };
+            }
+        };
     if !refreshed.obligation_open && refreshed.status.is_settled() {
         return HookOutput::Silent;
     }
@@ -61,7 +64,9 @@ pub fn handle_with_input(
         let reason = match &refreshed.status {
             crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
                 crate::cli::verification_record::work_event_settlement_blocker_description(
-                    blocker, &resolved,
+                    blocker,
+                    &resolved,
+                    comparison.as_deref(),
                 )
             }
             _ => "Work event settlement is waiting on the environment.".to_string(),
@@ -85,6 +90,7 @@ pub fn handle_with_input(
         crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
             crate::cli::verification_record::work_event_settlement_blocker_description(
                 blocker, &resolved,
+                comparison.as_deref(),
             )
         }
         crate::cli::verification_record::WorkEventSettlementStatus::Settled { .. } => {
