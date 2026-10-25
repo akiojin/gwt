@@ -64,6 +64,9 @@ test("Issue #3165: Start explains missing settings and waits for confirmed enabl
   const surface = page.locator(".surface-knowledge");
   const guidance = surface.locator('[data-role="monitor-setup-guidance"]');
   const start = surface.getByRole("button", { name: "Start", exact: true });
+  // Observe the bootstrap status before injecting scenario status, so a late
+  // initial saved-profile reply cannot overwrite the missing-settings state.
+  await expect(surface.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
   await expect(guidance).toBeHidden();
   const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3, max_active_agents: 2 };
   for (const source of ["default", "last_settings"]) {
