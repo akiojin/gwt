@@ -212,10 +212,25 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .is_empty()
     );
 
-    // The fixture provider answers version probes normally and stays alive
-    // for the real PTY launch until the test explicitly closes it.
-    fs::write(temp.path().join("operator-stop-close-requeue/fixture-runner-bin/codex.cmd"),
-        "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3 & exit /b 0)\r\nset /p GWT_TEST_OPERATOR_INPUT=\r\n").unwrap();
+    // Answer both probes despite cmd splitting unquoted `-c key=value` arguments.
+    // Normal launches reach `--sandbox` before the prompt and wait for PTY input.
+    fs::write(
+        temp.path()
+            .join("operator-stop-close-requeue/fixture-runner-bin/codex.cmd"),
+        concat!(
+            "@echo off\r\n",
+            "if \"%~1\"==\"--version\" (echo 1.2.3 & exit /b 0)\r\n",
+            ":probe\r\n",
+            "if \"%~1\"==\"\" goto launch\r\n",
+            "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+            "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+            "shift\r\n",
+            "goto probe\r\n",
+            ":launch\r\n",
+            "set /p GWT_TEST_OPERATOR_INPUT=\r\n",
+        ),
+    )
+    .unwrap();
     let mut monitor = test_monitor_with_prefs(
         gwt::IssueMonitorConfig::default(),
         gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
