@@ -68,7 +68,7 @@ pub use prepare::{
     resolve_launch_worktree, resolve_launch_worktree_request, resolve_public_gwt_bin_with_lookup,
     HookForwardEnv, HostRunnerHealthReport, HostRunnerProbeKind, HostRunnerProbeOutcome,
     PreparedAgentLaunch, PreparedProcessLaunch, CODEX_CONFIG_PREFLIGHT_FAILURE_PREFIX,
-    DIRECT_RUNNER_PROBE_TIMEOUT, TRANSIENT_LAUNCH_RETRY_HINT,
+    CODEX_CONFIG_PREFLIGHT_TIMEOUT, DIRECT_RUNNER_PROBE_TIMEOUT, TRANSIENT_LAUNCH_RETRY_HINT,
 };
 pub use presets::{
     claude_code_openai_compat_preset, list_presets, seed_agent, ClaudeCodeOpenaiCompatInput,

@@ -463,6 +463,7 @@ fn revalidate_issue_monitor_launch_prepared(
             provider_usage,
             &prepared.request,
             profile_config_path,
+            expected.codex_preflight.clone(),
         );
         if current != *expected {
             prepared.delivery.result =
@@ -755,10 +756,44 @@ fn issue_monitor_resume_handoff(
 /// Issue #6096: the prefs-derived inputs a prepared launch consumed (profile
 /// selection/tier and autonomous handoff). Rechecking these, instead of the
 /// whole prefs file, lets a busy project's unrelated rewrites keep the launch.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct IssueMonitorLaunchSourceFacts {
     selection: Result<Option<(gwt::LaunchWizardPreviousProfiles, Option<u8>)>, String>,
     handoff: IssueMonitorResumeHandoff,
+    /// Issue #6299: the host Codex preflight this delivery already ran. It is
+    /// not a prefs-derived input, so it is reused, never compared.
+    codex_preflight: IssueMonitorCodexPreflightMemo,
+}
+
+impl PartialEq for IssueMonitorLaunchSourceFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.selection == other.selection && self.handoff == other.handoff
+    }
+}
+
+/// Issue #6299: one Codex configuration preflight per profile per delivery.
+/// Re-checking prefs-derived facts must not re-run a slow host probe, which
+/// on a loaded host spends the launch's window-creation budget.
+#[derive(Debug, Clone, Default)]
+struct IssueMonitorCodexPreflightMemo(Option<(gwt::LaunchWizardPreviousProfile, Option<String>)>);
+
+impl IssueMonitorCodexPreflightMemo {
+    fn check(
+        &mut self,
+        profile: Option<&gwt::LaunchWizardPreviousProfile>,
+        probe: impl FnOnce() -> Result<Option<String>, String>,
+    ) -> Result<Option<String>, String> {
+        if let (Some(profile), Some((checked, outcome))) = (profile, self.0.as_ref()) {
+            if checked == profile {
+                return Ok(outcome.clone());
+            }
+        }
+        let outcome = probe()?;
+        if let Some(profile) = profile {
+            self.0 = Some((profile.clone(), outcome.clone()));
+        }
+        Ok(outcome)
+    }
 }
 
 impl IssueMonitorLaunchSourceFacts {
@@ -767,6 +802,7 @@ impl IssueMonitorLaunchSourceFacts {
         provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
         request: &super::DeferredIssueMonitorLaunch,
         profile_config_path: &Result<PathBuf, String>,
+        mut codex_preflight: IssueMonitorCodexPreflightMemo,
     ) -> Self {
         let issue_number = request.issue_number;
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
@@ -788,6 +824,7 @@ impl IssueMonitorLaunchSourceFacts {
                         provider_usage_accounts,
                         request,
                         profile_config_path,
+                        &mut codex_preflight,
                     )
                     .map(|choice| choice.map(|choice| (choice.profiles, choice.tier)))
                 }
@@ -795,6 +832,7 @@ impl IssueMonitorLaunchSourceFacts {
         Self {
             selection,
             handoff: issue_monitor_resume_handoff(&request.project_root, issue_number),
+            codex_preflight,
         }
     }
 }
@@ -806,6 +844,7 @@ fn issue_monitor_preparation_choice(
     provider_usage_accounts: &[gwt_core::usage::ProviderUsage],
     request: &super::DeferredIssueMonitorLaunch,
     profile_config_path: &Result<PathBuf, String>,
+    codex_preflight: &mut IssueMonitorCodexPreflightMemo,
 ) -> Result<Option<IssueMonitorLaunchProfileChoice>, String> {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&request.project_root);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).map_err(|error| error.to_string())?;
@@ -826,11 +865,10 @@ fn issue_monitor_preparation_choice(
         request.linked_issue_kind,
         None,
     )?;
-    let config_error = issue_monitor_codex_config_error(
-        choice.profiles.preferred_profile(),
-        request,
-        profile_config_path,
-    )?;
+    let preferred_profile = choice.profiles.preferred_profile();
+    let config_error = codex_preflight.check(preferred_profile, || {
+        issue_monitor_codex_config_error(preferred_profile, request, profile_config_path)
+    })?;
     let Some(config_error) = config_error else {
         return Ok(Some(choice));
     };
@@ -3696,7 +3734,7 @@ impl AppRuntime {
                 // This worker performs reads only. The normal head worker owns
                 // claim, tier writes, admission and all Answer side effects.
                 let reusable = (|| {
-                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path).ok()??;
+                    let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut IssueMonitorCodexPreflightMemo::default()).ok()??;
                     let handoff = issue_monitor_resume_handoff(&request.project_root, request.issue_number);
                     if !handoff.as_ref().is_ok_and(Option::is_none) {
                         return None;
@@ -3914,7 +3952,8 @@ impl AppRuntime {
             let claim = claim_input.as_ref().map(|input| (input.materializer_window_id.clone(), if retrying_facts { input.claim_or_reuse() } else { input.claim_from_worker() }));
             record_issue_monitor_worker_phase("monitor_claim", &mut phase_started);
             let handoff = issue_monitor_resume_handoff(&request.project_root, issue_number);
-            let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path);
+            let mut codex_preflight = IssueMonitorCodexPreflightMemo::default();
+            let choice = issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut codex_preflight);
             let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier))).map_err(Clone::clone);
             let reusable_facts = match reusable {
                 Some(IssueMonitorLaunchPreparation::Launch(facts))
@@ -3985,8 +4024,8 @@ impl AppRuntime {
             // Issue #6096: a prefs rewrite during these reads is not itself stale. The GUI
             // compares this stamp and lets a worker re-evaluate the same source facts.
             let source_prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
-            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff };
-            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path) {
+            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, codex_preflight };
+            if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone()) {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
             record_issue_monitor_worker_phase("monitor_source_revalidation", &mut phase_started);
@@ -8991,4 +9030,69 @@ fn prepare_issue_monitor_resume(
         }),
         fresh_reason: None,
     })
+}
+
+#[cfg(test)]
+mod codex_preflight_memo_tests {
+    use std::cell::Cell;
+
+    use super::IssueMonitorCodexPreflightMemo;
+
+    fn codex_profile(model: &str) -> gwt::LaunchWizardPreviousProfile {
+        gwt::LaunchWizardPreviousProfile {
+            agent_id: "codex".to_string(),
+            model: Some(model.to_string()),
+            reasoning: None,
+            session_mode: gwt_agent::SessionMode::Normal,
+            skip_permissions: false,
+            fast_mode: false,
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            docker_service: None,
+            docker_lifecycle_intent: gwt_agent::DockerLifecycleIntent::Connect,
+            windows_shell: None,
+            hermes: Default::default(),
+        }
+    }
+
+    #[test]
+    fn source_fact_recheck_reuses_the_delivery_codex_preflight() {
+        // Issue #6299: the source-fact recheck after preparation must not run
+        // a second slow host preflight for the same profile.
+        let probes = Cell::new(0);
+        let profile = codex_profile("gpt-5.5");
+        let mut memo = IssueMonitorCodexPreflightMemo::default();
+        let first = memo.check(Some(&profile), || {
+            probes.set(probes.get() + 1);
+            Ok(Some("codex_config_preflight: broken".to_string()))
+        });
+        let mut recheck = memo.clone();
+        let second = recheck.check(Some(&profile), || {
+            probes.set(probes.get() + 1);
+            Ok(None)
+        });
+
+        assert_eq!(probes.get(), 1);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_different_profile_or_a_failed_probe_is_checked_again() {
+        let probes = Cell::new(0);
+        let mut memo = IssueMonitorCodexPreflightMemo::default();
+        let failed = memo.check(Some(&codex_profile("gpt-5.5")), || {
+            probes.set(probes.get() + 1);
+            Err("profile config unavailable".to_string())
+        });
+        assert!(failed.is_err());
+        let _ = memo.check(Some(&codex_profile("gpt-5.5")), || {
+            probes.set(probes.get() + 1);
+            Ok(None)
+        });
+        let _ = memo.check(Some(&codex_profile("gpt-5.4")), || {
+            probes.set(probes.get() + 1);
+            Ok(None)
+        });
+
+        assert_eq!(probes.get(), 3);
+    }
 }
