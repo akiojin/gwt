@@ -5,6 +5,7 @@
  * and result modal are verified without touching a real Git repository.
  */
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
 
@@ -17,6 +18,20 @@ test("branch_entries shared state preserves count ordering and stale isolation",
   await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
   if (!base) await installEmbeddedRoutes(page);
+  await page.route("**/branch-list-state.js", async route => {
+    const response = base ? await route.fetch() : undefined;
+    const source = response ? await response.text()
+      : readFileSync("crates/gwt/web/branch-list-state.js", "utf8");
+    const anchor = "export function applyBranchEntriesEvent(state, event) {";
+    expect(source).toContain(anchor);
+    const body = source.replace(anchor, "function originalApplyBranchEntriesEvent(state, event) {") + `
+      export function applyBranchEntriesEvent(state, event) {
+        const result = originalApplyBranchEntriesEvent(state, event);
+        window.__branchReceipt = { state, event, result };
+        return result;
+      }`;
+    await route.fulfill({ response, contentType: "text/javascript", body });
+  });
   await installBranchCleanupBackend(page);
   await page.goto(base ? new URL(new URL(APP_URL).pathname, base).toString() : APP_URL);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -39,11 +54,23 @@ test("branch_entries shared state preserves count ordering and stale isolation",
     });
   }, { id, loadId, count });
   const count = page.locator("#op-strip-branches");
-  await emit("branches-1", 10, 2);
+  await page.evaluate(() => {
+    (window as any).__branchCleanupFixture.emit({ kind: "branch_entries", id: "branches-1", load_id: 10,
+      phase: "hydrated", entries: [
+        { name: "work/fixture-0", scope: "local", cleanup_ready: true, cleanup: { availability: "safe" } },
+        { name: "work/fixture-1", scope: "local", cleanup_ready: false },
+      ],
+    });
+  });
   await expect(count).toHaveText("2");
+  expect(await page.evaluate(() => {
+    const { state, event } = (window as any).__branchReceipt;
+    return [Object.isFrozen(event), Object.isFrozen(state.entries),
+      Object.isFrozen(state.lastHydratedByName.get("work/fixture-0")), state.entries[0].name];
+  })).toEqual([true, true, true, "work/fixture-0"]);
   await emit("branches-1", 11, 3);
   await expect(count).toHaveText("3");
-  await emit("branches-1", 10, 1); // stale: must not publish a receipt
+  await emit("branches-1", 10, 1); // stale: must not redraw or publish a count
   // This following event is a FIFO marker and has an independent load sequence.
   await emit("branches-other", 1, 4);
   await expect(count).toHaveText("4");

@@ -6,7 +6,50 @@
  * process, GitHub cache state, or the user's local workspace.
  */
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+
+test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installIssueBridgeBackend(page, { theme });
+  await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  await expect(settings).toHaveCount(1);
+  const monitor = page.locator("#op-strip-issue-monitor");
+  await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+  await expect(monitor).toHaveAttribute("title", "Open Monitor | Issue Monitor: Off");
+  const messageCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  for (const activation of ["click", "Enter", "Space"]) {
+    await settings.getByRole("tab", { name: "System", exact: true }).click();
+    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
+      .toHaveAttribute("aria-selected", "false");
+    if (activation === "click") await monitor.click();
+    else await monitor.press(activation);
+    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
+      .toHaveAttribute("aria-selected", "true");
+    await expect(settings).toHaveCount(1);
+    await expect(page.locator(".surface-knowledge")).toBeVisible();
+    await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+  }
+  const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), messageCursor);
+  expect(controls, "opening Monitor must not enable, configure, reorder or launch").toEqual([]);
+  await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status: {
+    enabled: true, state: "error", queue_len: 3, active_count: 0, max_active_agents: 2,
+    last_error: "Monitor navigation fixture error",
+  } }));
+  await expect(monitor).toHaveAccessibleName("Open Monitor: Error Q3 A0/2");
+  await expect(monitor).toHaveAttribute("title", /Open Monitor.*Monitor navigation fixture error/);
+  await expect(monitor).toHaveClass(/op-status-strip__cell--alert/);
+  await page.screenshot({ path: info.outputPath(`monitor-navigation-${theme}.png`) });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
 
 test.describe("Legacy SPEC preset Work Item compatibility", () => {
   test.use({
@@ -1037,6 +1080,103 @@ test.describe("Issue Related Work Resume", () => {
   test.use({
     deviceScaleFactor: 1,
     viewport: { width: 1440, height: 900 },
+  });
+
+  test("Resume list receipt preserves immutable candidates, correlation, and focus", async ({ page }, info) => {
+    const consoleErrors: string[] = [];
+    const pageErrors: string[] = [];
+    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+    page.on("pageerror", error => pageErrors.push(String(error)));
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await page.route("**/workspace-resume-picker-modal.js", async route => {
+      // Canonical headed runs instrument the actual checkout-served module.
+      const response = liveBase ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/workspace-resume-picker-modal.js", "utf8");
+      const anchor = "export function createWorkspaceResumePickerController(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalWorkspaceResumePickerController(") + `
+        export function createWorkspaceResumePickerController(...args) {
+          const controller = originalWorkspaceResumePickerController(...args);
+          window.__resumeListController = controller;
+          window.__resumeListReceipts = [];
+          const receive = controller.handleAgentsList;
+          controller.handleAgentsList = event => {
+            window.__resumeListReceipts.push(event);
+            return receive(event);
+          };
+          return controller;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
+    await installIssueBridgeBackend(page, { includeRelatedWork: true, theme });
+    await page.goto(liveBase ? new URL("p/0123456789abcdef", liveBase).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    await expect.poll(() => page.evaluate(() => Boolean((window as any).__resumeListController))).toBe(true);
+    // The production picker remains dormant; only this fixture opens it.
+    const operationId = await page.evaluate(() =>
+      (window as any).__resumeListController.open("resume-list-workspace"));
+    const list = {
+      kind: "workspace_resumable_agents", workspace_id: "resume-list-workspace", operation_id: operationId,
+      agents: [{ session_id: "resume-list-session", agent_id: "codex", display_name: "Fixture Resume",
+        resume_kind: "conversation", metadata: { source: "original" } }],
+    };
+    await page.evaluate(payload => {
+      (window as any).__resumeListOriginal = payload;
+      window.__issueBridgeFixtureSocket.emit(payload);
+    }, list);
+    const modal = page.locator("#workspace-resume-picker-modal");
+    const row = modal.locator('.workspace-resume-picker-row[data-session-id="resume-list-session"]');
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Fixture Resume");
+    await row.focus();
+    await page.evaluate(() => {
+      const payload = (window as any).__resumeListOriginal;
+      payload.agents[0].display_name = "Updated Resume";
+      window.__issueBridgeFixtureSocket.emit(payload);
+    });
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    await expect(row).toBeFocused();
+    expect(await page.evaluate(() => {
+      const original = (window as any).__resumeListOriginal;
+      const receipts = (window as any).__resumeListReceipts;
+      const receipt = receipts.at(-1);
+      return [receipt, receipt.agents, receipt.agents[0], receipt.agents[0].metadata].every(Object.isFrozen)
+        && receipt !== original && receipt.agents !== original.agents
+        && receipt.agents[0] !== original.agents[0]
+        && receipt.agents[0].metadata !== original.agents[0].metadata
+        && receipts[0] !== receipt && receipts[0].agents[0].display_name === "Fixture Resume";
+    })).toBe(true);
+    await page.evaluate(() => {
+      const original = (window as any).__resumeListOriginal;
+      original.agents[0].display_name = "Mutated caller";
+      original.agents[0].metadata.source = "mutated";
+      (window as any).__resumeListController.render();
+    });
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    expect(await page.evaluate(() => (window as any).__resumeListReceipts.at(-1).agents[0].metadata.source)).toBe("original");
+    const emitAndFlush = async (events: object[]) => {
+      const processed = page.waitForEvent("dialog");
+      await page.evaluate(events => {
+        for (const event of events) window.__issueBridgeFixtureSocket.emit(event);
+        window.__issueBridgeFixtureSocket.emit({ kind: "workspace_projection_prune_error", message: "Resume list processed" });
+      }, events);
+      const dialog = await processed;
+      expect(dialog.message()).toBe("Work Projection Prune error: Resume list processed");
+      await dialog.dismiss();
+    };
+    await emitAndFlush([{ ...list, workspace_id: "stale-workspace" }, { ...list, operation_id: "stale-operation" }]);
+    await expect(row.locator(".workspace-resume-picker-row-name")).toHaveText("Updated Resume");
+    const screenshot = info.outputPath("resume-list-receipt.png");
+    await page.screenshot({ path: screenshot });
+    await info.attach("resume-list-receipt", { path: screenshot, contentType: "image/png" });
+    await modal.locator(".workspace-resume-picker-cancel").click();
+    await emitAndFlush([list]);
+    await expect(modal).toHaveAttribute("aria-hidden", "true");
+    await expect(row).toHaveCount(0);
+    expect(consoleErrors).toEqual([]);
+    expect(pageErrors).toEqual([]);
   });
 
   test("correlates one real click, ignores stale error, and visibly recovers from the exact error", async ({

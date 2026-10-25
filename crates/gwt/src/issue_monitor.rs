@@ -11977,13 +11977,20 @@ impl IssueMonitorState {
                     && !self.has_monitor_pane_for_issue(delivery.issue_number)
             })
             .filter_map(|delivery| {
-                self.permission_readiness_block_for_launch(delivery.issue_number, &now)
-                    .map(|record| (delivery.issue_number, record))
+                let record =
+                    self.permission_readiness_block_for_launch(delivery.issue_number, &now);
+                (record.is_some()
+                    || (self.launch_auto
+                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
         self.compensate_uncommitted_claims(&blocked.keys().copied().collect());
         for (number, record) in blocked {
-            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+            if let (Some(record), Some(issue)) = (
+                record,
+                self.inbox_item(number).map(|item| item.issue.clone()),
+            ) {
                 self.record_permission_readiness_block(issue, &record);
             }
         }

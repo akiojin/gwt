@@ -14507,7 +14507,7 @@ mod tests {
 
         // An Issue-only override can change the effective provider too.
         // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
-        let mut override_prefs = initial_prefs;
+        let mut override_prefs = initial_prefs.clone();
         override_prefs.launch_auto = true;
         override_prefs.launch_tiers = vec![
             vec![pool_profile("claude", &[])],
@@ -14547,6 +14547,83 @@ mod tests {
             "tab::agent-42",
             |_| true
         ));
+
+        // A policy save can also leave no eligible provider, without a
+        // permission refusal. Both cold writers must release that delivery.
+        for issue_override in [false, true] {
+            let mut held_prefs = initial_prefs.clone();
+            held_prefs
+                .provider_quota_holds
+                .insert("codex".into(), "2999-01-01T00:00:00Z".into());
+            held_prefs.autonomous_records.push(
+                serde_json::from_value(serde_json::json!({
+                    "issue_number": 42, "attempts": 1, "non_agent_attempts": 1
+                }))
+                .unwrap(),
+            );
+            held_prefs.pending_launch_deliveries[0].launch_session_strategy =
+                crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired;
+            held_prefs.tier_overrides.insert(44, 2);
+            if issue_override {
+                held_prefs.launch_auto = true;
+                held_prefs.launch_tiers = vec![
+                    vec![pool_profile("claude", &[])],
+                    vec![pool_profile("claude", &[])],
+                    vec![pool_profile("codex", &[])],
+                ];
+            } else {
+                held_prefs.tier_overrides.insert(42, 2);
+            }
+            crate::save_issue_monitor_prefs(&path, &held_prefs).unwrap();
+            if issue_override {
+                run_monitor_tier_set(&env, None, None, 42, 2, &mut out).unwrap();
+            } else {
+                run_monitor_tiers_set(
+                    &env,
+                    None,
+                    None,
+                    true,
+                    Some(vec![
+                        vec![pool_profile("claude", &[])],
+                        vec![pool_profile("claude", &[])],
+                        vec![pool_profile("codex", &[])],
+                    ]),
+                    &mut out,
+                )
+                .unwrap();
+            }
+            let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+            assert_eq!(
+                saved.pending_launch_deliveries, prefs.pending_launch_deliveries,
+                "release only the unowned delivery with no eligible candidate"
+            );
+            assert_eq!(saved.launching_issues, prefs.launching_issues);
+            assert_eq!(saved.pending_effects.len(), 1);
+            assert_eq!(
+                saved.pending_effects[0].payload,
+                prefs.pending_effects[0].payload
+            );
+            assert_eq!(
+                saved.queued_launch_session_strategies[&42],
+                crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+            let mut restored =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), saved);
+            assert_eq!(restored.attempt_count(42), 1);
+            assert!(!restored.active_issue_numbers().contains(&42));
+            assert!(restored
+                .take_pending_launch_requests()
+                .iter()
+                .all(|request| request.issue_number != 42));
+            assert!(!restored.claim_launch_delivery(
+                42,
+                "pending-42",
+                "gui",
+                123,
+                "tab::agent-42",
+                |_| true
+            ));
+        }
     }
 
     /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored

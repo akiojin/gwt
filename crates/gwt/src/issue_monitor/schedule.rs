@@ -315,6 +315,45 @@ fn reconcile(
             });
         }
     }
+    // Automatic plans are preferences until claiming starts. A busy member
+    // must not strand them while another member can admit the work now.
+    for index in 0..reservations.len() {
+        let entry = &reservations[index];
+        if entry.host_id != host
+            || entry.reason == AgentScheduleReason::AssignedByYou
+            || prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+            || !members.iter().any(|member| {
+                member.agent_member_id == entry.agent_member_id && member.assignment.is_some()
+            })
+        {
+            continue;
+        }
+        let idle = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                member.assignment.is_none()
+                    && !prefs.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.agent_member_id.as_deref() == Some(&member.agent_member_id)
+                    })
+                    && !reservations.iter().any(|reservation| {
+                        reservation.agent_member_id == member.agent_member_id
+                            && prefs.scheduled_issue_has_pending_claim(reservation.issue_number)
+                    })
+            })
+            .min_by_key(|member| {
+                reservations
+                    .iter()
+                    .filter(|entry| entry.agent_member_id == member.agent_member_id)
+                    .count()
+            });
+        if let Some(member) = idle {
+            reservations[index]
+                .agent_member_id
+                .clone_from(&member.agent_member_id);
+            reservations[index].reason = AgentScheduleReason::QueueOrder;
+        }
+    }
     // Preserve the canonical queue order within each member's plan.
     let local_order: Vec<_> = prefs
         .terminal_queues
@@ -1075,13 +1114,61 @@ mod tests {
         )
         .unwrap();
         prefs.agent_roster.as_mut().unwrap().members[1] = busy;
+        let mut manual = prefs.clone();
+        manual
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 41)
+            .unwrap()
+            .reason = AgentScheduleReason::AssignedByYou;
+        reconcile(&mut manual, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), manual);
+        assert_eq!(
+            manual.scheduled_agent_member_id(41),
+            Some(roster.members[1].agent_member_id.as_str()),
+            "an explicit member choice keeps its busy reservation"
+        );
+        assert!(manual.agent_schedule_launch_exclusion(41).is_some());
+
+        let revision = prefs.agent_issue_schedule.revision;
         reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
-        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_none());
         assert_eq!(
             monitor.scheduled_agent_member_id(41),
-            Some(roster.members[1].agent_member_id.as_str())
+            Some(roster.members[0].agent_member_id.as_str()),
+            "an automatic reservation uses the idle member even with more future work"
         );
+        assert_eq!(prefs.agent_issue_schedule.revision, revision + 1);
+        assert_eq!(
+            prefs
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [41, 42, 43].map(|number| (number, AgentScheduleReason::QueueOrder))
+        );
+        let planned = prefs.agent_issue_schedule.clone();
+        prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert_eq!(prefs.agent_issue_schedule, planned);
+
+        let busy = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy-other",
+            Some(100),
+            None,
+            None,
+            Some(&roster.members[0].agent_member_id),
+        )
+        .unwrap();
+        let mut all_busy = prefs.clone();
+        all_busy.agent_roster.as_mut().unwrap().members[0] = busy;
+        reconcile(&mut all_busy, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert_eq!(all_busy.agent_issue_schedule, planned);
         prefs
             .terminal_queues
             .get_mut(&host)
@@ -1206,6 +1293,26 @@ mod tests {
         assert!(
             monitor.agent_schedule_launch_exclusion(42).is_none(),
             "a different free member remains available"
+        );
+
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy-42-member",
+            Some(99),
+            None,
+            None,
+            Some(&roster.members[1].agent_member_id),
+        )
+        .unwrap();
+        let read =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert!(
+            read.members[1]
+                .issues
+                .iter()
+                .any(|issue| issue.issue_number == 42),
+            "a member pinned by another pending claim is not an idle destination"
         );
 
         crate::try_mutate_issue_monitor_prefs(&path, |prefs| {

@@ -209,7 +209,7 @@ test.describe("Surface rail", () => {
     await page.evaluate(() => (window as any).__updateSurfaceAgent("pm-window", {}));
     await expectPm();
     await page.evaluate(() => (window as any).__surfaceRailSocket().emit({ kind: "hub_state", hub: {
-      app_version: "playwright", projects: [{ id: "tab-1", title: "Surface Rail Fixture", project_root: "/fixture", kind: "git" }], recent_projects: [],
+      app_version: "playwright", projects: [{ id: "tab-1", title: "Surface Rail Fixture", project_key: location.pathname.split("/").filter(Boolean).at(-1), project_root: "/fixture", kind: "git" }], recent_projects: [],
     } }));
     await expectPm();
     await main.locator('[data-id="pm-window"] .xterm').evaluate(node => { (window as any).__ownedPmTerminal = node; });
@@ -917,6 +917,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
           {
             id: "tab-1",
             title: "Surface Rail Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {
@@ -927,6 +928,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
           {
             id: "tab-2",
             title: "Second project",
+            project_key: "fedcba9876543210",
             project_root: "/second-fixture",
             kind: "git",
             workspace: {

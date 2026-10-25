@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
+import { createUiStateStore } from "../ui-state-store.js";
+import { applyBranchEntriesEvent } from "../branch-list-state.js";
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
@@ -178,16 +180,18 @@ test("Remote branch receiver commits shared state and rejects bypass rendering",
   }
 });
 
-test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
+test("Session resume receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && /^\/workspace_resume_agent_(error|started)(\||\/|$)/.test(finding.context));
+    finding.root === 'receive' && /^\/(workspace_resumable_agents|workspace_resume_agent_(error|started))(\||\/|$)/.test(finding.context));
   assert.deepEqual(findings(app), []);
   const start = app.indexOf('function receive(event)');
   assert.ok(start > 0);
-  for (const kind of ['workspace_resume_agent_error', 'workspace_resume_agent_started']) {
-    for (const bypass of ['document.body.textContent = event.message;', 'handleWorkspaceResumeAgentOutcome(event);']) {
+  for (const kind of ['workspace_resumable_agents', 'workspace_resume_agent_error', 'workspace_resume_agent_started']) {
+    const handler = kind === 'workspace_resumable_agents'
+      ? 'workspaceResumePicker.handleAgentsList(event);' : 'handleWorkspaceResumeAgentOutcome(event);';
+    for (const bypass of ['document.body.textContent = event.message;', handler]) {
       const mutated = app.slice(0, start) + app.slice(start)
         .replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
       assert.notEqual(mutated, app);
@@ -677,7 +681,7 @@ test("direct named imports follow exported function bodies for one module hop", 
   assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
 });
 
-test("real Board and Branch data imports reject DOM mutations in their helpers", () => {
+test("Board receiver and Branch subscriber data imports reject DOM mutations in their helpers", () => {
   for (const [sourceName, dependencyName, exportedName, marker, context] of [
     ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
     ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
@@ -687,7 +691,8 @@ test("real Board and Branch data imports reject DOM mutations in their helpers",
     const file = `crates/gwt/web/${dependencyName}.js`;
     const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
       modules: new Map([[file, module]]),
-    }).filter(finding => finding.context === context
+      rootName: sourceName === 'app' ? 'renderBranchEntries' : undefined,
+    }).filter(finding => finding.context === (sourceName === 'app' ? '' : context)
       && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
     assert.deepEqual(inspect(dependency), []);
     const mutated = dependency.replace(marker, `${marker} document.body.textContent = "bypass";`);
@@ -1431,18 +1436,41 @@ test("Branch entry receivers commit shared state and reject direct rendering", (
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, file).filter(finding =>
     finding.root === 'receive' && finding.context === '/branch_entries');
-  // The existing state lookup, pure ingest and selection normalization stay synchronous.
-  const dataCalls = [
-    '06cc29f0a75de93d059de5c527a04967d87070031924e5869c4b23a4091837d3',
-    'aa6152497be4307a6487effac25ca2b1f6c60c783b33a9fa9e44790765b56278',
-    'ab5d1ad7bc29d19bedd30294402bc6d9e9bc3f639854ea775759b01c741de37d',
-  ];
-  assert.ok(findings(app).every(finding => finding.kind === 'unresolved-call'));
-  assert.deepEqual(findings(app).map(finding => finding.hash).sort(), dataCalls);
+  assert.deepEqual(findings(app), []);
   for (const bypass of ['document.body.textContent = event.id;',
     'frontendUnits.branchesFileTreeSurface.renderBranches(event.id);']) {
     const mutated = app.replace('case "branch_entries": {', `case "branch_entries": { ${bypass}`);
     assert.notEqual(mutated, app);
-    assert.ok(findings(mutated).some(finding => !dataCalls.includes(finding.hash)));
+    assert.ok(findings(mutated).length > 0);
   }
+});
+
+test("Branch receipts isolate entries and cleanup before synchronous ingestion", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const model = app.slice(app.indexOf('const branchEntriesViewModel ='),
+    app.indexOf('\n\n', app.indexOf('branchEntriesViewModel.subscribe(')));
+  const arm = app.match(/case "branch_entries": \{[\s\S]*?\n          \}/)[0];
+  const states = new Map(), counts = [];
+  const frontendUnits = { branchesFileTreeSurface: {
+    ensureBranchListState(id) {
+      if (!states.has(id)) states.set(id, { entries: [] });
+      return states.get(id);
+    },
+    renderBranches() {},
+  } };
+  const receive = new Function('createUiStateStore', 'applyBranchEntriesEvent', 'frontendUnits',
+    'syncBranchSelectionState', 'applyOperatorTelemetryCounts', `${model}\nreturn event => { switch(event.kind) { ${arm} } };`)(
+    createUiStateStore, applyBranchEntriesEvent, frontendUnits, () => {}, value => counts.push(value.branches));
+  const event = { kind: 'branch_entries', id: 'branches', load_id: 2, phase: 'hydrated',
+    entries: [{ name: 'work/accepted', cleanup_ready: true, cleanup: { availability: 'safe' } }] };
+  receive(event);
+  event.entries[0].name = 'changed';
+  event.entries[0].cleanup.availability = 'blocked';
+  const state = states.get('branches');
+  assert.equal(state.entries[0].name, 'work/accepted');
+  assert.equal(state.lastHydratedByName.get('work/accepted').availability, 'safe');
+  receive({ ...event, load_id: 1, entries: [] });
+  assert.equal(state.entries.length, 1);
+  receive({ ...event, load_id: 3, entries: [] });
+  assert.deepEqual(counts, [1, 0]);
 });

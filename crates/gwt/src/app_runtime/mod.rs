@@ -4131,6 +4131,7 @@ fn observe_local_issue_completion(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
@@ -4139,6 +4140,7 @@ fn run_scheduled_issue_monitor_scan(
     window_snapshot_tabs: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
+    restoring_session_ids: &HashSet<String>,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     run_scheduled_issue_monitor_scan_with_budgets(
         project_root,
@@ -4150,6 +4152,7 @@ fn run_scheduled_issue_monitor_scan(
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
         ISSUE_MONITOR_COMMIT_BUDGET,
+        restoring_session_ids,
     )
 }
 
@@ -4248,7 +4251,11 @@ impl Drop for ScanGenerationReaperFlight {
 
 /// The prefs path already identifies the canonical project store, so linked
 /// worktrees and duplicate tabs share one reservation without another Git probe.
-fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
+fn enqueue_scan_generation_reaper(
+    project_root: &Path,
+    prefs_path: &Path,
+    restoring_session_ids: &HashSet<String>,
+) {
     if !scan_generation_reapers()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4262,6 +4269,7 @@ fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
     // Unwinding the worker releases it as well, without queuing another worker.
     let flight = ScanGenerationReaperFlight(prefs_path.to_path_buf());
     let project_root = project_root.to_path_buf();
+    let restoring_session_ids = restoring_session_ids.clone();
     #[cfg(test)]
     let user_home = gwt_config::home::user_home().expect("test user home");
     if let Err(error) = std::thread::Builder::new()
@@ -4271,7 +4279,7 @@ fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
             // The recovery can outlive the scan fixture's process-global HOME.
             #[cfg(test)]
             let _home = gwt_core::test_support::ScopedGwtHome::set(user_home);
-            reap_scan_defunct_active_generations(&project_root);
+            reap_scan_defunct_active_generations(&project_root, &restoring_session_ids);
         })
     {
         tracing::warn!(%error, "could not schedule scan Active generation recovery");
@@ -4339,11 +4347,12 @@ impl Drop for ScopedScanGenerationReaperTestHook {
 /// Issue #3934: recover generations after startup without changing the exact
 /// liveness checks and execution leases used by startup recovery.
 ///
-/// The scan worker has no `AppRuntime`, so it protects nothing by identity;
-/// it does not need to. Startup's protection list exists only for sessions it
-/// is about to restore, and every window this process already owns publishes a
-/// live runtime sidecar that the exact revalidation reads as `Live`.
-fn reap_scan_defunct_active_generations(project_root: &Path) {
+/// Restore sources have no live sidecar until asynchronous launch preparation
+/// finishes. Preserve their admitted identity alongside ordinary runtime checks.
+fn reap_scan_defunct_active_generations(
+    project_root: &Path,
+    restoring_session_ids: &HashSet<String>,
+) {
     #[cfg(test)]
     {
         let hook = scan_generation_reaper_test_hooks()
@@ -4373,7 +4382,7 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
         &gwt_core::paths::gwt_sessions_dir(),
         &worktrees,
         &[],
-        &std::collections::HashSet::new(),
+        restoring_session_ids,
         startup::GenerationReaperFailureLog::Debug,
     );
     if summary.reaped > 0 || summary.replayed > 0 {
@@ -4404,6 +4413,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
     commit_budget: std::time::Duration,
+    restoring_session_ids: &HashSet<String>,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     // Issue #3609: this runs on the worker thread `enqueue_issue_monitor_scan_worker`
     // spawned, so the prefs path is resolved from the process-global `HOME` here, not
@@ -4430,7 +4440,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // before the authority probe (#3964): daemon-owned scans still need local
     // recovery, which retains its exact liveness revalidation and own leases.
     if prefs.enabled {
-        enqueue_scan_generation_reaper(project_root, &prefs_path);
+        enqueue_scan_generation_reaper(project_root, &prefs_path, restoring_session_ids);
     }
 
     // Cheap authority probe before any remote I/O. The lease is intentionally
@@ -10519,6 +10529,7 @@ impl AppRuntime {
         let worker_now = now.to_string();
         let window_snapshot_tabs = self.issue_monitor_project_tab_ids(expected_project_tab_id);
         let issue_client_factory = self.issue_client_factory.clone();
+        let restoring_session_ids = self.restoring_session_ids();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Issue #4244: automatic disappearance belongs to the scan
@@ -10539,6 +10550,7 @@ impl AppRuntime {
                     Some(&window_snapshot_tabs),
                     &worker_now,
                     &issue_client_factory,
+                    &restoring_session_ids,
                 );
                 (outcome, Vec::new())
             }))

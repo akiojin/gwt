@@ -1311,6 +1311,17 @@ impl AppRuntime {
         }
     }
 
+    /// Keep the source protected through queue drain and asynchronous launch
+    /// preparation. Its binding can be refreshed before the launch handshake,
+    /// so protection follows the admitted Session id, not a stale binding.
+    pub(super) fn restoring_session_ids(&self) -> HashSet<String> {
+        self.pending_startup_auto_resume_sessions
+            .iter()
+            .map(|pending| pending.session.id.clone())
+            .chain(self.restore_launch_windows.values().flatten().cloned())
+            .collect()
+    }
+
     fn startup_reaper_protection(
         &self,
     ) -> (Vec<gwt_agent::SessionExecutionIdentity>, HashSet<String>) {

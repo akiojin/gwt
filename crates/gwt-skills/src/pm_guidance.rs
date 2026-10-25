@@ -261,6 +261,12 @@ a Goal, milestone or another row. Preserve the supplied row order, repeats and t
 Absent Monitor yields null even for empty membership; supplied snapshots without matching rows
 yield []. Keep `unobserved_issues` and the enclosing Monitor source, scan time and coverage limits.
 This join does not establish a complete graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents.
+Keep external/shared blockers, numeric order and distinct direct dependents; omit other dependents and empty blocker rows.
+Duplicate/blank row IDs and invalid links keep independent membership; never expand through a Goal, milestone or another row.
+Absent Monitor yields null even for empty membership; no supplied member blocker edges yields [].
+Degraded or aborted facts retain enclosing Monitor provenance and limits. This inverse does not establish a complete graph,
+transitive delay, critical path or health, and grants no priority, readiness or launch authority.
 
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
@@ -4550,6 +4556,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Each Goal's `dependency_impacts` filters the global direct inverse to its existing roadmap member dependents",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
             "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
+            "Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",

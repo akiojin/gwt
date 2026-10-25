@@ -9,13 +9,414 @@ use crate::project_runtime::launch_authority::{
     preflight_agent_capability_endpoints, ActiveContinuationInstall,
     AgentCapabilityLaunchAuthority,
 };
-use crate::project_runtime::launch_payload::AgentLaunchError;
+use crate::project_runtime::launch_payload::{
+    AgentLaunchError, LaunchFeedbackContext, PendingContinueWork, PendingContinueWorkExecution,
+    PendingFreshExecutionLaunch, WorkspaceResumeContext,
+};
 use crate::session_launch::durable_launch_recovery_exists;
 use crate::session_launch::recovery::{
     clear_durable_launch_recovery, durable_launch_recovery_session_identity,
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
     DurableLaunchRecoveryKind,
 };
+
+pub fn pending_execution_activation_status(pending: &PendingContinueWork) -> Option<bool> {
+    match &pending.execution {
+        PendingContinueWorkExecution::Successor(_) => {
+            crate::cli::execution_state::continuation_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::ContinuationAttemptStatus::Activated
+                })
+            })
+        }
+        PendingContinueWorkExecution::Takeover(_) => {
+            crate::cli::execution_state::generation_takeover_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+                })
+            })
+        }
+    }
+}
+
+pub fn pending_fresh_execution_activation_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<bool> {
+    pending_fresh_execution_attempt_status(pending)
+        .map(|status| status == crate::cli::execution_state::ContinuationAttemptStatus::Activated)
+}
+
+pub fn pending_fresh_execution_attempt_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<crate::cli::execution_state::ContinuationAttemptStatus> {
+    crate::cli::execution_state::continuation_attempt_for_operation(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.operation_id,
+    )
+    .ok()
+    .flatten()
+    .map(|attempt| attempt.status)
+}
+
+pub fn pending_continue_work_session_identity(
+    pending: &PendingContinueWork,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let mut session = gwt_agent::Session::new(
+        &pending.worktree_path,
+        pending.work_branch.clone(),
+        pending.work_agent_id.clone(),
+    );
+    session.id = pending.binding.session_id.clone();
+    session.project_state_root = Some(pending.project_root.clone());
+    session.repo_hash = Some(pending.binding.repo_hash.clone());
+    session.linked_issue_number = Some(pending.owner.number);
+    gwt_agent::SessionExecutionIdentity::for_binding(&session, &pending.binding)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn abort_prepared_execution_and_remove_exact_session<F>(
+    worktree: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    execution: &PendingContinueWorkExecution,
+    reason: &str,
+    sessions_dir: &Path,
+    session_identity: &gwt_agent::SessionExecutionIdentity,
+    after_abort: F,
+) -> std::io::Result<bool>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    match execution {
+        PendingContinueWorkExecution::Successor(request) => {
+            crate::cli::execution_state::abort_successor_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+        PendingContinueWorkExecution::Takeover(request) => {
+            crate::cli::execution_state::abort_generation_takeover_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+    }
+}
+
+/// Return false only for an irreversible Activated generation. Exact candidate
+/// conflicts and unreadable authority retain their evidence for reconciliation.
+pub fn rollback_worker_continue_work(
+    sessions_dir: &Path,
+    pending: &PendingContinueWork,
+) -> Result<bool, String> {
+    match pending_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("continuation activation status is unreadable".into()),
+    }
+    let identity = pending_continue_work_session_identity(pending)?;
+    let cleanup = abort_prepared_execution_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.execution,
+        "continuation launch failed before SessionStart",
+        sessions_dir,
+        &identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err("continuation candidate Session changed before exact rollback".into())
+        }
+        Err(_) if pending_execution_activation_status(pending) == Some(true) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    Ok(true)
+}
+
+pub fn rollback_worker_fresh_execution(
+    sessions_dir: &Path,
+    pending: &PendingFreshExecutionLaunch,
+) -> Result<bool, String> {
+    match pending_fresh_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("fresh launch activation status is unreadable".into()),
+    }
+    let cleanup = crate::cli::execution_state::abort_successor_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.request,
+        "fresh linked-owner launch failed before SessionStart",
+        sessions_dir,
+        &pending.session_identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => return Err("fresh candidate Session changed before exact rollback".into()),
+        Err(_) if pending_fresh_execution_activation_status(pending) == Some(true) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn pending_fresh_execution_launch_from_session(
+    sessions_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    agent_project_root: &str,
+    linked_issue_number: Option<u64>,
+    base_branch: Option<String>,
+    resume_context: Option<WorkspaceResumeContext>,
+    launch_feedback_context: Option<LaunchFeedbackContext>,
+    readiness_nonce: &str,
+    expected_agent_id: &gwt_agent::AgentId,
+) -> Result<PendingFreshExecutionLaunch, String> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path).map_err(|error| {
+        format!(
+            "fresh linked-owner launch Session could not be read at {}: {error}",
+            session_path.display()
+        )
+    })?;
+    if session.id != session_id
+        || &session.agent_id != expected_agent_id
+        || !same_worktree_path(&session.worktree_path, worktree_path)
+    {
+        return Err(
+            "fresh linked-owner launch Session does not match its materialized worktree"
+                .to_string(),
+        );
+    }
+    let binding = session.execution_binding.clone().ok_or_else(|| {
+        "fresh linked-owner launch Session has no Prepared execution binding".to_string()
+    })?;
+    if binding.session_id != session_id
+        || session.linked_issue_number != Some(binding.owner_number)
+        || linked_issue_number != Some(binding.owner_number)
+    {
+        return Err(
+            "fresh linked-owner launch owner does not match its persisted Session binding"
+                .to_string(),
+        );
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => return Err("fresh linked-owner launch owner kind is not canonical".to_string()),
+    };
+    let owner = crate::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    let ledger = crate::cli::execution_state::load_generation_ledger(worktree_path, owner)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "fresh linked-owner launch owner ledger is missing".to_string())?;
+    let attempt = crate::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+        worktree_path,
+        owner,
+        session_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| {
+        "fresh linked-owner launch has no unique Prepared successor attempt".to_string()
+    })?;
+    let expected_status = match attempt.predecessor_status {
+        crate::cli::execution_state::SuccessorPredecessorStatus::Blocked => {
+            crate::cli::execution_state::ExecutionControlStatus::Blocked
+        }
+        crate::cli::execution_state::SuccessorPredecessorStatus::Completed => {
+            crate::cli::execution_state::ExecutionControlStatus::Completed
+        }
+        crate::cli::execution_state::SuccessorPredecessorStatus::Active => {
+            crate::cli::execution_state::ExecutionControlStatus::Active
+        }
+    };
+    if ledger.current_effective_status() != Some(expected_status) {
+        return Err("fresh linked-owner launch predecessor status changed".to_string());
+    }
+    if !crate::cli::execution_state::prepared_execution_binding_matches(
+        worktree_path,
+        owner,
+        session_id,
+        &binding.identity,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "fresh linked-owner launch Session does not match its Prepared successor".to_string(),
+        );
+    }
+    let predecessor_binding =
+        crate::cli::execution_state::current_execution_binding(worktree_path, owner)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "fresh linked-owner launch predecessor binding is missing".to_string()
+            })?;
+    if predecessor_binding == binding.identity {
+        return Err(
+            "fresh linked-owner launch candidate is already the current generation".to_string(),
+        );
+    }
+    let project_root = session
+        .project_state_root
+        .clone()
+        .or_else(|| {
+            (!agent_project_root.trim().is_empty()).then(|| PathBuf::from(agent_project_root))
+        })
+        .ok_or_else(|| {
+            "fresh linked-owner launch canonical Project State root is missing".to_string()
+        })?;
+    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
+        .map_err(|error| format!("fresh linked-owner Session identity is invalid: {error}"))?
+        .ok_or_else(|| "fresh linked-owner Session identity is missing".to_string())?;
+    if durable_launch_recovery_session_identity(sessions_dir, session_id)?
+        != Some(session_identity.clone())
+    {
+        return Err(
+            "fresh linked-owner Session no longer matches its durable launch identity".to_string(),
+        );
+    }
+    Ok(PendingFreshExecutionLaunch {
+        operation_id: attempt.request.operation_id.clone(),
+        project_root,
+        worktree_path: worktree_path.to_path_buf(),
+        owner,
+        request: attempt.request,
+        binding,
+        session_identity,
+        readiness_nonce: readiness_nonce.to_string(),
+        predecessor_binding,
+        base_branch,
+        linked_issue_number,
+        resume_context,
+        launch_feedback_context,
+    })
+}
+
+pub fn rollback_materialized_fresh_execution_launch(
+    sessions_dir: &Path,
+    session_id: &str,
+    worktree_path: &Path,
+    reason: &str,
+    expected_agent_id: &gwt_agent::AgentId,
+) -> Result<(), String> {
+    let session_path = sessions_dir.join(format!("{session_id}.toml"));
+    let session = gwt_agent::Session::load(&session_path).map_err(|error| error.to_string())?;
+    let binding = session.execution_binding.clone().ok_or_else(|| {
+        "fresh linked-owner rollback cannot prove the candidate Session binding".to_string()
+    })?;
+    let session_identity = durable_launch_recovery_session_identity(sessions_dir, session_id)?
+        .ok_or_else(|| "fresh linked-owner rollback identity is missing".to_string())?;
+    if session.id != session_id
+        || &session.agent_id != expected_agent_id
+        || binding.session_id != session_id
+        || !same_worktree_path(&session.worktree_path, worktree_path)
+    {
+        return Err("fresh linked-owner rollback candidate identity no longer matches".to_string());
+    }
+    let owner_kind = match binding.owner_kind.as_str() {
+        "spec" => crate::cli::execution_state::ExecutionOwnerKind::Spec,
+        "issue" => crate::cli::execution_state::ExecutionOwnerKind::Issue,
+        _ => {
+            return Err("fresh linked-owner rollback candidate owner is not canonical".to_string())
+        }
+    };
+    let owner = crate::cli::execution_state::ExecutionOwnerKey {
+        kind: owner_kind,
+        number: binding.owner_number,
+    };
+    let attempt = crate::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
+        worktree_path,
+        owner,
+        session_id,
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "fresh linked-owner rollback found no unique Prepared candidate".to_string())?;
+    if !crate::cli::execution_state::prepared_execution_binding_matches(
+        worktree_path,
+        owner,
+        session_id,
+        &binding.identity,
+    )
+    .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "fresh linked-owner rollback candidate binding is no longer Prepared".to_string(),
+        );
+    }
+    match crate::cli::execution_state::abort_successor_and_remove_exact_session(
+        worktree_path,
+        owner,
+        &attempt.request,
+        reason,
+        sessions_dir,
+        &session_identity,
+        || Ok(()),
+    ) {
+        Ok(true) => clear_durable_launch_recovery(sessions_dir, session_id),
+        Ok(false) => Err(
+            "fresh linked-owner rollback retained a Session whose binding no longer matches"
+                .to_string(),
+        ),
+        Err(error) => Err(error.to_string()),
+    }
+}
 
 #[derive(Clone)]
 pub struct MaterializedGenesisLaunch {
