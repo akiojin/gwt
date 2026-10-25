@@ -422,6 +422,10 @@ pub enum FrontendEvent {
         #[serde(default)]
         expected_revision: Option<u64>,
     },
+    /// Read or reassign the authenticated project's persistent Agent schedule.
+    AgentSchedule {
+        action: crate::issue_monitor::AgentScheduleAction,
+    },
     StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
@@ -2144,6 +2148,13 @@ pub enum BackendEvent {
         project_key: String,
         message: String,
     },
+    AgentSchedule {
+        schedule: crate::issue_monitor::AgentScheduleSnapshot,
+    },
+    AgentScheduleError {
+        project_key: String,
+        message: String,
+    },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
     /// types directly.
@@ -3096,6 +3107,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "agent_schedule",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_schedule_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3613,6 +3634,8 @@ impl BackendEvent {
             BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
             BackendEvent::AgentRoster { .. } => "agent_roster",
             BackendEvent::AgentRosterError { .. } => "agent_roster_error",
+            BackendEvent::AgentSchedule { .. } => "agent_schedule",
+            BackendEvent::AgentScheduleError { .. } => "agent_schedule_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -4168,6 +4191,44 @@ mod tests {
                 .and_then(Value::as_str),
             Some("18446744073709551615")
         );
+    }
+
+    #[test]
+    fn agent_schedule_actions_and_snapshot_use_project_scoped_wire_contract() {
+        for action in [
+            serde_json::json!({"kind": "read"}),
+            serde_json::json!({
+                "kind": "reassign", "issue_number": 42,
+                "source_member_id": "member-a", "target_member_id": "member-b",
+                "expected_roster_revision": 3, "expected_queue_revision": "queue-3",
+                "expected_schedule_revision": 2,
+            }),
+        ] {
+            let wire = serde_json::json!({"kind": "agent_schedule", "action": action});
+            let _: FrontendEvent = serde_json::from_value(wire).unwrap();
+        }
+        let policy = backend_event_policy("agent_schedule").unwrap();
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot,
+        );
+        let schedule = serde_json::json!({
+            "roster_revision": 3, "queue_revision": "queue-3", "schedule_revision": 2,
+            "members": [{
+                "agent_member_id": "member-a",
+                "issues": [{"issue_number": 42, "reason": "queue_order"}],
+                "empty_reason": null,
+            }],
+        });
+        let event = BackendEvent::AgentSchedule {
+            schedule: serde_json::from_value(schedule.clone()).unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({"kind": "agent_schedule", "schedule": schedule}),
+        );
+        assert_eq!(event.delivery_policy(), policy);
     }
 
     #[test]

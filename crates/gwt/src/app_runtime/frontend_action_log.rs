@@ -150,6 +150,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
                 .mode(if *enabled { "on" } else { "off" })
         }
         FrontendEvent::AgentRoster { .. } => FrontendUserActionLog::new("agent_roster", "agents"),
+        FrontendEvent::AgentSchedule { .. } => {
+            FrontendUserActionLog::new("agent_schedule", "agents")
+        }
         FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")

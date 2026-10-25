@@ -2914,6 +2914,39 @@ fn issue_monitor_prefs_fence_digest(
                     .unwrap_or(&serde_json::Value::Null);
                 hasher.update(b"hold:");
                 hasher.update(serde_json::to_vec(hold).unwrap_or_default());
+                // Freeze this Issue's selected member across a queued refresh.
+                // A delivery pin survives consumption of the future reservation.
+                let pinned = map
+                    .get("pending_launch_deliveries")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|entries| {
+                        entries.iter().find(|entry| {
+                            entry
+                                .get("issue_number")
+                                .and_then(serde_json::Value::as_u64)
+                                == Some(issue_number)
+                        })
+                    })
+                    .and_then(|entry| entry.get("agent_member_id"))
+                    .filter(|id| id.is_string());
+                let planned = map
+                    .get("agent_issue_schedule")
+                    .and_then(|schedule| schedule.get("reservations"))
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|entries| {
+                        entries.iter().find(|entry| {
+                            entry
+                                .get("issue_number")
+                                .and_then(serde_json::Value::as_u64)
+                                == Some(issue_number)
+                        })
+                    });
+                let member = match pinned {
+                    Some(member) => serde_json::json!({"member":member,"host":gwt::process::current_hostname()}),
+                    None => planned.map(|entry| serde_json::json!({"member":entry.get("agent_member_id"),"host":entry.get("host_id")})).unwrap_or(serde_json::Value::Null),
+                };
+                hasher.update(b"member:");
+                hasher.update(serde_json::to_vec(&member).unwrap_or_default());
             }
         }
         // Unparsable bytes fail closed: any byte change invalidates.
@@ -11549,6 +11582,40 @@ mod agent_window_status_tests {
         assert_eq!(
             initial_agent_window_status(&generic),
             WindowProcessStatus::Running
+        );
+    }
+}
+
+#[cfg(test)]
+mod agent_schedule_admission_tests {
+    use super::*;
+    use std::fs;
+    #[test]
+    fn agent_schedule_prepared_admission_fences_member_change_but_not_other_plans() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("issue-monitor.json");
+        let mut value = serde_json::json!({"agent_issue_schedule":{"revision":1,"reservations":[
+            {"host_id":gwt::process::current_hostname(),"agent_member_id":"a","issue_number":42,"reason":"queue_order"},
+            {"host_id":gwt::process::current_hostname(),"agent_member_id":"b","issue_number":43,"reason":"queue_order"}
+        ]}});
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let original = issue_monitor_prefs_fence_digest(&path, Some(42)).unwrap();
+        value["agent_issue_schedule"]["revision"] = serde_json::json!(2);
+        value["agent_issue_schedule"]["reservations"][1]["agent_member_id"] =
+            serde_json::json!("c");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            issue_monitor_prefs_fence_digest(&path, Some(42)).unwrap(),
+            original,
+            "other member's next Issue must not invalidate this admission"
+        );
+        value["agent_issue_schedule"]["reservations"][0]["agent_member_id"] =
+            serde_json::json!("b");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_ne!(
+            issue_monitor_prefs_fence_digest(&path, Some(42)).unwrap(),
+            original,
+            "a prepared launch cannot silently change its selected member"
         );
     }
 }

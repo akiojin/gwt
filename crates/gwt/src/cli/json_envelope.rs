@@ -921,6 +921,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Read,
+        }),
+        "issue.monitor.schedule.reassign" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                issue_number: required_u64(params, "issue_number")?,
+                source_member_id: required_string(params, "source_member_id")?,
+                target_member_id: required_string(params, "target_member_id")?,
+                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                expected_queue_revision: required_string(params, "expected_queue_revision")?,
+                expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
+            },
+        }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
             terminal: optional_string(params, "terminal")?,
@@ -6392,6 +6407,55 @@ mod tests {
             params["recovered_at"] = json!("2026-10-20T01:00:00Z");
             let _ = err("issue.monitor.recovery.record", params);
         }
+    }
+
+    #[test]
+    fn issue_monitor_schedule_operations_require_complete_reassignment_observation() {
+        assert_eq!(
+            ok("issue.monitor.schedule.read", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: None,
+                action: crate::issue_monitor::AgentScheduleAction::Read,
+            })
+        );
+        let reassignment = json!({
+            "project_root": "/tmp/project",
+            "issue_number": 42,
+            "source_member_id": "member-a",
+            "target_member_id": "member-b",
+            "expected_roster_revision": 3,
+            "expected_queue_revision": "observed-queue",
+            "expected_schedule_revision": 2,
+        });
+        assert_eq!(
+            ok("issue.monitor.schedule.reassign", reassignment.clone()),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                    issue_number: 42,
+                    source_member_id: "member-a".into(),
+                    target_member_id: "member-b".into(),
+                    expected_roster_revision: 3,
+                    expected_queue_revision: "observed-queue".into(),
+                    expected_schedule_revision: 2,
+                },
+            })
+        );
+        for required in [
+            "issue_number",
+            "source_member_id",
+            "target_member_id",
+            "expected_roster_revision",
+            "expected_queue_revision",
+            "expected_schedule_revision",
+        ] {
+            let mut incomplete = reassignment.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            let _ = err("issue.monitor.schedule.reassign", incomplete);
+        }
+        let mut invalid = reassignment;
+        invalid["expected_schedule_revision"] = Value::Null;
+        let _ = err("issue.monitor.schedule.reassign", invalid);
     }
 
     #[test]
