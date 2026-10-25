@@ -604,6 +604,63 @@ test("factory return aliases resolve model handlers without trusting controller.
     .some(finding => finding.kind === "unresolved-call"));
 });
 
+test("direct named imports follow exported function bodies for one module hop", () => {
+  const entry = `import { selectValue as select } from "./data.js";
+    function receive(event) { select(event); }`;
+  const data = `export function selectValue(event) { return normalize(event.value); }
+    function normalize(value) { return String(value).trim(); }`;
+  const inspect = (source = entry, module = data) => scanModule(source, "entry.js", {
+    modules: new Map([["data.js", module], ["second.js", "export function normalize(value) { return String(value); }"]]),
+  });
+  assert.deepEqual(inspect(), []);
+  assert.deepEqual(inspect(entry, data + '\nfunction unrelated() { let normalize = () => {}; normalize = external; }'), []);
+  const dirty = inspect(entry, data.replace("return String(value).trim();", "element.textContent = value;"));
+  assert.ok(dirty.some(finding => finding.kind === "dom-write" && finding.file === "data.js"
+    && finding.root === "receive" && finding.path.includes("selectValue>normalize")));
+  for (const [source, module] of [
+    [entry, data.replace("export function", "function")],
+    [entry, "export function other() {}"],
+    [entry.replace("receive(event)", "receive(event, select)"), data],
+    [entry, 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }'],
+    [entry, data + "\nselectValue = external;"],
+  ]) assert.ok(inspect(source, module).some(finding => finding.kind === "unresolved-call"));
+  assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
+});
+
+test("real Board and Branch data imports reject DOM mutations in their helpers", () => {
+  for (const [sourceName, dependencyName, exportedName, marker, context] of [
+    ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
+    ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
+  ]) {
+    const source = readFileSync(new URL(`../${sourceName}.js`, import.meta.url), "utf8");
+    const dependency = readFileSync(new URL(`../${dependencyName}.js`, import.meta.url), "utf8");
+    const file = `crates/gwt/web/${dependencyName}.js`;
+    const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
+      modules: new Map([[file, module]]),
+    }).filter(finding => finding.context === context
+      && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
+    assert.deepEqual(inspect(dependency), []);
+    const mutated = dependency.replace(marker, `${marker} document.body.textContent = "bypass";`);
+    assert.notEqual(mutated, dependency);
+    assert.ok(inspect(mutated).some(finding => finding.kind === "dom-write" && finding.file === file));
+  }
+});
+
+test("imported function parameter defaults retain the receiver boundary", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", 'export function select(event, value = (document.body.textContent = event.value)) { return value; }']]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "dom-write"));
+});
+
+test("imported functions cannot trust reassigned local helpers", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", `export function select(event) { normalize(event); }
+      function normalize(event) {} normalize = event => { document.body.textContent = event.value; };`]]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "unresolved-call"));
+});
+
 test("synchronous and scheduled callbacks retain the receiver boundary", () => {
   const findings = scanModule(`function receive(event) {
     event.items.forEach(item => { element.textContent = item; });
