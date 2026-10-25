@@ -1,5 +1,7 @@
 //! Session launch preparation and persistence without a GUI dependency.
 
+pub mod recovery;
+
 use std::path::{Path, PathBuf};
 
 const DURABLE_LAUNCH_RECOVERY_DIR: &str = "execution-launch-recovery";

@@ -44,6 +44,8 @@ mod knowledge_bridge_test;
 mod launch_authority_test;
 #[path = "../launch_payload_test.rs"]
 mod launch_payload_test;
+#[path = "../launch_recovery_test.rs"]
+mod launch_recovery_test;
 #[path = "../managed_assets_test.rs"]
 mod managed_assets_test;
 #[path = "../migration_e2e_test.rs"]
