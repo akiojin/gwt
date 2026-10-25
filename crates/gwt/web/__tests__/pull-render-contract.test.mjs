@@ -604,6 +604,23 @@ test("factory return aliases resolve model handlers without trusting controller.
     .some(finding => finding.kind === "unresolved-call"));
 });
 
+test("reassigned factory handler aliases fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "apply") => scanModule(`import { createSurface } from "./surface.js";
+    let { applySnapshot: apply } = createSurface();
+    const { applySnapshot: stable } = createSurface();
+    ${mutation}
+    function receive(event) { ${call}(event); }`, "entry.js", {
+    modules: new Map([["surface.js", `export function createSurface() {
+      function applySnapshot(value) { return String(value); } return { applySnapshot };
+    }`]]),
+  });
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated() { let apply; apply = external; }"), []);
+  assert.deepEqual(inspect("apply = external;", "stable"), []);
+  assert.ok(inspect("apply = event => { element.textContent = event.value; };")
+    .some(finding => finding.kind === "unresolved-call" && finding.path === "receive"));
+});
+
 test("direct named imports follow exported function bodies for one module hop", () => {
   const entry = `import { selectValue as select } from "./data.js";
     function receive(event) { select(event); }`;
