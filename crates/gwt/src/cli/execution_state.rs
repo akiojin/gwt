@@ -12140,9 +12140,13 @@ fn complete_matching_build_lifecycle(
     if record.status != ExecutionControlStatus::Completed {
         return Ok(());
     }
-    crate::cli::verification_record::close_completed_work_event_obligation_locked(
-        worktree, record,
-    )?;
+    if let Err(error) =
+        crate::cli::verification_record::close_completed_work_event_obligation_locked(
+            worktree, record,
+        )
+    {
+        tracing::warn!(%error, "completed execution retains failed Work receipt cleanup for audit");
+    }
     let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
     else {
         return Ok(());
@@ -34640,6 +34644,7 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
             let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
             save(&fixture.repo, &active_record("sess-op")).unwrap();
@@ -34683,6 +34688,54 @@ exit 1
                 preserved.execution_binding,
                 foreign_receipt.execution_binding
             );
+
+            // Receipt cleanup must not strand a matching build after the
+            // execution has durably completed, even when the receipt is unreadable.
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_build_state(&fixture.repo, "sess-op", Some(3248), true);
+            let receipt_path = crate::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+                .unwrap()
+                .join("work-event-settlement.json");
+            fs::write(&receipt_path, "{not json").unwrap();
+            let mut completed = None;
+            for _ in 0..2 {
+                let (code, out) = run_cmd(&fixture.repo, ExecutionCommand::Complete)
+                    .expect("receipt cleanup failure must not refuse completion");
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    load(&fixture.repo).unwrap().unwrap().status,
+                    ExecutionControlStatus::Completed
+                );
+                assert!(
+                    !gwt_core::skill_state::load(&fixture.repo, "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+                assert_eq!(fs::read_to_string(&receipt_path).unwrap(), "{not json");
+                let bytes = record_contents(&fixture.repo).unwrap();
+                if let Some(previous) = &completed {
+                    assert_eq!(
+                        &bytes, previous,
+                        "completion replay must preserve the record"
+                    );
+                }
+                completed = Some(bytes);
+            }
+            let completed_bytes = record_contents(&fixture.repo).unwrap();
+            let output = crate::cli::hook::event_dispatcher::handle_with_input(
+                "Stop",
+                "{}",
+                &fixture.repo,
+                Some("sess-op"),
+            )
+            .unwrap();
+            let crate::cli::hook::HookOutput::SystemMessage(message) = output else {
+                panic!("Stop must warn without blocking completed work: {output:?}");
+            };
+            assert!(message.contains("receipt is unreadable"), "{message}");
+            assert_eq!(record_contents(&fixture.repo).unwrap(), completed_bytes);
+            assert_eq!(fs::read_to_string(&receipt_path).unwrap(), "{not json");
         }
 
         #[test]
