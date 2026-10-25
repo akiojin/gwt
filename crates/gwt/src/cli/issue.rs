@@ -7591,6 +7591,9 @@ mod tests {
 
     #[test]
     fn issue_monitor_switch_ack_missing_or_foreign_session_preserves_prefs() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = TempDir::new().unwrap();
         let _home = ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");

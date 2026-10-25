@@ -729,11 +729,34 @@ fn drive_switch(
 impl AppRuntime {
     pub(crate) fn agent_switch_tick_events(&mut self) -> Vec<OutboundEvent> {
         let mut seen = HashSet::new();
+        let host = gwt::process::current_hostname();
         for context in self
             .project_contexts()
             .into_iter()
             .filter(|context| seen.insert(context.project_root.clone()))
         {
+            // This cached local read only decides whether to enqueue work.
+            // The worker re-reads authority, including abandoned Host intents.
+            let needs_tick = gwt::load_issue_monitor_prefs(
+                &gwt::issue_monitor_prefs_path_for_repo_path(&context.project_root),
+            )
+            .map(|prefs| {
+                prefs.agent_switch_intents.values().any(|intent| {
+                    intent.source.assignment.host_id == host
+                        && matches!(
+                            intent.stage,
+                            AgentSwitchStage::Requested
+                                | AgentSwitchStage::Checkpointing
+                                | AgentSwitchStage::CheckpointVerified
+                                | AgentSwitchStage::StoppingCurrent
+                                | AgentSwitchStage::LaunchingNext
+                        )
+                })
+            })
+            .unwrap_or(false);
+            if !needs_tick {
+                continue;
+            }
             let Some(guard) = SwitchTickGuard::claim(&context.project_root) else {
                 continue;
             };
