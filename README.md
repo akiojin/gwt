@@ -1075,6 +1075,10 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+`policy.monitor.scan_aborted` preserves the supplied scan outcome (null without
+Monitor data). An aborted scan can retain older observations while advancing its
+timestamp. It names `successful_monitor_scan` as missing and leaves saved WIP and
+queue-age comparisons `unknown`, while retaining the observed facts and timing.
 Saved WIP policies are compared independently, in saved order, with the distinct
 observed Issue count. `observed_exceeded` means only that this snapshot's count
 strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured

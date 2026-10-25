@@ -186,6 +186,11 @@ an old or degraded scan is only an observation at that scan, not current idle ev
 Idle timing does not prove queue age, SLA breaches, liveness or permission to release.
 Never recompute the Monitor's idle classification or change slots, claims or launches from it.
 
+`policy.monitor.scan_aborted` exposes the supplied typed scan outcome, or null without Monitor data.
+An aborted scan can retain older observations while advancing last_scan_at.
+When true, `successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown.
+Keep the raw observations and timing; unrelated error text alone does not invalidate a normal scan.
+
 `wip_limits` compares each saved policy independently in saved order, retaining its ID,
 version and optional limit alongside `observed_issue_count` and an assessment.
 `observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
@@ -4507,6 +4512,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
+            "`policy.monitor.scan_aborted` exposes the supplied typed scan outcome",
+            "An aborted scan can retain older observations while advancing last_scan_at",
+            "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
             "`policy.dependency_observations` preserves every supplied inbox row",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
