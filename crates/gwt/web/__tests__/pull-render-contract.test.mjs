@@ -329,6 +329,11 @@ test("Open Project result receiver commits shared state and rejects bypass rende
     'function applyOpenProjectPathResultReceiveEvent(event) { status.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(findings(bypass).length > 0);
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyProjectOpenReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Clone Project receivers commit shared state and reject bypass rendering", () => {
@@ -564,13 +569,34 @@ test("factory return aliases resolve model handlers without trusting controller.
       function applySnapshot(value) { model.update(() => value); }
       return { applySnapshot };
     }`;
-  const source = `import { createSurface } from "./surface.js";
-    const { applySnapshot: applyInbox } = createSurface();
-    function receive(event) { applyInbox(event.value); }`;
   const modules = new Map([["surface.js", module]]);
-  assert.deepEqual(scanModule(source, "entry.js", { modules }), []);
-  modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
-  assert.ok(scanModule(source, "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  const entry = body => `import { createSurface } from "./surface.js"; ${body}`;
+  for (const body of [
+    'const { applySnapshot: applyInbox } = createSurface(); function receive(event) { applyInbox(event.value); }',
+    'const controller = createSurface(); function receive(event) { controller.applySnapshot(event.value); }',
+  ]) {
+    modules.set("surface.js", module);
+    assert.deepEqual(scanModule(entry(body), "entry.js", { modules }), []);
+    modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
+    assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  }
+  for (const body of [
+    'const controller = createSurface(); function receive(event) { controller.unknown(event); }',
+    'const controller = createSurface(); function receive(event) { controller[event.method](event); }',
+    'const controller = createSurface(); function receive(event, controller) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, { controller }) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, controller = external) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { const { controller } = external; controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { try { throw external; } catch (controller) { controller.applySnapshot(event); } }',
+    'const controller = createSurface(); function receive(event) { class controller {} controller.applySnapshot(event); }',
+    'const controller = createSurface(); const wrapper = function controller() { function receive(event) { controller.applySnapshot(event); } };',
+    'let controller = createSurface(); function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); controller.applySnapshot = external; function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); ({ replacement: controller.applySnapshot } = external); function receive(event) { controller.applySnapshot(event); }',
+  ]) assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
+  modules.set("surface.js", module.replace('model.update(() => value)', 'external.applySnapshot(value)'));
+  assert.ok(scanModule(entry('const controller = createSurface(); function receive(event) { controller.applySnapshot(event); }'),
+    "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule("function receive(event) { view.controller.update(event.snapshot); }", "entry.js")
     .some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule(`function createUiStateStore() { return external; }
@@ -1142,6 +1168,13 @@ test("Close Project receiver commits shared data and rejects direct rendering", 
     "if (event.kind === 'project_closed') { hide();");
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
+  for (const entry of ['app.js', 'hub-app.js']) {
+    const code = readFileSync(new URL(`../${entry}`, import.meta.url), 'utf8');
+    const findings = controller => scanModule(code, `crates/gwt/web/${entry}`,
+      { modules: new Map([[file, controller]]) }).filter(finding => finding.file === file);
+    assert.deepEqual(findings(source), []);
+    assert.ok(findings(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
 });
 
 
@@ -1166,6 +1199,11 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyPickerReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Knowledge detail completions commit shared state and reject direct rendering", () => {
