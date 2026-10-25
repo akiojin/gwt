@@ -262,3 +262,89 @@ fn a_branch_already_gone_from_the_remote_is_reported_as_absent_not_failed() {
     assert!(execution.deleted.is_empty());
     assert_eq!(execution.absent, vec!["work/issue-9".to_string()]);
 }
+
+#[test]
+fn issue_6394_prune_git_stops_at_maintenance_deadline_without_spending_launch_reserve() {
+    use gwt_core::operation_deadline::{now, ScopedOperationClock, ScopedOperationDeadline};
+    use gwt_git::merged_branch_prune::{
+        count_unmerged_commits, list_remote_work_branches, push_delete_batch, refresh_remote_refs,
+    };
+    use std::time::{Duration, Instant};
+
+    let repo = tempfile::tempdir().unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    let git = |root: &std::path::Path, args: &[&str]| {
+        let output = gwt_core::process::hidden_command("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+    };
+    git(remote.path(), &["init", "--bare"]);
+    git(repo.path(), &["init"]);
+    git(
+        repo.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(
+        repo.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    );
+    git(
+        repo.path(),
+        &[
+            "push",
+            "origin",
+            "HEAD:refs/heads/develop",
+            "HEAD:refs/heads/work/issue-1",
+        ],
+    );
+    refresh_remote_refs(repo.path()).unwrap();
+    assert_eq!(
+        count_unmerged_commits(repo.path(), "develop", "work/issue-1"),
+        Some(0)
+    );
+
+    let started = Instant::now();
+    let _clock = ScopedOperationClock::set(started);
+    let scan_deadline = started + Duration::from_secs(11);
+    let _scan = ScopedOperationDeadline::enter(scan_deadline);
+    {
+        let maintenance_deadline = scan_deadline - Duration::from_secs(10);
+        let _maintenance = ScopedOperationDeadline::enter(maintenance_deadline);
+        let _spent = ScopedOperationClock::set(maintenance_deadline);
+        assert!(refresh_remote_refs(repo.path())
+            .unwrap_err()
+            .contains("deadline expired"));
+        assert!(list_remote_work_branches(repo.path())
+            .unwrap_err()
+            .contains("deadline expired"));
+        assert_eq!(
+            count_unmerged_commits(repo.path(), "develop", "work/issue-1"),
+            None
+        );
+        assert!(
+            push_delete_batch(repo.path(), &["work/issue-1".to_string()])
+                .unwrap_err()
+                .contains("deadline expired")
+        );
+    }
+    let _after_maintenance = ScopedOperationClock::set(scan_deadline - Duration::from_secs(10));
+    assert_eq!(scan_deadline.duration_since(now()), Duration::from_secs(10));
+    gwt_core::operation_deadline::ensure_remaining("proposal-return").unwrap();
+    drop(_scan);
+    assert_eq!(
+        list_remote_work_branches(repo.path()).unwrap(),
+        vec!["work/issue-1"]
+    );
+}
