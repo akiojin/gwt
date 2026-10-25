@@ -10,8 +10,8 @@ next-step guidance returned from this workflow.
 Read-only `gh` commands are allowed and recorded on the shared GitHub budget
 ledger. Prefer gwtd JSON operations such as `pr.list` and `issue.view` when
 cached data or workflow lifecycle context is needed. GitHub mutations must
-use JSON-envelope operations, including `pr.ready` / `pr.draft` for handing a
-PR to merge automation or holding it back, and `actions.rerun` for rerunning
+use JSON-envelope operations, including `pr.ready` for handing a
+PR to merge automation, and `actions.rerun` for rerunning
 CI. gwtd has no merge operation. All verification and Ready PR gates still
 apply. The current
 implementation may still use GitHub REST / `gh` internally as transport, while

@@ -97,7 +97,7 @@ Stop and surface a blocker to the caller when:
   for a surface not classified as a UI surface under
   [references/surface-taxonomy.md](surface-taxonomy.md) (including its acceptance-aware
   escalation). This is a contract violation, not a runtime error.
-- The User Verification phase is required but no platform question tool
+- The owner explicitly requests a User Verification phase but no platform question tool
   and no plain-text channel are available to ask the user.
 
 ## Project-local AGENTS.md takes precedence
@@ -142,12 +142,11 @@ exists, stop with `gwtd not found`.
 
 On `Overall: PASS`, the caller proceeds:
 
-- `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`), provided
-  `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
-  deferred (autonomous execution), skipped(<reason>)}`. The legacy deferred
-  value follows the autonomous compatibility rule above.
-- `gwt-manage-pr` → PR create / update, provided the same User Verification
-  Result gate is satisfied.
+- `gwt-build-spec` Phase 3 → Phase 4 (PR Flow via `gwt-manage-pr`) after fresh
+  automated PASS and any explicitly requested human handoff. User Verification
+  Result is optional otherwise. Autonomous results remain `n/a (autonomous)`;
+  legacy `deferred (autonomous execution)` stays compatible.
+- `gwt-manage-pr` → PR create / update under the same automated Ready PR Gate.
 - Manual invocation → return the evidence bundle to the user.
 
 On `Overall: FAIL` (including `User Verification Result: rejected(...)`),

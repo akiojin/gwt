@@ -29,7 +29,7 @@ Skipped (no matching surface or not applicable):
 (inventory unavailable: <reason>)  # when extraction failed for a runner
 
 ### User Verification
-Status: required | recommended | skipped(<reason>) | waived(autonomous launch)
+Status: optional | required(owner request) | skipped(<reason>) | waived(autonomous launch)
 Surfaces requiring user check: <list>
 
 #### Verification Target Card
@@ -70,11 +70,13 @@ Overall: PASS|FAIL
 
 Rules:
 
-- `Overall: PASS` requires **both** every entry in `Executed` reporting `PASS`
-  **and** `User Verification Result ∈ {confirmed, n/a, n/a (autonomous),
-  deferred (autonomous execution), skipped(<reason>)}`. `pending` must never
-  resolve to `PASS`. The legacy deferred value is accepted for autonomous
-  launches under the same fresh evidence and Ready PR Gate requirements.
+- `Overall: PASS` requires every entry in `Executed` to report `PASS`.
+  User Verification Result is optional unless the owner explicitly requests
+  human confirmation; only then does an unfinished `pending` handoff prevent
+  PASS. A missing, pending, or legacy deferred field alone does not create an
+  owner request. An actual `rejected(<reason>)` remains a known blocker.
+  Autonomous launches record `n/a (autonomous)`; the legacy deferred value
+  remains compatible under the same fresh automated evidence requirements.
 - When a UI surface is in scope, `Overall: PASS` additionally requires
   `Agent Visual Check: pass`. In `autonomous` mode that line carries the GUI
   quality bar on its own, so a missing or failing Agent Visual Check is
@@ -106,7 +108,7 @@ project-specific specialization, see [references/surface-taxonomy.md](surface-ta
 | Skill asset / agent config | **Recommended** | Describe the trigger phrase or scenario that should activate the modified skill / agent, plus the expected effect. |
 | Docs / config-only (markdownlint clean) | **Skipped(docs-only)** | Automated checks are sufficient. |
 
-The `User Check` column applies to `interactive` launches. In `autonomous`
-mode every row collapses to `waived(autonomous launch)`; a **Required** row
-means the Agent Visual Check is mandatory instead, not that a human is
-summoned.
+The `User Check` column applies only after the owner explicitly requests a
+human check in an `interactive` launch. Otherwise it is optional in every row.
+In `autonomous` mode every row is `waived(autonomous launch)`; UI work always
+requires the independent Agent Visual Check and measured headed evidence.

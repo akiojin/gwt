@@ -142,6 +142,24 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
                     return Some(github_workflow_block_decision(command));
                 }
                 "pr" if is_blocked_pr_subcommand(verb) => {
+                    let trailing: Vec<_> = args.collect();
+                    let creates_draft = verb == Some("create")
+                        && trailing
+                            .iter()
+                            .any(|arg| matches!(*arg, "--draft" | "-d" | "--draft=true"));
+                    let converts_to_draft = verb == Some("ready")
+                        && trailing
+                            .iter()
+                            .any(|arg| matches!(*arg, "--undo" | "--undo=true"));
+                    if creates_draft || converts_to_draft {
+                        return Some(HookOutput::pre_tool_use_permission(
+                            "Draft PRs are prohibited",
+                            format!(
+                                "{}\n\nBlocked command: {command}",
+                                crate::cli::pr::DRAFT_PR_REFUSAL
+                            ),
+                        ));
+                    }
                     return Some(github_workflow_block_decision(command));
                 }
                 "run" if is_blocked_run_subcommand(verb) => {
@@ -510,10 +528,7 @@ fn is_blocked_repo_subcommand(subcommand: Option<&str>, nested: Option<&str>) ->
 }
 
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
-    // "draft" does not exist as a gh subcommand (the real reverse of
-    // `gh pr ready` is `gh pr ready --undo`, already covered by "ready");
-    // it is intercepted anyway so an agent guessing it by symmetry with the
-    // `pr.draft` JSON operation gets redirected instead of a gh usage error.
+    // Intercept guessed mutation verbs as well as actual gh commands.
     matches!(
         subcommand,
         Some(
@@ -547,7 +562,7 @@ Recommended alternatives:\n\
 - Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
 - Automatic updates: JSON operation `update.settings.set`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
 - External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
 - Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
@@ -923,7 +938,7 @@ Recommended alternatives:\n\
 - Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
 - Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
 - Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
 - Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
 - Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\

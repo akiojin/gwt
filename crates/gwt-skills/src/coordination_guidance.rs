@@ -446,7 +446,7 @@ There is no standalone `gwt-search` executable.
 
 ## Delivery: Ready PRs only, always auto-merge
 
-**Draft PRs are retired in this project (owner ruling, 2026-09-16).** Create
+**Draft PRs are prohibited (owner ruling, 2026-10-23).** Create
 every PR non-draft and enable `auto-merge` on it. Never open a Draft, and mark
 any Draft you inherit ready with `pr.ready`. "It is still in progress, so keep
 it a Draft" is no longer a valid state.
@@ -461,8 +461,10 @@ Read the launch route from `execution.status`. With `launch_route: autonomous`,
 record `User Verification Result: n/a (autonomous)` and continue verified work
 through the PR and the CI auto-merge path until merged. Do not request human
 visual confirmation or send a verification URL merely because nobody performed
-a human check. Manual launches retain their user-verification contract and
-require an explicit request to drive to merge.
+a human check. User Verification Result is optional in every launch mode.
+A human handoff is mandatory only when the owner explicitly requests it;
+a missing, pending, or legacy deferred field is not such a request. Manual
+launches still require an explicit delivery request to drive to merge.
 
 Automated test / headed E2E / CI failures, known blockers, and all other Ready
 Gate conditions still require repair. For UI work, use the project's isolated
@@ -485,8 +487,8 @@ ledger. This includes Issue, PR, and Actions inspection, REST GET requests,
 and GraphQL queries. Prefer gwtd `pr.list` and `issue.view` when cached data
 or workflow lifecycle context is useful.
 
-Mutations must use gwtd JSON-envelope operations, such as `pr.ready`,
-`pr.draft`, and `actions.rerun`; direct `gh` writes and API mutations are
+Mutations must use gwtd JSON-envelope operations, such as `pr.ready` and
+`actions.rerun`; direct `gh` writes and API mutations are
 blocked. Read permission does not bypass PR gates or the long PR/CI polling
 restriction.
 
@@ -494,9 +496,11 @@ gwtd has no merge operation. A PR is merged by the repository's own merge
 automation (GitHub auto-merge, or a workflow that merges non-Draft PRs) or by
 a human. Keep auto-merge enabled across routine pushes; verify code changes
 before pushing. For a BEHIND PR use `pr.update_branch`, or hand synchronization
-to the PM when assigned. An explicit owner-requested hold uses `pr.draft`:
-a Draft PR cannot be merged. Resume with `pr.ready` only after the Ready PR
-Gate passes again; routine pushes do not require a Draft/Ready cycle.
+to the PM when assigned. Draft creation and demotion are unavailable; repair
+failed verification before creating a PR. Promote an inherited Draft with
+`pr.ready`. The registered PM can promote a verified existing Draft using its
+exact head evidence; another session owning that evidence is not a blocker.
+CI, review, and measured UI evidence requirements still apply.
 
 ## Canonical verification admission
 

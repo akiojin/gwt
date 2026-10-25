@@ -49,6 +49,7 @@ pub struct TestEnv {
     pub completion_prs: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_prs_after_ready: HashMap<u64, gwt_git::pr_status::PrCompletionSnapshot>,
     pub completion_pr_call_log: Vec<u64>,
+    pub completion_pr_read_hook: Option<Box<dyn FnMut(usize) + Send>>,
     pub completion_pr_candidates_call_count: usize,
     pub pr_auto_merge_call_log: Vec<(u64, String)>,
     pub prs: HashMap<u64, PrStatus>,
@@ -119,6 +120,7 @@ impl TestEnv {
             completion_prs: HashMap::new(),
             completion_prs_after_ready: HashMap::new(),
             completion_pr_call_log: Vec::new(),
+            completion_pr_read_hook: None,
             completion_pr_candidates_call_count: 0,
             pr_auto_merge_call_log: Vec::new(),
             prs: HashMap::new(),
@@ -413,6 +415,9 @@ impl CliEnv for TestEnv {
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
         self.completion_pr_call_log.push(number);
+        if let Some(hook) = self.completion_pr_read_hook.as_mut() {
+            hook(self.completion_pr_call_log.len());
+        }
         self.completion_prs
             .get(&number)
             .cloned()

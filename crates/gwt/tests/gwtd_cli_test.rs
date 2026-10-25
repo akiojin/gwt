@@ -48,6 +48,22 @@ fn isolated_gwtd_command() -> std::process::Command {
     command
 }
 
+#[test]
+fn pr_help_exposes_ready_without_draft_creation_or_transition() {
+    let output = isolated_gwtd_command()
+        .args(["--help", "pr"])
+        .output()
+        .expect("pr help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(
+        help.contains("pr.create") && help.contains("pr.ready"),
+        "{help}"
+    );
+    assert!(!help.contains("pr.draft"), "{help}");
+    assert!(!help.contains("add_labels, draft"), "{help}");
+}
+
 fn prepared_hook_session() -> (TempDir, TempDir, String) {
     let home = tempfile::tempdir().expect("home tempdir");
     let worktree = tempfile::tempdir().expect("worktree tempdir");
