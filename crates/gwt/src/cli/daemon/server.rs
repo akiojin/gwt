@@ -5511,7 +5511,7 @@ fn commit_issue_monitor_scan_if_current(
                 &live_observed_at,
                 &chrono::Utc::now().to_rfc3339(),
             );
-            scanned.reconcile_unowned_not_ready_launches(disk.last_scan_at.as_deref());
+            scanned.reconcile_unowned_excluded_launches(disk.last_scan_at.as_deref());
             for effect in proposed_effects.iter().cloned() {
                 if !scanned
                     .pending_effects()
@@ -21171,7 +21171,7 @@ exit 1
     }
 
     #[test]
-    fn live_scan_commit_cancels_only_unowned_not_ready_spec_deliveries() {
+    fn live_scan_commit_cancels_only_unowned_excluded_deliveries() {
         let _prefs_budget = pin_prefs_hang_guard();
         let temp = TempDir::new().expect("tempdir");
         let prefs_path = temp.path().join("issue-monitor.json");
@@ -21181,17 +21181,19 @@ exit 1
                 autonomous_mode: true,
                 max_active_agents: 4,
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
-                queued_launch_session_strategies: std::collections::BTreeMap::from([(
-                    42,
-                    crate::IssueMonitorLaunchSessionStrategy::FreshRequired,
-                )]),
+                queued_launch_session_strategies: std::collections::BTreeMap::from([
+                    (42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
+                    (45, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
+                ]),
                 ..Default::default()
             },
         );
+        monitor.set_source_repository(Some(("akiojin", "gwt")));
         let now = chrono::Utc::now().to_rfc3339();
         let mut candidates = Vec::new();
-        for number in [42, 43, 44] {
+        for number in [42, 43, 44, 45] {
             let mut issue = sample_issue_monitor_issue(number);
+            issue.author_login = Some("akiojin".into());
             issue.labels.push("gwt-spec".into());
             issue.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
             monitor.terminal_queue_push(&[number], "test", &now);
@@ -21205,7 +21207,12 @@ exit 1
                 &format!("effect-{number}"),
                 &now
             ));
-            issue.readiness = crate::IssueMonitorReadiness::NotReady;
+            if number != 45 {
+                issue.readiness = crate::IssueMonitorReadiness::NotReady;
+            }
+            if number != 42 {
+                issue.body = Some("<!-- gwt-feedback:receipt -->".into());
+            }
             candidates.push(issue);
         }
         let mut scanned = monitor.clone();
@@ -21269,6 +21276,23 @@ exit 1
         ));
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            monitor.pending_launch_delivery_id(45),
+            None,
+            "a source-excluded delivery must release its slot before timing out"
+        );
+        let excluded = monitor.inbox_item(45).unwrap();
+        assert_eq!(excluded.state, crate::MonitorInboxState::SourceExcluded);
+        assert!(excluded
+            .exclusion_reason
+            .as_deref()
+            .unwrap()
+            .contains("untrusted feedback"));
+        assert!(!monitor.active_issue_numbers().contains(&45));
+        assert_eq!(persisted.pending_effects.iter().filter(|effect| matches!(
+            &effect.payload, crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 45, claim_id, owner }
+                if claim_id == "claim-45" && owner == "owner"
+        )).count(), 1);
         assert_eq!(monitor.pending_launch_delivery_id(42), None);
         assert_eq!(
             monitor.inbox_item(42).unwrap().state,
@@ -21313,6 +21337,18 @@ exit 1
         }
         assert_eq!(monitor.effect_authority_epoch(), epoch);
         observer.rebase_gui_observer_prefs(&persisted);
+        assert!(!observer.active_issue_numbers().contains(&45));
+        assert_eq!(
+            observer.inbox_item(45).unwrap().state,
+            crate::MonitorInboxState::SourceExcluded
+        );
+        assert!(!observer.apply_confirmed_claim(
+            45,
+            "excluded-claim",
+            "owner",
+            "excluded-effect",
+            &now
+        ));
         assert!(
             !observer.active_issue_numbers().contains(&42),
             "an equal-epoch exact cancellation must remove the observer's phantom slot"
@@ -21329,6 +21365,37 @@ exit 1
             &now
         ));
         let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
+        restored.set_source_repository(Some(("akiojin", "gwt")));
+        restored.record_candidate(candidates[3].clone());
+        assert_eq!(restored.pending_launch_delivery_id(45), None);
+        assert!(!restored.apply_confirmed_claim(
+            45,
+            "excluded-claim",
+            "owner",
+            "excluded-effect",
+            &now
+        ));
+        let mut trusted = candidates[3].clone();
+        trusted.body = None;
+        restored.record_candidate(trusted);
+        assert!(restored.apply_confirmed_claim(
+            45,
+            "trusted-claim",
+            "owner",
+            "trusted-effect",
+            &now
+        ));
+        assert_eq!(restored.attempt_count(45), 1);
+        assert_eq!(
+            restored
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|d| d.issue_number == 45)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         assert_eq!(restored.pending_launch_delivery_id(42), None);
         let mut ready = candidates[0].clone();
         ready.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
