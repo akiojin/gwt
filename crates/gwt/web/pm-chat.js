@@ -101,6 +101,8 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   let digest = '';
   let currentDigest;
   let latestState;
+  let scrollTop = 0;
+  let followTail = true;
   const element = (tag, className, text) => {
     const node = document.createElement(tag);
     node.className = className;
@@ -144,13 +146,30 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
   body.append(currentCard, historyHeader, notice, transcript);
   root.append(toolbar, body);
 
+  function rememberScroll() {
+    // Hidden tabs/windows have no layout; their zero offsets are not user intent.
+    if (!body.clientHeight) return;
+    scrollTop = body.scrollTop;
+    followTail = body.scrollHeight - body.clientHeight - scrollTop <= 32;
+  }
+  function restoreScroll() {
+    if (disposed || !body.clientHeight) return;
+    body.scrollTop = followTail ? body.scrollHeight : scrollTop;
+  }
+  body.addEventListener('scroll', rememberScroll);
+  const resizeObserver = typeof document.defaultView.ResizeObserver === 'function'
+    ? new document.defaultView.ResizeObserver(restoreScroll) : null;
+  resizeObserver?.observe(body);
+
   function showLogs(value) {
+    if (value && !logs) rememberScroll();
     logs = value;
     body.hidden = logs;
     root.classList.toggle('pm-chat--logs', logs);
     reportsButton.setAttribute('aria-pressed', String(!logs));
     logButton.setAttribute('aria-pressed', String(logs));
     onLogVisibility(logs);
+    if (!logs) restoreScroll();
   }
   const showReports = () => showLogs(false);
   const showLog = () => showLogs(true);
@@ -235,13 +254,12 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
     setSession(state.sessionId);
     latestState = state;
     root.dataset.stateVersion = String(state.revision);
+    if (transcript.childElementCount) rememberScroll();
     renderCurrent(state.current);
     const reports = state.reports;
     const visibleReports = kindSelect.value === 'all' ? reports : reports.filter(report => report.kind === kindSelect.value);
     const nextDigest = JSON.stringify([kindSelect.value, visibleReports]);
     if (digest !== nextDigest) {
-      const atBottom = transcript.childElementCount > 0 && body.scrollHeight - body.clientHeight - body.scrollTop <= 32;
-      const previousScroll = body.scrollTop;
       const nodes = visibleReports.map(report => {
         const row = element('article', 'pm-chat__message');
         const qa = report.kind === 'qa';
@@ -277,25 +295,29 @@ export function createPmChat({ document, root, sessionId, onLogVisibility,
         return row;
       });
       transcript.replaceChildren(...nodes);
-      body.scrollTop = atBottom ? body.scrollHeight : previousScroll;
       digest = nextDigest;
     }
     notice.textContent = state.error || (!state.loaded ? 'Loading PM reports…'
       : !reports.length ? 'No PM reports yet. Use the execution log to interact with PM.'
         : visibleReports.length ? '' : `No ${kindLabels[kindSelect.value]} reports yet.`);
     notice.hidden = !notice.textContent;
+    restoreScroll();
   }
   function setSession(nextSession) {
     if (disposed || session === nextSession) return;
     session = nextSession;
     transcript.replaceChildren();
     body.scrollTop = 0;
+    scrollTop = 0;
+    followTail = true;
     digest = '';
     currentDigest = undefined;
     showLogs(false);
   }
   function dispose() {
     disposed = true;
+    body.removeEventListener('scroll', rememberScroll);
+    resizeObserver?.disconnect();
     reportsButton.removeEventListener('click', showReports);
     logButton.removeEventListener('click', showLog);
     kindSelect.removeEventListener('change', filterReports);
