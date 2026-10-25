@@ -511,7 +511,7 @@ test.describe("Surface rail", () => {
     const settings = page.locator('.workspace-window[data-preset="settings"]');
     await settings.getByRole("tab", { name: "Issues", exact: true }).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
-    await issues.locator(".settings-issues-options > summary").click();
+    await issues.getByRole("button", {name:"Issues settings",exact:true}).click();
     await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
     await clearMessages(page);
     const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {

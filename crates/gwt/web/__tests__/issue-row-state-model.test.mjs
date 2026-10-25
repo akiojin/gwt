@@ -474,6 +474,8 @@ test("Issue #5401 mounts all 200 rows but virtualizes larger lists", async t => 
   t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
   const entries = Array.from({ length: 1545 }, (_, index) => knowledgeEntry(index + 1));
   applyEntries(fixture.surface, fixture.load, entries.slice(0, 200));
+  assert.equal(fixture.body.querySelectorAll(".knowledge-row").length, 5);
+  fixture.body.querySelector('[data-action="show-backlog"]').click();
   assert.equal(fixture.body.querySelectorAll(".knowledge-row").length, 200);
   applyEntries(fixture.surface, fixture.load, entries);
   assert.ok(fixture.body.querySelectorAll(".knowledge-row").length < 200);

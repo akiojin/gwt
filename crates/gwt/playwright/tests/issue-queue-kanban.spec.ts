@@ -27,7 +27,7 @@ test.beforeEach(async ({ page }, info) => {
   await installBackend(page, {
     narrowSettings,
     inboxFirst: info.title.startsWith("Issue #5287"),
-    includeAgent: info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
+    includeAgent: info.title.startsWith("AC-M1/M2:") || info.title.startsWith("T-F2:") || info.title.startsWith("T-7a:") || info.title.startsWith("T-7b.2b.2:") || info.title.startsWith("Issue #4862") || info.title.startsWith("Issue #6141"),
     observeSkipped: info.title.startsWith("four columns preserve"),
   });
   await page.goto(liveUrl || APP_URL);
@@ -234,6 +234,7 @@ test("Issue #5401 large collections retain scroll, selection and native keyboard
   const pane = page.locator(".knowledge-list-pane");
   const mounted = () => page.locator(".knowledge-row").count();
   await expect(column(page, "backlog").locator("h3")).toHaveText("Backlog · 1545");
+  await column(page, "backlog").getByRole("button", {name:"1540 more · Show all",exact:true}).click();
   expect(await mounted()).toBeLessThan(200);
   await pane.evaluate(node => { node.scrollTop = 10000; });
   await expect.poll(() => row(page, 1000).count()).toBe(0);
@@ -278,6 +279,14 @@ test("Issue #5401 preserves focused controls across column moves and identical d
   await detailTab.focus();
   await page.evaluate(() => (window as any).__queueEntries(undefined));
   await expect(detailTab).toBeFocused();
+  await page.evaluate(() => (window as any).__queueSetEntries([
+    ...Array.from({length:7},(_,index)=>({number:100+index,title:`Backlog ${index}`,state:"open",labels:[]})),
+    {number:1,title:"Moving queued issue",state:"open",labels:[]},
+  ]));
+  await row(page,1).locator('[data-action="queue-select"]').focus();
+  await confirm(page,[3,4]);
+  await expect(column(page,"backlog").locator('[data-issue-number="1"]')).toBeAttached();
+  await expect(row(page,1).locator('[data-action="queue-select"]')).toBeFocused();
 });
 
 test("Issue #5321 responsive summary and on-demand preview", async ({ page }, info) => {
@@ -305,9 +314,10 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     expect(Math.abs(paneBox.width - shellBox.width), "default Kanban uses the full list width").toBeLessThan(2);
     const statusBox = (await root.getByRole("group", { name: "Monitor status", exact: true }).boundingBox())!;
     const controlsBox = (await root.getByRole("group", { name: "Monitor controls", exact: true }).boundingBox())!;
-    expect(Math.abs(statusBox.y + statusBox.height / 2 - controlsBox.y - controlsBox.height / 2), "summary status and controls share one row").toBeLessThan(2);
-    expect(controlsBox.x - statusBox.x - statusBox.width, "summary has no large central gap").toBeLessThan(40);
-    expect((await root.locator(".knowledge-monitor-bar").boundingBox())!.height, "summary stays compact").toBeLessThan(60);
+    expect(statusBox.y + statusBox.height, "status precedes actions").toBeLessThanOrEqual(controlsBox.y);
+    const filterBox = (await root.locator(".workspace-toolbar").boundingBox())!;
+    expect(controlsBox.y + controlsBox.height, "actions precede filters").toBeLessThanOrEqual(filterBox.y);
+    expect(filterBox.y + filterBox.height - statusBox.y, "three rows retain more space than the old 293px header").toBeLessThan(240);
     const title = "First backlog issue with a long descriptive title that preserves every word in the preview while each Kanban card stays compact and readable across both viewport sizes";
     await page.evaluate(title => (window as any).__queueTitle(1, title), title);
     const cardTitle = row(page, 1).locator(".knowledge-row-title");
@@ -348,7 +358,7 @@ test("Issue #5321 responsive summary and on-demand preview", async ({ page }, in
     await expect(statusPill).toHaveText(label);
     await expect(statusPill).toHaveAttribute("data-tone", tone);
   }
-  await statusPill.click();
+  await root.locator('[data-action="monitor-diagnostics"]').click();
   await expect(page.locator('[data-error-key="issue-monitor:last_error"]')).toContainText("Fixture current failure");
   await page.getByRole("button", { name: "Close notifications", exact: true }).click();
   await page.evaluate(() => (window as any).__queueStatus({ state: "idle", last_error: null, active_count: 0, queue_len: 0 }));
@@ -841,6 +851,68 @@ test("Issue #4862 PM stop stays Held outside the queue while a stale pane linger
   await expect(held.locator('[data-key="recovery"]')).toHaveCount(0);
   await expect(column(page, "active").locator('[data-issue-number="5"]')).toHaveCount(0);
   await expect(column(page, "queued").locator('[data-issue-number="5"]')).toHaveCount(0);
+});
+
+test("AC-M1/M2: approved status, action, filter rows and card anatomy", async ({ page }, info) => {
+  await page.evaluate(() => {
+    (window as any).__queueStatus({active_count:1,max_active_agents:3,max_active_agents_override:3,
+      unqueued_open_count:7,last_scan_at:"2026-10-25T00:00:00Z"});
+    (window as any).__queueSetEntries([
+      ...Array.from({length:7},(_,index)=>({number:index+100,title:`Backlog issue ${index+1}`,state:"open",labels:["bug"]})),
+      {number:3,title:"Operator queued issue",state:"open",labels:["gwt-spec"]},
+      {number:4,title:"Auto-refilled issue",state:"open",labels:["bug"]},
+      {number:5,title:"Running issue",state:"open",labels:[]},
+      {number:6,title:"Completed issue",state:"closed",labels:[]},
+    ]);
+  });
+  const root=page.locator(".issue-bridge-root");
+  const status=root.getByRole("group",{name:"Monitor status",exact:true});
+  const controls=root.getByRole("group",{name:"Monitor controls",exact:true});
+  const filter=root.locator(".workspace-toolbar");
+  await expect(status.locator("button,input,select")).toHaveCount(0);
+  await expect(status.locator(".issue-monitor-stat-label")).toHaveText([
+    "Monitor","Agent slots","Queued","Backlog","Verification slots","Last scan"]);
+  await expect(status.locator('[data-metric="capacity"]')).toHaveText("1 of 3");
+  await expect(status.locator('[data-metric="backlog"]')).toHaveText("7");
+  await expect(status.locator('[data-metric="last-scan"]')).toHaveText("00:00:00 UTC");
+  await expect(status.locator('[data-metric="verification"]')).toHaveText("Not reported");
+  const boxes=await Promise.all([status,controls,filter].map(node=>node.boundingBox()));
+  expect(boxes[0]!.y+boxes[0]!.height).toBeLessThanOrEqual(boxes[1]!.y);
+  expect(boxes[1]!.y+boxes[1]!.height).toBeLessThanOrEqual(boxes[2]!.y);
+  expect(await root.evaluate(node=>[...node.children].slice(0,2).map(child=>child.className)))
+    .toEqual(["knowledge-monitor-bar","workspace-toolbar kanban-toolbar is-stacked"]);
+  const limit=controls.getByRole("spinbutton",{name:"Agent limit",exact:true});
+  await expect(limit).toHaveValue("3");
+  await limit.fill("4");
+  await limit.press("Tab");
+  await expect.poll(()=>page.evaluate(()=>(window as any).__queueMessages.filter((message:any)=>message.kind === "set_issue_monitor_max_active_agents").at(-1))).toMatchObject({kind:"set_issue_monitor_max_active_agents",max_active_agents:4});
+  await expect(limit).toHaveValue("4");
+  await expect(column(page,"backlog").locator(".knowledge-row")).toHaveCount(5);
+  await expect(column(page,"backlog").locator(".issue-queue-rule")).toHaveText("Will not launch");
+  await expect(column(page,"queued").locator(".issue-queue-rule")).toHaveText("Launches from top to bottom");
+  for(const phase of ["active","done"]) await expect(column(page,phase).locator(".issue-queue-rule")).toHaveText("System controlled");
+  for(const [number,source,label] of [[3,"manual","You"],[4,"auto","Auto"]] as const) {
+    await expect(row(page,number)).toHaveAttribute("data-queue-source",source);
+    await expect(row(page,number).locator(".issue-card-provenance")).toHaveText(label);
+    await expect(row(page,number)).toHaveCSS("border-left-width","3px");
+    expect(await row(page,number).locator(".knowledge-row-number").evaluate(node=>node.nextElementSibling?.className)).toBe("knowledge-row-title");
+  }
+  await expect(row(page,3).locator(".issue-card-label")).toHaveText("spec");
+  const theme=info.project.name.includes("light")?"light":"dark";
+  await page.setViewportSize({width:1600,height:1400});
+  await page.locator('.knowledge-search').focus();
+  await page.keyboard.press("Escape");
+  await expect(page.locator('.issue-control-explanation:visible')).toHaveCount(0);
+  const screenshot=process.env.GWT_ISSUE_4499_SCREENSHOTS
+    ?join(process.env.GWT_ISSUE_4499_SCREENSHOTS,`issue-4499-mock-alignment-${theme}.png`)
+    :info.outputPath(`mock-alignment-${theme}.png`);
+  await page.mouse.move(1590,1090);
+  await page.screenshot({path:screenshot});
+  await info.attach("approved structure: status → controls → filters",{path:screenshot,contentType:"image/png"});
+  await column(page,"backlog").getByRole("button",{name:"2 more · Show all",exact:true}).click();
+  await expect(column(page,"backlog").locator(".knowledge-row")).toHaveCount(7);
+  await expect(row(page,106)).toBeAttached();
+  await expect(row(page,105).locator('.knowledge-row-select')).toBeFocused();
 });
 
 test("four columns preserve labelled controls, provenance, empty guidance and narrow scrolling", async ({ page }) => {

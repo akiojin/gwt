@@ -598,7 +598,7 @@ test("T-7a: current Issue controls explain themselves on focus and hover without
   }
   const select = root.querySelector('.knowledge-row[data-issue-number="11"] .knowledge-row-select');
   const pill = root.querySelector('.knowledge-monitor-pill');
-  assert.equal(pill.disabled, false, "the status remains keyboard reachable without a notification");
+  assert.equal(pill.tagName, "SPAN", "read-only status remains keyboard reachable for its explanation");
   assert.equal(pill.getAttribute("aria-disabled"), "true", "no notification action is available");
   pill.click();
   assert.equal(sent.length, before, "an unavailable notification action sends no control messages");
