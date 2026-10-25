@@ -224,11 +224,25 @@ Keep the enclosing Monitor source, scan time and coverage limits. A reported cyc
 Monitor's observed verdict, not a fresh project-wide graph assessment; bundle declarations
 do not prove bundle completeness. Never recompute readiness or change priority, health or launches
 from these observations.
+`policy.dependency_impacts` reverses only supplied canonical blocked_by edges.
+Each row's `issue_number` is the blocker; `dependent_issues` lists distinct direct dependents.
+Both are in numeric order; the original observations keep their row order and repeats.
+Direct impact observations never expand transitive chains or cycle/bundle declarations.
+All supplied rows contribute without reclassifying their state, even when repeated rows conflict.
+Absent Monitor yields null; supplied snapshots with no blocker edges yield [].
+Degraded or aborted snapshots retain these facts with the enclosing Monitor provenance and limits.
+An empty inverse does not prove no impact, and dependent counts do not establish importance,
+current blockage, critical path, priority, readiness or permission to act.
 Each milestone's `dependency_observations` selects only its effective member Issues:
 direct references plus roadmap links resolved through a unique nonempty milestone ID.
 It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
 Use `unobserved_issues` for missing member rows and keep the enclosing coverage limits;
 this membership join does not establish transitive delay, critical path or milestone health.
+Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents.
+Keep external blockers, preserve numeric order and distinct dependents, and omit empty blocker rows.
+The same existing membership rule applies to duplicate or blank milestone IDs; never infer roadmap membership.
+Absent Monitor yields null; no supplied member blocker edges yields []. Degraded or aborted facts retain
+the enclosing Monitor provenance and limits; this inverse does not establish delay or milestone health.
 Each Goal's `dependency_observations` selects only its existing roadmap member Issues,
 resolved through an exact unique nonempty Goal ID, including invalid links as reference facts.
 Milestone-only, category-only and other-Goal references do not add members.
@@ -1880,7 +1894,7 @@ quota:
     records the intent; the `Auto Merge PR` workflow performs the merge,
     and a queued or failed run of it leaves the PR exactly here. Find
     that run and rerun it with `actions.rerun`; waiting does not land it
-    (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
+    (25 minutes measured). Never reach for Draft/Ready state flips as a
     nudge — Draft cancels auto-merge. External forks have the scoped operation
     described above; ordinary PRs retain repository merge automation.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
@@ -1936,12 +1950,15 @@ do not recheck them:
   head,
 - the body records `Agent Visual Check: pass` or `n/a (no UI surface)`.
 
-`User Verification Result: deferred (autonomous execution)` is not a
-refusal. Deferral records that nobody has looked at the change yet, not
-that it may never ship; the UI question it leaves open is the one
-`Agent Visual Check` answers. Promote a `deferred` PR that satisfies the
-list above, and leave the owner's later sweep to `pr.list`'s
-`deferred_user_verification`.
+Draft PRs are prohibited; do not create one or demote a Ready PR.
+`User Verification Result: deferred (autonomous execution)` is not a refusal.
+The `deferred_user_verification` field is diagnostic, not an owner request.
+User Verification Result is optional unless the owner explicitly requests
+a human check. A missing, pending, or legacy deferred field alone does not
+create that request. `Agent Visual Check` and measured headed evidence cover
+UI quality. Promote an existing Draft that satisfies the machine checks with
+`pr.ready`; evidence belonging to another session does not by itself refuse
+the registered PM. The target head, required CI, and review gates still apply.
 
 `ready_to_promote_blocker` names the one condition still missing on a
 Draft that did not qualify, so a row never leaves you guessing why:
@@ -4020,6 +4037,9 @@ mod tests {
             "run `pr.ready` on it yourself, without asking the user",
             "Do not wait for the owning agent to come back",
             "deferred (autonomous execution)` is not a refusal",
+            "Draft PRs are prohibited",
+            "User Verification Result is optional unless the owner explicitly requests",
+            "evidence belonging to another session does not by itself refuse the registered PM",
             "`ready_to_promote_blocker` names the one condition still missing",
             "`agent_visual_check_failed` is the owner's work, never yours",
         ] {
@@ -4168,9 +4188,8 @@ mod tests {
             "cargo build -p gwt --bin gwtd",
             "`verify.lease.status`",
             "waiting, not stuck",
-            // Issue #3913: verify.run admits itself and answers `deferred`
-            // on a busy host; a deferred agent is retrying, not stuck.
-            "`deferred`",
+            // Deferred admission is verified by its actual record wording
+            // below, independently of the unrelated legacy PR body value.
             "`pending`",
             "first remaining command's admission",
             "incomplete, non-PASS deferred record",
@@ -4517,8 +4536,11 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "An aborted scan can retain older observations while advancing last_scan_at",
             "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
             "`policy.dependency_observations` preserves every supplied inbox row",
+            "`policy.dependency_impacts` reverses only supplied canonical blocked_by edges",
+            "Direct impact observations never expand transitive chains or cycle/bundle declarations",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
+            "Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
             "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",

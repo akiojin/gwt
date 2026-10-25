@@ -82,6 +82,15 @@ format!(
 fn main() -> ExitCode {
 let args: Vec<String> = env::args().skip(1).collect();
 match args.as_slice() {
+    [pr, view, _number, json_flag, fields, ..]
+        if pr == "pr" && view == "view" && json_flag == "--json" && fields.contains("headRefOid") =>
+    {
+        if let Ok(path) = env::var("GWT_FAKE_GH_ARGV_FILE") {
+            std::fs::write(path, args.join("\n")).unwrap();
+        }
+        println!("{}", r#"{"number":12,"title":"Completion PR","state":"OPEN","url":"https://github.com/akiojin/gwt/pull/12","isDraft":true,"headRefName":"feature/coverage","headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","baseRefName":"develop","isCrossRepository":false,"body":"Agent Visual Check: n/a (no UI surface)","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","statusCheckRollup":[],"reviewDecision":"APPROVED"}"#);
+        ExitCode::SUCCESS
+    }
     [pr, view, json_flag, ..] if pr == "pr" && view == "view" && json_flag == "--json" => {
         let mut pr = pr_json("12", "Current PR");
         pr.pop();
@@ -1604,7 +1613,33 @@ fn dispatch_json_envelope_issue_create_uses_body_param() {
 
 #[test]
 fn dispatch_json_envelope_pr_create_uses_body_param() {
+    let _lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _session = crate::cli::test_support::ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
     let temp = tempfile::tempdir().expect("tempdir");
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: fixture",
+        ],
+        vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
     let mut env = TestEnv::new(temp.path().to_path_buf());
     env.seed_created_pr(sample_pr_status());
     env.stdin = r#"{
@@ -1616,7 +1651,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
             "title": "Wire JSON envelope",
             "body": "PR body supplied directly through params.body",
             "labels": ["agent"],
-            "draft": true
+            "draft": false
         }
     }"#
     .to_string();
@@ -1636,7 +1671,7 @@ fn dispatch_json_envelope_pr_create_uses_body_param() {
     assert_eq!(call.title, "Wire JSON envelope");
     assert_eq!(call.body, "PR body supplied directly through params.body");
     assert_eq!(call.labels, vec!["agent"]);
-    assert!(call.draft);
+    assert!(!call.draft);
 }
 
 fn issue_3693_transport_env(repo_path: &Path) -> DefaultCliEnv {
@@ -1896,6 +1931,19 @@ fn default_cli_env_routes_gh_backed_methods_and_internal_dispatch() {
             cache_root,
             failing_factory(Arc::new(AtomicUsize::new(0))),
         );
+
+        {
+            let log = repo_path.join("completion-pr-argv");
+            let _ambient = gwt_core::test_support::ScopedEnvVar::set("GH_REPO", "other/unrelated");
+            let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_FAKE_GH_ARGV_FILE", &log);
+            let snapshot = env.fetch_completion_pr(12).expect("completion snapshot");
+            assert_eq!(snapshot.inventory.number, 12);
+            let argv = fs::read_to_string(log).unwrap();
+            assert!(
+                argv.contains("--repo\ngithub.com/akiojin/gwt"),
+                "completion evidence must use the mutation repository: {argv}"
+            );
+        }
 
         let linked = env.fetch_linked_prs(IssueNumber(42)).expect("linked prs");
         assert_eq!(linked.len(), 1);

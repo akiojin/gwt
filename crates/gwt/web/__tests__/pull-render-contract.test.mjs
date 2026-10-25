@@ -329,6 +329,11 @@ test("Open Project result receiver commits shared state and rejects bypass rende
     'function applyOpenProjectPathResultReceiveEvent(event) { status.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(findings(bypass).length > 0);
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyProjectOpenReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Clone Project receivers commit shared state and reject bypass rendering", () => {
@@ -564,18 +569,113 @@ test("factory return aliases resolve model handlers without trusting controller.
       function applySnapshot(value) { model.update(() => value); }
       return { applySnapshot };
     }`;
-  const source = `import { createSurface } from "./surface.js";
-    const { applySnapshot: applyInbox } = createSurface();
-    function receive(event) { applyInbox(event.value); }`;
   const modules = new Map([["surface.js", module]]);
-  assert.deepEqual(scanModule(source, "entry.js", { modules }), []);
-  modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
-  assert.ok(scanModule(source, "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  const entry = body => `import { createSurface } from "./surface.js"; ${body}`;
+  for (const body of [
+    'const { applySnapshot: applyInbox } = createSurface(); function receive(event) { applyInbox(event.value); }',
+    'const controller = createSurface(); function receive(event) { controller.applySnapshot(event.value); }',
+  ]) {
+    modules.set("surface.js", module);
+    assert.deepEqual(scanModule(entry(body), "entry.js", { modules }), []);
+    modules.set("surface.js", module.replace("model.update(() => value)", "element.textContent = value"));
+    assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "dom-write"));
+  }
+  for (const body of [
+    'const controller = createSurface(); function receive(event) { controller.unknown(event); }',
+    'const controller = createSurface(); function receive(event) { controller[event.method](event); }',
+    'const controller = createSurface(); function receive(event, controller) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, { controller }) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event, controller = external) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { const { controller } = external; controller.applySnapshot(event); }',
+    'const controller = createSurface(); function receive(event) { try { throw external; } catch (controller) { controller.applySnapshot(event); } }',
+    'const controller = createSurface(); function receive(event) { class controller {} controller.applySnapshot(event); }',
+    'const controller = createSurface(); const wrapper = function controller() { function receive(event) { controller.applySnapshot(event); } };',
+    'let controller = createSurface(); function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); controller.applySnapshot = external; function receive(event) { controller.applySnapshot(event); }',
+    'const controller = createSurface(); ({ replacement: controller.applySnapshot } = external); function receive(event) { controller.applySnapshot(event); }',
+  ]) assert.ok(scanModule(entry(body), "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
+  modules.set("surface.js", module.replace('model.update(() => value)', 'external.applySnapshot(value)'));
+  assert.ok(scanModule(entry('const controller = createSurface(); function receive(event) { controller.applySnapshot(event); }'),
+    "entry.js", { modules }).some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule("function receive(event) { view.controller.update(event.snapshot); }", "entry.js")
     .some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule(`function createUiStateStore() { return external; }
     const model = createUiStateStore(); function receive(event) { model.update(event); }`, "entry.js")
     .some(finding => finding.kind === "unresolved-call"));
+});
+
+test("reassigned factory handler aliases fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "apply") => scanModule(`import { createSurface } from "./surface.js";
+    let { applySnapshot: apply } = createSurface();
+    const { applySnapshot: stable } = createSurface();
+    ${mutation}
+    function receive(event) { ${call}(event); }`, "entry.js", {
+    modules: new Map([["surface.js", `export function createSurface() {
+      function applySnapshot(value) { return String(value); } return { applySnapshot };
+    }`]]),
+  });
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated() { let apply; apply = external; }"), []);
+  assert.deepEqual(inspect("apply = external;", "stable"), []);
+  assert.ok(inspect("apply = event => { element.textContent = event.value; };")
+    .some(finding => finding.kind === "unresolved-call" && finding.path === "receive"));
+});
+
+test("direct named imports follow exported function bodies for one module hop", () => {
+  const entry = `import { selectValue as select } from "./data.js";
+    function receive(event) { select(event); }`;
+  const data = `export function selectValue(event) { return normalize(event.value); }
+    function normalize(value) { return String(value).trim(); }`;
+  const inspect = (source = entry, module = data) => scanModule(source, "entry.js", {
+    modules: new Map([["data.js", module], ["second.js", "export function normalize(value) { return String(value); }"]]),
+  });
+  assert.deepEqual(inspect(), []);
+  assert.deepEqual(inspect(entry, data + '\nfunction unrelated() { let normalize = () => {}; normalize = external; }'), []);
+  const dirty = inspect(entry, data.replace("return String(value).trim();", "element.textContent = value;"));
+  assert.ok(dirty.some(finding => finding.kind === "dom-write" && finding.file === "data.js"
+    && finding.root === "receive" && finding.path.includes("selectValue>normalize")));
+  for (const [source, module] of [
+    [entry, data.replace("export function", "function")],
+    [entry, "export function other() {}"],
+    [entry.replace("receive(event)", "receive(event, select)"), data],
+    [entry, 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }'],
+    [entry, data + "\nselectValue = external;"],
+  ]) assert.ok(inspect(source, module).some(finding => finding.kind === "unresolved-call"));
+  assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
+});
+
+test("real Board and Branch data imports reject DOM mutations in their helpers", () => {
+  for (const [sourceName, dependencyName, exportedName, marker, context] of [
+    ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
+    ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
+  ]) {
+    const source = readFileSync(new URL(`../${sourceName}.js`, import.meta.url), "utf8");
+    const dependency = readFileSync(new URL(`../${dependencyName}.js`, import.meta.url), "utf8");
+    const file = `crates/gwt/web/${dependencyName}.js`;
+    const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
+      modules: new Map([[file, module]]),
+    }).filter(finding => finding.context === context
+      && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
+    assert.deepEqual(inspect(dependency), []);
+    const mutated = dependency.replace(marker, `${marker} document.body.textContent = "bypass";`);
+    assert.notEqual(mutated, dependency);
+    assert.ok(inspect(mutated).some(finding => finding.kind === "dom-write" && finding.file === file));
+  }
+});
+
+test("imported function parameter defaults retain the receiver boundary", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", 'export function select(event, value = (document.body.textContent = event.value)) { return value; }']]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "dom-write"));
+});
+
+test("imported functions cannot trust reassigned local helpers", () => {
+  const findings = scanModule('import { select } from "./data.js"; function receive(event) { select(event); }', "entry.js", {
+    modules: new Map([["data.js", `export function select(event) { normalize(event); }
+      function normalize(event) {} normalize = event => { document.body.textContent = event.value; };`]]),
+  });
+  assert.ok(findings.some(finding => finding.kind === "unresolved-call"));
 });
 
 test("synchronous and scheduled callbacks retain the receiver boundary", () => {
@@ -629,13 +729,30 @@ test("baseline cannot grow and first introduction is bounded by base source find
 });
 
 test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () => {
-  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js"]) {
+  for (const file of ["knowledge-kanban-surface.js", "provider-usage-surface.js", "operator-shell.js"]) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
     const migrated = scanModule(source, file).filter(finding =>
       /^(applyIssueMonitorStatus|applyIssueMonitorInbox|applyProviderUsageUi)$/.test(finding.root)
       && finding.kind.startsWith("dom-"));
     assert.deepEqual(migrated, [], file);
   }
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const bridge = app.match(/applyIssueMonitorStatus:\s*([^\n]+),/)[1];
+  const committed = [];
+  const applyStatus = new Function('applyKnowledgeIssueMonitorStatus', 'applyIssueMonitorStatus', 'document',
+    `return (${bridge});`)(status => committed.push(status),
+      () => assert.fail('the public status bridge must not bypass the shared Issue model'), {});
+  const status = { enabled: true, state: 'active' };
+  applyStatus(status);
+  assert.deepEqual(committed, [status]);
+});
+
+test("Monitor renderer remains a DOM sink when reached from a receiver", () => {
+  const file = 'operator-shell.js';
+  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+  const bypass = source + '\nfunction receive(event) { renderIssueMonitorStatus(document, event); }';
+  assert.ok(scanModule(bypass, file).some(finding =>
+    finding.root === 'receive' && finding.kind.startsWith('dom-')));
 });
 
 test("Reports and raw terminal receivers resolve only shared model updates", () => {
@@ -926,6 +1043,47 @@ test("cleanup and branch error receivers commit shared data and reject direct re
     .some(finding => finding.kind.startsWith('dom-')));
 });
 
+test("Knowledge list completions retain shared rendering and reject receiver bypasses", () => {
+  const file = 'crates/gwt/web/knowledge-kanban-surface.js';
+  const appFile = 'crates/gwt/web/app.js';
+  const source = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const lists = findings => findings.filter(finding =>
+    finding.context.split('/').at(-1).split('|').includes('knowledge_entries'));
+  const local = text => lists(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
+  const delegated = (text, surface = source) => lists(scanModule(text, appFile,
+    { modules: new Map([[file, surface]]) }));
+  // Existing load/recovery, transport and preference calls remain data-only.
+  // renderKnowledgeBridge itself publishes the window to the shared models.
+  const dataCalls = [
+    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
+    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
+    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
+    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
+    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
+    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
+    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
+    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
+    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
+  ];
+  for (const findings of [local(source), delegated(app)]) {
+    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'));
+    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+  }
+  for (const bypass of ['document.body.textContent = event.kind;',
+    'renderKnowledgeBoardView(event.id, windowMap.get(event.id), knowledgeBridgeStateMap.get(event.id));']) {
+    const mutated = source.replace('case "knowledge_entries": {', `case "knowledge_entries": { ${bypass}`);
+    assert.notEqual(mutated, source);
+    assert.ok(local(mutated).some(finding => finding.kind.startsWith('dom-')));
+    assert.ok(delegated(app, mutated).some(finding => finding.kind.startsWith('dom-')));
+  }
+  for (const label of ['knowledge_entries', 'knowledge_search_results', 'knowledge_detail', 'terminal_preview']) {
+    const mutated = app.replace(`case "${label}":`, `case "${label}": document.body.textContent = event.kind;`);
+    assert.notEqual(mutated, app);
+    assert.ok(delegated(mutated).some(finding => finding.kind.startsWith('dom-')));
+  }
+});
+
 test("Knowledge search completions commit shared state and reject direct rendering", () => {
   const file = 'crates/gwt/web/knowledge-kanban-surface.js';
   const appFile = 'crates/gwt/web/app.js';
@@ -1092,6 +1250,13 @@ test("Close Project receiver commits shared data and rejects direct rendering", 
     "if (event.kind === 'project_closed') { hide();");
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file).some(finding => finding.kind.startsWith('dom-')));
+  for (const entry of ['app.js', 'hub-app.js']) {
+    const code = readFileSync(new URL(`../${entry}`, import.meta.url), 'utf8');
+    const findings = controller => scanModule(code, `crates/gwt/web/${entry}`,
+      { modules: new Map([[file, controller]]) }).filter(finding => finding.file === file);
+    assert.deepEqual(findings(source), []);
+    assert.ok(findings(bypass).some(finding => finding.kind.startsWith('dom-')));
+  }
 });
 
 
@@ -1116,6 +1281,11 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     'function applyFolderPickerReceiveEvent(event) { element.textContent = event.message;');
   assert.notEqual(bypass, source);
   assert.ok(scanModule(bypass, file, options).some(finding => finding.kind === 'dom-write'));
+  const shell = readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8');
+  const delegated = controller => scanModule(shell, 'crates/gwt/web/project-shell-surface.js',
+    { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyPickerReceiveEvent');
+  assert.deepEqual(delegated(source), []);
+  assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Knowledge detail completions commit shared state and reject direct rendering", () => {

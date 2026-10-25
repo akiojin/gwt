@@ -79,13 +79,12 @@ use super::{
     AttachmentProgressPhase, BlockingTaskSpawner, BlockingTestTaskQueue, CachedContinueWorkOutcome,
     ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
-    LaunchPaneDisposition, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
-    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenControlFailure,
-    ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision, ReadinessPaneEvidence,
-    RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent, WindowAddress,
-    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    PreparedProjectSwitch, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenControlFailure, ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision,
+    ReadinessPaneEvidence, RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent,
+    WindowAddress, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::app_runtime::initial_project_tab_incarnations;
 use crate::embedded_server::{
@@ -8589,6 +8588,10 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         .clone();
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert!(
+        windows[0].agent_name.is_some(),
+        "a fresh PM receives its assigned display name before publication"
+    );
     assert_eq!(
         runtime
             .project_state(&runtime.test_context())

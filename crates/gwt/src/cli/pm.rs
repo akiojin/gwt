@@ -506,6 +506,7 @@ pub(super) fn run<E: CliEnv>(
                     "failed to persist PM status: {error}"
                 )))
             })?;
+            crate::daemon_runtime::notify_pm_status_changed();
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );
@@ -918,6 +919,10 @@ mod tests {
             status["policy"].get("dependency_observations"),
             Some(&serde_json::Value::Null)
         );
+        assert_eq!(
+            status["policy"].get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
         assert_eq!(status["policy"]["forecasts"], serde_json::json!([]));
         assert_eq!(
@@ -1132,6 +1137,10 @@ mod tests {
         );
         assert_eq!(
             status["policy"]["milestones"][0].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0].get("dependency_impacts"),
             Some(&serde_json::Value::Null)
         );
         assert_eq!(

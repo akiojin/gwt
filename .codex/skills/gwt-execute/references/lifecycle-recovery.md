@@ -118,7 +118,10 @@ gwtd itself executes and records it. `execution.complete`, the execution
 settlement inside `build.complete`,
 non-draft `pr.create`, and `pr.ready` refuse when the latest record is
 missing, failing, stale (worktree changed after the run), from another
-session, or for another owner. Draft PRs stay available mid-work.
+session, or for another owner. Draft PRs are prohibited. Repair verification
+before PR creation. The registered PM may recover an inherited Draft with
+`pr.ready` against the verified target head; another session owning that
+evidence is not itself a refusal reason.
 
 When resuming or recovering another session's execution (crash, closed
 window), take over the record explicitly with JSON operation

@@ -3522,6 +3522,10 @@ mod tests {
             return;
         }
         let temp = tempfile::tempdir().expect("tempdir");
+        // Reject the missing root before Git probes: this fixture covers the
+        // worker's failure log, even when a real context probe would be slow.
+        let project_root = temp.path().join("missing-project");
+        let _git_hang = gwt_core::test_support::ScopedEnvVar::set("GWT_INDEX_TEST_GIT_HANG", "1");
         let output = tempfile::NamedTempFile::new().expect("repair log");
         // Repairs run on another thread, so a thread-local subscriber cannot
         // observe this event. Other log-capture tests use scoped subscribers.
@@ -3533,7 +3537,7 @@ mod tests {
         tracing::subscriber::set_global_default(subscriber).expect("repair log subscriber");
 
         queue_scope_rebuilds(
-            temp.path(),
+            &project_root,
             &[("specs".to_string(), "missing".to_string())],
             None,
         );

@@ -1083,7 +1083,8 @@ test("Agent window title starts with assigned identity before its current purpos
   assert.equal(displayTitle({ ...data, dynamic_title: null }, agentPreset, "Project Manager"), "Initial task");
   assert.equal(displayTitle({ preset: "agent", title: "Restore cache" }, agentPreset, "Project Manager"), "Restore cache");
   assert.equal(displayTitle({ preset: "agent", branch: "work/task" }, agentPreset, "Project Manager"), "work/task");
-  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager");
+  assert.equal(displayTitle({ ...data, agent_name: "Yuu", is_pm: true }, agentPreset, "Project Manager"), "Yuu");
   assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 

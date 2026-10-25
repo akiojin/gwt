@@ -1,15 +1,11 @@
 # User Verification Guide (Target Card + 4-step 導線 + Actionable Checks)
 
-After automated tests pass, `gwt-verify` hands off to the user for manual
-confirmation when the launch mode is `interactive`, `--mode full` or
-`--mode pre-pr` is active, and the
-changed surfaces include any `Required` or `Recommended` user-check
-entries (per `surface-taxonomy.md`). An `autonomous` launch never reaches this
-handoff — see **Skip rules** below. This includes a backend-only diff that
-`surface-taxonomy.md`'s acceptance-aware escalation promotes to a
-user-facing surface because its acceptance manifests in the UI / CLI: the
-handoff fires for the escalated surface even though no UI / CLI file
-changed.
+User Verification Result is optional. After automated tests pass, `gwt-verify`
+hands off only when the owner explicitly requests human confirmation in an
+`interactive` launch. A missing, pending, or legacy deferred field alone does
+not establish that request. An `autonomous` launch never reaches this handoff
+— see **Skip rules** below. Acceptance-aware surface escalation still selects
+the appropriate automated UI / CLI runners; it does not request a human check.
 
 The handoff has four parts, always in this order:
 
@@ -176,17 +172,21 @@ The handoff is **automatically skipped** (no user prompt) when:
   `deferred (autonomous execution)` body value with fresh passing evidence,
   without a body rewrite or human confirmation. The agent's own check is never
   human `confirmed`, and the launch waiver is never `skipped(<reason>)`.
+- The owner has not explicitly requested a human check. Record the optional
+  result only if useful; do not invent a skip or confirmation.
 - `--mode quick` is in effect (TDD mid-iteration).
 - `Changed surfaces: (none)` — nothing to verify.
 - All changed surfaces are `docs-only` per `surface-taxonomy.md`.
 - The caller passed `--skip-user-check` for an explicit non-interactive
   run.
 
-In every non-autonomous skip case, the reason is recorded as
-`User Verification: skipped(<reason>)` so reviewers can audit why no user
-confirmation was requested.
+When an explicitly requested check is skipped with the owner's consent,
+record `User Verification: skipped(<reason>)`. Without a request, the result
+is optional; do not fabricate a skip or a human confirmation.
 
 ## Worked examples
+
+These examples assume the owner explicitly requested a human check.
 
 ### Example A — gwt repo, Logs window filter changes
 

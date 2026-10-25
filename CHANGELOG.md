@@ -1,6 +1,58 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.144.0] - 2026-10-25
+
+### Bug Fixes
+
+- **works:** Restore live agents and pm identity
+- **work:** Match missing upstream recovery to its condition
+- **ui:** Share public Monitor status updates
+- **works:** Preserve primary watch if pm watch fails
+- **work:** Align remote readback recovery with its check
+- **monitor:** Compensate permission-blocked quota fallbacks
+- **lint:** Resolve named factory controller handlers
+- **test:** Avoid git probes in queued repair log fixture
+- **pr:** Draft PR 操作を禁止して検証済み Ready 配信へ統一
+- **monitor:** Cold復元後もSPECの起動tierを維持する
+- **execution:** Guide Git status readback recovery
+- **lint:** Named import の受信経路を検査する
+- **runtime:** 終了済みPTYを回収し起動確定処理を共有化する
+- **execution:** Guide offline Work event recovery
+- **lint:** 再代入された factory handler 別名を拒否する
+- **execution:** Guide invalid Work commit subject recovery
+- **execution:** Reap recovered same-session holders
+
+### Features
+
+- **pm:** Expose observed direct dependency impacts
+- **pm:** Expose milestone direct dependency impacts
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #3431 PR association
+- **work:** PM 直接依存影響の配信確認を記録する
+- **work:** 直接依存影響の配信記録を PR に関連付ける
+- **work:** Monitor共有状態の配送精算を記録
+- **work:** Record launch recovery delivery PR
+- **work:** Record issue-6209 delivery preparation
+- **work:** Record issue 3590 readback recovery settlement
+- **work:** SPEC #4326 の完了確認世代の Work イベントを記録する
+- **work:** PR #6332 の連携記録を保存する
+- **work:** Link milestone impact pull request
+- **work:** Link readiness policy PR
+
+### Refactor
+
+- **runtime:** Share durable launch recovery receipts
+- **ui:** Distinguish monitor rendering from state receivers
+- **runtime:** Share SessionStart readiness policy
+
+### Testing
+
+- **ui:** Lock shared Issue list rendering
+- **pr:** 引き継ぎ検証に Git 比較基準を設定する
+
 ## [9.143.0] - 2026-10-25
 
 ### Bug Fixes

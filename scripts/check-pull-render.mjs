@@ -1,6 +1,6 @@
 // AC-12: receiver roots may update models, but must not acquire new DOM paths.
 // This is a scoped syntax guard, not a whole-program/type analysis. Only local
-// named helpers and one-hop named factory return aliases are resolved.
+// named helpers and one-hop named imports/factory return aliases are resolved.
 // Other external/dynamic calls produce findings instead
 // of being silently trusted; their internals are outside this guard's scope.
 // Known data API spellings are trusted. Event/subscription handlers are not
@@ -29,6 +29,14 @@ const property = node => node?.type === "MemberExpression" ? (node.computed ? no
 const memberPath = node => node?.type === "Identifier" ? node.name : node?.type === "MemberExpression" ? memberPath(node.object) + "." + property(node) : "";
 const fingerprint = node => createHash("sha256").update(JSON.stringify(node, (key, value) => ["start", "end", "loc", "raw"].includes(key) ? undefined : value)).digest("hex");
 
+function bindingTargets(node) {
+  if (!node) return [];
+  if (["Identifier", "MemberExpression"].includes(node.type)) return [node];
+  if (node.type === "ObjectPattern") return node.properties.flatMap(property => bindingTargets(property.value || property.argument));
+  if (node.type === "ArrayPattern") return node.elements.flatMap(bindingTargets);
+  return bindingTargets(node.type === "AssignmentPattern" ? node.left : node.type === "RestElement" ? node.argument : null);
+}
+
 function factoryHandlers(source, name) {
   if (!source) return new Map();
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
@@ -41,18 +49,48 @@ function factoryHandlers(source, name) {
 
 export function scanModule(source, file, { modules, rootName } = {}) {
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", locations: true });
-  const scopes = new WeakMap(), names = new WeakMap(), roots = [], findings = new Map();
+  const scopes = new WeakMap(), names = new WeakMap(), mutatedFunctions = new WeakSet(), roots = [], findings = new Map();
   const scope = parent => ({ parent, bindings: new Map(), models: new Set() });
-  const factoryCache = new Map(), handlerCache = new Map();
-  function index(node, current) {
+  const factoryCache = new Map(), importCache = new Map(), handlerCache = new Map();
+  function importedHandler(binding) {
+    const source = modules?.get(binding.module);
+    if (!binding.imported || !source) return null;
+    const key = binding.module + ":" + binding.imported;
+    if (!importCache.has(key)) {
+      const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+      const exported = ast.body.find(node => node.type === "ExportNamedDeclaration"
+        && node.declaration?.type === "FunctionDeclaration" && node.declaration.id.name === binding.imported);
+      // A reassigned export no longer identifies this function body. Reject
+      // writes conservatively, even when a nested binding shares its name.
+      const reassigned = node => (["AssignmentExpression", "UpdateExpression", "ForOfStatement", "ForInStatement"].includes(node.type)
+        && bindingTargets(node.left || node.argument).some(target => target.type === "Identifier" && target.name === binding.imported))
+        || childNodes(node).some(reassigned);
+      importCache.set(key, exported && !reassigned(ast)
+        ? { name: binding.imported, source, file: binding.module } : null);
+    }
+    return importCache.get(key);
+  }
+  function factoryBindings(factory) {
+    const source = modules?.get(factory.module), key = factory.module + ":" + factory.imported;
+    if (!factoryCache.has(key)) factoryCache.set(key, new Map([...factoryHandlers(source, factory.imported)]
+      .map(([method, name]) => [method, { handler: { name, source, file: factory.module } }])));
+    return factoryCache.get(key);
+  }
+  function index(node, current, parent) {
     if (node.type === "FunctionDeclaration") current.bindings.set(node.id.name, node);
+    if (node.type === "ClassDeclaration" && node.id) current.bindings.set(node.id.name, null);
     if (functionPattern.test(node.type)) {
       names.set(node, node.id?.name || names.get(node) || "<callback>");
       current = scope(current);
-      for (const param of node.params) if (param.type === "Identifier") current.bindings.set(param.name, null);
+      if (node.id) current.bindings.set(node.id.name, node);
+      for (const param of node.params) for (const target of bindingTargets(param)) current.bindings.set(target.name, null);
       if (rootName ? names.get(node) === rootName : rootPattern.test(names.get(node))) roots.push(node);
-    } else if (node.type === "BlockStatement") current = scope(current);
+    } else if (["ClassDeclaration", "ClassExpression"].includes(node.type)) {
+      current = scope(current);
+      if (node.id) current.bindings.set(node.id.name, null);
+    } else if (node.type === "BlockStatement" || node.type === "CatchClause") current = scope(current);
     scopes.set(node, current);
+    if (node.type === "CatchClause") for (const target of bindingTargets(node.param)) current.bindings.set(target.name, null);
     if (node.type === "ImportDeclaration") {
       for (const specifier of node.specifiers) if (specifier.type === "ImportSpecifier") current.bindings.set(specifier.local.name,
         { imported: specifier.imported.name, module: posix.join(posix.dirname(file), node.source.value.replace(/^\//, "")) });
@@ -63,29 +101,44 @@ export function scanModule(source, file, { modules, rootName } = {}) {
       if (fn) names.set(fn, node.id.name);
       const factory = node.init?.type === "CallExpression" && resolve(node, node.init.callee.name);
       if (factory.imported === "createUiStateStore" && /(^|\/)ui-state-store\.js$/.test(factory.module)) current.models.add(node.id.name);
+      else if (parent?.kind === "const" && factory.imported && factoryBindings(factory).size)
+        current.bindings.set(node.id.name, { members: new Map(factoryBindings(factory)) });
     }
+    if (node.type === "VariableDeclarator" && node.id.type !== "Identifier")
+      for (const target of bindingTargets(node.id)) current.bindings.set(target.name, null);
     if (node.type === "VariableDeclarator" && node.id.type === "ObjectPattern" && node.init?.type === "CallExpression") {
       const factory = resolve(node, node.init.callee.name);
-      const source = modules?.get(factory.module), cacheKey = factory.module + ":" + factory.imported;
-      if (!factoryCache.has(cacheKey)) factoryCache.set(cacheKey, factoryHandlers(source, factory.imported));
       for (const property of node.id.properties) if (!property.computed && property.value?.type === "Identifier") {
-        const name = factoryCache.get(cacheKey).get(property.key.name || property.key.value);
-        current.bindings.set(property.value.name, name ? { handler: { name, source, file: factory.module } } : null);
+        current.bindings.set(property.value.name, factoryBindings(factory).get(property.key.name || property.key.value) || null);
       }
     }
-    for (const child of childNodes(node)) index(child, current);
+    for (const child of childNodes(node)) index(child, current, node);
   }
   index(ast, scope(null));
   function resolve(node, name) {
     for (let current = scopes.get(node); current; current = current.parent) {
       if (current.bindings.has(name)) {
         const binding = current.bindings.get(name);
-        return { fn: binding?.type ? binding : null, handler: binding?.handler, imported: binding?.imported,
+        return { scope: current, fn: binding?.type && !mutatedFunctions.has(binding) ? binding : null, handler: binding?.handler, members: binding?.members, imported: binding?.imported,
           module: binding?.module, model: current.models.has(name) };
       }
     }
     return {};
   }
+  function invalidateMutatedControllers(node) {
+    if (["AssignmentExpression", "UpdateExpression", "ForOfStatement", "ForInStatement"].includes(node.type) || (node.type === "UnaryExpression" && node.operator === "delete")) {
+      for (let target of bindingTargets(node.left || node.argument)) {
+        const binding = target.type === "Identifier" && resolve(node, target.name);
+        if (binding.fn) mutatedFunctions.add(binding.fn);
+        // Factory aliases share cached handlers; invalidate only this binding.
+        if (binding.handler) binding.scope.bindings.set(target.name, null);
+        while (target.type === "MemberExpression") target = target.object;
+        if (target.type === "Identifier") resolve(node, target.name).members?.clear();
+      }
+    }
+    for (const child of childNodes(node)) invalidateMutatedControllers(child);
+  }
+  invalidateMutatedControllers(ast);
   for (const root of roots) {
     // One reachable helper per root/case prevents recursion/path explosion.
     const visited = new Set(), active = new Set();
@@ -98,7 +151,10 @@ export function scanModule(source, file, { modules, rootName } = {}) {
       if (visited.has(key) || active.has(fn)) return;
       visited.add(key);
       active.add(fn);
-      try { visit(fn.body, path, context); } finally { active.delete(fn); }
+      try {
+        for (const param of fn.params) visit(param, path, context);
+        visit(fn.body, path, context);
+      } finally { active.delete(fn); }
     }
     function visit(node, path, context) {
       if (functionPattern.test(node.type)) return;
@@ -120,14 +176,17 @@ export function scanModule(source, file, { modules, rootName } = {}) {
       if (node.type === "CallExpression" || node.type === "NewExpression") {
         const callee = node.callee.type === "ChainExpression" ? node.callee.expression : node.callee;
         const method = property(callee), spelling = memberPath(callee);
-        const binding = callee.type === "Identifier" ? resolve(node, callee.name) : {};
+        const binding = callee.type === "Identifier" ? resolve(node, callee.name)
+          : callee.type === "MemberExpression" && !callee.computed && callee.object.type === "Identifier"
+            ? resolve(node, callee.object.name).members?.get(method) || {} : {};
         const local = binding.fn;
+        const handler = binding.handler || importedHandler(binding);
         const model = callee.object?.type === "Identifier" && resolve(node, callee.object.name).model;
         if (domCalls.has(method) || /\.(style|classList)\./.test(spelling)) add("dom-call", node, path, context);
         else if (local) follow(local, path + ">" + names.get(local), context);
-        else if (binding.handler) {
-          const handler = binding.handler, key = handler.file + ":" + handler.name;
-          // Deliberately one hop: imported helpers inside the returned handler
+        else if (handler) {
+          const key = handler.file + ":" + handler.name;
+          // Deliberately one hop: imported helpers inside the resolved handler
           // remain unresolved, while its local closure/model bindings are read.
           if (!handlerCache.has(key)) handlerCache.set(key, scanModule(handler.source, handler.file, { rootName: handler.name }));
           for (const finding of handlerCache.get(key)) {

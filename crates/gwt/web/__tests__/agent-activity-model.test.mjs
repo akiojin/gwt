@@ -75,9 +75,12 @@ test("Works telemetry sums measured project conversations once, preserves missin
   assert.equal(result.today.cache_tokens, 10);
   assert.equal(result.by_window.w1.cache_tokens, 10);
   const claude = { ...usage, provider: "claude_code", cache_creation_tokens: 3,
+    model: "claude-sonnet-4-5",
     telemetry: { ...usage.telemetry, today_cache_creation_tokens: 3 } };
-  const claudeResult = selectWorksTelemetry({ ...params, sessions: [claude] });
+  const claudeResult = selectWorksTelemetry({ ...params, sessions: [claude], bySession: { s1: { model: null, branch: "pm/resident" } } });
   assert.equal(claudeResult.by_window.w1.cache_tokens, 13);
+  assert.equal(claudeResult.by_window.w1.model, "claude-sonnet-4-5", "missing Session model cannot erase measured provider model");
+  assert.equal(claudeResult.by_window.w1.branch, "pm/resident");
   assert.equal(claudeResult.today.cache_tokens, 13);
   const incompleteClaude = selectWorksTelemetry({ ...params, sessions: [{ ...usage, provider: "claude_code" }] });
   assert.equal(incompleteClaude.by_window.w1.cache_tokens, null);

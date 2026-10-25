@@ -451,9 +451,6 @@ pub enum PrCommand {
     Ready {
         number: u64,
     },
-    Draft {
-        number: u64,
-    },
     Close {
         number: u64,
         comment: Option<String>,

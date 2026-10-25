@@ -978,11 +978,26 @@ status for zero declarations and omit resolved or unknown blockers. No usable ob
 returns null; a supplied empty inbox returns []. Keep the Monitor source, scan time and
 coverage limits when interpreting this partial snapshot. It does not establish a fresh
 project-wide graph, bundle completeness, priority, milestone health or launch permission.
+`policy.dependency_impacts` reverses only the supplied canonical blocker edges. Each row's
+`issue_number` is the blocker and `dependent_issues` lists distinct direct dependents;
+both levels use ascending Issue numbers. Original observations keep their order and repeats.
+All supplied rows contribute, including conflicting states for a repeated Issue. Chains,
+cycle flags and bundle references add no inferred edges. Absent Monitor yields null;
+supplied snapshots with no blocker edges yield []. Degraded or aborted snapshots retain
+these facts with the enclosing Monitor provenance and coverage limits. This partial inverse
+does not prove no impact, current blockage, importance, transitive delay or critical path,
+and does not authorize priority, readiness or launch changes.
 Each milestone's `dependency_observations` selects these rows for its effective member
 Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
 Row order, repeats and missing dependency data remain visible; absent Monitor yields null,
 while no matching rows yields []. Keep `unobserved_issues` and Monitor coverage limits;
 this join does not prove transitive delay, critical path or milestone health.
+Each milestone's `dependency_impacts` filters the global direct inverse to the same
+effective member dependents. External blockers remain; other dependents and empty
+blocker rows are omitted. Numeric order and distinct direct dependents are preserved.
+Duplicate or blank milestone IDs use only their direct references. Absent Monitor is
+null; no supplied member blocker edges is []. Degraded or aborted snapshots retain
+facts with the enclosing provenance; this does not establish delay or milestone health.
 Each Goal's `dependency_observations` selects rows for its existing roadmap member
 Issues through an exact unique nonempty Goal ID, including invalid links as reference
 facts. Milestone-only, category-only and other-Goal references add no members. It keeps
