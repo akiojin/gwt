@@ -1,11 +1,47 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { TestInfo } from "@playwright/test";
+
+// Rust's bare-command search on Windows requires a PE executable for git/gh;
+// the provider itself uses the production-supported .cmd launch route.
+export async function writeFixtureNodeCommand(bin: string, name: string, source: string, native = false) {
+  const windows = process.platform === "win32";
+  const script = join(bin, windows ? `${name}.cjs` : name);
+  // Issue #5028: close writable fixture FDs in a child before any PTY spawn.
+  const written = spawnSync(process.execPath, ["-e",
+    "const fs=require('node:fs');fs.writeFileSync(process.argv[1],fs.readFileSync(0));fs.chmodSync(process.argv[1],0o755);",
+    script], { input: source, encoding: "utf8", windowsHide: true });
+  if (written.error) throw written.error;
+  if (written.status !== 0) throw new Error(`Fixture executable writer failed: ${written.stderr}`);
+  if (!windows) return script;
+  if (!native) {
+    const command = join(bin, `${name}.cmd`);
+    await writeFile(command, `@echo off\r\n"${process.execPath}" "%~dp0${name}.cjs" %*\r\n`);
+    return command;
+  }
+  const adapter = join(bin, "fixture-node.exe");
+  if (!await access(adapter).then(() => true, () => false)) {
+    const rust = join(bin, "fixture-node.rs");
+    await writeFile(rust, `fn main() {
+    let script = std::env::current_exe().unwrap().with_extension("cjs");
+    let status = std::process::Command::new(${JSON.stringify(process.execPath)})
+        .arg(script).args(std::env::args_os().skip(1)).status().expect("fixture Node command");
+    std::process::exit(status.code().unwrap_or(1));
+}\n`);
+    const built = spawnSync("rustc", ["--crate-name", "fixture_node", "-C", "debuginfo=0", rust, "-o", adapter],
+      { encoding: "utf8", windowsHide: true });
+    if (built.error) throw built.error;
+    if (built.status !== 0) throw new Error(`Fixture native adapter failed: ${built.stderr}`);
+  }
+  const command = join(bin, `${name}.exe`);
+  await copyFile(adapter, command);
+  return command;
+}
 
 export type ExactRelaunchInvocation = {
   pid: number;
@@ -29,16 +65,32 @@ export type ExactRelaunchSetup = {
 };
 
 export async function startExactRelaunchFixture(testInfo: TestInfo, setup: ExactRelaunchSetup = {}) {
-  if (process.platform === "win32") throw new Error("Exact relaunch fixture requires POSIX executables");
+  const windows = process.platform === "win32";
+  const suffix = windows ? ".exe" : "";
   const root = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
-  const gwt = join(root, "target/debug/gwt");
-  const gwtd = join(root, "target/debug/gwtd");
+  const gwt = join(root, `target/debug/gwt${suffix}`);
+  const gwtd = join(root, `target/debug/gwtd${suffix}`);
   await Promise.all([access(gwt), access(gwtd)]);
   const home = await realpath(await mkdtemp(join(tmpdir(), "gwt-exact-relaunch-")));
   const bin = join(home, "bin");
   const state = join(home, ".gwt");
   const argvLog = join(home, "provider-argv.jsonl");
   const nativeId = randomUUID();
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  // No ambient parent Session, capability, Git selection, or credentials may
+  // enter this independent instance, including its initial Git operations.
+  for (const key of Object.keys(env)) {
+    if (/^(GWT_|CODEX_|CLAUDE_|GIT_)/i.test(key)
+      || ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key.toUpperCase())
+      || key.toUpperCase() === "PATH") delete env[key];
+  }
+  Object.assign(env, {
+    HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),
+    PATH: [bin, process.env.PATH ?? process.env.Path ?? ""].join(delimiter),
+    GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
+    GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: join(home, "project"),
+    GWT_DISABLE_BACKGROUND_INDEX: "1",
+  });
   await Promise.all([mkdir(bin), mkdir(state), mkdir(join(home, ".codex"))]);
   await writeFile(argvLog, "");
   // The project is a throwaway repository, not this checkout: startup restore
@@ -47,7 +99,7 @@ export async function startExactRelaunchFixture(testInfo: TestInfo, setup: Exact
   const project = join(home, "project");
   const branch = "main";
   await mkdir(project);
-  const git = (...args: string[]) => spawnSync("git", args, { cwd: project, encoding: "utf8" });
+  const git = (...args: string[]) => spawnSync("git", args, { cwd: project, env, encoding: "utf8", windowsHide: true });
   for (const args of [["init", "-q", "-b", branch], ["-c", "user.name=gwt", "-c", "user.email=gwt@example.invalid",
     "commit", "-q", "--allow-empty", "-m", "exact relaunch fixture"]]) {
     const result = git(...args);
@@ -65,7 +117,14 @@ if (args.includes('--version') || args.includes('-V')) {
   console.log('codex-cli 0.116.0'); process.exit(0);
 }
 // Configuration preflight is not an interactive provider session.
-if (args.at(-2) === 'features' && args.at(-1) === 'list') {
+const configOptions = ['--config','-c','--profile','-p','--enable','--disable'];
+let configEnd = 0;
+while (configEnd < args.length - 2) {
+  if (configOptions.includes(args[configEnd])) configEnd += 2;
+  else if (/^--(?:config|profile|enable|disable)=/.test(args[configEnd])) configEnd += 1;
+  else break;
+}
+if (configEnd === args.length - 2 && args.at(-2) === 'features' && args.at(-1) === 'list') {
   process.exit(0);
 }
 const option = name => {
@@ -90,7 +149,12 @@ try {
   const hooks = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.codex', 'hooks.json'), 'utf8'));
   const input = JSON.stringify({session_id:native,hook_event_name:'SessionStart',source:resumed ? 'resume' : 'startup',cwd:process.cwd(),transcript_path:rollout,model:option('--model')});
   for (const group of hooks.hooks?.SessionStart ?? []) for (const hook of group.hooks ?? []) {
-    if (hook.type === 'command') require('node:child_process').spawnSync('/bin/sh', ['-c', hook.command], {input, stdio:['pipe','ignore','inherit'], timeout:60000});
+    if (hook.type !== 'command') continue;
+    const windows = process.platform === 'win32';
+    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh',
+      windows ? ['/d','/s','/c',hook.command] : ['-c',hook.command],
+      {input, stdio:['pipe','ignore','inherit'], timeout:60000, windowsHide:true, windowsVerbatimArguments:windows});
+    if (result.error || result.status !== 0) throw new Error('SessionStart hook failed: ' + (result.error?.message || result.status));
   }
 } catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
@@ -98,7 +162,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
   if (line.trim() === 'GWT_FIXTURE_DONE') {
     const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000,
+      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000, windowsHide:true,
       input:JSON.stringify({schema_version:1,operation:'workspace.update',params:{status:'done'}}),
     });
     let done = false;
@@ -110,7 +174,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     // Exercise the provider's real authenticated execution boundary. Never
     // copy its launch capability into the test runner or print the envelope.
     const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
-      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000,
+      cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000, windowsHide:true,
       input:JSON.stringify({schema_version:1,operation:'execution.blocked',params:{reason:'Fixture execution intentionally blocked'}}),
     });
     let blocked = false;
@@ -121,48 +185,27 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   console.log('GWT_FAKE_PROVIDER_READY ' + native);
 });
 `;
-  // Only the child holds writable fixture FDs, and exits before any spawn.
-  // Issue #5028: awaiting writeFile cannot prevent sibling fork inheritance.
-  const writeExecutable = (file: string, contents: string) => {
-    const result = spawnSync(process.execPath, ["-e",
-      "const fs = require('node:fs'); fs.writeFileSync(process.argv[1], fs.readFileSync(0)); fs.chmodSync(process.argv[1], 0o755);",
-      file], { input: contents, encoding: "utf8" });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(`Fixture executable writer failed: ${result.stderr}`);
-  };
-  writeExecutable(join(bin, "codex"), provider);
+  await writeFixtureNodeCommand(bin, "codex", provider);
   // Hooks resolve `gwtd` through PATH when GWT_BIN_PATH is absent; it must be
   // the checkout build under test, never an installed binary.
-  await symlink(gwtd, join(bin, "gwtd"));
+  if (windows) await copyFile(gwtd, join(bin, `gwtd${suffix}`));
+  else await symlink(gwtd, join(bin, "gwtd"));
   // An accidentally selected package runner must never contact a registry or
   // bypass the fixture's provider. Installed Codex is the intended test route.
   for (const runner of ["bunx", "npx", "npm"]) {
-    writeExecutable(join(bin, runner), "#!/bin/sh\necho 'Exact relaunch fixture requires installed Codex' >&2\nexit 64\n");
+    await writeFixtureNodeCommand(bin, runner,
+      `#!${process.execPath}\nconsole.error('Exact relaunch fixture requires installed Codex');process.exit(64);\n`);
   }
   try {
     const runtime = join(homedir(), ".gwt/runtime");
     await access(runtime);
-    await symlink(runtime, join(state, "runtime"));
+    await symlink(runtime, join(state, "runtime"), windows ? "junction" : "dir");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  // No ambient parent Session, capability, execution, transport, or config
-  // identity may enter this independent test instance.
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("GWT_") || key.startsWith("CODEX_") || key.startsWith("CLAUDE_")
-      || ["GH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"].includes(key)) delete env[key];
-  }
-  Object.assign(env, {
-    HOME: home, USERPROFILE: home, CODEX_HOME: join(home, ".codex"),
-    PATH: `${bin}:${process.env.PATH ?? ""}`,
-    GIT_TERMINAL_PROMPT: "0", GH_PROMPT_DISABLED: "1",
-    GWT_HOOK_BIN: "gwtd", GWT_PROJECT_ROOT: project,
-    GWT_DISABLE_BACKGROUND_INDEX: "1",
-  });
   await setup.prepare?.({ home, bin, project, env });
   const status = spawnSync(gwtd, [], {
-    cwd: project, env, encoding: "utf8", timeout: 30_000,
+    cwd: project, env, encoding: "utf8", timeout: 30_000, windowsHide: true,
     input: JSON.stringify({ schema_version: 1, operation: "issue.monitor.status", params: {} }),
   });
   if (status.status !== 0) throw new Error(`Fixture project lookup failed: ${status.stderr}`);
@@ -188,6 +231,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   async function launches(): Promise<ExactRelaunchInvocation[]> {
     return (await readFile(argvLog, "utf8")).split("\n").filter(Boolean).map(line => JSON.parse(line));
   }
+  function processCommand(pid: number) {
+    const result = windows
+      ? spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine`],
+      { encoding: "utf8", windowsHide: true })
+      : spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+    if (result.error) throw result.error;
+    if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
+    return result.stdout.trim();
+  }
   async function stop() {
     const ownedPid = child?.pid;
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
@@ -203,11 +256,11 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
-    const providerPaths = [join(bin, "codex"), join(bin, "claude")];
+    const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
     const providerPids: number[] = [];
     for (const launch of await launches()) {
-      const command = spawnSync("ps", ["-p", String(launch.pid), "-o", "command="], { encoding: "utf8" });
-      if (providerPaths.some(path => command.stdout.includes(path))) {
+      const command = processCommand(launch.pid);
+      if (providerPaths.some(path => command.includes(path))) {
         providerPids.push(launch.pid);
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
@@ -215,16 +268,16 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     await Promise.all(providerPids.map(async pid => {
       const deadline = Date.now() + 5_000;
       while (Date.now() < deadline) {
-        const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-        if (!providerPaths.some(path => command.stdout.includes(path))) return;
+        const command = processCommand(pid);
+        if (!providerPaths.some(path => command.includes(path))) return;
         await delay(100);
       }
       throw new Error(`Fixture provider ${pid} remained after shutdown`);
     }));
     if (ownedPid) {
-      const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
-      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });
-      if (remaining.status !== 1) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
+      const remaining = processCommand(ownedPid);
+      await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, exited: !remaining }), contentType: "application/json" });
+      if (remaining) throw new Error(`Fixture gwt process ${ownedPid} remained after shutdown`);
     }
     child = undefined;
   }
@@ -234,7 +287,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     const stream = createWriteStream(logFile);
     try {
       child = spawn(gwt, ["--no-tray", "--no-open"], {
-        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, stdio: ["ignore", "pipe", "pipe"],
+        cwd: project, env: { ...env, GWT_BROWSER_URL_FILE: urlFile }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
       });
       const current = child;
       let failure: Error | undefined;

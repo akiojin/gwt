@@ -3,13 +3,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
-import { startExactRelaunchFixture } from "./exact-relaunch";
+import { startExactRelaunchFixture, writeFixtureNodeCommand } from "./exact-relaunch";
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo) {
+  const windows = process.platform === "win32";
   const comments: { id: number; body: string; updated_at: string }[] = [];
   const requests: { method: string; url: string }[] = [];
   const issue = {
@@ -59,9 +60,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
   let projectLogs = "";
   let projectState = "";
   const hookAudits: unknown[] = [];
-  function auditHooks(cwd: string, repair: boolean) {
+  function auditHooks(cwd: string, repair: boolean): { status: string; issues: string[] } {
     const operation = repair ? "hook.doctor" : "hook.health";
-    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000,
+    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation, params: {
         ...(repair ? { repair: true } : {}), expected_hook_bin: stableHook,
         runtime_state_path: join(auditEnv.HOME!, ".gwt", "fixture-missing-runtime-state.json"),
@@ -73,6 +74,15 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
     const output = typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
     const health = repair ? output.health : output;
     hookAudits.push({ operation, cwd, health });
+    if (repair) {
+      const registered = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
+        input: JSON.stringify({ schema_version: 1, operation: "hook.register_codex_managed_hook_trust", params: {
+          project_root: cwd, codex_config: join(auditEnv.HOME!, ".codex/config.toml"), codex_hook_discovery: "both",
+        } }),
+      });
+      if (registered.status !== 0 || !JSON.parse(registered.stdout).ok) throw new Error(`Fixture hook trust registration failed: ${registered.stderr}`);
+      return auditHooks(cwd, false);
+    }
     const issues = (health.issues ?? []).filter((issue: string) => !issue.startsWith("managed hook failure:") || !issue.includes("state=fail-open"));
     if (issues.length || (!repair && health.status === "inactive")) throw new Error(`Hook audit failed: ${JSON.stringify(health)}`);
     return health;
@@ -84,6 +94,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
       const until = Date.now() + 5_000;
       while (daemon.exitCode === null && daemon.signalCode === null && Date.now() < until) await delay(100);
       if (daemon.exitCode === null && daemon.signalCode === null) daemon.kill("SIGKILL");
+      const forcedUntil = Date.now() + 5_000;
+      while (daemon.exitCode === null && daemon.signalCode === null && Date.now() < forcedUntil) await delay(100);
+      if (daemon.exitCode === null && daemon.signalCode === null) throw new Error(`Owned fixture daemon ${daemon.pid} remained after shutdown`);
     }
   }
   let fixture;
@@ -97,14 +110,14 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
       async beforeStart({ project, env, preferences }) {
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
-        daemon = spawn(checkoutGwtd, [], { cwd: project, env, stdio: ["pipe", "ignore", "pipe"] });
+        daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
         let daemonErrors = "";
         daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
         daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
         const until = Date.now() + 30_000;
         while (Date.now() < until) {
           if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`Fixture daemon exited: ${daemonErrors}`);
-          const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000,
+          const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000, windowsHide: true,
             input: JSON.stringify({ schema_version: 1, operation: "daemon.status", params: {} }) });
           if (status.status === 0 && status.stdout.includes(String(daemon.pid))) return;
           await delay(100);
@@ -112,19 +125,30 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
       },
       async prepare({ home, bin, project, env }) {
-        const candidates = [process.env.GWT_HOOK_BIN, process.env.GWT_BIN_PATH,
-          spawnSync("which", ["gwtd"], { encoding: "utf8" }).stdout.trim(),
-          "/Applications/GWT.app/Contents/MacOS/gwtd"];
-        stableHook = candidates.find(path => path && path.startsWith("/") && existsSync(path)
-          && !/[/\\]target[/\\].*[/\\](?:debug|release)[/\\]gwtd/.test(path)
-          && !/[/\\]target[/\\](?:debug|release)[/\\]gwtd/.test(path)) || "";
-        if (!stableHook) throw new Error("No stable installed gwtd hook fallback available");
-        env.GWT_HOOK_BIN = stableHook;
         auditEnv = env;
-        checkoutGwtd = join(bin, "gwtd");
-        const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+        checkoutGwtd = join(bin, windows ? "gwtd.exe" : "gwtd");
+        const disposable = /(^|[/\\])target[/\\](?:[^/\\]+[/\\])*(?:debug|release)[/\\]gwtd(?:\.exe)?(?:[^a-z0-9_.-]|$)/i;
+        stableHook = process.env.GWT_HOOK_BIN || "";
+        if (disposable.test(stableHook) || (stableHook && stableHook !== "gwtd" && (!isAbsolute(stableHook) || !existsSync(stableHook)))) stableHook = "";
+        if (!stableHook) {
+          delete env.GWT_HOOK_BIN;
+          const resolved = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 30_000, windowsHide: true,
+            input: JSON.stringify({ schema_version: 1, operation: "hook.doctor", params: {} }),
+          });
+          if (resolved.error) throw resolved.error;
+          const envelope = resolved.stdout.trim() ? JSON.parse(resolved.stdout) : null;
+          if (resolved.status !== 0 || !envelope?.ok) throw new Error(`Fixture hook fallback resolution failed: ${resolved.stderr}`);
+          const output = typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
+          stableHook = output.managed_hook_bin;
+        }
+        if (!stableHook || disposable.test(stableHook)) throw new Error("No stable managed-hook fallback resolved");
+        env.GWT_HOOK_BIN = stableHook;
+        const foundGit = spawnSync(windows ? "where.exe" : "which", ["git"], { encoding: "utf8", windowsHide: true });
+        if (foundGit.error) throw foundGit.error;
+        const realGit = foundGit.stdout.split(/\r?\n/).find(path => path && (!windows || /\.exe$/i.test(path)));
+        if (!realGit) throw new Error("No native Git executable found for the fixture");
         const git = (...args: string[]) => {
-          const result = spawnSync(realGit, args, { cwd: project, env, encoding: "utf8" });
+          const result = spawnSync(realGit, args, { cwd: project, env, encoding: "utf8", windowsHide: true });
           if (result.status !== 0) throw new Error(`Fixture git failed: ${result.stderr}`);
         };
         const remote = join(home, "origin.git");
@@ -133,9 +157,8 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         git("push", "-q", "-u", "origin", "main");
         git("--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main");
         git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
-        const gitWrapper = `#!${process.execPath}\nconst cp=require('node:child_process');\nconst a=process.argv.slice(2);\nif(a.slice(-3).join(' ')==='remote get-url origin'){console.log('https://github.com/fixture/queue.git');process.exit(0);}\nconst r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit'});process.exit(r.status??1);\n`;
-        await writeFile(join(bin, "git"), gitWrapper);
-        await chmod(join(bin, "git"), 0o755);
+        const gitWrapper = `#!${process.execPath}\nconst cp=require('node:child_process');\nconst a=process.argv.slice(2);\nif(a.slice(-3).join(' ')==='remote get-url origin'){console.log('https://github.com/fixture/queue.git');process.exit(0);}\nconst r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',windowsHide:true});process.exit(r.status??1);\n`;
+        await writeFixtureNodeCommand(bin, "git", gitWrapper, true);
         await writeFile(join(home, ".codex", "auth.json"), JSON.stringify({ OPENAI_API_KEY: "fixture-only" }));
         const ghLog = join(home, "gh-argv.jsonl");
         await writeFile(ghLog, "");
@@ -153,16 +176,17 @@ if(a[0]==='api'&&a[1]==='graphql'){console.log(JSON.stringify({data:{repository:
 if(a[0]==='pr'&&a[1]==='list'){console.log('[]');process.exit(0);}
 console.error('Unimplemented fixture gh: '+text);process.exit(64);
 `;
-        await writeFile(join(bin, "gh"), gh);
-        await chmod(join(bin, "gh"), 0o755);
+        const ghCommand = await writeFixtureNodeCommand(bin, "gh", gh, true);
         Object.assign(env, {
           RUST_LOG: "info",
           GWT_OWNER_GITHUB_TEST_MODE: "loopback-v1",
           GWT_OWNER_GITHUB_REST_BASE: endpoint,
           GWT_OWNER_GITHUB_GRAPHQL_URL: `${endpoint}/graphql`,
           GWT_OWNER_GITHUB_TOKEN: "fixture-only",
-          GWT_TEST_GH: join(bin, "gh"),
+          GWT_TEST_GH: ghCommand,
         });
+        await mkdir(join(project, ".codex"), { recursive: true });
+        await writeFile(join(project, ".codex/hooks.json"), "{}");
         auditHooks(project, true);
       },
     });
@@ -178,7 +202,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return join(cwd, ".gwt", "work", "events", digest.slice(0, 2), `${digest}.jsonl`);
   }
   function stagedDiff(cwd: string) {
-    const result = spawnSync("git", ["diff", "--cached", "--binary"], { cwd, env: auditEnv });
+    const result = spawnSync("git", ["diff", "--cached", "--binary"], { cwd, env: auditEnv, windowsHide: true });
     if (result.status !== 0) throw new Error("Fixture staged diff failed");
     return result.stdout;
   }
@@ -207,13 +231,13 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     await writeFile(shard, `${JSON.stringify(orphan)}\n`, { flag: "wx" });
     const stagedPath = "retained-staged-source.txt";
     await writeFile(join(worktree, stagedPath), "Active orphan recovery must retain these staged bytes.\n");
-    const staged = spawnSync("git", ["add", "--", stagedPath], { cwd: worktree, env: auditEnv });
+    const staged = spawnSync("git", ["add", "--", stagedPath], { cwd: worktree, env: auditEnv, windowsHide: true });
     if (staged.status !== 0) throw new Error("Fixture stage failed");
     return { predecessorId: predecessor.id, successorId, orphan, worktree,
       branch: start.execution_container.branch, stagedDiff: stagedDiff(worktree) };
   }
   function readOperation(operation: "execution.status" | "perf.startup", cwd: string) {
-    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000,
+    const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation,
         params: operation === "execution.status" ? { issue: issue.number } : {} }),
     });
@@ -223,10 +247,10 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
   }
   function scheduleOperation(
-    operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign",
+    operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign" | "issue.monitor.requeue" | "issue.monitor.launch_now",
     params: Record<string, unknown> = {},
   ) {
-    const result = spawnSync(checkoutGwtd, [], { cwd: active.project, env: auditEnv, encoding: "utf8", timeout: 30_000,
+    const result = spawnSync(checkoutGwtd, [], { cwd: active.project, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: active.project } }),
     });
     if (result.error) throw result.error;
@@ -252,6 +276,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     issueNumber: issue.number, requests, comments, hookAudits, restoreSummary,
     workItems, eventShardPath, stagedDiff, seedActiveOrphan,
     scheduleOperation,
+    fixtureOperation: scheduleOperation,
     monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
