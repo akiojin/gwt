@@ -1019,6 +1019,14 @@ a Goal, milestone or another row. Absent Monitor yields null even for empty memb
 supplied snapshots without matching rows yield []. Keep `unobserved_issues` and the
 Monitor source, scan time and coverage limits. This join does not establish a complete
 graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that
+row's direct member dependents. It keeps external/shared blockers, numeric order and
+distinct direct dependents, omitting other dependents and empty blocker rows.
+Duplicate/blank IDs and invalid links keep independent membership; no Goal, milestone
+or other row adds members. Absent Monitor yields null even for empty membership;
+no supplied member blocker edges yields []. Degraded or aborted facts retain the
+enclosing Monitor provenance and limits. This inverse proves neither a complete graph,
+transitive delay, critical path nor health, and grants no priority, readiness or launch authority.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied

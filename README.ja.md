@@ -928,6 +928,13 @@ critical path を証明せず、優先順位・起動可能性・起動の変更
 Monitor がなければ空所属でも null、供給された snapshot に一致する行がなければ [] です。
 `unobserved_issues` と Monitor の取得元・スキャン時刻・対象範囲の制限を併せて確認します。
 この照合だけで完全なグラフ・critical path・起動可能性・優先順位・health は判断しません。
+各ロードマップ項目の `dependency_impacts` は、全体の直接逆引きからその行に直接所属する
+dependent だけを選びます。外部・共有 blocker は残し、番号順・重複なしの直接 dependent を
+返し、所属外 dependent と空の blocker 行を除きます。重複・空 ID や不正な紐付けも行ごとの
+所属を維持し、Goal・milestone・他の行から所属を広げません。Monitor がなければ空所属でも
+null、供給された所属 blocker 辺がなければ [] です。degraded・aborted の事実は Monitor の
+取得元と制限を保持します。この逆引きだけで完全なグラフ・推移的な遅延・critical path・
+health を証明せず、優先順位・起動可能性・起動の変更を許可しません。
 `policy.roadmap_items` の各行は、その項目に直接保存された `issues` を順序・重複を
 保持して返します。`observed_issue_states` と `unobserved_issues` は Issue 番号の
 昇順・重複なしで、typed state は供給された inbox 順のまま重複を除きます。
