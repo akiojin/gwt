@@ -2731,6 +2731,8 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
     };
     let recovery = if matches!(blocker, WorkEventSettlementBlocker::CommitNotPushed) {
         "Push the existing event commit through the repository's normal delivery path, then retry once the compared upstream contains it. Later source-only commits do not need to be pushed.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::RemoteDiverged) {
+        "Integrate the existing event commit with the compared upstream without rewriting it, using the repository's normal delivery path, then retry once that upstream contains the event commit. Later source-only commits do not need to be pushed.".to_string()
     } else {
         format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
     };
@@ -14762,6 +14764,12 @@ fn default_integration_test_builds_a_guarded_binary() {
             .expect("write local divergent source");
         fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
         fixture.commit("fix: local source and Work event");
+        let event_commit = fixture.latest_event_commit();
+        let event_bytes = fs::read(fixture.event_path()).unwrap();
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after divergent Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
         fixture.advance_remote_from_peer();
         fixture.git_ok(&["fetch", "-q", "origin", "main"]);
 
@@ -14780,6 +14788,51 @@ fn default_integration_test_builds_a_guarded_binary() {
         assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
         let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
         assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Integrate the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let peer = fixture._root.path().join("peer");
+        let peer = peer.to_str().unwrap();
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "fetch",
+            "-q",
+            fixture.repo.to_str().unwrap(),
+            &event_commit,
+        ]);
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "merge",
+            "-qm",
+            "fix: integrate existing Work event",
+            "FETCH_HEAD",
+        ]);
+        fixture.git_ok(&["-C", peer, "push", "-q", "origin", "main"]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
+        assert_eq!(
+            fixture
+                .git_output(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &source_commit,
+                    &fixture.upstream_ref(),
+                ])
+                .status
+                .code(),
+            Some(1)
+        );
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), event_bytes);
     }
 
     #[test]
