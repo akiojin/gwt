@@ -20,6 +20,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::worktree::run_git_observing_operation_deadline;
+
 /// Remote refspecs pushed per `git push` invocation. Matches the batch size the
 /// 2026-09-05 manual cleanup used; large enough that 265 branches cost ~18
 /// pushes, small enough that one bad ref only forces a 15-way retry.
@@ -420,12 +422,10 @@ impl PruneEnvironment for GitPruneEnvironment {
 /// so the branch is kept rather than deleted on an unverified guess.
 pub fn count_unmerged_commits(repo_path: &Path, base_branch: &str, branch: &str) -> Option<u64> {
     let range = format!("origin/{base_branch}..origin/{branch}");
-    let output = gwt_core::process::run_git_logged(
-        &["rev-list", "--count", range.as_str()],
-        Some(repo_path),
-    )
-    .ok()?;
-    if !output.status.success() {
+    let output =
+        run_git_observing_operation_deadline(&["rev-list", "--count", range.as_str()], repo_path)
+            .ok()?;
+    if !output.success {
         return None;
     }
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
@@ -436,12 +436,12 @@ pub fn count_unmerged_commits(repo_path: &Path, base_branch: &str, branch: &str)
 /// `--prune` also drops tracking refs for branches a previous pass already
 /// deleted, which is what keeps a repeated sweep from re-proposing them.
 pub fn refresh_remote_refs(repo_path: &Path) -> Result<(), String> {
-    let output = gwt_core::process::run_git_logged(
-        &["fetch", "origin", "--prune", "--quiet"],
-        Some(repo_path),
-    )
-    .map_err(|error| error.to_string())?;
-    if output.status.success() {
+    // Pruning shares the scan's maintenance budget. Every Git boundary must
+    // honor it, including the ancestry fan-out, to preserve the launch reserve.
+    let output =
+        run_git_observing_operation_deadline(&["fetch", "origin", "--prune", "--quiet"], repo_path)
+            .map_err(|error| error.to_string())?;
+    if output.success {
         return Ok(());
     }
     Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
@@ -468,9 +468,9 @@ pub fn push_delete_batch(repo_path: &Path, branches: &[String]) -> Result<(), St
     let refspecs = delete_refspecs(branches);
     let mut args = vec!["push", "origin"];
     args.extend(refspecs.iter().map(String::as_str));
-    let output = gwt_core::process::run_git_logged(&args, Some(repo_path))
+    let output = run_git_observing_operation_deadline(&args, repo_path)
         .map_err(|error| error.to_string())?;
-    if output.status.success() {
+    if output.success {
         return Ok(());
     }
     Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
@@ -478,12 +478,12 @@ pub fn push_delete_batch(repo_path: &Path, branches: &[String]) -> Result<(), St
 
 /// Enumerate `work/issue-*` branches that exist on the remote.
 pub fn list_remote_work_branches(repo_path: &Path) -> Result<Vec<String>, String> {
-    let output = gwt_core::process::run_git_logged(
+    let output = run_git_observing_operation_deadline(
         &["ls-remote", "--heads", "origin", WORK_BRANCH_GLOB],
-        Some(repo_path),
+        repo_path,
     )
     .map_err(|error| error.to_string())?;
-    if !output.status.success() {
+    if !output.success {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(parse_ls_remote_heads(&String::from_utf8_lossy(
