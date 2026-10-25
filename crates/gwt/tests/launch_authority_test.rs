@@ -343,3 +343,192 @@ fn prepared_continuation_issues_observation_only_capability_without_activating_s
         .expect("read Prepared authority")
     );
 }
+
+use gwt::project_runtime::launch_finalization::{
+    pending_fresh_execution_launch_from_session, rollback_materialized_fresh_execution_launch,
+};
+
+/// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse
+/// another launch. The second launch starts its own generation beside the
+/// holder's; the holder keeps its Active generation and its binding.
+#[test]
+fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candidate() {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _home = ScopedEnvVar::set("HOME", home.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+    let mut launch = persisted_execution_launch(home.path());
+    let issuer = AgentCapabilityIssuer::for_test(
+        "http://127.0.0.1:45123/internal/hook-live",
+        "ws://127.0.0.1:46234/ws",
+        "ws://127.0.0.1:45123/internal/pane-ws",
+    );
+    let mut genesis_env = HashMap::new();
+    FinalizedAgentCapabilityLaunch {
+        issuer: Some(&issuer),
+        sessions_dir: &launch.sessions_dir,
+        session: &mut launch.session,
+        project_root: &launch.project,
+        worktree: &launch.project,
+        producing_owner: Some(launch.owner),
+        prepared_continuation: None,
+        rebound_continuation: None,
+        execution_entrypoint: "$gwt-execute #2359",
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        container_runtime: None,
+        permission_decision: None,
+    }
+    .install(&mut genesis_env)
+    .expect("materialize the first producing generation");
+
+    let holder_id = launch.session.id.clone();
+    let holder_identity = gwt_agent::SessionExecutionIdentity::from_session(
+        &gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+            .expect("reload holder Session"),
+    )
+    .expect("read holder identity")
+    .expect("holder must be bound");
+
+    let mut relaunch = gwt_agent::Session::new(
+        &launch.project,
+        "work/issue-2359",
+        gwt_agent::AgentId::Codex,
+    );
+    relaunch.project_state_root = Some(launch.project.clone());
+    relaunch.linked_issue_number = Some(launch.owner.number);
+    relaunch.update_status(gwt_agent::AgentStatus::Running);
+
+    let mut env = HashMap::new();
+    FinalizedAgentCapabilityLaunch {
+        issuer: Some(&issuer),
+        sessions_dir: &launch.sessions_dir,
+        session: &mut relaunch,
+        project_root: &launch.project,
+        worktree: &launch.project,
+        producing_owner: Some(launch.owner),
+        prepared_continuation: None,
+        rebound_continuation: None,
+        execution_entrypoint: "$gwt-execute #2359",
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        container_runtime: None,
+        permission_decision: None,
+    }
+    .install(&mut env)
+    .expect("a concurrent launch must start beside a live holder");
+
+    assert!(
+        env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
+        "the concurrent launch must receive its own producing capability"
+    );
+    let binding = relaunch
+        .execution_binding
+        .clone()
+        .expect("the concurrent launch must be bound");
+    assert_ne!(
+        binding.identity.generation_id, holder_identity.execution_binding.identity.generation_id,
+        "the concurrent launch must own a new generation, not the holder's"
+    );
+
+    let ledger = gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+        .expect("load owner ledger")
+        .expect("owner ledger exists");
+    assert!(
+        !ledger.lifecycle_events.iter().any(|event| {
+            event.generation_id == holder_identity.execution_binding.identity.generation_id
+        }),
+        "the live holder generation must not be terminalized by a concurrent launch"
+    );
+    let holder_session =
+        gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
+            .expect("reload holder Session after the concurrent launch");
+    assert_eq!(
+        gwt_agent::SessionExecutionIdentity::from_session(&holder_session)
+            .expect("read holder identity after the concurrent launch")
+            .expect("holder must stay bound"),
+        holder_identity,
+        "the existing window must be untouched by the concurrent launch"
+    );
+
+    // A second Prepared launch for the owner must not make recovery of
+    // this Session ambiguous (Issue #4395 AC-3).
+    let mut other = gwt_agent::Session::new(
+        &launch.project,
+        "work/issue-2359",
+        gwt_agent::AgentId::Codex,
+    );
+    other.project_state_root = Some(launch.project.clone());
+    other.linked_issue_number = Some(launch.owner.number);
+    other.update_status(gwt_agent::AgentStatus::Running);
+    FinalizedAgentCapabilityLaunch {
+        issuer: Some(&issuer),
+        sessions_dir: &launch.sessions_dir,
+        session: &mut other,
+        project_root: &launch.project,
+        worktree: &launch.project,
+        producing_owner: Some(launch.owner),
+        prepared_continuation: None,
+        rebound_continuation: None,
+        execution_entrypoint: "$gwt-execute #2359",
+        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+        container_runtime: None,
+        permission_decision: None,
+    }
+    .install(&mut HashMap::new())
+    .expect("prepare another concurrent candidate");
+    let other_path = launch.sessions_dir.join(format!("{}.toml", other.id));
+    let other_before = std::fs::read(&other_path).unwrap();
+    assert!(
+        gwt::cli::execution_state::prepared_owner_launch_successor_for_predecessor(
+            &launch.project,
+            launch.owner,
+            &holder_identity.execution_binding.identity,
+        )
+        .expect("concurrent launches are not terminal manual-launch replays")
+        .is_none()
+    );
+    let nonce = &env[gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV];
+    let recover = |issue| {
+        pending_fresh_execution_launch_from_session(
+            &launch.sessions_dir,
+            &relaunch.id,
+            &launch.project,
+            launch.project.to_str().unwrap(),
+            issue,
+            None,
+            None,
+            None,
+            nonce,
+            &gwt_agent::AgentId::Codex,
+        )
+    };
+    let pending = recover(Some(launch.owner.number))
+        .expect("recover the exact concurrent candidate among two Prepared launches");
+    assert_eq!(pending.binding, binding);
+    assert!(recover(Some(launch.owner.number + 1)).is_err());
+
+    rollback_materialized_fresh_execution_launch(
+        &launch.sessions_dir,
+        &relaunch.id,
+        &launch.project,
+        "readiness reconstruction failed",
+        &gwt_agent::AgentId::Codex,
+    )
+    .expect("a failed concurrent launch must roll back its candidate");
+    assert!(!launch
+        .sessions_dir
+        .join(format!("{}.toml", relaunch.id))
+        .exists());
+    let remaining =
+        gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
+            .unwrap()
+            .unwrap();
+    let prepared =
+        gwt::cli::execution_state::blocking_prepared_transactions(&launch.sessions_dir, &remaining);
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(prepared[0].candidate_session_id, other.id);
+    assert_eq!(std::fs::read(other_path).unwrap(), other_before);
+    assert_eq!(remaining.generations, ledger.generations);
+    assert_eq!(remaining.lifecycle_events, ledger.lifecycle_events);
+}
