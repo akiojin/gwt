@@ -903,6 +903,12 @@ milestone ID で解決した roadmap 所属 Issue の行を抽出します。供
 欠測を保持し、Monitor 不在は null、一致行がなければ [] です。`unobserved_issues` と
 Monitor の coverage 制約も確認してください。この所属照合は推移的な遅延・critical path・
 milestone health を証明しません。
+各 milestone の `dependency_impacts` は、全体の直接逆引きから同じ所属 Issue の
+dependent だけを抽出します。外部 blocker は残し、他の dependent と空の blocker 行は
+除きます。番号順・重複排除・直接辺の範囲を維持し、重複・空の milestone ID では
+直接参照だけを使います。Monitor 不在は null、所属 Issue の供給辺がなければ [] です。
+degraded・中断 snapshot でも取得元・観測範囲の制約と共に事実を保持し、遅延や
+milestone health の判定には使えません。
 各 Goal の `dependency_observations` は、一意な非空 Goal ID への完全一致で解決した
 既存 roadmap 所属 Issue の行を抽出します。不正なリンクも参照の事実として扱い、
 milestone のみ・category のみ・他 Goal の参照から所属を広げません。供給順・重複・

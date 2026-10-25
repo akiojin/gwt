@@ -238,6 +238,11 @@ direct references plus roadmap links resolved through a unique nonempty mileston
 It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
 Use `unobserved_issues` for missing member rows and keep the enclosing coverage limits;
 this membership join does not establish transitive delay, critical path or milestone health.
+Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents.
+Keep external blockers, preserve numeric order and distinct dependents, and omit empty blocker rows.
+The same existing membership rule applies to duplicate or blank milestone IDs; never infer roadmap membership.
+Absent Monitor yields null; no supplied member blocker edges yields []. Degraded or aborted facts retain
+the enclosing Monitor provenance and limits; this inverse does not establish delay or milestone health.
 Each Goal's `dependency_observations` selects only its existing roadmap member Issues,
 resolved through an exact unique nonempty Goal ID, including invalid links as reference facts.
 Milestone-only, category-only and other-Goal references do not add members.
@@ -4535,6 +4540,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Direct impact observations never expand transitive chains or cycle/bundle declarations",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
+            "Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
             "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
