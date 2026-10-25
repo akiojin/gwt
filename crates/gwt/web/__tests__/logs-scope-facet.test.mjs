@@ -87,7 +87,6 @@ function createFixture(createBoardLogsSurface) {
     activeWorkspace: () => ({ windows: [] }),
     activeProjectTab: () => ({ project_scope: activeProjectScope }),
     projectWindowContextById: () => ({ tab: { project_scope: windowProjectScope } }),
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     getActiveWorkProjection: () => null,
   });
   return {
@@ -165,6 +164,7 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     severity: "info",
     source: "gwt",
     message: "project event",
+    fields: { nested: { value: "original" } },
   };
   const otherProjectEntry = {
     ...projectEntry,
@@ -192,6 +192,21 @@ test("Project and Global modes accept mutually exclusive live log scopes", async
     [globalEntry],
     "Global mode accepts only entries without project_scope",
   );
+  projectEntry.fields.nested.value = "mutated";
+  assert.equal(projectState.entries[0].fields.nested.value, "original",
+    "live receipts must detach nested payload data");
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: globalEntry });
+  assert.equal(globalState.entries.length, 2, "equal-valued live receipts still append");
+
+  surface.requestLogs("logs-project");
+  const pendingScope = projectState.pendingScope;
+  projectState.error = "retained error";
+  projectState.selectedEntryId = projectEntry.id;
+  surface.applyBoardLogsReceiveEvent({ kind: "log_entry_appended", entry: projectEntry });
+  assert.equal(projectState.loading, true, "live receipts do not settle snapshot requests");
+  assert.equal(projectState.pendingScope, pendingScope);
+  assert.equal(projectState.error, "retained error");
+  assert.equal(projectState.selectedEntryId, projectEntry.id);
 });
 
 test("a Project reload refreshes the window scope after project migration", async () => {
@@ -335,10 +350,15 @@ test("Logs snapshots and live appends retain the latest 1000 entries without ext
   const entries = Array.from({ length: 1002 }, (_, id) => ({
     id, project_scope: "project-alpha", severity: "info", message: `log-${id}`,
   }));
+  entries.at(-1).fields = { context: { label: "original" } };
   surface.applyBoardLogsReceiveEvent({ kind: "log_entries", id: "logs-1", entries });
   const state = surface.ensureLogState("logs-1");
   assert.equal(state.entries.length, 1000);
   assert.deepEqual(state.entries.map(entry => entry.id), entries.slice(2).map(entry => entry.id));
+  entries.at(-1).message = "changed by caller";
+  entries.at(-1).fields.context.label = "changed by caller";
+  assert.equal(state.entries.at(-1).message, "log-1001");
+  assert.equal(state.entries.at(-1).fields.context.label, "original");
 
   surface.applyBoardLogsReceiveEvent({
     kind: "log_entry_appended",

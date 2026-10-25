@@ -77,7 +77,7 @@ fn open_project_restore_resumes_paused_agent_even_after_stopped_drift() {
         title: "Open Resume".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -192,7 +192,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
         title: "Family Restore".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -235,9 +235,7 @@ fn app_runtime_startup_auto_resume_removes_stale_placeholders_across_agent_famil
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime.tabs[0]
@@ -309,7 +307,7 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
         title: "No Exact Id".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -332,9 +330,7 @@ fn app_runtime_startup_auto_resume_without_exact_id_keeps_placeholder_with_diagn
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let windows = runtime.tabs[0].workspace.persisted().windows.clone();
@@ -411,7 +407,7 @@ fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
         title: "Candidate Detail".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -451,7 +447,7 @@ fn app_runtime_startup_auto_resume_candidate_skips_generic_paused_detail() {
 }
 
 #[test]
-fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
+fn app_runtime_startup_auto_resume_restores_each_eligible_session() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -465,14 +461,14 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         &repo,
         &["commit", "--allow-empty", "-m", "unlanded restore fixture"],
     );
-    let worktree = temp.path().join("worktrees").join("centered-stack");
+    let worktree = temp.path().join("worktrees").join("restore-all");
     run_git(
         &repo,
         &[
             "worktree",
             "add",
             "-b",
-            "work/centered-stack",
+            "work/restore-all",
             worktree.to_str().expect("worktree path"),
         ],
     );
@@ -484,9 +480,13 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
         &[],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-auto"));
-    for (index, native_session_id) in ["native-stack-one", "native-stack-two", "native-stack-three"]
-        .into_iter()
-        .enumerate()
+    for (index, native_session_id) in [
+        "native-restore-one",
+        "native-restore-two",
+        "native-restore-three",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let worktree = temp.path().join("worktrees").join(native_session_id);
         let branch = format!("work/{native_session_id}");
@@ -495,7 +495,7 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
             &["worktree", "add", "-b", &branch, worktree.to_str().unwrap()],
         );
         let mut session = gwt_agent::Session::new(&worktree, &branch, gwt_agent::AgentId::Codex);
-        session.id = format!("session-centered-stack-{index}");
+        session.id = format!("session-restore-all-{index}");
         session.agent_session_id = Some(native_session_id.to_string());
         session.restore_window_on_startup = true;
         session.record_hook_event("Stop");
@@ -510,31 +510,29 @@ fn app_runtime_startup_auto_resume_uses_centered_stack_bounds() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
-    let geometries = runtime.tabs[0]
+    let agents = runtime.tabs[0]
         .workspace
         .persisted()
         .windows
         .iter()
         .filter(|window| window.preset == WindowPreset::Agent)
-        .map(|window| window.geometry.clone())
         .collect::<Vec<_>>();
-    assert_eq!(geometries.len(), 3);
     assert_eq!(
-        geometries
+        agents.len(),
+        3,
+        "every eligible Session must restore a pane"
+    );
+    assert_eq!(
+        agents
             .iter()
-            .map(|geometry| (geometry.x, geometry.y, geometry.width, geometry.height))
-            .collect::<Vec<_>>(),
-        vec![
-            (32.0, 26.0, 1280.0, 800.0),
-            (60.0, 50.0, 1280.0, 800.0),
-            (88.0, 74.0, 1280.0, 800.0),
-        ],
-        "restored agent windows should form a stack centered in the startup canvas"
+            .map(|window| &window.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3,
+        "restored panes must keep distinct identities"
     );
 }
 
@@ -594,9 +592,7 @@ fn app_runtime_startup_auto_resume_excludes_closed_stopped_windows() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let resumed_sources = runtime
@@ -854,7 +850,7 @@ fn app_runtime_startup_recovery_reads_only_restore_candidates_and_defers_the_res
     persisted.windows.push(placeholder);
     persisted.next_z_index = 2;
     let mut tab = sample_project_tab("tab-repo", "Repo", worktree.clone(), ProjectKind::Git, &[]);
-    tab.workspace = WindowCanvasState::from_persisted(persisted);
+    tab.workspace = WindowRegistry::from_persisted(persisted);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -1079,9 +1075,7 @@ fn app_runtime_startup_auto_resume_includes_legacy_non_stopped_sessions() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let resumed_sources = runtime
@@ -1240,9 +1234,7 @@ fn app_runtime_bootstrap_auto_resumes_same_repo_worktree_session_from_restored_p
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     assert_eq!(
@@ -1303,9 +1295,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_without_lifecycle() 
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime.tabs[0]
@@ -1361,9 +1351,7 @@ fn app_runtime_bootstrap_ignores_same_repo_worktree_session_with_placeholder_res
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime.tabs[0]
@@ -1418,9 +1406,7 @@ fn app_runtime_bootstrap_does_not_auto_resume_sessions_outside_restored_tabs() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     assert!(
@@ -1499,9 +1485,7 @@ fn app_runtime_bootstrap_auto_resume_dedupes_and_skips_stale_without_count_cap()
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     assert_eq!(

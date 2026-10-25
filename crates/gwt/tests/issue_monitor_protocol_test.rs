@@ -254,6 +254,8 @@ fn agent_issue_monitor_scan_result_uses_a_truthful_wire_shape() {
 fn backend_issue_monitor_status_serializes_for_monitor_card() {
     let event = BackendEvent::IssueMonitorStatus {
         status: Box::new(IssueMonitorStatusView {
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
             max_active_agents_scope: "machine".to_string(),
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
@@ -285,6 +287,8 @@ fn backend_issue_monitor_status_serializes_for_monitor_card() {
             update_drain_release: None,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             launch_profile_candidates: Vec::new(),
             effective_launch_profile: None,
@@ -407,6 +411,10 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
     for (state, wire_state) in [
         (MonitorInboxState::NotReady, "not_ready"),
         (MonitorInboxState::SourceExcluded, "source_excluded"),
+        (
+            MonitorInboxState::BlockedByDependency,
+            "blocked_by_dependency",
+        ),
     ] {
         let item = IssueMonitorInboxItem {
             dependency: None,
@@ -433,11 +441,31 @@ fn backend_exclusion_states_and_reason_use_stable_wire_names() {
             exclusion_reason: Some("Untrusted source; PM triage required".to_string()),
         };
 
-        let value = serde_json::to_value(item).expect("serialize excluded inbox item");
+        let mut value = serde_json::to_value(item).expect("serialize excluded inbox item");
+        if state == MonitorInboxState::BlockedByDependency {
+            value["dependency"] = serde_json::json!({
+                "blocked_by": [{ "number": 44 }],
+                "cycle": true,
+                "bundle_with": []
+            });
+            value["exclusion_reason"] = serde_json::json!(
+                "Blocked by #44; Dependency cycle detected; cyclic dependencies ignored"
+            );
+            let decoded: IssueMonitorInboxItem =
+                serde_json::from_value(value.clone()).expect("decode dependency projection");
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+            assert_eq!(value["dependency"]["blocked_by"][0]["number"], 44);
+            assert_eq!(value["dependency"]["cycle"], true);
+            assert_eq!(value["dependency"]["bundle_with"], serde_json::json!([]));
+        }
         assert_eq!(value["state"], wire_state);
         assert_eq!(
             value["exclusion_reason"],
-            "Untrusted source; PM triage required"
+            if state == MonitorInboxState::BlockedByDependency {
+                "Blocked by #44; Dependency cycle detected; cyclic dependencies ignored"
+            } else {
+                "Untrusted source; PM triage required"
+            }
         );
     }
 }

@@ -221,7 +221,7 @@ fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
     let events = runtime.close_expired_terminal_window_candidates_at(t0 + Duration::from_secs(360));
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
@@ -603,7 +603,7 @@ fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_rest
         title: "Terminal Restore".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -631,9 +631,7 @@ fn app_runtime_startup_auto_resume_refuses_closed_issue_window_and_disables_rest
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let windows = runtime.tabs[0].workspace.persisted().windows.clone();
@@ -712,7 +710,7 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -1054,9 +1052,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one resume notice: {toasts:?}");
@@ -1095,9 +1091,7 @@ fn bootstrap_settles_update_resume_marker_and_bypasses_auto_resume_freshness() {
     assert!(!update_drain_is_raised(&worktree));
     let events = restarted.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
     assert!(
         update_resume_toasts(&events).is_empty(),
@@ -1153,9 +1147,7 @@ fn bootstrap_records_failed_update_resume_when_version_mismatches() {
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
     let toasts = update_resume_toasts(&events);
     assert_eq!(toasts.len(), 1, "exactly one failure notice: {toasts:?}");
@@ -1351,7 +1343,7 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
     ));
     let logs = capture_tracing_events(|| {
         runtime.queue_startup_auto_resume_sessions(&HashSet::new());
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
     });
     assert!(runtime.pending_startup_auto_resume_sessions.is_empty());
     assert_eq!(

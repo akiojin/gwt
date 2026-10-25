@@ -5261,7 +5261,7 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
     let workspace = events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("workspace broadcast");
@@ -5276,10 +5276,6 @@ fn app_runtime_issue_monitor_auto_launch_uses_start_with_last_settings() {
         runtime.has_pending_agent_launch_worker(&agent_window.id),
         "initial launch must remain registered until its worker completion is applied"
     );
-    assert_eq!(agent_window.geometry.x, 96.0);
-    assert_eq!(agent_window.geometry.y, 96.0);
-    assert_eq!(agent_window.geometry.width, 860.0);
-    assert_eq!(agent_window.geometry.height, 520.0);
 }
 
 #[test]
@@ -5404,7 +5400,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     assert!(
         first
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "launch must materialize a pane: {first:?}"
     );
     let replay = runtime.auto_launch_issue_monitor_delivery_events_for_project(
@@ -5416,7 +5412,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     );
     assert!(!replay
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     let agent_windows = runtime.tabs[0]
         .workspace
         .persisted()
@@ -5465,7 +5461,7 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .tab_mut("tab-1")
         .unwrap()
         .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+        .add_window(WindowPreset::Agent);
     runtime.register_window("tab-1", &newer_window.id);
     runtime.persist().unwrap();
     assert_eq!(
@@ -6174,7 +6170,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
     assert!(
         !starved
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "an exhausted fallback commit budget must not materialize a window",
     );
     assert!(
@@ -6199,7 +6195,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
     assert!(
         replay
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "the same delivery replays into exactly one window once the budget is explicit",
     );
     assert_eq!(
@@ -6430,7 +6426,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     assert!(
         replay
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "a vanished materializing window must not suppress exact delivery replay",
     );
     assert_eq!(
@@ -6497,7 +6493,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
     assert!(
         expired_replay
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "an expired materializing window must be replaced by exact delivery replay",
     );
     assert_eq!(
@@ -6586,10 +6582,10 @@ fn competing_issue_monitor_subscribers_materialize_one_durable_delivery() {
 
     assert!(first
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!second
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!non_owner_failure
         .iter()
         .any(|event| matches!(event.event, BackendEvent::IssueMonitorLaunchFailed { .. })));
@@ -6701,7 +6697,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(restored_workspace),
+        workspace: WindowRegistry::from_persisted(restored_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -6730,7 +6726,7 @@ fn durable_issue_monitor_delivery_restart_recovers_only_exact_bound_window() {
     );
     assert!(!events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert_eq!(
         restarted.tabs[0]
             .workspace

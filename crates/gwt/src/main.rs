@@ -21,7 +21,7 @@ use gwt::{
     workspace_state_path, AttachmentProgressPhase, BackendEvent, BranchCleanupOptions,
     BranchEntriesPhase, BranchListEntry, ContentLimits, DockerWizardContext, FrontendEvent,
     KnowledgeKind, LaunchWizardState, LiveSessionEntry, ShellLaunchConfig, UiTracePayload,
-    WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus, APP_NAME,
+    WindowPreset, WindowProcessStatus, WindowRegistry, APP_NAME,
 };
 use gwt_terminal::{Pane, PtyHandle};
 use tao::{
@@ -127,13 +127,13 @@ pub(crate) use runtime_support::{
 pub(crate) use runtime_support::{
     attach_parent_console_for_cli, close_window_from_workspace, combined_window_id,
     current_git_branch, dedupe_recent_projects, fallback_project_target,
-    first_available_worktree_path, front_door_route, geometry_to_pty_size,
-    intake_hook_config_is_disposable, is_ephemeral_worktree_path, knowledge_kind_for_preset,
-    local_branch_exists, normalize_branch_name, normalize_recent_project_path,
-    normalize_recent_projects, origin_remote_ref, prune_missing_recent_projects,
-    resolve_launch_spec_with_fallback, resolve_project_target, run_cli, same_worktree_path,
-    should_auto_close_agent_window, should_auto_start_restored_window, synthetic_branch_entry,
-    usable_worktree_path_for_branch, worktrees_have_stale_branch_entry, EPHEMERAL_WORKTREE_PREFIX,
+    first_available_worktree_path, front_door_route, intake_hook_config_is_disposable,
+    is_ephemeral_worktree_path, knowledge_kind_for_preset, local_branch_exists,
+    normalize_branch_name, normalize_recent_project_path, normalize_recent_projects,
+    origin_remote_ref, prune_missing_recent_projects, resolve_launch_spec_with_fallback,
+    resolve_project_target, run_cli, same_worktree_path, should_auto_close_agent_window,
+    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
+    worktrees_have_stale_branch_entry, EPHEMERAL_WORKTREE_PREFIX,
 };
 pub(crate) use update_front_door::spawn_startup_update_check;
 #[cfg(test)]
@@ -1324,17 +1324,27 @@ fn spawn_workspace_projection_watcher(
         let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
             return;
         };
+        let mut watch_dirs = vec![watch_dir];
+        let pm_status_path = gwt::pm_current::status_path(&project_root);
+        if let Some(status_dir) = pm_status_path
+            .parent()
+            .filter(|status_dir| !same_worktree_path(status_dir, &watch_dirs[0]))
+        {
+            watch_dirs.push(status_dir.to_path_buf());
+        }
         // The workspace dir is created lazily by `save_workspace_projection`;
         // the watcher needs the directory to exist before `notify` can attach.
         // Best-effort create — if it fails, the watcher just won't fire until
         // the dir appears on its own.
-        if let Err(error) = std::fs::create_dir_all(&watch_dir) {
-            tracing::debug!(
-                project_root = %project_root.display(),
-                watch_dir = %watch_dir.display(),
-                error = %error,
-                "workspace projection watcher could not ensure watch dir (will retry on first write)"
-            );
+        for watch_dir in &watch_dirs {
+            if let Err(error) = std::fs::create_dir_all(watch_dir) {
+                tracing::debug!(
+                    project_root = %project_root.display(),
+                    watch_dir = %watch_dir.display(),
+                    error = %error,
+                    "workspace projection watcher could not ensure watch dir (will retry on first write)"
+                );
+            }
         }
         let mut debouncer = match notify_debouncer_mini::new_debouncer_opt::<_, notify::RecommendedWatcher>(
             workspace_projection_debounce_config(),
@@ -1358,23 +1368,14 @@ fn spawn_workspace_projection_watcher(
             }
         };
 
-        if let Err(error) = debouncer
-            .watcher()
-            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
-        {
-            tracing::warn!(
-                project_root = %project_root.display(),
-                watch_dir = %watch_dir.display(),
-                error = %error,
-                "workspace projection watcher path failed"
-            );
+        if watch_workspace_projection_dirs(&project_root, &watch_dirs, debouncer.watcher()).is_err() {
             return;
         }
 
         while let Ok(message) = rx.recv() {
             match message {
                 WorkspaceProjectionWatcherMessage::Changed(paths) => {
-                    if let Some(event) = workspace_projection_watch_event(&project_root, &paths) {
+                    for event in workspace_projection_watch_events(&project_root, &paths) {
                         proxy.send(event);
                     }
                 }
@@ -1395,19 +1396,51 @@ fn spawn_workspace_projection_watcher(
     })
 }
 
+fn watch_workspace_projection_dirs(
+    project_root: &Path,
+    watch_dirs: &[PathBuf],
+    watcher: &mut dyn notify::Watcher,
+) -> notify::Result<()> {
+    for (index, watch_dir) in watch_dirs.iter().enumerate() {
+        if let Err(error) = watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "workspace projection watcher path failed"
+            );
+            if index == 0 {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
     notify_debouncer_mini::Config::default().with_timeout(Duration::from_millis(250))
 }
 
-fn workspace_projection_watch_event(project_root: &Path, paths: &[PathBuf]) -> Option<UserEvent> {
-    if !paths
+fn workspace_projection_watch_events(project_root: &Path, paths: &[PathBuf]) -> Vec<UserEvent> {
+    let mut events = Vec::new();
+    if paths
         .iter()
         .any(|path| path.file_name().is_some_and(|name| name == "current.json"))
     {
-        return None;
+        tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
+        events.extend(load_workspace_projection_user_event(project_root));
     }
-    tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
-    load_workspace_projection_user_event(project_root)
+    let pm_status_path = gwt::pm_current::status_path(project_root);
+    if paths.iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "pm-status.jsonl")
+            && same_worktree_path(path, &pm_status_path)
+    }) {
+        events.push(UserEvent::ActiveWorkProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    events
 }
 
 /// Issue #4406: Board refreshes run off the GUI event loop, one per project at
@@ -2306,7 +2339,6 @@ enum UserEvent {
         wizard_id: String,
         client_id: Option<ClientId>,
         config: Box<gwt::LaunchWizardLaunchRequest>,
-        bounds: WindowGeometry,
     },
     ProjectIndexStatus {
         project_root: String,
@@ -2739,11 +2771,11 @@ mod tests {
     use tempfile::tempdir;
 
     use gwt::{
-        empty_workspace_state, AgentOption, ArrangeMode, BackendEvent, BranchCleanupInfo,
-        BranchListEntry, BranchScope, CanvasViewport, FocusCycleDirection, KnowledgeKind,
-        LaunchWizardAction, LaunchWizardContext, LaunchWizardState, PersistedWindowState,
-        ProjectKind, QuickStartEntry, QuickStartLaunchMode, RuntimeHookEvent, RuntimeHookEventKind,
-        ShellLaunchConfig, WindowCanvasState, WindowGeometry, WindowPreset, WindowProcessStatus,
+        empty_workspace_state, AgentOption, BackendEvent, BranchCleanupInfo, BranchListEntry,
+        BranchScope, FocusCycleDirection, KnowledgeKind, LaunchWizardAction, LaunchWizardContext,
+        LaunchWizardState, PersistedWindowState, ProjectKind, QuickStartEntry,
+        QuickStartLaunchMode, RuntimeHookEvent, RuntimeHookEventKind, ShellLaunchConfig,
+        WindowPreset, WindowProcessStatus, WindowRegistry,
     };
     use gwt_agent::{AgentId, AgentLaunchBuilder, DockerLifecycleIntent, LaunchRuntimeTarget};
     use gwt_config::{Profile, Settings};
@@ -2767,15 +2799,6 @@ mod tests {
         OutboundEvent, ProcessLaunch, ProjectNavigationPrepared, ProjectTabRuntime, UserEvent,
         WindowAddress,
     };
-
-    fn canvas_bounds() -> WindowGeometry {
-        WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 1400.0,
-            height: 900.0,
-        }
-    }
 
     fn expected_launch_remove_env(additional: &[&str]) -> Vec<String> {
         let mut env = HashMap::new();
@@ -3311,6 +3334,8 @@ mod tests {
         assert_eq!(wire["notification_transition_id"], "source-transition");
         let status = gwt::IssueMonitorStatusView {
             max_active_agents_scope: "machine".to_string(),
+            agent_roster_capacity: None,
+            agent_roster_revision: None,
             agent_capacity: Default::default(),
             max_active_agents_override: Some(1),
             max_active_last_change: None,
@@ -3337,6 +3362,8 @@ mod tests {
             autonomous_mode: false,
             autonomous_issues: Vec::new(),
             tier_facts: Vec::new(),
+            tier_config_token: String::new(),
+            launch_tiers: Vec::new(),
             agent_blackout: None,
             quota_hold: None,
             github_budget: None,
@@ -3667,6 +3694,67 @@ mod tests {
     }
 
     #[test]
+    fn workspace_projection_pm_status_write_refreshes_local_activity() {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let status_path = gwt::pm_current::status_path(&root);
+        let input = serde_json::from_value(serde_json::json!({
+            "items": [{"kind": "working", "text": "Review the next Issue", "started_at": "2026-10-25T00:00:00Z"}],
+            "next_trigger": "Next scan"
+        })).unwrap();
+        gwt_core::pm_status::set_status_from_path(&status_path, input, None).unwrap();
+        let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&root);
+        fs::create_dir_all(&pm_worktree).unwrap();
+
+        for watched_root in [&root, &pm_worktree] {
+            let events = super::workspace_projection_watch_events(
+                watched_root,
+                std::slice::from_ref(&status_path),
+            );
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [UserEvent::ActiveWorkProjectionChanged { project_root }] if project_root == watched_root
+                ),
+                "a canonical PM status write must remeasure local activity"
+            );
+            assert!(super::workspace_projection_watch_events(
+                watched_root,
+                &[temp.path().join("other/pm-status.jsonl")]
+            )
+            .is_empty());
+        }
+        let current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        let paths = [current.clone(), status_path.clone()];
+        let events = super::workspace_projection_watch_events(&root, &paths);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [UserEvent::WorkspaceProjectionLoaded { projection: Some(actual), .. },
+                 UserEvent::ActiveWorkProjectionChanged { project_root }]
+                 if actual.as_ref() == &projection && project_root == &root
+            ),
+            "a mixed batch must retain both the current snapshot and PM refresh"
+        );
+        fs::write(&current, b"{broken").unwrap();
+        let events = super::workspace_projection_watch_events(&root, &paths);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [UserEvent::WorkspaceStateLoadFailed { .. },
+                 UserEvent::ActiveWorkProjectionChanged { project_root }]
+                 if project_root == &root
+            ),
+            "a current snapshot load failure must not discard the PM refresh"
+        );
+    }
+
+    #[test]
     fn workspace_projection_ten_notifications_trigger_one_reload() {
         struct BurstWatcher(Box<dyn notify::EventHandler>);
         impl notify::Watcher for BurstWatcher {
@@ -3677,6 +3765,12 @@ mod tests {
                 Ok(Self(Box::new(handler)))
             }
             fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "unavailable-pm-status")
+                {
+                    return Err(notify::Error::generic("secondary watch unavailable"));
+                }
                 // The error callback gates the worker until all ten raw
                 // notifications are queued, regardless of thread scheduling.
                 self.0
@@ -3725,17 +3819,23 @@ mod tests {
                     .into_iter()
                     .map(|event| event.path)
                     .collect::<Vec<_>>();
-                if let Some(event) = super::workspace_projection_watch_event(&watched_root, &paths)
-                {
+                for event in super::workspace_projection_watch_events(&watched_root, &paths) {
                     tx.send(event).unwrap();
                 }
             },
         )
         .unwrap();
-        debouncer
-            .watcher()
-            .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
-            .unwrap();
+        let unavailable = temp.path().join("unavailable-pm-status");
+        let registration = super::watch_workspace_projection_dirs(
+            &root,
+            &[path.parent().unwrap().to_path_buf(), unavailable.clone()],
+            debouncer.watcher(),
+        );
+        let primary_failure = super::watch_workspace_projection_dirs(
+            &root,
+            std::slice::from_ref(&unavailable),
+            debouncer.watcher(),
+        );
         projection.title = "final state after ten notifications".to_string();
         gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
         release_tx.send(()).unwrap();
@@ -3745,6 +3845,11 @@ mod tests {
         // Shutdown drops the callback's sender. Drain until disconnect to
         // count every reload instead of assuming a second of silence is final.
         reloads.extend(rx);
+        registration.expect("a secondary failure must preserve the primary watch");
+        assert!(
+            primary_failure.is_err(),
+            "a primary failure must still fail registration"
+        );
         assert_eq!(reloads.len(), 1);
         match &reloads[0] {
             UserEvent::WorkspaceProjectionLoaded {
@@ -3886,16 +3991,9 @@ mod tests {
             id: "sample-1".to_string(),
             title: "Sample".to_string(),
             preset,
-            geometry: WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 640.0,
-                height: 420.0,
-            },
-            geometry_revision: 0,
             z_index: 1,
             status,
-            placement: gwt::WindowPlacement::Canvas,
+            placement: gwt::WindowPlacement::Surface,
             persist: true,
             purpose_title: None,
             dynamic_title: None,
@@ -3904,8 +4002,6 @@ mod tests {
             agent_name: None,
             agent_color: None,
             worktree_form: gwt::WindowWorktreeForm::Unknown,
-            tab_group_id: None,
-            tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
@@ -3931,7 +4027,7 @@ mod tests {
             title: "Repo".to_string(),
             project_root: PathBuf::from("E:/gwt/test-repo"),
             kind: gwt::ProjectKind::Git,
-            workspace: WindowCanvasState::from_persisted(persisted),
+            workspace: WindowRegistry::from_persisted(persisted),
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
@@ -4344,7 +4440,7 @@ mod tests {
         }));
         assert!(matches!(
             &events[0].event,
-            gwt::BackendEvent::WindowCanvasState { .. }
+            gwt::BackendEvent::WorkspaceState { .. }
         ));
         assert!(events.iter().any(|event| matches!(
             &event.event,
@@ -4438,7 +4534,7 @@ mod tests {
                 title: "Repo".to_string(),
                 project_root: PathBuf::from("E:/gwt/test-repo"),
                 kind: gwt::ProjectKind::Git,
-                workspace: WindowCanvasState::from_persisted(persisted),
+                workspace: WindowRegistry::from_persisted(persisted),
                 migration_pending: false,
                 main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
             }
@@ -4518,11 +4614,6 @@ mod tests {
             project_scope: "0123456789abcdef".to_string(),
             kind: gwt::ProjectKind::Git,
             workspace: gwt::WorkspaceView {
-                viewport: CanvasViewport {
-                    x: 0.0,
-                    y: 0.0,
-                    zoom: 1.0,
-                },
                 windows: Vec::new(),
                 work_items: Vec::new(),
             },
@@ -4599,7 +4690,7 @@ mod tests {
             title: "Repo".to_string(),
             project_root: PathBuf::from("E:/gwt/test-repo"),
             kind: gwt::ProjectKind::Git,
-            workspace: WindowCanvasState::from_persisted(persisted),
+            workspace: WindowRegistry::from_persisted(persisted),
             migration_pending: false,
             main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
         }
@@ -4626,9 +4717,9 @@ mod tests {
         kind: ProjectKind,
         presets: &[WindowPreset],
     ) -> ProjectTabRuntime {
-        let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+        let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
         for preset in presets {
-            let _ = workspace.add_window(*preset, canvas_bounds());
+            let _ = workspace.add_window(*preset);
         }
         ProjectTabRuntime {
             id: tab_id.to_string(),
@@ -4906,7 +4997,7 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
             origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
@@ -5028,7 +5119,7 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
             origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
@@ -5131,7 +5222,7 @@ mod tests {
             events.get(1),
             Some(event)
                 if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                    && matches!(event.event, BackendEvent::WindowCanvasState { .. })
+                    && matches!(event.event, BackendEvent::WorkspaceState { .. })
         ));
         assert!(events.iter().any(|event| {
             matches!(
@@ -5877,7 +5968,7 @@ mod tests {
             take_project_navigation_completion(&recorded_events),
         );
         assert!(existing_events.iter().any(|event| matches!(&event.event,
-            BackendEvent::WindowCanvasState { workspace } if workspace.active_tab_id.as_deref() == Some("tab-1"))));
+            BackendEvent::WorkspaceState { workspace } if workspace.active_tab_id.as_deref() == Some("tab-1"))));
         assert!(
             runtime
                 .project_state(&runtime.project_context("tab-2").unwrap())
@@ -5898,7 +5989,7 @@ mod tests {
 
         assert!(added_events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
         assert_eq!(runtime.tabs.len(), 3);
         assert!(super::same_worktree_path(
             &runtime.recent_projects[0].path,
@@ -5977,121 +6068,44 @@ mod tests {
     }
 
     #[test]
-    fn window_management_events_cover_canvas_operations() {
+    fn window_management_events_preserve_lifecycle_without_layout_state() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
         fs::create_dir_all(&repo).expect("create repo");
         let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::NonRepo, &[]);
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let bounds = canvas_bounds();
-
-        assert_eq!(
-            runtime
-                .create_window_events(
-                    &runtime.test_context(),
-                    WindowPreset::Branches,
-                    bounds.clone(),
-                    None
-                )
-                .len(),
-            3
-        );
-        assert_eq!(
-            runtime
-                .create_window_events(
-                    &runtime.test_context(),
-                    WindowPreset::Board,
-                    bounds.clone(),
-                    None
-                )
-                .len(),
-            3
-        );
-
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        for preset in [WindowPreset::Branches, WindowPreset::Board] {
+            assert_eq!(
+                runtime
+                    .create_window_events(&runtime.test_context(), preset, None)
+                    .len(),
+                3
+            );
+        }
+        let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
         let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
-        let board_raw_id = runtime
-            .window_lookup
-            .get(&board_id)
-            .expect("board lookup")
-            .raw_id
-            .clone();
-
         assert_eq!(
-            runtime.window_status(&branches_id),
+            runtime.window_status(&settings_id),
             Some(WindowProcessStatus::Running)
         );
+        assert_eq!(runtime.focus_window_events(&settings_id).len(), 1);
         assert_eq!(
             runtime
-                .focus_window_events(&branches_id, Some(bounds.clone()))
+                .cycle_focus_events(&runtime.test_context(), FocusCycleDirection::Forward)
                 .len(),
             1
         );
-        assert_eq!(
-            runtime
-                .cycle_focus_events(
-                    &runtime.test_context(),
-                    FocusCycleDirection::Forward,
-                    bounds.clone()
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .update_viewport_events(
-                    &runtime.test_context(),
-                    CanvasViewport {
-                        x: 10.0,
-                        y: 20.0,
-                        zoom: 1.2,
-                    }
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .arrange_windows_events(&runtime.test_context(), ArrangeMode::Tile, bounds.clone())
-                .len(),
-            1
-        );
-
-        let geometry = WindowGeometry {
-            x: 30.0,
-            y: 40.0,
-            width: 500.0,
-            height: 320.0,
-        };
-        assert_eq!(
-            runtime
-                .update_window_geometry_events(&board_id, geometry.clone(), 10, 1, None)
-                .len(),
-            1
-        );
-        let updated_window = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(&board_raw_id)
-            .expect("window");
-        assert_eq!(updated_window.geometry, geometry);
-
         match runtime.list_windows_event() {
             BackendEvent::WindowList { windows } => assert_eq!(windows.len(), 2),
             other => panic!("expected window list, got {other:?}"),
         }
-
         assert_eq!(runtime.close_window_events(&board_id).len(), 1);
         assert!(!runtime.window_lookup.contains_key(&board_id));
     }
 
-    // SPEC-2008 FR-096/FR-097: the Camera-focus model replaced manual maximize.
-    // Windows now open and focus at their normal floating size; nothing
-    // auto-maximizes. Framing is the frontend camera's responsibility.
     #[test]
-    fn non_agent_window_presets_open_and_focus_at_normal_floating_size() {
+    fn non_agent_window_presets_preserve_identity_and_activation() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
         let repo = temp.path().join("repo");
@@ -6104,75 +6118,11 @@ mod tests {
             &[WindowPreset::Board, WindowPreset::Shell],
         );
         let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let bounds = canvas_bounds();
-
-        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
-        let board_raw_id = runtime
-            .window_lookup
-            .get(&board_id)
-            .expect("board lookup")
-            .raw_id
-            .clone();
-        let board_geometry = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(&board_raw_id)
-            .expect("board window")
-            .geometry
-            .clone();
-        assert_eq!(
-            (board_geometry.width, board_geometry.height),
-            (720.0, 420.0),
-            "Board windows open at their normal floating size",
-        );
-        assert_eq!(
-            runtime
-                .focus_window_events(&board_id, Some(bounds.clone()))
-                .len(),
-            1
-        );
-        let board_after_focus = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(&board_raw_id)
-            .expect("board window")
-            .geometry
-            .clone();
-        assert_eq!(
-            (board_after_focus.width, board_after_focus.height),
-            (720.0, 420.0),
-            "focusing a window must not resize it",
-        );
-
-        let shell_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Shell, 0);
-        assert_eq!(
-            runtime
-                .focus_window_events(&shell_id, Some(bounds.clone()))
-                .len(),
-            1
-        );
-        let shell_raw_id = runtime
-            .window_lookup
-            .get(&shell_id)
-            .expect("shell lookup")
-            .raw_id
-            .clone();
-        let shell_geometry = runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .window(&shell_raw_id)
-            .expect("shell window")
-            .geometry
-            .clone();
-        assert_eq!(
-            (shell_geometry.width, shell_geometry.height),
-            (1280.0, 800.0),
-            "shell is a terminal preset, so it opens work-area large for camera framing",
-        );
-
+        for preset in [WindowPreset::Board, WindowPreset::Shell] {
+            let id = window_id_for_preset(&runtime, "tab-1", preset, 0);
+            assert_eq!(runtime.focus_window_events(&id).len(), 1);
+            assert!(runtime.window_lookup.contains_key(&id));
+        }
         for preset in [
             WindowPreset::Settings,
             WindowPreset::Profile,
@@ -6180,63 +6130,34 @@ mod tests {
         ] {
             assert_eq!(
                 runtime
-                    .create_window_events(&runtime.test_context(), preset, bounds.clone(), None)
+                    .create_window_events(&runtime.test_context(), preset, None)
                     .len(),
-                3,
-                "{preset:?} should create through the normal window path",
+                3
             );
-            let id = window_id_for_preset(&runtime, "tab-1", preset, 0);
-            let raw_id = runtime
-                .window_lookup
-                .get(&id)
-                .expect("window lookup")
-                .raw_id
-                .clone();
-            let window = runtime
-                .tab("tab-1")
-                .expect("tab")
-                .workspace
-                .window(&raw_id)
-                .expect("window");
-            assert_eq!(window.geometry.width, 720.0, "{id} opens at normal width");
-            assert_eq!(window.geometry.height, 420.0, "{id} opens at normal height");
         }
-
-        let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
-        let branches_raw_id = runtime
-            .window_lookup
-            .get(&branches_id)
-            .expect("Settings lookup")
-            .raw_id
-            .clone();
-        let before_z = runtime
+        let id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        let raw = runtime.window_lookup[&id].raw_id.clone();
+        let before = runtime
             .tab("tab-1")
-            .expect("tab")
+            .unwrap()
             .workspace
-            .window(&branches_raw_id)
-            .expect("Settings window")
+            .window(&raw)
+            .unwrap()
             .z_index;
         assert_eq!(
             runtime
-                .create_window_events(
-                    &runtime.test_context(),
-                    WindowPreset::Work,
-                    bounds.clone(),
-                    None
-                )
+                .create_window_events(&runtime.test_context(), WindowPreset::Work, None)
                 .len(),
-            1,
-            "Work must focus the existing Settings surface",
+            1
         );
-        let reused_work = runtime
+        let reused = runtime
             .tab("tab-1")
-            .expect("tab")
+            .unwrap()
             .workspace
-            .window(&branches_raw_id)
-            .expect("reused Work surface");
-        assert_eq!(reused_work.geometry.width, 720.0);
-        assert_eq!(reused_work.geometry.height, 420.0);
-        assert!(reused_work.z_index > before_z);
+            .window(&raw)
+            .unwrap();
+        assert_eq!(combined_window_id("tab-1", &reused.id), id);
+        assert!(reused.z_index > before);
     }
 
     #[test]
@@ -6805,6 +6726,8 @@ mod tests {
     }
 
     #[test]
+    // Retain this legacy test identifier for the recorded timing-debt inventory.
+    // The exercised window protocol no longer includes canvas layout operations.
     fn frontend_event_dispatch_routes_canvas_knowledge_and_async_paths() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -6829,9 +6752,8 @@ mod tests {
             Some("tab-1"),
         );
         let context = runtime.test_context();
-        let bounds = canvas_bounds();
+
         let branches_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Branches, 0);
-        let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
         let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
 
         assert!(!runtime
@@ -6869,7 +6791,6 @@ mod tests {
                     "client-1".to_string(),
                     gwt::FrontendEvent::CreateWindow {
                         preset: WindowPreset::Settings,
-                        bounds: bounds.clone(),
                         surface_owner: None,
                     },
                 )
@@ -6885,7 +6806,6 @@ mod tests {
                     "client-1".to_string(),
                     gwt::FrontendEvent::FocusWindow {
                         id: branches_id.clone(),
-                        bounds: Some(bounds.clone()),
                     },
                 )
                 .len(),
@@ -6898,41 +6818,12 @@ mod tests {
                     "client-1".to_string(),
                     gwt::FrontendEvent::CycleFocus {
                         direction: FocusCycleDirection::Forward,
-                        bounds: bounds.clone(),
                     },
                 )
                 .len(),
             1
         );
-        assert_eq!(
-            runtime
-                .handle_frontend_event_for_project(
-                    &context,
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::UpdateViewport {
-                        viewport: CanvasViewport {
-                            x: 5.0,
-                            y: 10.0,
-                            zoom: 1.1,
-                        },
-                    },
-                )
-                .len(),
-            1
-        );
-        assert_eq!(
-            runtime
-                .handle_frontend_event_for_project(
-                    &context,
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::ArrangeWindows {
-                        mode: ArrangeMode::Tile,
-                        bounds: bounds.clone(),
-                    },
-                )
-                .len(),
-            1
-        );
+
         assert_eq!(
             runtime
                 .handle_frontend_event_for_project(
@@ -6943,27 +6834,7 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
-            runtime
-                .handle_frontend_event_for_project(
-                    &context,
-                    "client-1".to_string(),
-                    gwt::FrontendEvent::UpdateWindowGeometry {
-                        id: board_id.clone(),
-                        geometry: WindowGeometry {
-                            x: 20.0,
-                            y: 30.0,
-                            width: 480.0,
-                            height: 300.0,
-                        },
-                        cols: 80,
-                        rows: 24,
-                        base_geometry_revision: None,
-                    },
-                )
-                .len(),
-            1
-        );
+
         assert_eq!(
             runtime
                 .handle_frontend_event_for_project(
@@ -7086,7 +6957,6 @@ mod tests {
                 "client-1".to_string(),
                 gwt::FrontendEvent::LaunchWizardAction {
                     action: LaunchWizardAction::Cancel,
-                    bounds: None,
                 },
             )
             .is_empty());
@@ -7453,7 +7323,7 @@ mod tests {
             .expect("test project state")
             .launch_wizard = None;
         assert!(runtime
-            .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Cancel, None)
+            .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Cancel)
             .is_empty());
 
         runtime
@@ -7470,7 +7340,6 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            Some(canvas_bounds()),
         );
         assert!(!missing_focus.is_empty());
 
@@ -7488,7 +7357,6 @@ mod tests {
                 index: 0,
                 mode: QuickStartLaunchMode::Resume,
             },
-            Some(canvas_bounds()),
         );
         assert!(focus_events.iter().any(|event| {
             matches!(
@@ -7515,14 +7383,12 @@ mod tests {
             wizard_id,
             client_id,
             config,
-            bounds,
         } = request
         else {
             unreachable!("matched above")
         };
-        let focus_events = runtime.handle_launch_wizard_launch_materialization_requested(
-            wizard_id, client_id, *config, bounds,
-        );
+        let focus_events = runtime
+            .handle_launch_wizard_launch_materialization_requested(wizard_id, client_id, *config);
         assert!(focus_events.len() >= 2);
         assert!(runtime
             .project_state(&runtime.test_context())
@@ -7534,11 +7400,8 @@ mod tests {
             .project_state_mut(&runtime.test_context())
             .expect("test project state")
             .launch_wizard = Some(sample_launch_wizard_session("tab-1", &repo));
-        let cancel_events = runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Cancel,
-            None,
-        );
+        let cancel_events = runtime
+            .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Cancel);
         assert_eq!(cancel_events.len(), 1);
         assert!(matches!(
             cancel_events[0].event,
@@ -7552,7 +7415,6 @@ mod tests {
         let update_events = runtime.handle_launch_wizard_action(
             &runtime.test_context(),
             LaunchWizardAction::SetLinkedIssue { issue_number: 99 },
-            None,
         );
         assert_eq!(update_events.len(), 1);
         assert_eq!(
@@ -7611,7 +7473,7 @@ mod tests {
             ),
             workspace_resume_context: None,
             agent_kanban_target: None,
-            auto_submit_after_runtime_resolution: None,
+            auto_submit_after_runtime_resolution: false,
             issue_monitor_profile_save: None,
             issue_monitor_launch_issue_number: None,
             origin: super::app_runtime::LaunchWizardOrigin::ManualLaunchAgent,
@@ -7634,7 +7496,6 @@ mod tests {
             LaunchWizardAction::SetAgent {
                 agent_id: "echo-agent".to_string(),
             },
-            Some(canvas_bounds()),
         );
         assert_eq!(set_agent_events.len(), 1);
         assert_eq!(
@@ -7650,11 +7511,8 @@ mod tests {
             None
         );
 
-        let launch_events = runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            Some(canvas_bounds()),
-        );
+        let launch_events = runtime
+            .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
         assert!(launch_events.iter().any(|event| {
             matches!(
@@ -7681,14 +7539,12 @@ mod tests {
             wizard_id,
             client_id,
             config,
-            bounds,
         } = request
         else {
             unreachable!("matched above")
         };
-        let launch_events = runtime.handle_launch_wizard_launch_materialization_requested(
-            wizard_id, client_id, *config, bounds,
-        );
+        let launch_events = runtime
+            .handle_launch_wizard_launch_materialization_requested(wizard_id, client_id, *config);
         assert!(runtime
             .project_state(&runtime.test_context())
             .expect("test project state")
@@ -8703,15 +8559,7 @@ mod tests {
             env.contains_key("PATH"),
             "PTY spawn env must inherit the process PATH"
         );
-        assert_eq!(
-            super::geometry_to_pty_size(&WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            }),
-            (46, 11)
-        );
+
         assert_eq!(
             super::parse_github_remote_url("git@github.com:akiojin/gwt.git"),
             Some(("akiojin".to_string(), "gwt".to_string()))
@@ -9996,18 +9844,10 @@ mod tests {
     }
 
     #[test]
-    fn git_and_cli_metadata_helpers_cover_parsing_geometry_and_repo_state() {
+    fn git_and_cli_metadata_helpers_cover_parsing_and_repo_state() {
         let env = super::spawn_env();
         assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
         assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
-
-        let geometry = WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-        };
-        assert_eq!(super::geometry_to_pty_size(&geometry), (46, 11));
 
         assert_eq!(
             super::parse_github_remote_url("git@github.com:akiojin/gwt.git"),
@@ -10155,14 +9995,14 @@ fn apply_agent_frontend_dispatch_outcome(
 }
 
 /// Issue #4145 AC-1: the startup route is measured from the first statement of
-/// `main` to the moment the canvas reports its bounds, so the sample covers
+/// `main` to the moment the frontend reports its initial surfaces ready, so the sample covers
 /// everything a person waits through — logging init, session restore, worktree
 /// enumeration, the embedded server bind and the first render.
 static PROCESS_STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
 
 /// Record the startup route exactly once per process.
 ///
-/// The canvas can report bounds again after a reconnect; only the first report
+/// The frontend can report readiness again after a reconnect; only the first report
 /// is the startup a user experienced.
 fn record_startup_perf_route_once() {
     static RECORDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -11245,10 +11085,10 @@ fn main() -> std::io::Result<()> {
                 }
                 let refresh_index_status = matches!(event, FrontendEvent::FrontendReady);
                 let sync_board_projection_watchers = frontend_event_may_change_project_tabs(&event);
-                // Issue #4145 AC-1: the canvas reporting its bounds is the
+                // Issue #4145 AC-1: the frontend mounting its initial surfaces is the
                 // app's own definition of "ready", and the gate agent panes
                 // wait on, so it closes the startup route.
-                let canvas_ready = matches!(event, FrontendEvent::StartupAutoResumeReady { .. });
+                let surface_ready = matches!(event, FrontendEvent::StartupAutoResumeReady { .. });
                 // Phase 0 perf instrumentation (measure-first): time the handler
                 // on the main event-loop thread so a synchronous repo-scaling
                 // handler that freezes the GUI is diagnosable, and inter-event
@@ -11256,7 +11096,7 @@ fn main() -> std::io::Result<()> {
                 let dispatch_started = std::time::Instant::now();
                 let events = app.handle_frontend_event_in_scope(client_id, event, &scope);
                 let completed_at = std::time::Instant::now();
-                if canvas_ready {
+                if surface_ready {
                     record_startup_perf_route_once();
                     board_daemon_subscribers.sync(app, proxy.clone());
                 }
@@ -11500,6 +11340,7 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
                 let commit = app.handle_active_work_projection_prepared(*prepared);
+                clients.dispatch(commit.local_activity.into_iter().collect());
                 let mut dispatch_ms = 0;
                 if let Some(prepared_dispatch) = commit.prepared_dispatch {
                     let dispatch_started = std::time::Instant::now();
@@ -11534,7 +11375,9 @@ fn main() -> std::io::Result<()> {
                 tab_id,
                 target,
                 payload,
-            }) if tab_id == context.tab_id && app.project_context_is_current(&context) => {
+            }) if tab_id == context.tab_id
+                && app.project_context_is_current(&context)
+                && app.prepared_active_work_dispatch_is_current(&tab_id, &payload) => {
                 clients.dispatch_prepared_active_work(payload, target);
             }
             // A background projection from a closed or replaced owner generation
@@ -11788,10 +11631,9 @@ fn main() -> std::io::Result<()> {
                 wizard_id,
                 client_id,
                 config,
-                bounds,
             }) => {
                 let events = app.handle_launch_wizard_launch_materialization_requested(
-                    wizard_id, client_id, *config, bounds,
+                    wizard_id, client_id, *config,
                 );
                 clients.dispatch(events);
             }

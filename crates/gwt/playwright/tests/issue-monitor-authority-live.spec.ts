@@ -180,13 +180,26 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       }
       const beforeReceipts = new Set(await readdir(join(CHECK_HOME, "workload")));
       const now = new Date().toISOString();
+      // Resize the canonical roster before seeding the durable delivery fixture.
+      // Raw numerical writes would leave an already-materialized roster inconsistent.
+      cli("issue.monitor.config.set", { max_active: 12 });
+      // Project roster size no longer changes the independent machine safety
+      // policy. Seed this disposable experiment's explicit Manual 12 limit;
+      // the real physical-spawn gate remains active for all twelve children.
+      const machinePath = join(CHECK_HOME, ".gwt/machine-state/agent-settings.json");
+      const machinePolicy = { ...JSON.parse(await readFile(machinePath, "utf8")),
+        mode: "manual", manual_limit: 12, last_change: null };
+      await writeFile(machinePath + ".twelve-pty.tmp", JSON.stringify(machinePolicy));
+      await rename(machinePath + ".twelve-pty.tmp", machinePath);
       const prefs = await readPrefs();
+      expect(prefs.max_active_agents).toBe(12);
+      if (prefs.agent_roster) expect(prefs.agent_roster.members.filter((member: any) => member.enabled)).toHaveLength(12);
       expect(prefs.enabled).toBe(false);
       expect(prefs.autonomous_mode).toBe(false);
       // This fixture starts after remote claim acquisition. It exercises the
       // real durable outbox, IPC, preparation, process spawn and ACK transport;
       // remote claim/requeue policy stays covered by the existing Rust tests.
-      Object.assign(prefs, { max_active_agents: 12, max_active_agents_mode: "manual",
+      Object.assign(prefs, {
         launch_auto: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "monitor-delivery-fixture", runtime_target: "Host", skip_permissions: true },
         launch_profiles: [{ agent_id: "monitor-delivery-fixture", runtime_target: "Host", skip_permissions: true }],
@@ -237,12 +250,16 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
         expect(durable.windows.filter((pane: any) => pane.agent_id === "monitor-delivery-fixture")
           .map((pane: any) => `${pane.id}/${pane.session_id}`).sort())
           .toEqual(windows.map(window => `${window.id.split("::").at(-1)}/${window.session_id}`).sort());
-        await expect(page.locator('.op-rail__surface[data-surface="agents"]')).toBeVisible({ timeout: 10_000 });
-        await page.locator('.op-rail__surface[data-surface="agents"]').click();
+        await expect(page.locator('.op-rail__surface[data-surface="works"]')).toBeVisible({ timeout: 10_000 });
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+          await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
         for (const window of windows) {
-          const tile = page.locator('.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="' + window.id + '"]');
+          const tile = page.locator('.work-row[data-window-id="' + window.id + '"]');
           await tile.scrollIntoViewIfNeeded({ timeout: 10_000 });
-          await expect(tile.locator(".xterm-rows")).toBeVisible();
+          const preview = tile.locator(".terminal-text-preview");
+          await expect(preview).toBeVisible();
+          expect((await preview.innerText()).trim().split("\n").length).toBeLessThanOrEqual(3);
           const receiptPath = join(CHECK_HOME, "workload", `${window.session_id}.json`);
           expect(beforeReceipts.has(`${window.session_id}.json`)).toBe(false);
           await expect(async () => {
@@ -259,12 +276,14 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
           }).toPass({ timeout: 40_000 });
           await expect.poll(() => page.evaluate(id => (window as any).__gwtTerminalTestApi.bufferText(id), window.id))
             .toContain(`GWT_5694_PTY_${window.session_id}`);
+          await expect(preview).toContainText(`GWT_5694_PTY_${window.session_id}`);
         }
         expect((await readPrefs()).failed_issues ?? []).toEqual([]);
         assertOwnedDaemon(cli);
         await page.screenshot({ path: join(CHECK_HOME, `twelve-pty-${theme}.png`), fullPage: true });
         await info.attach(`twelve-pty-${theme}`, { path: join(CHECK_HOME, `twelve-pty-${theme}.png`), contentType: "image/png" });
-        await info.attach(`twelve-pty-ack-${theme}`, { body: JSON.stringify({ numbers, windows, exactAcks, daemon_pid: DAEMON_PID, recovery_elapsed_ms: launchRecoveryMs,
+        await info.attach(`twelve-pty-ack-${theme}`, { body: JSON.stringify({ numbers, windows, exactAcks, machine_manual_limit: machinePolicy.manual_limit,
+          daemon_pid: DAEMON_PID, recovery_elapsed_ms: launchRecoveryMs,
           ack_elapsed_ms: acknowledgedAt - Date.parse(now), pending: (await readPrefs()).pending_launch_deliveries ?? [],
           scope: "confirmed-delivery through actual PTY and durable ACK; remote claims covered separately" }), contentType: "application/json" });
         expect(errors).toEqual([]);

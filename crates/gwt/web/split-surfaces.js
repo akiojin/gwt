@@ -1,6 +1,6 @@
 import { surfaceForWindow } from "./surface-rail.js";
 
-const SURFACES = { issues: "Issues", agents: "Agents", board: "Board", settings: "Settings" };
+const SURFACES = { issues: "Issues", works: "Works", agents: "Agents", board: "Board", settings: "Settings" };
 const PRESETS = { issues: "settings", board: "board", settings: "settings" };
 
 // A client-local layout: move live views, never clone terminals or persist
@@ -8,7 +8,7 @@ const PRESETS = { issues: "settings", board: "board", settings: "settings" };
 // connected in an inert cache so view lifecycle checks keep their state alive.
 export function createSplitSurfaces({
   document, windowCatalogModel, getWindows, getElement, openSurface, onChange, onLayout,
-  onAgentsHost = () => {},
+  onAgentsHost = () => {}, onWorksHost = () => {},
 }) {
   const host = document.getElementById("split-surfaces");
   const button = document.getElementById("split-view-button");
@@ -66,7 +66,7 @@ export function createSplitSurfaces({
     const changed = active !== index;
     active = index;
     for (const [i, pane] of panes.entries()) pane.dataset.active = String(i === active);
-    if (changed && selections.every(surface => surface === "agents")) sync();
+    if (changed && selections.every(surface => surface === "agents" || surface === "works")) sync();
     onChange(selections[active]);
   }
 
@@ -127,7 +127,7 @@ export function createSplitSurfaces({
         option.disabled = false;
         option.textContent = SURFACES[option.value];
       }
-      if (surface === "agents") {
+      if (surface === "agents" || surface === "works") {
         pane.querySelector(".split-pane__empty").hidden = true;
         continue;
       }
@@ -154,11 +154,13 @@ export function createSplitSurfaces({
         }
       }
     }
-    const agentPanes = visiblePanes.filter(({ index }) => selections[index] === "agents").map(({ pane }) => pane);
-    const livePane = selections[active] === "agents" ? panes[active] : agentPanes[0];
-    const previewPane = agentPanes.find(pane => pane !== livePane);
-    onAgentsHost(livePane?.querySelector(".split-pane__body") || null,
-      previewPane?.querySelector(".split-pane__body") || null);
+    for (const [surface, onHost] of [["agents", onAgentsHost], ["works", onWorksHost]]) {
+      const surfacePanes = visiblePanes.filter(({ index }) => selections[index] === surface).map(({ pane }) => pane);
+      const livePane = selections[active] === surface ? panes[active] : surfacePanes[0];
+      const previewPane = surfacePanes.find(pane => pane !== livePane);
+      onHost(livePane?.querySelector(".split-pane__body") || null,
+        previewPane?.querySelector(".split-pane__body") || null);
+    }
     const changed = [];
     for (const [id, element] of mounted) {
       if (desired.has(id)) continue;
@@ -228,7 +230,7 @@ export function createSplitSurfaces({
     if (!surface) return false;
     const existingPane = mounted.get(id)?.closest(".split-pane");
     if (existingPane) active = panes.indexOf(existingPane);
-    selectedWindowIds[active] = surface === "agents" ? null : id;
+    selectedWindowIds[active] = ["agents", "works"].includes(surface) ? null : id;
     selections[active] = surface;
     opened = true;
     if (surface === "pm") split = false;
@@ -256,6 +258,7 @@ export function createSplitSurfaces({
     active = 0;
     requested.clear();
     onAgentsHost(null, null);
+    onWorksHost(null, null);
     host.hidden = false;
     host.dataset.split = "false";
     area.classList.remove("is-split");

@@ -220,7 +220,7 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -272,7 +272,7 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -352,7 +352,7 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
         title: "Current".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -906,7 +906,7 @@ fn restore_drain_with_no_restored_windows_finishes_inside_500ms() {
 
         let git_spawns = gwt_core::process::thread_git_spawn_count();
         let started = Instant::now();
-        runtime.startup_auto_resume_ready_events(canvas_bounds());
+        runtime.startup_auto_resume_ready_events();
         fastest = fastest.min(started.elapsed());
         assert_eq!(
             gwt_core::process::thread_git_spawn_count() - git_spawns,
@@ -2783,7 +2783,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             .tab_mut("tab-1")
             .unwrap()
             .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds());
+            .add_window(WindowPreset::Agent);
         runtime
             .tab_mut("tab-1")
             .unwrap()
@@ -2804,7 +2804,15 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         );
         runtime.register_window("tab-1", &placeholder.id);
 
-        runtime.spawn_restored_agent_session("tab-1", source, None, canvas_bounds(), origin);
+        runtime.spawn_restored_agent_session("tab-1", source, None, origin);
+        let source_member_id = gwt_agent::Session::load(
+            &runtime
+                .sessions_dir
+                .join(format!("{source_session_id}.toml")),
+        )
+        .expect("load migrated source Session")
+        .agent_member_id
+        .expect("the exact source Session was bound to a persistent member");
         let assigned_name = runtime
             .tab("tab-1")
             .unwrap()
@@ -2814,26 +2822,10 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             .iter()
             .find_map(|window| window.agent_name.as_deref())
             .expect("assigned name");
-        if origin == super::super::startup::RestoreOrigin::Automatic {
-            assert_eq!(
-                assigned_name, "Falcon-2",
-                "automatic restore retains identity"
-            );
-        } else {
-            assert_ne!(
-                assigned_name, "Falcon-2",
-                "Issue restart receives a fresh identity"
-            );
-            assert!(!assigned_name.chars().any(|ch| ch.is_ascii_digit()));
-            let history =
-                gwt_core::paths::gwt_project_dir_for_repo_path(&repo).join("agent-names.jsonl");
-            let history = fs::read_to_string(history).unwrap();
-            assert!(history.contains("Falcon-2"));
-            assert!(
-                history.contains("\"Flora\""),
-                "reserve the Session-only legacy name"
-            );
-        }
+        assert_eq!(
+            assigned_name, "Flora",
+            "both restore routes retain the canonical member name over stale window metadata"
+        );
         let assigned_name = assigned_name.to_string();
         assert_eq!(
             runtime
@@ -2874,6 +2866,11 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
                 .expect("load restored Session");
         assert_eq!(successor.launch_route, expected_route, "{origin:?}");
         assert_eq!(
+            successor.agent_member_id.as_deref(),
+            Some(source_member_id.as_str()),
+            "restore preparation preserves the exact persistent member"
+        );
+        assert_eq!(
             successor.agent_name.as_deref(),
             Some(assigned_name.as_str())
         );
@@ -2883,6 +2880,7 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", successor.id)))
                 .expect("load completed restore provenance");
         let value = serde_json::to_value(successor).expect("serialize successor");
+        assert_eq!(value["agent_member_id"], source_member_id);
         assert_eq!(value["restore_source_session_id"], source_session_id);
         assert_eq!(
             value["launch_origin"],
@@ -2927,7 +2925,6 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         "tab-1",
         session,
         None,
-        canvas_bounds(),
         super::super::startup::RestoreOrigin::Automatic,
     );
 

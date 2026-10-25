@@ -32,7 +32,7 @@ body {
 
    gwt is primarily a long-form coding conversation workspace. These
    primitives define the shared, opaque grammar for readable content
-   blocks while leaving decorative Canvas/backdrop layers outside of the
+   blocks while leaving decorative backdrop layers outside of the
    text contract.
    ============================================================ */
 
@@ -156,7 +156,7 @@ body::after {
   height: 100%;
   display: grid;
   /* SPEC-3038 US-1: the Command Rail is grid-docked so it is always visible
-     and never overlays canvas windows. Issue 4777 T-1 widens it to 64px so
+     and never overlays surface windows. Issue 4777 T-1 widens it to 64px so
      each surface entry carries a visible label under its icon. */
   grid-template-columns: 64px 1fr;
   grid-template-rows: 44px 1fr 28px;
@@ -682,7 +682,7 @@ body::after {
   padding: var(--space-3) 0;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
-  /* Flyout chips + popovers (window list, update CTA) extend over the canvas. */
+  /* Flyout chips + popovers (window list, update CTA) extend over the workspace. */
   overflow: visible;
   z-index: var(--z-rail);
 }
@@ -881,7 +881,7 @@ body::after {
 }
 
 /* Issue 4777 T-1 — at 860px and below the rail becomes a strip across the
-   top of the canvas. Groups wrap instead of scrolling so the popovers
+   top of the workspace. Groups wrap instead of scrolling so the popovers
    anchored to rail items (window list, PM gear) are never clipped. */
 @media (max-width: 860px) {
   #app {
@@ -1056,7 +1056,7 @@ button.op-status-strip__cell {
 }
 
 /* Issue #3884 AC-3 — RUNNING breakdown: "N inline" names the running agents
-   that live as inline terminals in the Issue window rather than on the canvas.
+   that live as inline terminals in the Issue window rather than in Agents.
    Quieter than the value so the total still reads first. */
 .op-status-strip__sub {
   margin-left: var(--space-1);
@@ -5738,7 +5738,7 @@ button.workspace-board-ref:focus-visible {
 .workspace-window[data-pm="true"] {
   /* 3px read as "hard to notice" against the dark window chrome in review
      (2026-08-05); the bar has to be legible at a glance from across the
-     canvas, not only when the window is already in focus. */
+     workspace, not only when the window is already in focus. */
   border-left: 6px solid var(--color-role-pm);
 }
 
@@ -6002,130 +6002,7 @@ button.workspace-board-ref:focus-visible {
   }
 }
 
-/* Issue 4777 T-4: an equal grid, independent of canvas coordinates. */
-.agents-surface {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
-  background: var(--color-surface);
-  color: var(--color-text);
-}
-.agents-surface[hidden],
-.surface-area.is-agents > :not(.agents-surface) { display: none !important; }
-.agents-toolbar, .agent-tile__header {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-}
-.agents-toolbar, .agent-tile__header { justify-content: space-between; }
-.agents-toolbar h2, .agent-tile h3 { margin: 0; font: inherit; }
-.agents-toolbar label { display: flex; align-items: center; gap: var(--space-2); }
-.agents-toolbar input { width: 4em; }
-.agents-toolbar input {
-  color: var(--color-text);
-  background: var(--color-surface-elevated);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1);
-  font: inherit;
-}
-.agents-toolbar input:focus-visible, .agents-tabs button:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-}
-.agents-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: 360px;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  overflow: auto;
-  min-height: 0;
-}
-.agents-tabs {
-  display: flex;
-  flex-shrink: 0;
-  overflow-x: auto;
-  border-bottom: 1px solid var(--color-border);
-}
-.agents-tabs button {
-  flex-shrink: 0;
-  padding: var(--space-2) var(--space-3);
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: var(--color-surface);
-  color: var(--color-text-muted);
-  font: inherit;
-  cursor: pointer;
-}
-.agents-tabs button[aria-selected="true"] {
-  border-bottom-color: var(--color-state-active);
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-}
-.agents-tab { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; max-width: min(32rem, 100%); min-width: 0; }
-.agents-tabs button.agent-title { flex-shrink: 1; }
-.agent-title {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  white-space: nowrap;
-}
-.agent-title__name { flex-shrink: 0; }
-.agent-title__purpose {
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-  white-space: nowrap;
-}
-.agent-title__name:not(:empty) + .agent-title__purpose:not(:empty) { padding-inline-start: var(--space-1); }
-.agent-title__purpose::-webkit-scrollbar { display: none; }
-.agent-title:focus-visible { outline: 2px solid var(--color-focus-ring); outline-offset: 2px; }
-.agents-tabs .agents-tab-close {
-  align-self: center;
-  padding: var(--space-1);
-  border-bottom: 0;
-}
-.agent-tile__open {
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-elevated);
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-.agent-tile h3 { flex: 1; }
-.agent-tile__open[hidden] { display: none; }
-.agent-tile__open:focus-visible { outline: 2px solid var(--color-focus-ring); }
-.agents-grid.is-single { flex: 1; grid-auto-rows: minmax(0, 1fr); }
-/* Stack tab panels so new background terminals can measure their initial grid
-   without painting or accepting input before their tab is selected. */
-.agents-grid.is-single > .agent-tile { grid-area: 1 / 1; }
-.agent-tile[hidden] { display: flex; visibility: hidden; }
-.agents-toolbar label[hidden] { display: none; }
-.agent-tile {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.agent-tile:focus-within { border-color: var(--color-focus-ring); }
-.agents-surface--preview .agent-tile:focus-visible { outline: 2px solid var(--color-focus-ring); }
-.agents-surface--preview .agents-toolbar span { color: var(--color-text-muted); font-size: var(--type-xs); }
-.agent-tile__header { flex-shrink: 0; border-bottom: 1px solid var(--color-border); white-space: nowrap; }
-.issue-preview-mode { grid-column: 1 / -1; }
-.agent-tile__header > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.agent-tile__header > span, .issue-preview-mode { color: var(--color-text-muted); font-size: var(--type-xs); }
-.agent-tile .agent-tile__terminal { position: relative; inset: auto; flex: 1; min-height: 0; overflow: hidden; background: var(--color-surface); color: var(--color-text); }
-.agents-empty { padding: var(--space-3); color: var(--color-text-muted); }
+.issue-preview-mode { grid-column: 1 / -1; color: var(--color-text-muted); font-size: var(--type-xs); }
 
 /* Keep persistence diagnostics in the shell layout, above every workspace surface. */
 #app:has(> .workspace-state-notice) {

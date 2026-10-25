@@ -59,6 +59,9 @@ test.beforeEach(async ({ page }, testInfo) => {
             active_tab_id: "tab-1", recent_projects: [],
           },
         }) }));
+        this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ kind: "active_work_projection", projection: { id: "fixture-local-live", active_works: [], local_agent_activity: { project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "interrupted-fixture", observed_at: new Date().toISOString(), agents: [
+          { window_id: 'agent-1', session_id: 'fixture-session', runtime_incarnation: 1, is_pm: false, issue_number: null }
+        ] } } }) }));
       }
       close() { this.readyState = FixtureSocket.CLOSED; }
     }
@@ -66,6 +69,8 @@ test.beforeEach(async ({ page }, testInfo) => {
   });
   if (!interruptedBase) await installEmbeddedRoutes(page);
   await page.goto(interruptedAppUrl);
+  await page.getByRole("button", { name: "Works", exact: true }).click();
+  await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 });
 
@@ -75,9 +80,9 @@ test.afterEach(({ page }) => {
 
 test("interrupted window renders Interrupted, never done, and recovers without a stale class", async ({ page }, testInfo) => {
   const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
-  const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+  const tile = page.locator(".works-terminal[data-window-id='agent-1']");
   await expect(tile).toBeVisible({ timeout: 10_000 });
-  await expect(tile.locator(".agent-tile__mode")).toHaveText("Input unavailable");
+  await expect(page.locator(".works-full-meta")).toContainText("Input unavailable");
   const chip = agentWindow.locator(".status-chip");
   await expect(agentWindow.locator(".status-label")).toHaveText("Interrupted");
   await expect(chip).toHaveClass(/\binterrupted\b/);
@@ -89,7 +94,7 @@ test("interrupted window renders Interrupted, never done, and recovers without a
       detail: { kind: "window_state", window_id: "agent-1", state: "running" },
     }));
   });
-  await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
+  await expect(page.locator(".works-full-meta")).toContainText("Interactive");
   await expect(agentWindow.locator(".status-label")).toHaveText("Running");
   await expect(chip).toHaveClass(/\brunning\b/);
   await expect(chip).not.toHaveClass(/\binterrupted\b/);
@@ -97,7 +102,7 @@ test("interrupted window renders Interrupted, never done, and recovers without a
 
 test("capacity-ended turn renders Waiting with its reason and recovers", async ({ page }, testInfo) => {
   const agentWindow = page.locator(".workspace-window[data-id='agent-1']");
-  const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+  const tile = page.locator(".works-terminal[data-window-id='agent-1']");
   await expect(tile).toBeVisible();
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: {

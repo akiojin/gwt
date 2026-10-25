@@ -30,7 +30,7 @@ Issues, SPECs, search, and Board context rather than from branch management.
 - **Managed workflow skills** — use bundled `gwt-*` skills for discussion,
   issue routing, planning, TDD implementation, PR work, architecture review,
   project search, and agent-pane management.
-- **Operator workspace** — switch between Issues, Agents, Board, and Settings
+- **Operator workspace** — switch between Issues, Works, Agents, Board, and Settings
   from the rail, with an optional Split view and a separate PM entry.
 - **Provider usage** — hover over USAGE for account limits, including Claude's
   Fable weekly limit and enabled Usage credits with utilization, used/limit,
@@ -461,7 +461,7 @@ Common windows include:
   panes, design-required tags, and Launch Agent handoff. Legacy `SPEC` windows
   open this same Work Item view. Issue Monitor agents are mirrored read-only in
   the Issue window's right pane,
-  and `Windowize` opens the same session in an individual Agents tab for input.
+  and `Windowize` opens the same session in its native terminal in Works for input.
   Each row also carries its Work's lifecycle, attention reason, and PR state,
   with `Continue work` / `Resume` / `Clean Up` available in place.
 - `Logs` — project diagnostics and live log surface
@@ -501,14 +501,11 @@ Board keeps up to 1,000 entries in each window. Scroll to the top or choose
 `Load earlier entries` to retrieve older posts. When browsing older history,
 choose `Back to latest entries` to resume the latest updates.
 
-gwt assigns each worker Agent a random memorable name in the output language
-when it starts. Its badge, window title, Fleet, Kanban, and Board show that
-name, and the PM uses it when reporting work. Names are unique across the
-project's history and never receive numeric suffixes; exhausted catalogs expand
-with localized family names. Automatic restoration keeps the existing name;
-explicitly restarting an Issue's Agent assigns a fresh name. Issue comments
-record assignments, handovers, PR creation, and completion; PR bodies also
-include the responsible name. The resident PM keeps its own fixed identity.
+Implementation Agents are persistent project members with memorable names in the output language.
+A new Issue reuses an available member; a continuation prefers its previous member when available.
+New member names are unique within the project and use localized family names when needed.
+Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
+Kanban, Board, Issue comments, and PR attribution. The resident PM keeps its own role identity.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -538,15 +535,24 @@ the requested `numbers` from every terminal queue saved in this machine's projec
 store and preserves their manual auto-refill exclusions. Omit the option to affect
 only this host. It does not change another machine's independent project store.
 
+Active cards have an agent process observed on this terminal. The Active badge
+counts agents, including PM, and separately shows distinct Issue and PM counts;
+two agents on one Issue produce one card. `Active —` means runtime observation
+is pending. Historical activity is marked **Recorded work**, and a foreign
+claim is marked **Claimed elsewhere**; neither proves a local live agent.
+
 Search and the Kanban / Split switch share one row. A compact summary shows
 Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue counts,
-a linked capacity notice, Autonomous, Start / Stop, and ⚙. Only current failures
-appear red; error details and history stay in the notification center. Use ⚙ to
+a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
+**Issues settings**. The switches show the server-confirmed On / Off state.
+Only current failures appear red; error details and history stay in the notification center.
+Use **Issues settings** to
 expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. Autonomous and Start / Stop return to the summary when collapsed.
-Auto-apply updates is in **System**. Select **Manual** to edit
-Max active, then select **Apply** to save the final number. **Auto** disables editing
+profiles. The summary switches remain available when settings are collapsed.
+Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
+edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
+Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
 and shows the effective limit, with **Measuring capacity…** while measurement is pending.
 Lowering the limit below the active count keeps existing agents running; new launches
 wait until the active count falls below the limit. Auto-refill is
@@ -563,12 +569,18 @@ only the cyclic links. Removing the marker also removes the wait on the next sca
 
 The Kanban board starts at full width. Select a card to open its preview and use
 **Issue / Output** to switch between the body and acceptance criteria and the
-agent's read-only output. **Windowize** opens the agent in an individual Agents
-tab. **Close preview** or Escape restores the full board. At narrow widths the preview overlays the
+agent's read-only output. With automatic tiers enabled, cards show the running
+tier or the current next-tier selection. The preview shows provider, model and
+effort in both tabs. **Raise one tier** raises only this Issue's minimum for its
+next launch; a running agent keeps its profile. Changes appear after the server
+accepts them, and the highest tier explains why it cannot be raised. Next-tier
+previews remain subject to launch-time checks. **Windowize** opens the agent in its native terminal in Works.
+**Close preview** or Escape restores the full board. At narrow widths the preview overlays the
 board; columns scroll horizontally instead of shrinking. The legacy
 `issue_monitor` preset opens this same Issue surface.
 
-**Max active** uses **Auto** for new settings. Its recommendation reflects CPU,
+The shared **Machine budget** remains separate from a roster's requested member count.
+Its default **Auto** policy reflects CPU,
 free memory and disk space, the GUI's CPU use, and live agents in other projects.
 Registered projects without live agents consume no share. **Machine budget**
 shows the limiting resource and distinguishes the Monitor's implementation/review
@@ -577,18 +589,22 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Enter a positive number and select **Apply** to keep a **Manual** override, or select **Auto** to
-follow the recommendation again. Auto/Manual and the requested Manual limit are shared
+Before a roster is created, the legacy **Max active** control can select a **Manual**
+override or **Auto** to follow the recommendation. This machine policy is shared
 by all projects on this machine. Manual is a total worker limit; each project receives
 the remaining capacity after other projects' workers, while PM windows stay separate.
 Settings shows this project's allocation and other projects' worker consumption.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
-timing-dependent test failures may block unrelated PRs. Automation uses
+timing-dependent test failures may block unrelated PRs. In roster projects, automation uses
+`issue.monitor.config.set` with `{"max_active":4}` to resize the roster to four enabled
+members; Auto requests are rejected to keep membership and requested capacity equal.
+For legacy projects without a roster, automation uses
 `issue.monitor.config.set` with `{"max_active_mode":"auto"}` for Auto or
 `{"max_active":4}` for a Manual limit of four. `issue.monitor.status` reports the effective limit,
 `max_active_agents_override` (the shared requested value), `max_active_agents_scope: "machine"`,
-and the shared `agent_capacity` measurement.
+and the shared `agent_capacity` measurement. Roster projects also report
+`agent_roster_capacity` and `agent_roster_revision` for the project member setting.
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
@@ -954,6 +970,63 @@ missing milestone information. Monitor observations include their source and
 scan time; unavailable or incomplete observations do not prove full coverage.
 Reported milestone health and confidence remain unverified until supporting
 evidence is connected.
+`policy.dependency_observations` retains every supplied Monitor inbox row, including
+repeated Issues, with its state and canonical dependency blockers, cycle flag and bundle
+references. Absent typed status stays null with `dependency_status` named as missing.
+Neither absent nor empty status proves no dependencies or readiness: the Monitor can omit
+status for zero declarations and omit resolved or unknown blockers. No usable observation
+returns null; a supplied empty inbox returns []. Keep the Monitor source, scan time and
+coverage limits when interpreting this partial snapshot. It does not establish a fresh
+project-wide graph, bundle completeness, priority, milestone health or launch permission.
+`policy.dependency_impacts` reverses only the supplied canonical blocker edges. Each row's
+`issue_number` is the blocker and `dependent_issues` lists distinct direct dependents;
+both levels use ascending Issue numbers. Original observations keep their order and repeats.
+All supplied rows contribute, including conflicting states for a repeated Issue. Chains,
+cycle flags and bundle references add no inferred edges. Absent Monitor yields null;
+supplied snapshots with no blocker edges yield []. Degraded or aborted snapshots retain
+these facts with the enclosing Monitor provenance and coverage limits. This partial inverse
+does not prove no impact, current blockage, importance, transitive delay or critical path,
+and does not authorize priority, readiness or launch changes.
+Each milestone's `dependency_observations` selects these rows for its effective member
+Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
+Row order, repeats and missing dependency data remain visible; absent Monitor yields null,
+while no matching rows yields []. Keep `unobserved_issues` and Monitor coverage limits;
+this join does not prove transitive delay, critical path or milestone health.
+Each milestone's `dependency_impacts` filters the global direct inverse to the same
+effective member dependents. External blockers remain; other dependents and empty
+blocker rows are omitted. Numeric order and distinct direct dependents are preserved.
+Duplicate or blank milestone IDs use only their direct references. Absent Monitor is
+null; no supplied member blocker edges is []. Degraded or aborted snapshots retain
+facts with the enclosing provenance; this does not establish delay or milestone health.
+Each Goal's `dependency_observations` selects rows for its existing roadmap member
+Issues through an exact unique nonempty Goal ID, including invalid links as reference
+facts. Milestone-only, category-only and other-Goal references add no members. It keeps
+row order, repeats and missing dependency data; absent Monitor yields null, while no
+matching rows yields []. Keep `unobserved_issues` and the Monitor provenance. These
+observations do not prove Goal achievement, metric attainment, critical path or readiness,
+and authorize no priority or launch changes.
+Each Goal's `dependency_impacts` filters the global direct inverse to those same roadmap
+member dependents. It retains external blockers, numeric order and distinct direct
+dependents, and omits other dependents and empty blocker rows. Duplicate or blank Goal
+IDs resolve no members. Absent Monitor yields null; no supplied member blocker edges
+yields []. Degraded or aborted facts keep the enclosing Monitor provenance and limits.
+This inverse proves neither Goal/metric attainment, transitive delay nor critical path,
+and grants no priority, readiness or launch authority.
+Each roadmap item's `dependency_observations` selects only that row's directly saved
+Issues, retaining supplied row order, repeats and missing dependency data. Empty or
+duplicate IDs and invalid links keep independent membership; it never expands through
+a Goal, milestone or another row. Absent Monitor yields null even for empty membership;
+supplied snapshots without matching rows yield []. Keep `unobserved_issues` and the
+Monitor source, scan time and coverage limits. This join does not establish a complete
+graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that
+row's direct member dependents. It keeps external/shared blockers, numeric order and
+distinct direct dependents, omitting other dependents and empty blocker rows.
+Duplicate/blank IDs and invalid links keep independent membership; no Goal, milestone
+or other row adds members. Absent Monitor yields null even for empty membership;
+no supplied member blocker edges yields []. Degraded or aborted facts retain the
+enclosing Monitor provenance and limits. This inverse proves neither a complete graph,
+transitive delay, critical path nor health, and grants no priority, readiness or launch authority.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied
@@ -961,7 +1034,7 @@ inbox order without duplicates. Empty or duplicate IDs and invalid traces keep
 separate rows. Membership never expands through a Goal, Milestone or another row.
 Queue/active membership alone supplies no inbox state. Without a Monitor snapshot,
 all direct Issues are unobserved; degraded observations retain their provenance.
-Empty membership yields empty arrays. These observations do not establish health,
+Empty membership yields empty state and unobserved arrays. These observations do not establish health,
 completion, priority or permission to launch work.
 Milestone `target_date_observation` compares an exact `YYYY-MM-DD` target with the
 recorded scan's UTC calendar date. `days_past_target_at_scan` is zero before or on
@@ -1032,11 +1105,16 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+`policy.monitor.scan_aborted` preserves the supplied scan outcome (null without
+Monitor data). An aborted scan can retain older observations while advancing its
+timestamp. It names `successful_monitor_scan` as missing and leaves saved WIP and
+queue-age comparisons `unknown`, while retaining the observed facts and timing.
 Saved WIP policies are compared independently, in saved order, with the distinct
 observed Issue count. `observed_exceeded` means only that this snapshot's count
 strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
-limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
-missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+limit, complete daemon coverage and a valid scan time. Scan fractions beyond nine digits
+yield `unknown` with `monitor_scan_time`. Equal or smaller counts and missing or degraded
+inputs yield `unknown`, never a within-limit PASS. Without Monitor
 data the count is null; without policies the list is empty. This comparison does not
 establish canonical WIP, a current breach or permission to act, and does not select
 or combine policies. Verification and full WIP remain missing.
@@ -1050,6 +1128,15 @@ null; a supplied view without rows yields []. Keep its source, scan time and cov
 an old or degraded snapshot is only an observation then. Legacy omitted queue lists
 also decode to []; neither proves the host or whole project queue is empty. Queue residency is not execution waiting time, an SLA
 or starvation verdict, priority, preemption or permission to launch.
+Each row's `age_limits` compares its age with every saved policy's
+`starvation_after_seconds`, retaining policy order, ID, version and optional threshold.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete
+daemon Monitor coverage. Other cases yield `unknown`, never a within-limit PASS, with
+named missing inputs for absent, invalid, ambiguous or degraded evidence. No policies
+yields []. No active policy is selected or combined. This compares host membership at
+the recorded scan; it does not establish end-to-end starvation, SLA or permission to
+change priority, launch or preempt. Keep the source and scan age alongside it.
 Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
 idle classification and binding/pane facts. They show elapsed whole seconds from idle start
 to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
@@ -1699,25 +1786,29 @@ an entry removes its copied policy on the next refresh.
 
 ## Surface Navigation
 
-- Select **Issues**, **Agents**, **Board**, or **Settings** from the rail to fill the content area.
-- Open **PM** from its separate rail entry; PM uses a single pane.
-- Surfaces have no window close, minimize, move, or resize controls. Closing an Agent tab hides its view and keeps its session running.
-- Use **Split view** in the project bar to show two surfaces side by side, then choose each pane's surface independently.
-- Use **Close split** to keep the active surface in one pane.
-- In **Agents**, switch between **All agents** and individual tabs while keeping the same live terminals.
+- Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
+- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works.
+- **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
+- **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
+
+Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
+branch and verification facts. Unavailable measurements display **—**, including context remaining
+unless the provider reports it directly. Today totals use this project's measured conversations;
+account-wide usage is not copied into them. Individual PR information is not shown here.
+
+Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
+setting do not return after reload or restart; the roster's Team/Past tabs remain.
 
 ## Agent Navigation
 
-Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select individual
-Agent tabs by activity: running/starting first, waiting/idle next, then the
-remaining Agents. Agents shown inside Issues and Shell terminals are included;
-PM is skipped. Cycling keeps the split view and focuses the selected
-terminal for input. Closing the selected tab returns to All agents without stopping the
-agent; cycling can reopen the same terminal.
-
-Agent card and tab titles stay on one line with the name fixed at the start.
-Scroll the purpose horizontally, or hover or keyboard-focus the title to read it in full.
-Issue and Project Manager settings also explain their controls on hover and keyboard focus.
+Use `Cmd/Ctrl+Shift+Right` and `Cmd/Ctrl+Shift+Left` to select current implementation
+Agents by activity while keeping the split layout. PM and auxiliary Shells are skipped.
+The selected native terminal receives input; returning to the list keeps every session running.
+Names stay on one line, and longer purposes can be scrolled horizontally or read on hover.
+Issue and Project Manager settings explain their controls on hover and keyboard focus.
 
 ## Operator Design Language (SPEC-2356)
 

@@ -29,6 +29,12 @@ use crate::{
     LinkedIssueKind, WindowState,
 };
 
+mod schedule;
+pub use schedule::{
+    mutate_project_agent_schedule, AgentIssueReservation, AgentIssueSchedule, AgentMemberSchedule,
+    AgentScheduleAction, AgentScheduleReason, AgentScheduleSnapshot, AgentScheduledIssue,
+};
+
 mod urgent;
 pub use urgent::{
     IssueMonitorUrgentGrant, IssueMonitorUrgentQueue, IssueMonitorUrgentQueueProjection,
@@ -38,7 +44,8 @@ mod tiers;
 pub(crate) use tiers::record_work_done_tier_landing;
 pub use tiers::{
     IssueMonitorConfirmedLaunchTier, IssueMonitorTierFacts, IssueMonitorTierLandingStats,
-    IssueMonitorTierRecord, IssueMonitorTierSelection,
+    IssueMonitorTierProfileProjection, IssueMonitorTierRecord, IssueMonitorTierSelection,
+    IssueMonitorTierSelectionProjection,
 };
 mod quota;
 pub(crate) use quota::provider_quota_reset_label;
@@ -986,6 +993,10 @@ pub struct IssueMonitorPriorityReasonNote {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorPrefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster: Option<crate::agent_names::AgentRoster>,
+    #[serde(default)]
+    pub agent_issue_schedule: AgentIssueSchedule,
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
         default = "current_issue_monitor_prefs_schema_version",
@@ -1330,6 +1341,8 @@ pub struct IssueMonitorTerminalQueue {
 impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
+            agent_roster: None,
+            agent_issue_schedule: AgentIssueSchedule::default(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
@@ -1427,6 +1440,10 @@ impl IssueMonitorPrefs {
     /// Saved inputs observed by guarded config writes, excluding runtime state.
     pub fn config_observation(&self) -> serde_json::Value {
         serde_json::json!({
+            "agent_roster": self.agent_roster.as_ref().map(|roster| serde_json::json!({
+                "revision": roster.revision,
+                "enabled_members": roster.enabled_count(),
+            })),
             "enabled": self.enabled,
             "autonomous_mode": self.autonomous_mode,
             "allowed_labels": self.allowed_labels,
@@ -1883,6 +1900,8 @@ pub enum IssueMonitorProviderUsageLimitOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_observations: Vec<IssueMonitorDependencyObservation>,
     pub delivery_id: String,
@@ -2120,8 +2139,13 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
     fn from(repr: IssueMonitorLaunchProfileRepr) -> Self {
         let legacy_fast_mode = repr.codex_fast_mode
             && normalize_issue_monitor_provider(&repr.agent_id).as_deref() == Some("codex");
+        // Validation resolves aliases and trims IDs; selection uses those IDs.
+        let agent_id = match gwt_agent::resolve_agent_id(&repr.agent_id) {
+            Some(agent) => agent.command().to_string(),
+            None => repr.agent_id,
+        };
         Self {
-            agent_id: repr.agent_id,
+            agent_id,
             model: repr.model,
             reasoning: repr.reasoning,
             version: repr.version,
@@ -2708,6 +2732,7 @@ pub fn parse_issue_monitor_dependencies(body: &str, issue_number: u64) -> IssueM
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueMonitorDependencyFacts {
     declarations: IssueMonitorDependencies,
+    is_spec: bool,
     state: IssueMonitorIssueState,
     updated_at: Option<String>,
     source_hash: String,
@@ -3807,6 +3832,10 @@ fn machine_max_active_scope() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorStatusView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster_capacity: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_roster_revision: Option<u64>,
     #[serde(default = "machine_max_active_scope")]
     pub max_active_agents_scope: String,
     #[serde(default)]
@@ -3866,6 +3895,12 @@ pub struct IssueMonitorStatusView {
     /// inferring the tier or liveness of a current launch from issue history.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tier_facts: Vec<IssueMonitorTierFacts>,
+    /// Current configuration observation required by per-Issue tier controls.
+    #[serde(default)]
+    pub tier_config_token: String,
+    /// Effective automatic pools for the runtime's cached read-only selection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launch_tiers: Vec<Vec<IssueMonitorLaunchProfile>>,
     /// Issue #3628 (AC-5): the fleet has run nothing for longer than the
     /// blackout window while work was runnable.
     ///
@@ -5013,6 +5048,15 @@ enum IssueMonitorSourceRepository {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_roster: Option<crate::agent_names::AgentRoster>,
+    #[serde(default)]
+    agent_issue_schedule: AgentIssueSchedule,
+    // Automatic scan proposals are valid only against this exact source snapshot.
+    #[serde(skip)]
+    agent_schedule_source: Option<(AgentIssueSchedule, String, u64)>,
+    #[serde(skip)]
+    roster_machine_policy: Option<crate::machine_agent_settings::Policy>,
     /// Runtime identity of the repository actually read; never a saved approval.
     #[serde(skip)]
     source_repository: IssueMonitorSourceRepository,
@@ -6455,6 +6499,21 @@ fn issue_monitor_prefs_cache(
 
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
     let mut prefs = load_issue_monitor_prefs_raw(path)?;
+    prefs
+        .agent_issue_schedule
+        .validate()
+        .map_err(io::Error::other)?;
+    if let Some(roster) = &prefs.agent_roster {
+        roster
+            .validate()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if roster.enabled_count() != prefs.max_active_agents {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent roster and project capacity disagree",
+            ));
+        }
+    }
     if machine_managed_monitor_prefs(path) {
         // Cache only project bytes. The machine policy may change without any
         // project-file stamp change, including on a cache hit.
@@ -6529,6 +6588,9 @@ pub(crate) fn apply_machine_policy_to_prefs(
     prefs: &mut IssueMonitorPrefs,
     policy: &crate::machine_agent_settings::Policy,
 ) {
+    if prefs.agent_roster.is_some() {
+        return;
+    }
     prefs.max_active_agents_mode = policy.mode;
     if let Some(limit) = policy.manual_limit {
         prefs.max_active_agents = limit;
@@ -6726,11 +6788,15 @@ pub(crate) fn durable_atomic_write(path: &Path, content: &[u8]) -> io::Result<()
 }
 
 fn save_issue_monitor_prefs_unlocked(path: &Path, prefs: &IssueMonitorPrefs) -> io::Result<()> {
+    let mut normalized = prefs.clone();
+    crate::agent_names::synchronize_roster_capacity(&mut normalized, path)
+        .map_err(io::Error::other)?;
+    let prefs = &normalized;
     validate_issue_monitor_prefs_schema_version(prefs.schema_version)?;
     validate_existing_issue_monitor_prefs_schema(path)?;
     crate::machine_agent_settings::migration_before_project_save(path)?;
     let mut value = serde_json::to_value(prefs).map_err(io::Error::other)?;
-    if machine_managed_monitor_prefs(path) {
+    if machine_managed_monitor_prefs(path) && prefs.agent_roster.is_none() {
         let fields = value.as_object_mut().expect("Monitor preferences object");
         // Older readers require this key. It is a fixed safe compatibility
         // mirror, never this project's or the machine's requested policy.
@@ -7294,6 +7360,8 @@ pub fn try_mutate_issue_monitor_prefs<T>(
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let before = prefs.clone();
         let result = mutation(&mut prefs)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
+            .map_err(io::Error::other)?;
         if prefs != before {
             save_issue_monitor_prefs_unlocked(path, &prefs)?;
         }
@@ -7324,6 +7392,8 @@ pub fn try_mutate_issue_monitor_prefs_without_authority_fence<T>(
         }
         let mut prefs = load_issue_monitor_prefs_unlocked(path)?;
         let result = mutation(&mut prefs)?;
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, path)
+            .map_err(io::Error::other)?;
         save_issue_monitor_prefs_unlocked(path, &prefs)?;
         Ok((prefs, result))
     })
@@ -7403,7 +7473,17 @@ pub(crate) fn try_mutate_issue_monitor_prefs_recovering_observed<T>(
             }
             Err(error) => return Err(error),
         };
+        // Issue #6096: a clean load whose mutation changed nothing must not
+        // rewrite the file. Unconditional saves bumped the prefs mtime every
+        // few seconds and kept every prepared Monitor launch admission stale.
+        let before = recovery
+            .is_none()
+            .then(|| path.exists().then(|| prefs.clone()))
+            .flatten();
         let result = mutation(&mut prefs)?;
+        if before.as_ref().is_some_and(|before| *before == prefs) {
+            return Ok((prefs, result));
+        }
         if recovery.as_ref().is_some_and(|(_, _, restored)| !*restored) {
             crate::update_settings::migrate_before_project_save(path, true)?;
         }
@@ -7903,6 +7983,10 @@ impl IssueMonitorState {
 
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
+            agent_roster: None,
+            agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_schedule_source: None,
+            roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
             queue_label_observation: None,
             config,
@@ -8010,6 +8094,8 @@ impl IssueMonitorState {
             IssueMonitorMaxActiveMode::Auto => prefs.max_active_agents,
         };
         let mut state = Self::new(config);
+        state.agent_roster = prefs.agent_roster.clone();
+        state.agent_issue_schedule = prefs.agent_issue_schedule.clone();
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
@@ -8188,12 +8274,17 @@ impl IssueMonitorState {
 
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
+            agent_roster: self.agent_roster.clone(),
+            agent_issue_schedule: self.agent_issue_schedule.clone(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
-            max_active_agents: self
-                .max_active_agents_override()
-                .unwrap_or_else(|| self.effective_max_active_agents()),
+            max_active_agents: if self.agent_roster.is_some() {
+                self.config.max_active.max(1)
+            } else {
+                self.max_active_agents_override()
+                    .unwrap_or_else(|| self.effective_max_active_agents())
+            },
             max_active_agents_mode: self.max_active_agents_mode,
             max_active_last_change: self.max_active_last_change.clone(),
             priority_order: self.priority_order.clone(),
@@ -8317,6 +8408,15 @@ impl IssueMonitorState {
             last_scan_error: self.last_scan_error.clone(),
             agent_blackout_since: self.agent_blackout_since.clone(),
         }
+    }
+
+    /// Finalize a numerical cap change inside its existing prefs transaction.
+    pub fn synchronize_agent_roster_capacity(&mut self, prefs_path: &Path) -> io::Result<()> {
+        let mut prefs = self.prefs();
+        crate::agent_names::synchronize_roster_capacity(&mut prefs, prefs_path)
+            .map_err(io::Error::other)?;
+        self.agent_roster = prefs.agent_roster;
+        Ok(())
     }
 
     fn merge_closure_record(&mut self, incoming: IssueClosureRecord) {
@@ -9429,7 +9529,13 @@ impl IssueMonitorState {
             );
             let is_spec = self
                 .inbox_item(issue_number)
-                .is_some_and(|item| has_gwt_spec_label(&item.issue.labels));
+                .map(|item| has_gwt_spec_label(&item.issue.labels))
+                .unwrap_or_else(|| {
+                    self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == issue_number
+                            && delivery.linked_issue_kind == LinkedIssueKind::Spec
+                    })
+                });
             if self
                 .prefs()
                 .select_auto_launch_profile(issue_number, is_spec, None, |pool| {
@@ -10856,28 +10962,66 @@ impl IssueMonitorState {
     }
 
     pub fn effective_max_active_agents(&self) -> usize {
+        self.effective_max_active_agents_under(&self.agent_capacity)
+    }
+
+    /// Issue #6096: derive the slot limit without applying the capacity sample.
+    /// Admission compares this decision because sampler snapshot bytes change.
+    pub fn effective_max_active_agents_under(&self, capacity: &AgentCapacity) -> usize {
+        if self.agent_roster.is_some() {
+            let machine = match self.roster_machine_policy.as_ref() {
+                Some(policy) if policy.mode == IssueMonitorMaxActiveMode::Manual => policy
+                    .manual_limit
+                    .unwrap_or(1)
+                    .saturating_sub(
+                        capacity
+                            .other_live_agents
+                            .saturating_sub(capacity.other_pm_agents),
+                    )
+                    .saturating_sub(capacity.own_untracked_workers),
+                _ if capacity.measurement_complete && capacity.is_fresh() => {
+                    capacity.recommended_worker_limit
+                }
+                _ => self.config.max_active,
+            };
+            return self.config.max_active.min(machine);
+        }
         match self.max_active_agents_mode {
             IssueMonitorMaxActiveMode::Manual => self
                 .config
                 .max_active
                 .max(1)
                 .saturating_sub(
-                    self.agent_capacity
+                    capacity
                         .other_live_agents
-                        .saturating_sub(self.agent_capacity.other_pm_agents),
+                        .saturating_sub(capacity.other_pm_agents),
                 )
-                .saturating_sub(self.agent_capacity.own_untracked_workers),
+                .saturating_sub(capacity.own_untracked_workers),
             IssueMonitorMaxActiveMode::Auto
-                if self.agent_capacity.measurement_complete && self.agent_capacity.is_fresh() =>
+                if capacity.measurement_complete && capacity.is_fresh() =>
             {
-                self.agent_capacity.recommended_worker_limit
+                capacity.recommended_worker_limit
             }
             IssueMonitorMaxActiveMode::Auto => self.config.max_active,
         }
     }
 
+    /// The slot limit the current machine capacity snapshot grants
+    /// `project_root`, observed the same way [`Self::refresh_agent_capacity`]
+    /// does but without mutating this state.
+    pub fn project_capacity_limit_now(&self, project_root: &Path) -> usize {
+        let capacity = crate::agent_capacity::project_capacity(
+            project_root,
+            &BTreeSet::new(),
+            self.review_windows.len(),
+        );
+        self.effective_max_active_agents_under(&capacity)
+    }
+
     fn apply_agent_capacity_limit(&mut self) {
-        if self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto {
+        if self.agent_roster.is_none()
+            && self.max_active_agents_mode == IssueMonitorMaxActiveMode::Auto
+        {
             self.config.max_active = self.effective_max_active_agents();
         }
     }
@@ -10909,6 +11053,10 @@ impl IssueMonitorState {
     }
 
     pub fn apply_machine_policy(&mut self, policy: &crate::machine_agent_settings::Policy) {
+        if self.agent_roster.is_some() {
+            self.roster_machine_policy = Some(policy.clone());
+            return;
+        }
         let previous_limit = self.effective_max_active_agents();
         self.max_active_agents_mode = policy.mode;
         self.config.max_active = policy.manual_limit.unwrap_or(previous_limit);
@@ -10918,6 +11066,9 @@ impl IssueMonitorState {
 
     /// Persist only an explicit accepted change, preserving its replay identity.
     pub fn persist_machine_max_active_change(&mut self, control_id: &str) -> io::Result<()> {
+        if self.agent_roster.is_some() {
+            return Ok(());
+        }
         let change = self.max_active_last_change.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -11378,6 +11529,14 @@ impl IssueMonitorState {
         self.compensate_permission_blocked_launch_deliveries(true);
     }
 
+    pub(crate) fn set_issue_minimum_launch_tier(&mut self, number: u64, tier: u8) {
+        let minimum = self.tier_overrides.entry(number).or_default();
+        *minimum = (*minimum).max(tier);
+        if self.launch_auto {
+            self.compensate_permission_blocked_launch_deliveries(true);
+        }
+    }
+
     pub fn launch_usage_threshold_percent(&self) -> u8 {
         self.launch_usage_threshold_percent
     }
@@ -11432,6 +11591,7 @@ impl IssueMonitorState {
         self.priority_order = disk.priority_order.clone();
         self.priority_reason_note = disk.priority_reason_note.clone();
         self.terminal_queues = disk.terminal_queues.clone();
+
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
@@ -11446,6 +11606,7 @@ impl IssueMonitorState {
         }
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
+        self.rebase_agent_issue_schedule(disk);
         // SPEC #3914 FR-012: the pool has no daemon control of its own for
         // GUI saves, so disk owns it; a stale in-memory copy must not shrink it.
         self.launch_profiles = disk.launch_profile_pool();
@@ -11796,13 +11957,20 @@ impl IssueMonitorState {
                     && !self.has_monitor_pane_for_issue(delivery.issue_number)
             })
             .filter_map(|delivery| {
-                self.permission_readiness_block_for_launch(delivery.issue_number, &now)
-                    .map(|record| (delivery.issue_number, record))
+                let record =
+                    self.permission_readiness_block_for_launch(delivery.issue_number, &now);
+                (record.is_some()
+                    || (self.launch_auto
+                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
         self.compensate_uncommitted_claims(&blocked.keys().copied().collect());
         for (number, record) in blocked {
-            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+            if let (Some(record), Some(issue)) = (
+                record,
+                self.inbox_item(number).map(|item| item.issue.clone()),
+            ) {
                 self.record_permission_readiness_block(issue, &record);
             }
         }
@@ -11998,7 +12166,14 @@ impl IssueMonitorState {
                     })
                 });
             self.prefs()
-                .select_auto_launch_profile(issue_number, is_spec, None, select)
+                .select_auto_launch_profile(issue_number, is_spec, None, |pool| {
+                    let work_tags = vec![if is_spec {
+                        "kind:spec".to_string()
+                    } else {
+                        "kind:issue".to_string()
+                    }];
+                    select_launch_profile(pool, &holds, &work_tags, None, now)
+                })
         } else {
             None
         };
@@ -12298,6 +12473,11 @@ impl IssueMonitorState {
         disk: &IssueMonitorPrefs,
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
+        self.agent_roster = disk.agent_roster.clone();
+
+        if let Some(roster) = self.agent_roster.as_ref() {
+            self.config.max_active = roster.enabled_count();
+        }
         // Cancellation revisions order only cancellation evidence. Equal
         // revisions retain the normal GUI/daemon phase ownership policy.
         let disk_completions = Self::completion_records_from_prefs(disk);
@@ -13359,6 +13539,7 @@ impl IssueMonitorState {
                 issue.body.as_deref().unwrap_or(""),
                 issue.number,
             ),
+            is_spec: has_gwt_spec_label(&issue.labels),
             state: issue.state,
             updated_at: issue.updated_at.clone(),
             source_hash: IssueMonitorDependencyObservation::new(issue, None).source_hash,
@@ -14237,10 +14418,19 @@ impl IssueMonitorState {
             .filter(|(terminal, _)| *terminal != &host)
             .map(|(_, queue)| queue.entries.len())
             .sum();
-        let auto_tier_count = self
-            .launch_auto
-            .then(|| self.prefs().effective_launch_tiers().len());
+        let prefs = self.prefs();
+        let launch_tiers = if self.launch_auto {
+            prefs.effective_launch_tiers()
+        } else {
+            Vec::new()
+        };
+        let auto_tier_count = self.launch_auto.then_some(launch_tiers.len());
         IssueMonitorStatusView {
+            agent_roster_capacity: self
+                .agent_roster
+                .as_ref()
+                .map(|roster| roster.enabled_count()),
+            agent_roster_revision: self.agent_roster.as_ref().map(|roster| roster.revision),
             max_active_agents_scope: machine_max_active_scope(),
             allowed_labels: self.allowed_labels.clone(),
             label_excluded_count: self.label_excluded_issues.len(),
@@ -14313,6 +14503,8 @@ impl IssueMonitorState {
             provider_quota_holds: self.active_provider_quota_holds_at(now),
             usage_threshold_percent: self.launch_usage_threshold_percent,
             tier_facts: self.tier_facts(auto_tier_count),
+            tier_config_token: prefs.config_token(),
+            launch_tiers,
             autonomous_issues: self
                 .autonomous_records
                 .values()
@@ -15717,6 +15909,7 @@ impl IssueMonitorState {
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
                     || self.scan_dependency_exclusion(*issue_number).is_some()
+                    || self.agent_schedule_launch_exclusion(*issue_number).is_some()
         )
     }
 
@@ -16275,6 +16468,9 @@ impl IssueMonitorState {
                         && idle_window_is_alive(window.status)
                 }))
         {
+            return false;
+        }
+        if !review_dispatch && self.agent_schedule_launch_exclusion(issue_number).is_some() {
             return false;
         }
         let max_active = self.effective_max_active_agents();
@@ -18051,6 +18247,7 @@ impl IssueMonitorState {
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
                 && self.scan_dependency_exclusion(*issue).is_none()
+                && self.agent_schedule_launch_exclusion(*issue).is_none()
         })?;
         let issue_number = self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
@@ -18163,6 +18360,9 @@ impl IssueMonitorState {
 
     fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if let Some(reason) = self.agent_schedule_launch_exclusion(issue_number) {
+            reasons.push(reason);
+        }
         if let Some(reason) = self.launch_source_exclusion(issue_number) {
             reasons.push(reason);
         }
@@ -18451,6 +18651,9 @@ impl IssueMonitorState {
                     && !self.open_pr_launch_held(*issue_number)
                     && self.launch_source_exclusion(*issue_number).is_none()
                     && self.scan_dependency_exclusion(*issue_number).is_none()
+                    && self
+                        .agent_schedule_launch_exclusion(*issue_number)
+                        .is_none()
                     && self.retry_ready_for_saved_profile(*issue_number, now)
             }) else {
                 break;
@@ -18791,6 +18994,12 @@ impl IssueMonitorState {
             return true;
         }
         if self
+            .agent_schedule_launch_exclusion(delivery.issue_number)
+            .is_some()
+        {
+            return false;
+        }
+        if self
             .launch_dependency_exclusion(delivery.issue_number)
             .is_some()
         {
@@ -19063,10 +19272,14 @@ impl IssueMonitorState {
             .iter()
             .any(|delivery| delivery.delivery_id == delivery_id)
         {
+            let agent_member_id = self
+                .scheduled_agent_member_id(issue_number)
+                .map(str::to_owned);
             let dependency_observations =
                 self.dependency_observations_for_delivery(issue_number, None);
             self.pending_launch_deliveries
                 .push_back(PendingIssueMonitorLaunchDelivery {
+                    agent_member_id,
                     dependency_observations,
                     delivery_id,
                     issue_number,
@@ -21107,9 +21320,13 @@ impl IssueMonitorState {
                     .map(|delivery| delivery.issue_number),
             )
             // A healthy lower tier cannot honor an Issue's higher tier floor.
-            // Preserve work that still has an eligible provider in its pool.
+            // The remaining candidate must also be able to run unattended.
             .filter(|issue_number| {
-                every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
+                every_pool_provider_held
+                    || !self.retry_ready_for_saved_profile(*issue_number, now)
+                    || self
+                        .permission_readiness_block_for_launch(*issue_number, now)
+                        .is_some()
             })
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled_issues);
@@ -25452,6 +25669,38 @@ mod tests {
         assert_eq!(project_b.max_active_agents_override(), Some(5));
         project_a.set_agent_capacity(AgentCapacity::default());
         assert_eq!(project_a.effective_max_active_agents(), 5);
+
+        // Roster revalidation must use the proposed sample's PM count too.
+        project_a.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada",
+                    "enabled": true,
+                    "created_at": IDLE_NOW,
+                }],
+            }))
+            .unwrap(),
+        );
+        project_a.set_max_active_agents(1);
+        project_a.apply_machine_policy(&crate::machine_agent_settings::Policy {
+            mode: IssueMonitorMaxActiveMode::Manual,
+            manual_limit: Some(1),
+            last_change: None,
+        });
+        project_a.set_agent_capacity(AgentCapacity {
+            other_live_agents: 1,
+            other_pm_agents: 1,
+            ..AgentCapacity::default()
+        });
+        let fresh = AgentCapacity {
+            other_live_agents: 1,
+            other_pm_agents: 0,
+            ..AgentCapacity::default()
+        };
+        assert_eq!(project_a.effective_max_active_agents_under(&fresh), 0);
     }
 
     #[test]
@@ -26800,6 +27049,48 @@ mod tests {
             windows_shell: None,
             prefer_for: Vec::new(),
         }
+    }
+
+    #[test]
+    fn launch_now_priority_only_empty_queue_does_not_launch() {
+        let now = "2026-09-29T00:00:00Z";
+        let mut monitor = test_monitor_with_prefs(
+            IssueMonitorConfig::default(),
+            IssueMonitorPrefs {
+                enabled: true,
+                max_active_agents_mode: IssueMonitorMaxActiveMode::Manual,
+                priority_order: vec![42],
+                terminal_queue_auto_refill: false,
+                ..IssueMonitorPrefs::default()
+            },
+        );
+        monitor.set_gui_connected(true);
+        let target = issue(42);
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(!is_auto_improve_candidate(
+            &target,
+            monitor.terminal_queue_contains(42)
+        ));
+
+        // The raw scanner must not admit a priority-only instruction.
+        scan_issue_monitor_candidates(&mut monitor, std::slice::from_ref(&target), now);
+        assert!(monitor.inbox_item(42).is_none());
+        assert!(monitor.local_terminal_queue_numbers().is_empty());
+        assert!(monitor.queued_issue_numbers().is_empty());
+        assert!(monitor.next_launch_request(now).is_none());
+        assert_eq!(monitor.prefs().priority_order, vec![42]);
+
+        // The same ready issue launches once explicit membership is added.
+        monitor.terminal_queue_push(&[42], "launch_now", now);
+        scan_issue_monitor_candidates(&mut monitor, &[target], now);
+        assert_eq!(monitor.local_terminal_queue_numbers(), vec![42]);
+        assert_eq!(
+            monitor
+                .next_launch_request(now)
+                .expect("explicit admission")
+                .issue_number,
+            42
+        );
     }
 
     // SPEC-3431 T-023 (AS2 / FR-006): the PM's launch_now writes the target to
@@ -29021,7 +29312,11 @@ mod tests {
         assert_eq!(prefs.launch_profile.as_ref(), Some(&codex));
         assert_eq!(prefs.launch_profiles, vec![codex.clone(), claude.clone()]);
 
-        let json = serde_json::to_string(&prefs).expect("serialize pool prefs");
+        let mut saved = serde_json::to_value(&prefs).expect("serialize pool prefs");
+        saved["launch_profile"]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][0]["agent_id"] = serde_json::json!(" CODEX ");
+        saved["launch_profiles"][1]["agent_id"] = serde_json::json!("ClaudeCode");
+        let json = serde_json::to_string(&saved).expect("serialize accepted aliases");
         let reloaded: IssueMonitorPrefs = serde_json::from_str(&json).expect("reload pool prefs");
         assert_eq!(reloaded.launch_profile_pool(), vec![codex.clone(), claude]);
         assert_eq!(
@@ -29033,6 +29328,19 @@ mod tests {
         prefs.set_launch_profile_pool(Vec::new());
         assert!(prefs.launch_profile.is_none());
         assert!(prefs.launch_profiles.is_empty());
+    }
+
+    #[test]
+    fn launch_profile_decode_preserves_custom_case_and_empty_agent_ids() {
+        for (agent_id, expected) in [
+            (" My-Custom-Agent ", "My-Custom-Agent"),
+            ("", ""),
+            ("  ", "  "),
+        ] {
+            let profile: IssueMonitorLaunchProfile =
+                serde_json::from_value(serde_json::json!({"agent_id": agent_id})).unwrap();
+            assert_eq!(profile.agent_id, expected);
+        }
     }
 
     #[test]
@@ -29547,20 +29855,28 @@ mod tests {
         let mut prefs = IssueMonitorPrefs {
             launch_auto: true,
             launch_tiers: vec![
-                vec![test_launch_profile("codex")],
-                vec![test_launch_profile("claude")],
+                vec![test_launch_profile(" CODEX ")],
+                vec![test_launch_profile("claude-code")],
             ],
             ..Default::default()
         };
+        for tier in &prefs.launch_tiers {
+            crate::cli::issue::validate_monitor_profiles_set(tier, None).unwrap();
+        }
+        prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
+        let available = vec!["codex".to_string(), "claude".to_string()];
         let holds = BTreeMap::from([("codex".to_string(), "2026-09-30T00:00:00Z".to_string())]);
         let select = |pool: &[IssueMonitorLaunchProfile]| {
             select_launch_profile(pool, &holds, &[], None, "2026-09-29T00:00:00Z")
         };
         let choice = prefs
-            .select_auto_launch_profile(42, false, None, select)
+            .select_auto_launch_profile(42, false, Some(&available), select)
             .unwrap();
         assert_eq!(choice.tier, 1);
         assert_eq!(choice.profile.agent_id, "claude");
+        let previous =
+            crate::LaunchWizardPreviousProfiles::from_profile(Some(choice.profile.into()));
+        assert!(previous.profile_for("claude").is_some());
         prefs.record_tier_launch(42, choice.tier);
         let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), prefs);
         monitor.record_attempt(42);
@@ -29593,8 +29909,33 @@ mod tests {
         prefs.tier_overrides.insert(42, 0);
         prefs.tier_overrides.insert(7, 2);
         monitor.rebase_daemon_driver_prefs(&prefs);
+        monitor.terminal_queue_auto_refill = false;
+        let mut backlog_issue = issue(99);
+        backlog_issue.labels.clear();
+        scan_issue_monitor_candidates(&mut monitor, &[backlog_issue], "2026-09-29T00:00:00Z");
+        assert!(monitor.inbox_item(99).is_none());
+        assert!(!monitor.terminal_queue_contains(99));
+        assert!(!monitor.queue.contains(&99));
         let before = monitor.prefs();
         let wire = serde_json::to_value(monitor.status_view()).unwrap();
+        assert_eq!(wire["tier_facts"].as_array().unwrap().len(), 3);
+        let backlog = &wire["tier_facts"][2];
+        assert_eq!(backlog["issue_number"], 99);
+        assert_eq!(backlog["is_spec"], false);
+        assert_eq!(backlog["tier_count"], 3);
+        assert_eq!(backlog["next_minimum_tier"], 0);
+        assert!(backlog.get("next_launch").is_none());
+        assert!(backlog["next_launch_unavailable_reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()));
+        assert!(backlog.get("confirmed_launch").is_none());
+        assert!(backlog.get("recorded_launch_tier").is_none());
+        assert!(backlog.get("minimum_tier_override").is_none());
+        assert_eq!(wire["tier_config_token"], before.config_token());
+        assert_eq!(
+            wire["launch_tiers"],
+            serde_json::json!(before.effective_launch_tiers())
+        );
         assert_eq!(wire["tier_facts"][0]["issue_number"], 7);
         assert!(wire["tier_facts"][0]["recorded_launch_tier"].is_null());
         assert!(wire["tier_facts"][0]["next_minimum_tier"].is_null());
@@ -29616,6 +29957,8 @@ mod tests {
         monitor.launch_auto = false;
         let wire = serde_json::to_value(monitor.status_view()).unwrap();
         assert!(wire["tier_facts"][1]["next_minimum_tier"].is_null());
+        assert!(wire["tier_facts"][1].get("tier_count").is_none());
+        assert!(wire.get("launch_tiers").is_none());
         assert_eq!(wire["tier_facts"][1]["history_floor"], 9);
     }
 
@@ -31161,6 +31504,117 @@ mod tests {
             "claim-effect-44",
             "2026-08-22T02:00:00Z",
         ));
+
+        // A restart restores deliveries before the inbox. An initial SPEC
+        // still requires tier 1 even without recorded attempts or tier history.
+        let mut cold_prefs = monitor.prefs();
+        cold_prefs.issue_tiers.remove(&43);
+        cold_prefs
+            .autonomous_records
+            .iter_mut()
+            .find(|record| record.issue_number == 43)
+            .unwrap()
+            .attempts = 0;
+        cold_prefs
+            .pending_launch_deliveries
+            .iter_mut()
+            .find(|delivery| delivery.issue_number == 43)
+            .unwrap()
+            .linked_issue_kind = LinkedIssueKind::Spec;
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), cold_prefs);
+        assert!(cold.inbox_item(43).is_none());
+        assert_eq!(
+            cold.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "claude",
+                "Claude quota exhausted",
+                Some("2026-08-22T04:00:00Z"),
+                None,
+                "2026-08-22T02:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert_eq!(cold.pending_launch_delivery_id(43), None);
+        assert!(!cold.active_issue_numbers().contains(&43));
+        assert_eq!(cold.attempt_count(43), 0);
+        assert_eq!(
+            cold.prefs().queued_launch_session_strategies.get(&43),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(cold.pending_effects().len(), 1);
+        assert!(matches!(
+            &cold.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!cold.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert_eq!(cold.take_pending_launch_requests()[0].issue_number, 44);
+
+        // An unheld fallback can still be unable to run unattended. Revoke
+        // the unowned delivery before a GUI can materialize that fallback.
+        let mut unsupported = monitor.clone();
+        unsupported.launch_tiers[1].push(test_launch_profile("openclaw"));
+        unsupported.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-42",
+            "claude",
+            "Claude quota exhausted",
+            Some("2026-08-22T04:00:00Z"),
+            None,
+            "2026-08-22T02:01:00Z",
+        );
+        assert!(unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
+        assert_eq!(unsupported.pending_launch_delivery_id(43), None);
+        assert!(!unsupported.active_issue_numbers().contains(&43));
+        assert_eq!(unsupported.attempt_count(43), 1);
+        assert_eq!(
+            unsupported
+                .prefs()
+                .queued_launch_session_strategies
+                .get(&43),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(unsupported.pending_effects().len(), 1);
+        assert!(matches!(
+            &unsupported.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!unsupported.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert_eq!(
+            unsupported.take_pending_launch_requests()[0].issue_number,
+            44
+        );
+        assert_eq!(
+            unsupported.prepare_claim_effects_with_observations(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                4,
+                &BTreeMap::from([(43, false)]),
+            ),
+            0
+        );
+        let blocked = unsupported.inbox_item(43).unwrap();
+        assert_eq!(blocked.state, MonitorInboxState::NotReady);
+        let reason = blocked.exclusion_reason.as_deref().unwrap();
+        for expected in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(expected), "{reason}");
+        }
 
         monitor.try_hold_provider_usage_limit(
             42,
@@ -33200,6 +33654,50 @@ mod tests {
                 .filter_map(Result::ok)
                 .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")),
             "the unreadable bytes are still quarantined for diagnosis"
+        );
+    }
+
+    /// Issue #6096: a recovering transaction that changes nothing (for
+    /// example the daemon's windowless-launch expiry with nothing expired)
+    /// must not rewrite the prefs, or every prepared launch admission that
+    /// fences the file goes stale.
+    #[test]
+    fn issue6096_noop_recovering_mutation_does_not_rewrite_prefs() {
+        let home = tempfile::tempdir().expect("temp home");
+        let path = home.path().join("project-state").join("issue-monitor.json");
+        let mut monitor = launched_cohort(&[(3873, "project-a::agent-2")]);
+        monitor.set_autonomous_mode(true);
+        save_issue_monitor_prefs(&path, &monitor.prefs()).expect("commit prefs");
+        let bytes = fs::read(&path).unwrap();
+        // Backdate the file so any rewrite would observably move its mtime.
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let (unchanged, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .expect("no-op transaction");
+        assert_eq!(unchanged.launched_issues.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+
+        let (changed, ()) = mutate_issue_monitor_prefs_recovering(
+            &path,
+            &IssueMonitorPrefs::recovery_default(),
+            |prefs| prefs.autonomous_mode = false,
+        )
+        .expect("changing transaction");
+        assert!(!changed.autonomous_mode);
+        assert!(
+            !load_issue_monitor_prefs(&path).unwrap().autonomous_mode,
+            "a real change still commits"
         );
     }
 
@@ -39755,6 +40253,75 @@ mod tests {
             1,
             "empty census releases only its exact host"
         );
+    }
+
+    #[test]
+    fn markerless_scan_claim_and_launch_preserve_legacy_behavior() {
+        use gwt_github::{FakeIssueClient, IssueNumber, IssueSnapshot, IssueState, UpdatedAt};
+
+        let now = "2026-10-24T00:00:00Z";
+        let mut baseline = None;
+        for body in [None, Some("Ordinary issue text referencing #43.")] {
+            let client = FakeIssueClient::new();
+            let mut candidates = [issue(42), issue(43)];
+            for candidate in &mut candidates {
+                candidate.body = body.map(str::to_string);
+                client.seed(IssueSnapshot {
+                    author_login: None,
+                    number: IssueNumber(candidate.number),
+                    title: candidate.title.clone(),
+                    body: candidate.body.clone().unwrap_or_default(),
+                    labels: candidate.labels.clone(),
+                    state: IssueState::Open,
+                    updated_at: UpdatedAt::new("t1"),
+                    comments: Vec::new(),
+                });
+            }
+            let mut monitor = test_monitor(IssueMonitorConfig {
+                enabled: true,
+                max_active: 1,
+                ..Default::default()
+            });
+            monitor.set_gui_connected(true);
+            let scan = scan_queued_candidates(&mut monitor, &candidates, now);
+            assert_eq!((scan.scanned, scan.claimed, scan.blocked), (2, 0, 0));
+            assert!(client.call_log().is_empty(), "scanning never claims");
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [42, 43]);
+            assert_eq!(monitor.claim_probe_plan(1), (1, vec![42, 43]));
+            assert_eq!(monitor.active_count(), 0);
+            assert!(monitor.inbox_view_at(now).iter().all(|item| {
+                item.state == MonitorInboxState::Queued && item.dependency.is_none()
+            }));
+
+            let probes = std::cell::RefCell::new(Vec::new());
+            let launches =
+                monitor.claim_next_launch_requests_with_probe(&client, "owner", now, 1, |number| {
+                    probes.borrow_mut().push(number);
+                    false
+                });
+            assert_eq!(*probes.borrow(), [42]);
+            assert_eq!(launches.len(), 1);
+            assert_eq!(launches[0].issue_number, 42);
+            assert_eq!(launches[0].branch_name, "work/issue-42");
+            assert_eq!(client.comments(IssueNumber(42)).len(), 1);
+            assert!(client.comments(IssueNumber(43)).is_empty());
+            assert_eq!(monitor.queue.iter().copied().collect::<Vec<_>>(), [43]);
+            assert_eq!(monitor.active_count(), 1);
+            let observed = (
+                scan,
+                launches,
+                client.call_log(),
+                client.comments(IssueNumber(42)),
+            );
+            if let Some(expected) = &baseline {
+                assert_eq!(
+                    &observed, expected,
+                    "ordinary prose retains marker-less behavior"
+                );
+            } else {
+                baseline = Some(observed);
+            }
+        }
     }
 
     #[test]

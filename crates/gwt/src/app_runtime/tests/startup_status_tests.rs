@@ -1597,7 +1597,6 @@ fn app_runtime_resume_workspace_agent_replies_error_when_session_toml_missing() 
             operation_id: "resume-operation".to_string(),
             session_id: "missing-session".to_string(),
             agent_session_id: None,
-            bounds: canvas_bounds(),
         },
     );
 
@@ -1650,7 +1649,6 @@ fn app_runtime_resume_workspace_agent_ignores_stopped_same_session_window() {
             operation_id: "resume-operation".to_string(),
             session_id: "stopped-session".to_string(),
             agent_session_id: None,
-            bounds: canvas_bounds(),
         },
     );
 
@@ -1688,7 +1686,6 @@ fn app_runtime_resume_workspace_agent_metadata_only_nonpicker_never_starts_new_w
             operation_id: "resume-operation".to_string(),
             session_id: session.id.clone(),
             agent_session_id: None,
-            bounds: canvas_bounds(),
         },
     );
 
@@ -1737,7 +1734,6 @@ fn app_runtime_resume_workspace_agent_materializes_missing_worktree_when_branch_
             operation_id: "resume-operation".to_string(),
             session_id: "session-ghost".to_string(),
             agent_session_id: None,
-            bounds: canvas_bounds(),
         },
     );
 
@@ -1849,7 +1845,6 @@ fn app_runtime_resume_workspace_agent_errors_when_live_window_runs_other_convers
             operation_id: "resume-operation".to_string(),
             session_id: "work-live".to_string(),
             agent_session_id: Some("conv-old".to_string()),
-            bounds: canvas_bounds(),
         },
     );
 
@@ -2091,7 +2086,6 @@ fn app_runtime_resume_branch_latest_returns_branch_error_when_no_resumable_sessi
         FrontendEvent::ResumeBranchLatestAgent {
             id: window_id.clone(),
             branch_name: "work/manual-resume".to_string(),
-            bounds: canvas_bounds(),
         },
     );
 
@@ -2160,9 +2154,7 @@ fn app_runtime_bootstrap_auto_resumes_clean_waiting_input_session() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     assert_eq!(
@@ -2238,9 +2230,7 @@ fn app_runtime_bootstrap_resumes_session_in_linked_worktree_of_workspace_home_ta
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime
@@ -2313,7 +2303,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
         title: "Unclosed".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -2342,9 +2332,7 @@ fn app_runtime_bootstrap_resumes_unclosed_window_despite_stopped_status() {
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime
@@ -2408,7 +2396,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
         title: "Stale".to_string(),
         project_root: worktree.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -2433,9 +2421,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
     runtime.bootstrap();
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     assert!(
@@ -2447,7 +2433,7 @@ fn app_runtime_bootstrap_does_not_resume_an_unclosed_window_past_the_freshness_b
 /// Issue #4804 AC-7: finishing the reaper first must not release Monitor
 /// deliveries before placeholder-less restores have registered their panes.
 #[test]
-fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
+fn app_runtime_bootstrap_queues_startup_auto_resume_until_surface_ready() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2560,9 +2546,7 @@ fn app_runtime_bootstrap_queues_startup_auto_resume_until_canvas_ready() {
 
     runtime.handle_frontend_event(
         "client-1".to_string(),
-        FrontendEvent::StartupAutoResumeReady {
-            bounds: canvas_bounds(),
-        },
+        FrontendEvent::StartupAutoResumeReady {},
     );
 
     let agent_windows = runtime.tabs[0]
@@ -3431,7 +3415,7 @@ fn bootstrap_runs_the_generation_reaper_off_the_startup_path() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
-    runtime.startup_auto_resume_ready_events(canvas_bounds());
+    runtime.startup_auto_resume_ready_events();
     assert_eq!(
         runtime
             .deferred_issue_monitor_launches

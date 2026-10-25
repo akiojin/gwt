@@ -1,6 +1,272 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.144.0] - 2026-10-25
+
+### Bug Fixes
+
+- **works:** Restore live agents and pm identity
+- **work:** Match missing upstream recovery to its condition
+- **ui:** Share public Monitor status updates
+- **works:** Preserve primary watch if pm watch fails
+- **work:** Align remote readback recovery with its check
+- **monitor:** Compensate permission-blocked quota fallbacks
+- **lint:** Resolve named factory controller handlers
+- **test:** Avoid git probes in queued repair log fixture
+- **pr:** Draft PR 操作を禁止して検証済み Ready 配信へ統一
+- **monitor:** Cold復元後もSPECの起動tierを維持する
+- **execution:** Guide Git status readback recovery
+- **lint:** Named import の受信経路を検査する
+- **runtime:** 終了済みPTYを回収し起動確定処理を共有化する
+- **execution:** Guide offline Work event recovery
+- **lint:** 再代入された factory handler 別名を拒否する
+- **execution:** Guide invalid Work commit subject recovery
+- **execution:** Reap recovered same-session holders
+
+### Features
+
+- **pm:** Expose observed direct dependency impacts
+- **pm:** Expose milestone direct dependency impacts
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue #3431 PR association
+- **work:** PM 直接依存影響の配信確認を記録する
+- **work:** 直接依存影響の配信記録を PR に関連付ける
+- **work:** Monitor共有状態の配送精算を記録
+- **work:** Record launch recovery delivery PR
+- **work:** Record issue-6209 delivery preparation
+- **work:** Record issue 3590 readback recovery settlement
+- **work:** SPEC #4326 の完了確認世代の Work イベントを記録する
+- **work:** PR #6332 の連携記録を保存する
+- **work:** Link milestone impact pull request
+- **work:** Link readiness policy PR
+
+### Refactor
+
+- **runtime:** Share durable launch recovery receipts
+- **ui:** Distinguish monitor rendering from state receivers
+- **runtime:** Share SessionStart readiness policy
+
+### Testing
+
+- **ui:** Lock shared Issue list rendering
+- **pr:** 引き継ぎ検証に Git 比較基準を設定する
+
+## [9.143.0] - 2026-10-25
+
+### Bug Fixes
+
+- **monitor:** 同数の新規予定では空きメンバーを優先する
+- **monitor:** Preserve member while claim is in flight
+- **gui:** Align issue kanban with approved layout
+- **gui:** Kanbanの優先度ラベルをカード内で折り返す
+- **work:** Preserve evaluated settlement comparisons in diagnostics
+- **agents:** 現在タスクの後に予定操作を配置する
+- **work:** 未pushの既存event commitだけを復旧案内する
+- **pm:** Reject aborted scans as policy comparison evidence
+- **work:** 分岐した既存event commitの復旧案内を限定する
+- **pm:** WIP 比較の時刻精度を既存契約に揃える
+- **launch:** Keep Codex Issue Monitor launches inside the window budget
+
+### Features
+
+- **monitor:** メンバー別の担当予定と原子的な再割当を保存する
+- **pm:** Queue 滞留時間を保存閾値と照合する
+- **agents:** 予定操作と現在タスクリンクの実装を保存
+
+### Miscellaneous Tasks
+
+- **work:** Record Issue 4777 schedule delivery handoff
+- **work:** PR #6271の関連付け記録を保存
+- **work:** Issue 5016の配信再開記録を確定する
+- **work:** Deliver issue 5016 work records
+- **work:** Reconcile completed kanban task accounting
+- **work:** Record kanban accounting pull request
+- **work:** Record PR 6288 delivery metadata
+- **work:** Deliver issue 3431 PR link
+- **work:** Settlement診断の後継世代を精算する
+- **work:** Record issue 3431 PR delivery link
+- **work:** Issue #3431 の PR 関連付けを記録する
+
+### Refactor
+
+- **ui:** Render Hub catalog from shared state
+- **ui:** Render Hub open results from shared state
+- **ui:** Render workspace snapshots from shared state
+
+### Testing
+
+- **monitor:** Isolate scheduled admission fixture home
+- **issue:** Kanban選択とlaunch_nowの回帰を固定
+
+## [9.142.0] - 2026-10-25
+
+### Bug Fixes
+
+- **issue:** Expose auto-refill beside autonomous
+- **gui:** Count observed local agents in Active views
+- **gui:** Fence stale agent activity and focus targets
+- **gui:** Pluralize active issue counts correctly
+- **hooks:** Warn when skill-state cannot be read
+- **agents:** Preserve spec member continuity across reuse
+- **hooks:** Obligation読取失敗のStop警告を保持する
+- **launch:** Raise direct runner health probe deadline to 20s for slow hosts
+- **hooks:** Warn on unreadable discussion state
+
+### Features
+
+- **issue:** Connect per-issue tier controls
+- **pm:** ロードマップ項目に依存診断を表示する
+- **agents:** Add persistent roster and live works
+
+### Miscellaneous Tasks
+
+- **work:** Record issue kanban acceptance audit
+- **work:** Issue #3431 の PR 関連付けを保存する
+- **work:** Record T-095 delivery settlement audit
+- **work:** Link T-095 settlement audit PR
+- **work:** Link skill-state warning delivery PR
+- **work:** Record local live activity delivery PR
+- **work:** Reconcile issue kanban acceptance records
+- **work:** Obligation警告の配送PRを関連付ける
+- **work:** Record discussion warning delivery PR
+
+### Refactor
+
+- **ui:** 詳細応答の描画を共有状態購読へ移す
+- **ui:** Render knowledge errors from shared state
+- **ui:** Render active card previews from shared state
+- **ui:** Render branch entries from shared state
+- **ui:** Recovery Centerを共有状態から描画
+- **ui:** Render recovery Board responses from shared state
+- **ui:** Hub カタログを共有状態から描画する
+
+### Testing
+
+- **issue:** Align legacy controls with the refill switch
+- **gui:** Close live client before fixture shutdown
+
+## [9.141.2] - 2026-10-24
+
+### Bug Fixes
+
+- **hooks:** Retain unreadable execution record stop warnings
+- **issue-monitor:** Launch admission converges on slow Windows hosts (#6096)
+
+### Miscellaneous Tasks
+
+- **work:** Record canvas removal delivery scope
+- **work:** Record knowledge search delivery successor
+- **work:** Record unreadable stop warning delivery audit
+- **work:** Link unreadable stop warning pr
+- **work:** PR #6244の検証引継ぎを記録
+
+### Refactor
+
+- **gui:** Remove retired canvas state and placement APIs
+- **ui:** Render knowledge search completions from shared state
+
+### Testing
+
+- **gui:** 端末計測前にAgents面を表示する
+- **gui:** Isolate focus dispatch from log rendering
+- Align launch and resume contracts with surface APIs
+- **hooks:** Stop警告に既存consumerの期待値を整合
+
+## [9.141.1] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Ignore scan re-stamped prefs record fields in launch admission (#6096)
+
+### Refactor
+
+- **ui:** Render knowledge phase completions from shared state
+
+## [9.141.0] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Autoのkind優先候補で起動前権限を判定する
+- **monitor:** Normalize accepted launch profile agent ids
+- **monitor:** Stop prefs churn from invalidating spawn admission forever
+
+### Features
+
+- **pm:** Expose milestone member dependency diagnostics
+- **pm:** Goal の所属 Issue に依存診断を表示する
+
+### Miscellaneous Tasks
+
+- **work:** Record live Logs delivery metadata
+- **work:** Record stop warning slice delivery audit
+- **work:** Record stop warning audit pr metadata
+- **work:** Link milestone dependency PR
+- **work:** Settle public stop warning delivery records
+- **work:** Link final stop warning audit pr
+- **work:** Link Goal dependency PR
+
+### Refactor
+
+- **ui:** Render live Logs from shared state
+- **ui:** Notify Board mentions from shared state
+
+### Testing
+
+- **monitor:** Backdate mtimes instead of sleeping in #6096 tests
+
+## [9.140.0] - 2026-10-24
+
+### Bug Fixes
+
+- **monitor:** Auto配信を手動profile保存時の補償から保護する
+- **issue-monitor:** Hold ラベルの起動除外を Backlog に統一する
+- **monitor:** Tier保存時に非対応の未所有配信を補償する
+- **ci:** Bypass slow runner HTTP mirrors for cold apt installs
+- **gh:** Preserve comment success after cache refresh failures
+- **monitor:** Issue別tier保存時に未所有配信を補償する
+- **monitor:** Claim launch deliveries from the worker with the durable publish budget
+- **hooks:** Preserve stop bookkeeping warnings
+
+### Features
+
+- **pm:** Expose canonical dependency observations
+
+### Miscellaneous Tasks
+
+- **work:** Record periodic wake contract reconciliation
+- **work:** Record periodic wake reconciliation pr
+- **work:** Record monitor list delivery metadata
+- **work:** Record Logs error delivery metadata
+- **work:** Record headless profile acceptance
+- **work:** Record headless acceptance pr metadata
+- **work:** Record issue 3590 delivery audit
+- **work:** Settle issue 3590 delivery evidence
+- **work:** Record issue 3590 slice settlement
+- **work:** Record issue 3590 current settlement
+- **work:** Record issue 3590 completion order pr
+- **work:** Record cold apt delivery metadata
+- **work:** Record Logs snapshot delivery metadata
+- **work:** Record dependency observation PR
+- **work:** Record issue 3165 compatibility pr
+- **work:** Record stop warning delivery metadata
+
+### Performance
+
+- **ui:** Batch monitor-driven issue list renders
+
+### Refactor
+
+- **ui:** Render Logs errors from shared state
+- **ui:** Render Logs snapshots from shared state
+
+### Testing
+
+- **issue-monitor:** Hold 廃止後の admission 前提を更新する
+- **execution:** Cover execution then build completion
+- **monitor:** Preserve markerless scan and launch behavior
+
 ## [9.139.0] - 2026-10-23
 
 ### Bug Fixes

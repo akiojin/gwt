@@ -1252,7 +1252,9 @@ impl PtyHandle {
     /// This bounded wait belongs on a background finalizer, never the GUI loop.
     /// Returns false when the timeout expires and propagates OS observation errors.
     pub fn terminate_and_wait_for_tree(&self, timeout: Duration) -> Result<bool, TerminalError> {
-        self.kill()?;
+        // An already-exited Unix group can reject the initial signal. Only
+        // the complete captured-tree proof below can establish its exit.
+        let kill_result = self.kill();
         let mut group = match self.process_group.lock() {
             Ok(group) => group,
             Err(poisoned) => poisoned.into_inner(),
@@ -1262,6 +1264,8 @@ impl PtyHandle {
             .map_err(|details| TerminalError::PtyIoError { details })?;
         if exited {
             self.tree_exit_confirmed.store(true, Ordering::Release);
+        } else {
+            kill_result?;
         }
         Ok(exited)
     }

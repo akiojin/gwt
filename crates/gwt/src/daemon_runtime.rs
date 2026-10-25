@@ -442,6 +442,8 @@ pub enum RuntimeHookEventKind {
     Forward,
 }
 
+pub const PM_STATUS_CHANGED_SOURCE_EVENT: &str = "PmStatusChanged";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHookEvent {
     pub kind: RuntimeHookEventKind,
@@ -1446,6 +1448,23 @@ pub fn handle_coordination_event(event: &str, input: &str) -> Result<(), HookErr
         ),
     );
     Ok(())
+}
+
+pub(crate) fn notify_pm_status_changed() {
+    let Some(session) = current_session_from_env() else {
+        return;
+    };
+    emit_live_event_fail_open(
+        Some(PM_STATUS_CHANGED_SOURCE_EVENT),
+        RuntimeHookEvent::from_hook(
+            RuntimeHookEventKind::CoordinationEvent,
+            Some(PM_STATUS_CHANGED_SOURCE_EVENT),
+            None,
+            Some(format!("coordination:{PM_STATUS_CHANGED_SOURCE_EVENT}")),
+            Some(session),
+            None,
+        ),
+    );
 }
 
 pub fn handle_forward(input: &str) -> Result<(), HookError> {

@@ -5,8 +5,83 @@
  * and result modal are verified without touching a real Git repository.
  */
 import { expect, test } from "@playwright/test";
+import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 import { gotoLiveGwt } from "./_helpers/live-gwt";
+
+// SPEC #5016 AC11: exercise the real app receiver and its synchronous view.
+test("branch_entries shared state preserves count ordering and stale isolation", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await page.route("**/branch-list-state.js", async route => {
+    const response = base ? await route.fetch() : undefined;
+    const source = response ? await response.text()
+      : readFileSync("crates/gwt/web/branch-list-state.js", "utf8");
+    const anchor = "export function applyBranchEntriesEvent(state, event) {";
+    expect(source).toContain(anchor);
+    const body = source.replace(anchor, "function originalApplyBranchEntriesEvent(state, event) {") + `
+      export function applyBranchEntriesEvent(state, event) {
+        const result = originalApplyBranchEntriesEvent(state, event);
+        window.__branchReceipt = { state, event, result };
+        return result;
+      }`;
+    await route.fulfill({ response, contentType: "text/javascript", body });
+  });
+  await installBranchCleanupBackend(page);
+  await page.goto(base ? new URL(new URL(APP_URL).pathname, base).toString() : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const control = page.locator("#op-strip-issue-monitor");
+  await control.focus();
+  await page.evaluate(() => {
+    const shell = (window as any).__operatorShell;
+    const apply = shell.applyTelemetryCounts;
+    (window as any).__branchCounts = [];
+    shell.applyTelemetryCounts = (counts: any) => {
+      if ("branches" in counts) (window as any).__branchCounts.push(counts.branches);
+      return apply(counts);
+    };
+  });
+  const emit = (id: string, loadId: number, count: number) => page.evaluate(({ id, loadId, count }) => {
+    (window as any).__branchCleanupFixture.emit({ kind: "branch_entries", id, load_id: loadId,
+      phase: "hydrated", entries: Array.from({ length: count }, (_, index) => ({
+        name: `work/fixture-${index}`, scope: "local", cleanup_ready: false,
+      })),
+    });
+  }, { id, loadId, count });
+  const count = page.locator("#op-strip-branches");
+  await page.evaluate(() => {
+    (window as any).__branchCleanupFixture.emit({ kind: "branch_entries", id: "branches-1", load_id: 10,
+      phase: "hydrated", entries: [
+        { name: "work/fixture-0", scope: "local", cleanup_ready: true, cleanup: { availability: "safe" } },
+        { name: "work/fixture-1", scope: "local", cleanup_ready: false },
+      ],
+    });
+  });
+  await expect(count).toHaveText("2");
+  expect(await page.evaluate(() => {
+    const { state, event } = (window as any).__branchReceipt;
+    return [Object.isFrozen(event), Object.isFrozen(state.entries),
+      Object.isFrozen(state.lastHydratedByName.get("work/fixture-0")), state.entries[0].name];
+  })).toEqual([true, true, true, "work/fixture-0"]);
+  await emit("branches-1", 11, 3);
+  await expect(count).toHaveText("3");
+  await emit("branches-1", 10, 1); // stale: must not redraw or publish a count
+  // This following event is a FIFO marker and has an independent load sequence.
+  await emit("branches-other", 1, 4);
+  await expect(count).toHaveText("4");
+  expect(await page.evaluate(() => (window as any).__branchCounts)).toEqual([2, 3, 4]);
+  await expect(control).toBeFocused();
+  await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
+  const screenshot = info.outputPath(`branch-entries-${theme}.png`);
+  await page.screenshot({ path: screenshot });
+  await info.attach("branch-entries", { path: screenshot, contentType: "image/png" });
+  expect(errors).toEqual([]);
+});
 
 // SPEC #5016 AC11: receive receipts drive the existing list/modal appliers.
 test("branch_error receipts preserve branch controls and prioritize running cleanup", async ({ page }, info) => {

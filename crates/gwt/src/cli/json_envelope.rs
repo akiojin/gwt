@@ -921,6 +921,21 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Read,
+        }),
+        "issue.monitor.schedule.reassign" => CliCommand::Issue(IssueCommand::MonitorSchedule {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                issue_number: required_u64(params, "issue_number")?,
+                source_member_id: required_string(params, "source_member_id")?,
+                target_member_id: required_string(params, "target_member_id")?,
+                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                expected_queue_revision: required_string(params, "expected_queue_revision")?,
+                expected_schedule_revision: required_u64(params, "expected_schedule_revision")?,
+            },
+        }),
         "issue.monitor.queue.list" => CliCommand::Issue(IssueCommand::MonitorQueueList {
             project_root: optional_path(params, "project_root")?,
             terminal: optional_string(params, "terminal")?,
@@ -1211,14 +1226,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 },
             ))
         }
-        "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
-            base: required_string(params, "base")?,
-            head: optional_string(params, "head")?,
-            title: required_string(params, "title")?,
-            body: required_string(params, "body")?,
-            labels: optional_string_vec(params, "labels")?,
-            draft: optional_bool(params, "draft")?.unwrap_or(false),
-        }),
+        "pr.create" => {
+            if optional_bool(params, "draft")?.unwrap_or(false) {
+                return Err(CliParseError::InvalidValue {
+                    flag: "draft",
+                    reason: crate::cli::pr::DRAFT_PR_REFUSAL,
+                });
+            }
+            CliCommand::Pr(PrCommand::CreateBody {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+                title: required_string(params, "title")?,
+                body: required_string(params, "body")?,
+                labels: optional_string_vec(params, "labels")?,
+                draft: false,
+            })
+        }
         "pr.edit" => {
             let number = required_u64(params, "number")?;
             let base = optional_string(params, "base")?;
@@ -1249,9 +1272,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "pr.ready" => CliCommand::Pr(PrCommand::Ready {
-            number: required_u64(params, "number")?,
-        }),
-        "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
         "pr.close" => CliCommand::Pr(PrCommand::Close {
@@ -3727,9 +3747,9 @@ mod tests {
         #[test]
         fn guidance_operation_names_flag_an_operation_that_does_not_exist() {
             let operations = dispatched_operations();
-            assert!(operations.contains("pr.draft"), "{operations:?}");
+            assert!(operations.contains("pr.ready"), "{operations:?}");
             let text = "Disable auto-merge through `pr.merge`, or run workspace.prune. \
-                Keep `pr.draft`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
+                Keep `pr.ready`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
                 holder, and github.com.";
             assert_eq!(
                 unresolved_operation_names(text, &operations),
@@ -6395,6 +6415,55 @@ mod tests {
     }
 
     #[test]
+    fn issue_monitor_schedule_operations_require_complete_reassignment_observation() {
+        assert_eq!(
+            ok("issue.monitor.schedule.read", json!({})),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: None,
+                action: crate::issue_monitor::AgentScheduleAction::Read,
+            })
+        );
+        let reassignment = json!({
+            "project_root": "/tmp/project",
+            "issue_number": 42,
+            "source_member_id": "member-a",
+            "target_member_id": "member-b",
+            "expected_roster_revision": 3,
+            "expected_queue_revision": "observed-queue",
+            "expected_schedule_revision": 2,
+        });
+        assert_eq!(
+            ok("issue.monitor.schedule.reassign", reassignment.clone()),
+            CliCommand::Issue(IssueCommand::MonitorSchedule {
+                project_root: Some(std::path::PathBuf::from("/tmp/project")),
+                action: crate::issue_monitor::AgentScheduleAction::Reassign {
+                    issue_number: 42,
+                    source_member_id: "member-a".into(),
+                    target_member_id: "member-b".into(),
+                    expected_roster_revision: 3,
+                    expected_queue_revision: "observed-queue".into(),
+                    expected_schedule_revision: 2,
+                },
+            })
+        );
+        for required in [
+            "issue_number",
+            "source_member_id",
+            "target_member_id",
+            "expected_roster_revision",
+            "expected_queue_revision",
+            "expected_schedule_revision",
+        ] {
+            let mut incomplete = reassignment.clone();
+            incomplete.as_object_mut().unwrap().remove(required);
+            let _ = err("issue.monitor.schedule.reassign", incomplete);
+        }
+        let mut invalid = reassignment;
+        invalid["expected_schedule_revision"] = Value::Null;
+        let _ = err("issue.monitor.schedule.reassign", invalid);
+    }
+
+    #[test]
     fn issue_monitor_queue_operations_parse() {
         assert_eq!(
             ok("issue.monitor.status", json!({})),
@@ -8571,10 +8640,18 @@ mod tests {
         assert!(matches!(
             ok(
                 "pr.create",
-                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
+                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": false})
             ),
-            CliCommand::Pr(PrCommand::CreateBody { draft: true, .. })
+            CliCommand::Pr(PrCommand::CreateBody { draft: false, .. })
         ));
+        let refused = err(
+            "pr.create",
+            json!({"base": "develop", "title": "t", "body": "b", "draft": true}),
+        );
+        assert!(
+            refused.to_string().contains("Draft PRs are prohibited"),
+            "{refused}"
+        );
         assert!(matches!(
             ok(
                 "pr.edit",
@@ -8629,8 +8706,8 @@ mod tests {
             CliCommand::Pr(PrCommand::Ready { number: 9 })
         ));
         assert!(matches!(
-            ok("pr.draft", json!({"number": 9})),
-            CliCommand::Pr(PrCommand::Draft { number: 9 })
+            err("pr.draft", json!({"number": 9})),
+            CliParseError::UnknownSubcommand(_)
         ));
         assert!(matches!(
             ok("pr.comment", json!({"number": 1, "body": "b"})),

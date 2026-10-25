@@ -19,7 +19,7 @@ const HOOK_WORKSPACE_REPAIR_LEASE_WAIT: Duration = Duration::from_millis(25);
 /// runs. Without this, the JSON `workspace.update` operation for the
 /// running session silently no-ops because `apply_update`'s session matcher
 /// finds nothing to update (only a journal entry is written, and no
-/// `WindowCanvasState` broadcast fires).
+/// `WindowRegistry` broadcast fires).
 ///
 /// Registration is idempotent: if the launch flow has already registered
 /// the session (with `Assigned` affiliation, a workspace_id, etc.) we

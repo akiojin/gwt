@@ -183,6 +183,67 @@ fn issue_3777_cache_only_patch_invalidates_stale_serialized_projection() {
 }
 
 #[test]
+fn local_agent_activity_hydrates_while_work_refreshes_keep_superseding() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.merge_workspace_projection_into_cached_active_work(
+        &repo,
+        &gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo),
+    );
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_none());
+
+    for _ in 0..2 {
+        runtime.schedule_runtime_hook_active_work_projection_refresh(
+            &repo,
+            "posttooluse",
+            "running",
+        );
+        tasks.lock().unwrap().remove(0)();
+        let event = events.lock().unwrap().pop().unwrap();
+        let UserEvent::ActiveWorkProjectionPrepared(prepared) =
+            into_recorded_project_payload(event)
+        else {
+            panic!("expected projection completion");
+        };
+        let commit = runtime.handle_active_work_projection_prepared(*prepared);
+        assert!(
+            commit.prepared_dispatch.is_none(),
+            "stale Work stays withheld"
+        );
+        let event = commit
+            .local_activity
+            .expect("current census must reach hydration");
+        let wire = serde_json::to_value(event.event).unwrap();
+        assert_eq!(wire["kind"], "local_agent_activity");
+        assert_eq!(wire["activity"]["agents"], serde_json::json!([]));
+        assert_eq!(tasks.lock().unwrap().len(), 1, "one rerun remains queued");
+    }
+
+    tasks.lock().unwrap().remove(0)();
+    let event = events.lock().unwrap().pop().unwrap();
+    let UserEvent::ActiveWorkProjectionPrepared(mut prepared) =
+        into_recorded_project_payload(event)
+    else {
+        panic!("expected projection completion");
+    };
+    prepared.context.generation += 1;
+    let commit = runtime.handle_active_work_projection_prepared(*prepared);
+    assert!(
+        commit.local_activity.is_none(),
+        "old project contexts stay fenced"
+    );
+    assert!(commit.prepared_dispatch.is_none());
+}
+
+#[test]
 fn issue_5404_unchanged_projection_inputs_skip_rebuild_and_changed_work_refreshes() {
     let _env_lock = env_test_lock()
         .lock()
@@ -224,6 +285,10 @@ fn issue_5404_unchanged_projection_inputs_skip_rebuild_and_changed_work_refreshe
     assert!(
         unchanged.prepared_dispatch.is_none(),
         "unchanged inputs do not broadcast"
+    );
+    assert!(
+        unchanged.local_activity.is_some(),
+        "memo hits still carry their census"
     );
 
     let mut projection =
@@ -634,6 +699,7 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
         works: Vec::new(),
         cleanup_candidate: None,
         managed_hook_health: None,
+        local_agent_activity: None,
         active_work_count: 0,
         active_works: Vec::new(),
         agents: Vec::new(),
@@ -674,6 +740,10 @@ fn issue_3777_runtime_hook_failure_preserves_last_good_projection() {
     let commit = runtime.handle_active_work_projection_prepared(*completion);
 
     assert!(commit.prepared_dispatch.is_none());
+    assert!(
+        commit.local_activity.is_some(),
+        "Work errors do not suppress the census"
+    );
     assert!(
         commit.profile.is_some(),
         "a failed prepare still emits its content-free timing profile",

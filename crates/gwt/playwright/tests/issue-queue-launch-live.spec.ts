@@ -10,6 +10,220 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  test("T20a UI reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info);
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const context = page.context();
+    let current = page;
+    const capture = (target: typeof page) => {
+      target.on("pageerror", error => errors.push(error.message));
+      target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    };
+    const request = async (event: unknown, kind: string) => {
+      const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(current, event);
+      return (await current.waitForFunction(({ after, kind }) => {
+        const entry = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+        return entry?.payload || null;
+      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+    };
+    const schedule = () => {
+      const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
+      expect(reply.ok, JSON.stringify(reply)).toBe(true);
+      return JSON.parse(reply.output);
+    };
+    const owner = (snapshot: any) => snapshot.members.find((member: any) =>
+      member.issues.some((issue: any) => issue.issue_number === fixture.issueNumber));
+    const openMemberPlans = async (memberId: string) => {
+      await current.locator('.op-rail__surface[data-surface="agents"]').click();
+      const main = current.getByRole("region", { name: "Main pane", exact: true });
+      await expect(main).toHaveAttribute("data-surface", "agents");
+      const agents = main.locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      return agents.locator(".roster-plans");
+    };
+    capture(current);
+    try {
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
+        { timeout: 30_000 }).toBe(false);
+      const initial = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+      expect(initial.error).toBeFalsy();
+      const roster = (await request({ kind: "agent_roster", action: { kind: "add" },
+        expected_revision: initial.revision }, "agent_roster")).roster;
+      expect(roster.error).toBeFalsy();
+      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      const queued = await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] },
+        "issue_monitor_queue_result");
+      expect(queued.error).toBeNull();
+      expect(await fixture.launches()).toEqual([]);
+      const observed = schedule();
+      const source = owner(observed);
+      expect(source).toBeTruthy();
+      const target = roster.members.find((member: any) => member.enabled
+        && member.agent_member_id !== source.agent_member_id);
+      expect(target).toBeTruthy();
+      const reassignment = {
+        issue_number: fixture.issueNumber,
+        source_member_id: source.agent_member_id,
+        target_member_id: target.agent_member_id,
+        expected_roster_revision: observed.roster_revision,
+        expected_queue_revision: observed.queue_revision,
+        expected_schedule_revision: observed.schedule_revision,
+      };
+      const sourcePlans = await openMemberPlans(source.agent_member_id);
+      const queuedPlan = sourcePlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"]`);
+      await expect(queuedPlan).toBeVisible();
+      await queuedPlan.getByRole("combobox", { name: `Assign issue #${fixture.issueNumber} to member`, exact: true })
+        .selectOption(target.agent_member_id);
+      await queuedPlan.getByRole("button", { name: `Reassign issue #${fixture.issueNumber}`, exact: true }).click();
+      const targetPlans = await openMemberPlans(target.agent_member_id);
+      await expect(targetPlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"] .roster-plan-reason`))
+        .toHaveText("Assigned by you");
+      const saved = schedule();
+      expect(owner(saved)).toMatchObject({ agent_member_id: target.agent_member_id,
+        issues: [{ issue_number: fixture.issueNumber, reason: "assigned_by_you" }] });
+      await info.attach(`agent-schedule-ui-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      const beforeStale = await fixture.monitorPreferencesBytes();
+      const stale = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
+      expect(stale.ok).toBe(false);
+      const afterStale = await fixture.monitorPreferencesBytes();
+      await info.attach("agent-schedule-stale-prefs", { body: JSON.stringify({
+        before: beforeStale.toString(), after: afterStale.toString(),
+      }, null, 2), contentType: "application/json" });
+      const plan = (bytes: Buffer) => {
+        const prefs = JSON.parse(bytes.toString());
+        return { agent_issue_schedule: prefs.agent_issue_schedule, agent_roster: prefs.agent_roster,
+          terminal_queues: Object.fromEntries(Object.entries(prefs.terminal_queues)
+            .map(([host, queue]) => [host, (queue as any).entries])) };
+      };
+      expect(plan(afterStale), "rejected stale move preserves canonical member plans and queue order").toEqual(plan(beforeStale));
+      expect(schedule()).toEqual(saved);
+      const gui = await request({ kind: "agent_schedule", action: { kind: "read" } }, "agent_schedule");
+      expect(gui.schedule, "GUI and JSON use the same canonical schedule").toEqual(saved);
+
+      const previousPid = fixture.ownedPid;
+      await current.close();
+      await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(previousPid);
+      current = await context.newPage();
+      capture(current);
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(owner(schedule()), "fresh GUI retains the reassigned member").toEqual(owner(saved));
+      const restoredPlans = await openMemberPlans(target.agent_member_id);
+      await expect(restoredPlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"] .roster-plan-reason`))
+        .toHaveText("Assigned by you");
+      await expect(current.getByRole("region", { name: "Main pane", exact: true }).locator(".roster-detail h3"))
+        .toHaveText(target.name);
+      expect(await fixture.launches(), "disabled Monitor stays idle across restart").toEqual([]);
+      await info.attach(`agent-schedule-ui-restored-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 90_000, message: "normal Monitor launches the reassigned queued Issue" }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      expect(launch.gwt_session_id).toBeTruthy();
+      expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      const session = () => readFile(join(fixture.home, ".gwt", "sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+      await expect.poll(async () => field(await session(), "agent_session_id"),
+        { timeout: 60_000, message: "authentic Session receives the provider SessionStart identity" }).toBe(launch.provider_session_id);
+      const record = await session();
+      expect(field(record, "id")).toBe(launch.gwt_session_id);
+      expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
+      expect(field(record, "agent_name")).toBe(target.name);
+      expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
+      fixture.auditHooks(launch.cwd);
+      await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch }, null, 2), contentType: "application/json" });
+      expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
+    } finally {
+      try { await current.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
+  test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings" });
+      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      await expect(issueWindow).toBeVisible();
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
+      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
+      const issues = issueWindow.locator('[data-settings-panel="issues"]');
+      const metric = issues.locator('[data-metric="active"]');
+      await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
+      const row = issues.locator(`[data-issue-number="${fixture.issueNumber}"]`);
+      await expect(row).toBeVisible({ timeout: 60_000 });
+      await row.dragTo(issues.locator('[data-queue-column="queued"] h3'));
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const activity = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .filter((item: any) => item.payload.projection?.local_agent_activity)
+        .at(-1)?.payload.projection.local_agent_activity);
+      await expect(metric).toHaveText("Active 1 · 1 issue · PM 0", { timeout: 60_000 });
+      const live = await activity();
+      const agent = live.agents.find((agent: any) => agent.session_id === launch.gwt_session_id);
+      expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
+      expect(agent.runtime_incarnation).toBeGreaterThan(0);
+      expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      await info.attach(`local-live-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      const main = page.getByRole("region", { name: "Main pane", exact: true });
+      await expect(main).toHaveAttribute("data-surface", "works");
+      const workRow = main.locator(`.work-row[data-window-id="${agent.window_id}"]`);
+      await expect(workRow.locator(".terminal-text-preview")).toBeVisible();
+      await workRow.getByRole("button", { name: "Open terminal", exact: true }).click();
+      await expect(main.locator(`.works-full .works-terminal[data-window-id="${agent.window_id}"] .xterm`)).toBeVisible();
+      const currentSurface = info.outputPath(`current-agent-surface-${theme}.png`);
+      await page.screenshot({ path: currentSurface });
+      await info.attach(`current-agent-surface-${theme}`, { path: currentSurface, contentType: "image/png" });
+      await page.locator('.op-rail__surface[data-surface="issues"]').click();
+      await expect(issueWindow).toBeVisible();
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => {
+        try { process.kill(launch.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000, message: "the exact provider child exited and was reaped" }).toBe(true);
+      await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
+      expect((await activity()).agents).toEqual([]);
+      await expect(issues.locator('[data-queue-column="active"] .knowledge-row')).toHaveCount(0);
+      await expect(row).toBeVisible();
+      await expect(row.locator('[data-action="focus-surface-window"]')).toHaveCount(0);
+      await expect(row).not.toContainText("Shown in Agents");
+      expect(errors, "zero console/page errors across the real child exit").toEqual([]);
+      await info.attach("local-live-exit", { body: JSON.stringify({ before: live, after: await activity(), launch }, null, 2), contentType: "application/json" });
+    } finally {
+      try {
+        const observations = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+          .filter(({ payload }: any) => payload.projection || payload.kind === "terminal_status")
+          .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind,
+            activity: payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
+        await info.attach("local-live-wire", { body: JSON.stringify({ observations, errors }, null, 2), contentType: "application/json" });
+      } finally {
+        // Close the client before its server so cleanup cannot trigger reconnect errors.
+        try { await page.close(); } finally { await fixture.stop(); }
+      }
+    }
+    expect(errors, "zero console/page errors including fixture cleanup").toEqual([]);
+  });
+
   test("Backlog drag launches once and Blocked generation stays stopped after app restart", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
@@ -93,11 +307,13 @@ test.describe("Issue queue real backend launch", () => {
       expect(restoreSummary.reasons).toContain("execution_blocked");
       await expect.poll(async () => (await agentWindow(restored))?.status,
         { timeout: 60_000, message: "Blocked Session keeps its stopped diagnostic window" }).toBe("stopped");
-      // The current Agents surface reparents terminals from hidden legacy
-      // canvas nodes. Open the real surface to inspect the retained diagnostic.
+      // The stopped diagnostic remains in the catalog; Works only shows live census members.
       await expect(restored.locator(`.workspace-window[data-id="${windowId}"]`)).toHaveCount(1);
-      await restored.locator('.op-rail__surface[data-surface="agents"]').click();
-      await expect(restored.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${windowId}"]`)).toBeVisible();
+      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      await expect(restored.locator(`.work-row[data-window-id="${windowId}"]`)).toHaveCount(0);
+      await expect(restored.locator(".works-empty")).toHaveText("No local agents are active.");
       expect(await fixture.launches(), "Blocked generation must not launch another provider after restore completes").toHaveLength(1);
       expect(fixture.executionStatus(launch.cwd).ecr_status).toBe("blocked");
       expect(errors, "console/page errors including app restart").toEqual([]);
@@ -247,12 +463,15 @@ test.describe("Issue queue real backend launch", () => {
       const successor = await freshWork();
       const retired = (await fixture.workItems()).work_items.find((work: any) => work.id === seed.successorId);
       expect(retired.discarded).toBe(true);
-      expect(retired.events.some((event: any) => event.id === `superseded-${seed.successorId}`
+      // Canonical branch-bound audits carry portable content identities.
+      expect(retired.events.some((event: any) => new RegExp(`^superseded-portable-${seed.successorId}-[0-9a-f]{64}$`).test(event.id)
         && event.kind === "discard" && event.related_work_item_id === seed.predecessorId)).toBe(true);
       expect(retired.events).toContainEqual(seed.orphan);
       expect(successor.id).not.toBe(seed.successorId);
       const start = successor.events.find((event: any) => event.kind === "start" && event.agent_session_id === fresh.gwt_session_id);
-      expect(JSON.parse(await readFile(fixture.eventShardPath(seed.worktree, start.id), "utf8"))).toEqual(start);
+      expect(JSON.parse(await readFile(fixture.eventShardPath(seed.worktree, start.id), "utf8"))).toEqual({
+        ...start, execution_container: { ...start.execution_container, worktree_path: "." },
+      });
       expect(start.owner).toBe(seed.orphan.owner);
       expect(start.execution_container.branch).toBe(seed.branch);
       expect(await realpath(start.execution_container.worktree_path)).toBe(seed.worktree);
@@ -262,11 +481,14 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => ["running", "idle"].includes((await agentWindow(restored, fresh.gwt_session_id!))?.status),
         { timeout: 60_000 }).toBe(true);
       const freshWindow = await agentWindow(restored, fresh.gwt_session_id!);
-      await restored.locator('.op-rail__surface[data-surface="agents"]').click();
-      await restored.getByRole("tab", { name: "All agents", exact: true }).click();
-      const tile = restored.locator(`.agents-surface:not(.agents-surface--preview) .agent-tile[data-agent-id="${freshWindow.id}"]`);
+      await restored.locator('.op-rail__surface[data-surface="works"]').click();
+      if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
+      const tile = restored.locator(`.work-row[data-window-id="${freshWindow.id}"]`);
       await expect(tile).toBeVisible();
-      await expect(tile.locator(".agent-tile__mode")).toHaveText("Interactive");
+      await tile.getByRole("button", { name: "Open terminal", exact: true }).click();
+      await expect(restored.locator(".works-full-meta")).toContainText("Interactive");
+      await expect(restored.locator(`.works-full .works-terminal[data-window-id="${freshWindow.id}"] .xterm-helper-textarea`)).toBeVisible();
       expect(errors, "console/page errors including cold restart and fresh launch").toEqual([]);
       await info.attach(`active-orphan-recovered-${theme}`, { body: await restored.screenshot(), contentType: "image/png" });
       await info.attach("active-orphan-recovery", { body: JSON.stringify({ execution, start,

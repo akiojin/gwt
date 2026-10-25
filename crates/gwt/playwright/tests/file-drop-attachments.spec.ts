@@ -27,7 +27,8 @@ test.describe("Browser file drop attachments", () => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
     await page.goto(fileDropAppUrl);
-    const tile = page.locator(".agent-tile[data-agent-id='agent-1']");
+    await openAgentWork(page);
+    const tile = page.locator(".works-terminal[data-window-id='agent-1']");
     await expect(tile).toBeVisible();
     const tileNode = await tile.elementHandle();
     const agent = page.locator(".workspace-window[data-id='agent-1']");
@@ -73,7 +74,8 @@ test.describe("Browser file drop attachments", () => {
     if (!fileDropBase) await installEmbeddedRoutes(page);
     await installFileDropBackend(page);
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
     await page.evaluate(() => window.__emitFileDropBackendEvent?.({
       kind: "terminal_status", id: "agent-1", status: "starting", detail: null,
     }));
@@ -115,9 +117,10 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
-    await dropTextFileOn(page, ".agent-tile[data-agent-id='agent-1'] .agent-tile__header", {
+    await dropTextFileOn(page, ".works-full-header", {
       name: "notes.txt",
       type: "text/plain",
       content: "hello from browser drop\n",
@@ -149,11 +152,11 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
-    await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
+    await openShell(page);
 
-    await dropTextFileOn(page, ".agent-tile[data-agent-id='shell-1'] .agent-tile__header", {
+    await dropTextFileOn(page, ".workspace-window[data-id='shell-1'] .titlebar", {
       name: "notes.txt",
       type: "text/plain",
       content: "shell drop\n",
@@ -172,11 +175,11 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
-    await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
+    await openShell(page);
 
-    await dropTextFileOn(page, ".agent-tile[data-agent-id='shell-1'] .terminal-root", {
+    await dropTextFileOn(page, ".workspace-window[data-id='shell-1'] .terminal-root", {
       name: "notes.txt",
       type: "text/plain",
       content: "shell root drop\n",
@@ -193,7 +196,8 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
     await page.evaluate((selector) => {
       const target = document.querySelector(selector);
@@ -218,7 +222,7 @@ test.describe("Browser file drop attachments", () => {
           dataTransfer: transfer,
         }),
       );
-    }, ".agent-tile[data-agent-id='agent-1'] .agent-tile__header");
+    }, ".works-full-header");
 
     const progress = page.locator(".attachment-progress");
     expect(
@@ -251,11 +255,11 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
-    await page.getByRole("tab", { name: "All agents", exact: true }).click();
-    await expect(page.locator(".agent-tile[data-agent-id='shell-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-id='shell-1']")).toBeAttached();
 
-    await dropTextFileOn(page, ".agent-tile[data-agent-id='agent-1'] .agent-tile__header", {
+    await dropTextFileOn(page, ".works-full-header", {
       name: "資料 日本語.txt",
       type: "text/plain",
       content: "nihongo filename\n",
@@ -272,10 +276,10 @@ test.describe("Browser file drop attachments", () => {
     });
 
     const agentProgress = page.locator(
-      ".agent-tile[data-agent-id='agent-1'] .attachment-progress",
+      ".works-terminal[data-window-id='agent-1'] .attachment-progress",
     );
     await expect(agentProgress).toBeVisible();
-    const tileBounds = (await page.locator(".agent-tile[data-agent-id='agent-1']").boundingBox())!;
+    const tileBounds = (await page.locator(".works-terminal[data-window-id='agent-1']").boundingBox())!;
     const progressBounds = (await agentProgress.boundingBox())!;
     expect(progressBounds.x).toBeGreaterThanOrEqual(tileBounds.x);
     expect(progressBounds.y).toBeGreaterThanOrEqual(tileBounds.y);
@@ -284,7 +288,7 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toContainText("資料 日本語.txt");
     await expect(agentProgress.locator(".attachment-progress__cancel")).toHaveCount(0);
     await expect(
-      page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress"),
+      page.locator(".workspace-window[data-id='shell-1'] .attachment-progress"),
     ).toHaveCount(0);
 
     await page.evaluate((operationId) => {
@@ -332,10 +336,11 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
     const agentProgress = page.locator(
-      ".agent-tile[data-agent-id='agent-1'] .attachment-progress",
+      ".works-terminal[data-window-id='agent-1'] .attachment-progress",
     );
 
     await emitAttachmentProgress(page, { operationId: "", phase: "failed", message: "ignored" });
@@ -360,7 +365,7 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toContainText("Injecting");
     await expect(progressbar).toHaveAttribute("aria-valuenow", "75");
     expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
-    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await expect(page.locator(".workspace-window[data-id='shell-1'] .attachment-progress")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("attachment-progress.png") });
 
     await emitAttachmentProgress(page, {
@@ -377,7 +382,7 @@ test.describe("Browser file drop attachments", () => {
     // Attached must never leave the surface stuck at `Queued · 100%`.
     await expect(agentProgress).toBeHidden();
     await expect(
-      page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress"),
+      page.locator(".workspace-window[data-id='shell-1'] .attachment-progress"),
     ).toHaveCount(0);
   });
 
@@ -388,10 +393,11 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
     const agentProgress = page.locator(
-      ".agent-tile[data-agent-id='agent-1'] .attachment-progress",
+      ".works-terminal[data-window-id='agent-1'] .attachment-progress",
     );
 
     await emitAttachmentProgress(page, {
@@ -427,7 +433,7 @@ test.describe("Browser file drop attachments", () => {
     await expect(agentProgress).toContainText("report.pdf");
     await expect(agentProgress).not.toContainText("disk full");
     expect(await agentProgress.evaluate((node, original) => node === original, surfaceNode)).toBe(true);
-    await expect(page.locator(".agent-tile[data-agent-id='shell-1'] .attachment-progress")).toHaveCount(0);
+    await expect(page.locator(".workspace-window[data-id='shell-1'] .attachment-progress")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("attachment-replacement.png") });
   });
 
@@ -436,7 +442,8 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page);
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
     await page.evaluate((selector) => {
       const target = document.querySelector(selector);
@@ -454,7 +461,7 @@ test.describe("Browser file drop attachments", () => {
           clipboardData: transfer,
         }),
       );
-    }, ".agent-tile[data-agent-id='agent-1'] .terminal-root");
+    }, ".works-terminal[data-window-id='agent-1']");
 
     const progress = page.locator(".attachment-progress");
     expect(
@@ -487,9 +494,10 @@ test.describe("Browser file drop attachments", () => {
     await installFileDropBackend(page, { failUploads: true });
 
     await page.goto(fileDropAppUrl);
-    await expect(page.locator(".agent-tile[data-agent-id='agent-1']")).toBeVisible();
+    await openAgentWork(page);
+    await expect(page.locator(".works-terminal[data-window-id='agent-1']")).toBeVisible();
 
-    await dropTextFileOn(page, ".agent-tile[data-agent-id='agent-1'] .agent-tile__header", {
+    await dropTextFileOn(page, ".works-full-header", {
       name: "notes.txt",
       type: "text/plain",
       content: "upload failure\n",
@@ -502,6 +510,19 @@ test.describe("Browser file drop attachments", () => {
     expect(await attachFilesMessages(page)).toEqual([]);
   });
 });
+
+async function openAgentWork(page: Page) {
+  await page.getByRole("button", { name: "Works", exact: true }).click();
+  const terminal = page.locator('.works-full .works-terminal[data-window-id="agent-1"]');
+  if (!await terminal.isVisible()) await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+  await expect(terminal).toBeVisible();
+}
+
+async function openShell(page: Page) {
+  await page.locator("#window-list-button").click();
+  await page.locator(".window-list-row").filter({ has: page.locator(".window-list-title", { hasText: "Shell" }) }).click();
+  await expect(page.locator('.workspace-window[data-id="shell-1"]')).toBeVisible();
+}
 
 async function dropTextFileOn(
   page,
@@ -683,6 +704,7 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: agentId,
+        session_id: id === "agent-1" ? "session-agent-1" : null,
         agent_color: agentId ? "cyan" : null,
         tab_group_id: null,
         tab_group_active: false,
@@ -704,6 +726,10 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState);
+          this.emit({ kind: "active_work_projection", projection: { id: "file-drop-live", active_works: [], local_agent_activity: {
+            project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "file-drop-fixture", observed_at: new Date().toISOString(),
+            agents: [{ window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null }],
+          } } });
         }, 0);
       }
 

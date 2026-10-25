@@ -109,7 +109,7 @@ export function createAgentCompletionNotifier({
 // in-app, always-on counterpart: the moment an agent transitions into a state
 // that wants the operator's eyes (needs_input / blocked / error / done), a
 // quiet in-app toast appears even while the operator is present. Clicking a
-// toast flies the camera to that window (frameWindow), so attention is one
+// toast selects that window in its surface (frameWindow), so attention is one
 // click from action. Pure controller: DOM rendering is injected via
 // `showToast`. The mapping keys off the runtime wire state, not the Living
 // Telemetry projection, so this stays independent of CSS state names.

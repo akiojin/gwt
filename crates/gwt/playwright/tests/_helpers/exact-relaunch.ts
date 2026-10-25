@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -34,7 +34,7 @@ export async function startExactRelaunchFixture(testInfo: TestInfo, setup: Exact
   const gwt = join(root, "target/debug/gwt");
   const gwtd = join(root, "target/debug/gwtd");
   await Promise.all([access(gwt), access(gwtd)]);
-  const home = await mkdtemp(join(tmpdir(), "gwt-exact-relaunch-"));
+  const home = await realpath(await mkdtemp(join(tmpdir(), "gwt-exact-relaunch-")));
   const bin = join(home, "bin");
   const state = join(home, ".gwt");
   const argvLog = join(home, "provider-argv.jsonl");
@@ -203,12 +203,24 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
+    const providerPaths = [join(bin, "codex"), join(bin, "claude")];
+    const providerPids: number[] = [];
     for (const launch of await launches()) {
       const command = spawnSync("ps", ["-p", String(launch.pid), "-o", "command="], { encoding: "utf8" });
-      if (command.stdout.includes(join(bin, "codex"))) {
+      if (providerPaths.some(path => command.stdout.includes(path))) {
+        providerPids.push(launch.pid);
         try { process.kill(launch.pid, "SIGTERM"); } catch { /* exited */ }
       }
     }
+    await Promise.all(providerPids.map(async pid => {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline) {
+        const command = spawnSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+        if (!providerPaths.some(path => command.stdout.includes(path))) return;
+        await delay(100);
+      }
+      throw new Error(`Fixture provider ${pid} remained after shutdown`);
+    }));
     if (ownedPid) {
       const remaining = spawnSync("ps", ["-p", String(ownedPid), "-o", "pid="], { encoding: "utf8" });
       await testInfo.attach("fixture-process-cleanup", { body: JSON.stringify({ pid: ownedPid, ps_status: remaining.status }), contentType: "application/json" });

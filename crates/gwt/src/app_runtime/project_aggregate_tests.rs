@@ -21,7 +21,7 @@ fn aggregate_test_runtime(root: &Path) -> AppRuntime {
                 WindowPreset::Shell,
                 WindowProcessStatus::Error,
             ));
-            tab.workspace = WindowCanvasState::from_persisted(persisted);
+            tab.workspace = WindowRegistry::from_persisted(persisted);
             tab
         })
         .collect();

@@ -1291,10 +1291,29 @@ pub fn startup_candidate_holder_identity(
         gwt_agent::SessionPathState::Missing => return Ok(None),
         gwt_agent::SessionPathState::Error(error) => return Err(error),
     };
+    // Lifecycle transitions leave the durable Session bound to an authentic
+    // earlier head. Read the owner ledger so missing worktree publications
+    // still reach the reaper's leased repair/revalidation below.
+    let Some(ledger) = load_owner_generation_ledger(&candidate.worktree, candidate.owner)? else {
+        return Ok(None);
+    };
+    let Some(current) = ledger.current_generation() else {
+        return Ok(None);
+    };
+    if execution_binding_for_generation(&ledger, current) != candidate.execution_binding {
+        return Ok(None);
+    }
     Ok(gwt_agent::SessionExecutionIdentity::from_session(&holder)
         .ok()
         .flatten()
-        .filter(|identity| identity.execution_binding.identity == candidate.execution_binding))
+        .filter(|identity| {
+            execution_binding_authorizes_lifecycle_descendant(
+                &ledger,
+                current,
+                &candidate.session_id,
+                &identity.execution_binding.identity,
+            )
+        }))
 }
 
 /// Issue #3457 / Issue #3472: identify the current generation's holder when no
@@ -1879,7 +1898,6 @@ pub fn reap_startup_defunct_active_generation(
         || candidate.session_id != expected_session.session_id
         || expected_session.execution_binding.owner_kind != candidate.owner.kind.as_str()
         || expected_session.execution_binding.owner_number != candidate.owner.number
-        || expected_session.execution_binding.identity != candidate.execution_binding
     {
         return Ok(StartupActiveGenerationReapOutcome::Unchanged);
     }
@@ -1963,6 +1981,12 @@ pub fn reap_startup_defunct_active_generation(
             || current.identity.worktree_binding_hash != context.worktree_binding_hash
             || strict.effective_status_for(&current) != ExecutionControlStatus::Active
             || execution_binding_for_generation(&strict, &current) != candidate.execution_binding
+            || !execution_binding_authorizes_lifecycle_descendant(
+                &strict,
+                &current,
+                &candidate.session_id,
+                &expected_session.execution_binding.identity,
+            )
             || current_generation_has_prepared_transaction(&strict, &current.identity.generation_id)
         {
             return Ok(StartupActiveGenerationReapOutcome::Unchanged);
@@ -12116,9 +12140,13 @@ fn complete_matching_build_lifecycle(
     if record.status != ExecutionControlStatus::Completed {
         return Ok(());
     }
-    crate::cli::verification_record::close_completed_work_event_obligation_locked(
-        worktree, record,
-    )?;
+    if let Err(error) =
+        crate::cli::verification_record::close_completed_work_event_obligation_locked(
+            worktree, record,
+        )
+    {
+        tracing::warn!(%error, "completed execution retains failed Work receipt cleanup for audit");
+    }
     let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
     else {
         return Ok(());
@@ -22204,13 +22232,48 @@ mod tests {
         crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
         let owner = generation_owner();
         let session_id = "owner-status-idle-holder";
-        let (candidate, identity) = startup_reaper_active_fixture_with_status(
+        let (_, identity) = startup_reaper_active_fixture_with_status(
             worktree.path(),
             owner,
             session_id,
             gwt_agent::AgentStatus::Idle,
         );
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        // Issue #5876: a same-Session recovery advances only the ledger head.
+        // Reproduce Issue #4777 without rebinding its durable Session/runtime.
+        let session_path = sessions_dir.join(format!("{session_id}.toml"));
+        let session_before = fs::read(&session_path).unwrap();
+        let active = load(worktree.path()).unwrap().unwrap();
+        settle(
+            worktree.path(),
+            session_id,
+            ExecutionSettlement::Blocked {
+                reason: "recoverable dependency".into(),
+                missing_verification: None,
+            },
+        )
+        .unwrap();
+        assert!(persist_generation_lifecycle_transition_if_owned(
+            worktree.path(),
+            &active,
+            ExecutionControlStatus::Blocked,
+            "same-Session recovery",
+        )
+        .unwrap());
+        assert_eq!(fs::read(&session_path).unwrap(), session_before);
+        let candidate = inspect_startup_active_generation_ledgers(&[worktree.path().to_path_buf()])
+            .candidates
+            .pop()
+            .unwrap();
+        assert_ne!(
+            candidate.execution_binding,
+            identity.execution_binding.identity
+        );
+        assert_eq!(
+            startup_candidate_holder_identity(&sessions_dir, &candidate).unwrap(),
+            Some(identity.clone()),
+            "the reaper must admit the unchanged holder after same-Session recovery"
+        );
         let dead_host_pid = i32::MAX as u32;
         gwt_agent::SessionRuntimeState::for_execution_process(
             gwt_agent::AgentStatus::Running,
@@ -33664,14 +33727,17 @@ exit 1
             assert!(message.contains("execution.adopt"), "{message}");
             assert!(!message.contains("network"), "{message}");
 
-            // The Stop gate keeps failing open on the same malformed state.
-            assert_eq!(
-                crate::cli::hook::execution_control_stop_check::handle_with_input(
-                    dir.path(),
-                    "{}",
-                    Some("sess-health"),
-                ),
-                crate::cli::hook::HookOutput::Silent
+            // The Stop gate warns while failing open on the same malformed state.
+            let output = crate::cli::hook::execution_control_stop_check::handle_with_input(
+                dir.path(),
+                "{}",
+                Some("sess-health"),
+            );
+            assert!(
+                matches!(&output, crate::cli::hook::HookOutput::SystemMessage(message)
+                    if message.contains("Execution control record is unreadable")
+                        && message.contains("Stop is not blocked")),
+                "{output:?}"
             );
         }
 
@@ -34578,6 +34644,7 @@ exit 1
             let home = tempfile::tempdir().unwrap();
             let _home = ScopedEnvVar::set("HOME", home.path());
             let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
             let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
             save(&fixture.repo, &active_record("sess-op")).unwrap();
@@ -34621,6 +34688,54 @@ exit 1
                 preserved.execution_binding,
                 foreign_receipt.execution_binding
             );
+
+            // Receipt cleanup must not strand a matching build after the
+            // execution has durably completed, even when the receipt is unreadable.
+            save(&fixture.repo, &active_record("sess-op")).unwrap();
+            save_build_state(&fixture.repo, "sess-op", Some(3248), true);
+            let receipt_path = crate::cli::trusted_store::trusted_dir_for_worktree(&fixture.repo)
+                .unwrap()
+                .join("work-event-settlement.json");
+            fs::write(&receipt_path, "{not json").unwrap();
+            let mut completed = None;
+            for _ in 0..2 {
+                let (code, out) = run_cmd(&fixture.repo, ExecutionCommand::Complete)
+                    .expect("receipt cleanup failure must not refuse completion");
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(
+                    load(&fixture.repo).unwrap().unwrap().status,
+                    ExecutionControlStatus::Completed
+                );
+                assert!(
+                    !gwt_core::skill_state::load(&fixture.repo, "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+                assert_eq!(fs::read_to_string(&receipt_path).unwrap(), "{not json");
+                let bytes = record_contents(&fixture.repo).unwrap();
+                if let Some(previous) = &completed {
+                    assert_eq!(
+                        &bytes, previous,
+                        "completion replay must preserve the record"
+                    );
+                }
+                completed = Some(bytes);
+            }
+            let completed_bytes = record_contents(&fixture.repo).unwrap();
+            let output = crate::cli::hook::event_dispatcher::handle_with_input(
+                "Stop",
+                "{}",
+                &fixture.repo,
+                Some("sess-op"),
+            )
+            .unwrap();
+            let crate::cli::hook::HookOutput::SystemMessage(message) = output else {
+                panic!("Stop must warn without blocking completed work: {output:?}");
+            };
+            assert!(message.contains("receipt is unreadable"), "{message}");
+            assert_eq!(record_contents(&fixture.repo).unwrap(), completed_bytes);
+            assert_eq!(fs::read_to_string(&receipt_path).unwrap(), "{not json");
         }
 
         #[test]
@@ -35292,6 +35407,13 @@ exit 1
             let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
             let dir = tempfile::tempdir().unwrap();
             crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+            // Establish the no-UI integration baseline before recording verification.
+            assert!(gwt_core::process::hidden_command("git")
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
             let owner = ExecutionOwnerKey {
                 kind: ExecutionOwnerKind::Spec,
                 number: 3248,

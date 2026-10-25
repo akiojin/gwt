@@ -2,467 +2,272 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseHTML } from "linkedom";
 import { readFileSync } from "node:fs";
+import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentsSurface } from "../agents-surface.js";
 
-const appSource = readFileSync(new URL("../app.js", import.meta.url), "utf8");
-const titleBody = appSource.match(/function windowDisplayTitle\(windowData\)\s*\{([\s\S]*?)\n      \}/)[1];
-const titleFromApp = new Function("windowData", "isAgentWindowPreset", "PM_WINDOW_TITLE", titleBody);
-const windowDisplayTitle = data => titleFromApp(data, preset => ["agent", "claude", "codex"].includes(preset), "Project Manager");
-
-async function fixture({ isMounted = () => true, storage } = {}) {
-  const { createUiStateStore } = await import("../ui-state-store.js");
-  const frames = new Set();
-  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
-  const model = createUiStateStore({ catalog: { windows: [], version: 0 } }, {
-    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); },
-  });
-  const { createAgentsSurface } = await import("../agents-surface.js");
+const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
+const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
+const members = [
+  { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+    { session_id: "s0", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
+  ] },
+  { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+];
+const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
+async function fixture({ onOpenWork = () => {}, schedule } = {}) {
   const { document, window } = parseHTML("<main></main>");
-  Object.defineProperty(window, "localStorage", { configurable: true, get: () => storage });
-  const mounted = [], focused = [], layouts = [];
-  const previews = new Set();
-  const surface = createAgentsSurface({ document, windowCatalogModel: model, windowDisplayTitle,
-    getWindows: catalog => catalog.windows, isMounted,
-    mountTerminal: (id, root) => { mounted.push([id, root]); if (!root.firstChild) root.appendChild(document.createElement("textarea")); },
-    mountPreview: (id, root) => {
-      const pre = document.createElement("pre");
-      pre.textContent = id;
-      root.appendChild(pre);
-      previews.add(pre);
-      return () => { previews.delete(pre); pre.remove(); };
-    },
-    onFocus: id => focused.push(id),
-    onLayout: () => layouts.push(true),
-  });
-  document.querySelector("main").appendChild(surface.element);
-  // Existing interaction cases observe a completed receive/render turn.
-  const setWindows = (windows, flushFrame = true) => {
-    model.update(state => ({ ...state, catalog: { windows, version: state.catalog.version + 1 } }));
-    if (flushFrame) flush();
-  };
-  return { surface, model, setWindows, frames, flush, document, window, focused, mounted, layouts, previews };
+  // linkedom does not track focus; keep that browser state local to this fixture.
+  let activeElement = null;
+  Object.defineProperty(document, "activeElement", { get: () => activeElement });
+  const createElement = document.createElement.bind(document);
+  document.createElement = (...args) => { const node = createElement(...args); node.focus = () => { activeElement = node; }; return node; };
+  const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
+  const rosterModel = createUiStateStore({ members, revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] }, options);
+  const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
+  const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
+  const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
+  const opened = [], rested = [], added = [], reassigned = [], refreshed = [];
+  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, scheduleModel, onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: () => added.push(true), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  document.querySelector("main").append(surface.element);
+  const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
+  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed };
 }
 
-const agents = [
-  { id: "one", preset: "codex", title: "One", agent_name: "One", session_id: "s1", status: "running" },
-  { id: "two", preset: "claude", title: "Two", agent_name: "Two", session_id: "s2", placement: { kind: "issue_preview" }, status: "running" },
-  { id: "three", preset: "agent", title: "Three", agent_name: "Three", status: "stopped" },
-  { id: "pm", preset: "claude", is_pm: true },
-];
-
-test("Agents batches catalog bursts, preserves synchronous navigation and cancels disposed frames", async () => {
-  let active = true;
-  const { surface, model, setWindows, frames, flush, document, mounted, focused } = await fixture({ isMounted: () => active });
-  setWindows([agents[0]]);
-  const terminal = surface.element.querySelector("textarea");
-  const host = document.createElement("aside");
-  document.querySelector("main").append(host);
-  surface.setPreviewHost(host);
-  const previewChip = host.querySelector(".status-chip");
-  const before = model.read();
-  const mounts = mounted.length;
-  const updates = Array.from({ length: 50 }, (_, index) => ({ ...agents[0], dynamic_title: `Burst ${index}` }));
-  for (const data of updates) {
-    setWindows([data], false);
-    surface.setPreviewHost(host); // Split synchronizes host ownership on receipt.
-  }
-  updates.at(-1).dynamic_title = "Uncommitted mutation";
-  assert.equal(model.read().catalog.windows[0].dynamic_title, "Burst 49");
-  assert.equal(before.catalog.windows[0].dynamic_title, undefined);
-  assert.equal(surface.element.querySelector("h3").textContent, "One", "receipt commits without rendering");
-  assert.equal(host.querySelector("h3").textContent, "One");
-  assert.ok(host.querySelector(".status-chip") === previewChip, "same-host synchronization must not bypass the frame");
-  assert.equal(mounted.length, mounts);
-  assert.equal(frames.size, 1);
-  flush();
-  assert.equal(mounted.length, mounts + 1, "one catalog sync mounts each retained terminal once");
-  for (const view of [surface.element, host.firstElementChild]) {
-    assert.equal(view.querySelector("h3").textContent, "One — Burst 49");
-    assert.equal(view.dataset.catalogVersion, String(model.read().catalog.version));
-  }
-  model.update(state => ({ ...state, unrelated: 1 }));
-  assert.equal(frames.size, 0, "unrelated slices do not schedule Agents");
-  assert.equal(surface.element.querySelector("textarea"), terminal);
-
-  setWindows(agents.slice(0, 2), false);
-  assert.equal(surface.openTab("two"), true, "new agents are selectable before the pending frame");
-  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
-  assert.equal(focused.at(-1), "two");
-  const afterNavigation = mounted.length;
-  flush();
-  assert.equal(mounted.length, afterNavigation, "the pending frame skips the synchronously rendered catalog");
-  // Rehosting terminals requires explicit sync even at the same catalog revision.
-  surface.sync();
-  assert.equal(mounted.length, afterNavigation + 2);
-
-  active = false;
-  setWindows([agents[0]]);
-  assert.equal(mounted.length, afterNavigation + 2, "inactive Agents do not rehost terminals");
-  active = true;
-  surface.sync();
-  assert.equal(surface.element.querySelectorAll(".agent-tile").length, 1);
-  setWindows(agents, false);
-  assert.equal(frames.size, 1);
-  surface.dispose();
-  assert.equal(frames.size, 0, "dispose cancels the reserved frame");
-  const disposedMounts = mounted.length;
-  flush();
-  assert.equal(mounted.length, disposedMounts);
-  assert.equal(host.childNodes.length, 0);
+test("Agents replaces the old terminal surface with the approved roster contract", () => {
+  assert.match(source, /rosterModel/);
+  assert.doesNotMatch(source, /agents-grid|agent-tile|All agents|Columns|openTab|localStorage|mountTerminal/);
 });
 
-test("Agents titles preserve a fixed name and scrollable purpose in cards, tabs and previews", async () => {
-  const { surface, setWindows, document } = await fixture();
-  const purpose = "Investigate the terminal output and deliver the smallest verified change. ".repeat(3);
-  const data = { ...agents[0], agent_name: "Lumen", dynamic_title: purpose.trim() };
-  setWindows([data]);
-  const host = document.createElement("div");
-  document.querySelector("main").appendChild(host);
-  surface.setPreviewHost(host);
-  const terminal = surface.element.querySelector("textarea");
-  for (const title of [surface.element.querySelector("h3"), document.getElementById("agents-tab-one"), host.querySelector("h3")]) {
-    assert.equal(title.querySelector(".agent-title__name")?.textContent, "Lumen");
-    assert.equal(title.querySelector(".agent-title__purpose")?.textContent, ` — ${purpose.trim()}`);
-    assert.equal(title.dataset.issueExplanation, title.textContent);
-    assert.equal(title.getAttribute("aria-label"), title.textContent);
-  }
-  assert.equal(surface.element.querySelector("h3").getAttribute("tabindex"), "0");
-  setWindows([{ ...data, agent_name: "Vireo", dynamic_title: "Updated purpose" }]);
-  for (const title of [surface.element.querySelector("h3"), document.getElementById("agents-tab-one"), host.querySelector("h3")]) {
-    assert.equal(title.querySelector(".agent-title__name").textContent, "Vireo");
-    assert.equal(title.dataset.issueExplanation, "Vireo — Updated purpose");
-  }
-  assert.equal(surface.element.querySelector("textarea"), terminal);
-  assert.match(surface.element.querySelector(".agent-tile__header").textContent, /Interactive/);
-  surface.dispose();
-});
-
-test("Agents title styles keep one line and constrain only the purpose scroll area", () => {
-  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
-  assert.match(css, /\.agent-title\s*\{[^}]*white-space:\s*nowrap/);
-  assert.match(css, /\.agent-title__name\s*\{[^}]*flex-shrink:\s*0/);
-  assert.match(css, /\.agent-title__purpose\s*\{[^}]*overflow-x:\s*auto/);
-  assert.match(css, /\.agent-tile__header\s*\{[^}]*flex-shrink:\s*0/);
-});
-
-test("provider runtime pushes update separate header, tab and preview chips without replacing terminals", async () => {
-  const { surface, setWindows, document } = await fixture();
-  const providers = agents.slice(0, 2);
-  setWindows(providers);
-  const host = document.createElement("div");
-  document.querySelector("main").appendChild(host);
-  surface.setPreviewHost(host);
-  const terminal = surface.element.querySelector("textarea");
-  for (const status of ["running", "waiting", "idle"]) {
-    setWindows(providers.map(data => ({ ...data, status })));
-    for (const data of providers) {
-      const tile = surface.element.querySelector(`[data-agent-id="${data.id}"]`);
-      const tab = document.getElementById(`agents-tab-${data.id}`);
-      const preview = host.querySelector(`[data-agent-id="${data.id}"]`);
-      for (const container of [tile.querySelector("header"), tab.parentElement, preview.querySelector("header")]) {
-        const chip = container.querySelector(".status-chip");
-        assert.ok(chip, `${data.preset} ${status} has a visible runtime chip`);
-        assert.equal(chip.querySelector(".status-label").textContent, status[0].toUpperCase() + status.slice(1));
-        assert.ok(chip.classList.contains(status));
-        assert.equal(chip.closest(".agent-title"), null, "state and agent name remain separate elements");
-      }
-      assert.equal(tab.textContent, data.agent_name);
-      assert.equal(tile.querySelector("h3").textContent, data.agent_name);
-    }
-    assert.equal(surface.element.querySelector("textarea"), terminal);
-  }
-  surface.dispose();
-});
-
-test("fleet counts keep live pane states authoritative over stale Work activity", async () => {
-  const { mapAgentTelemetryState, normalizeWindowRuntimeState, presetSupportsWaitingStatus } = await import("../window-runtime-state.js");
-  const body = appSource.match(/function recomputeOperatorTelemetry\(\)\s*\{([\s\S]*?)\n      \}/)[1];
-  const windows = [{ ...agents[0], status: "idle" }, { ...agents[1], status: "waiting" },
-    { id: "shell", preset: "shell", status: "running" }];
-  const panes = new Map(windows.map(data => [data.id, { dataset: { agentState: mapAgentTelemetryState(data.status) } }]));
-  const projection = { active_agents: 2, status_category: "active", active_works: [
-    { active_agents: 2, agents: windows.slice(0, 2).map(data => ({ window_id: data.id })) },
-  ] };
-  let counts;
-  new Function("window", "windowMap", "workspaceWindowById", "presetSupportsWaitingStatus", "activeWorkProjection",
-    "activeWorkItemsFromProjection", "allProjectWindowIds", "applyOperatorTelemetryCounts", "runtimeStateForWindow",
-    "mapAgentTelemetryState", body)(
-    { __operatorShell: { applyTelemetryCounts() {} } }, panes, id => windows.find(data => data.id === id),
-    presetSupportsWaitingStatus, projection, () => projection.active_works, () => windows.map(data => data.id),
-    value => { counts = value; }, data => normalizeWindowRuntimeState(data.status, data.preset), mapAgentTelemetryState,
-  );
-  assert.deepEqual({ running: counts.running, idle: counts.idle, waiting: counts.waiting, agents: counts.agents },
-    { running: 0, idle: 1, waiting: 1, agents: 2 });
-  assert.equal(counts.branches, 1, "Work projection still supplies its branch count");
-});
-
-test("Agents tiles, tabs and readonly preview acquire a late assigned name", async () => {
-  const { surface, setWindows, document } = await fixture();
-  const data = { ...agents[0], agent_name: null, dynamic_title: "Fix cache" };
-  setWindows([data]);
-  const host = document.createElement("div");
-  document.querySelector("main").appendChild(host);
-  surface.setPreviewHost(host);
-  assert.equal(surface.element.querySelector("h3").textContent, "Fix cache");
-  const terminal = surface.element.querySelector("textarea");
-  setWindows([{ ...data, agent_name: "Lumen" }]);
-  assert.equal(surface.element.querySelector("h3").textContent, "Lumen — Fix cache");
-  assert.equal(document.getElementById("agents-tab-one").textContent, "Lumen — Fix cache");
-  assert.equal(host.querySelector("h3").textContent, "Lumen — Fix cache");
-  assert.equal(surface.element.querySelector("textarea"), terminal);
-  surface.dispose();
-});
-
-test("Agents and its preview pull one catalog revision and release their subscription", async () => {
-  let active = false;
-  const { surface, model, setWindows, document, mounted } = await fixture({ isMounted: () => active });
-  setWindows(agents);
-  assert.equal(mounted.length, 0, "inactive Agents must not steal terminal hosts");
-  active = true;
-  surface.sync();
-  const host = document.createElement("div");
-  document.querySelector("main").appendChild(host);
-  surface.setPreviewHost(host);
-  assert.equal(surface.element.querySelectorAll(".agent-tile").length, 3);
-  const terminal = surface.element.querySelector("textarea");
-  setWindows([{ ...agents[0], dynamic_title: "Latest", status: "stopped" }]);
-  assert.equal(surface.element.querySelector("h3").textContent, "One — Latest");
-  assert.equal(host.querySelector("h3").textContent, "One — Latest");
-  assert.match(surface.element.textContent, /Input unavailable/);
-  assert.equal(surface.element.querySelector("textarea"), terminal);
-  for (const view of [surface.element, host.firstElementChild]) {
-    assert.equal(view.dataset.catalogVersion, String(model.read().catalog.version));
-  }
-  surface.sync([{ ...agents[0], dynamic_title: "Bypass" }]);
-  assert.equal(surface.element.querySelector("h3").textContent, "One — Latest", "a view cannot accept uncommitted payloads");
-  surface.dispose();
-  assert.equal(host.childNodes.length, 0);
-  const mounts = mounted.length;
-  setWindows(agents);
-  assert.equal(mounted.length, mounts, "disposed views no longer react");
-});
-
-test("Agents includes off-canvas agents, excludes PM and clamps the column spin control", async () => {
-  const { surface, setWindows, document, window, mounted } = await fixture();
-  setWindows(agents);
-  assert.equal(document.querySelectorAll(".agent-tile").length, 3);
-  assert.equal(mounted.length, 3);
-  const columns = document.querySelector("input[type=number]");
-  assert.equal(columns.getAttribute("min"), "1");
-  assert.equal(columns.getAttribute("max"), "4");
-  columns.value = "9";
-  columns.dispatchEvent(new window.Event("input"));
-  assert.equal(columns.value, "4");
-  assert.equal(document.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(4, minmax(0, 1fr))");
-  setWindows(agents.slice(0, 1));
-  assert.equal(document.querySelectorAll(".agent-tile").length, 1);
-});
-
-test("Agents restores Columns when recreated and normalizes saved values", async () => {
-  const saved = new Map();
-  const storage = { getItem: key => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) };
-  const first = await fixture({ storage });
-  const columns = first.surface.element.querySelector("input");
-  assert.equal(columns.value, "2", "missing preference keeps the existing default");
-  columns.value = "3";
-  columns.dispatchEvent(new first.window.Event("input"));
-  first.surface.dispose();
-  const restored = await fixture({ storage });
-  assert.equal(restored.surface.element.querySelector("input").value, "3");
-  assert.equal(restored.surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
-  restored.surface.dispose();
-  for (const [value, expected] of [["0", "1"], ["9", "4"], ["invalid", "1"]]) {
-    saved.set("gwt:ui:agent-columns", value);
-    const current = await fixture({ storage });
-    assert.equal(current.surface.element.querySelector("input").value, expected);
-    current.surface.dispose();
-  }
-});
-
-test("Agents keeps Columns usable when browser storage is unavailable", async () => {
-  const storage = { getItem() { throw new Error("unavailable"); }, setItem() { throw new Error("unavailable"); } };
-  const { surface, window } = await fixture({ storage });
-  const columns = surface.element.querySelector("input");
-  assert.equal(columns.value, "2");
-  columns.value = "3";
-  columns.dispatchEvent(new window.Event("input"));
-  assert.equal(surface.element.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
-  surface.dispose();
-});
-
-test("a second pane shares the agent selection as a readonly preview and cleans up subscriptions", async () => {
-  const { surface, setWindows, document, window, previews } = await fixture();
-  setWindows(agents);
-  const host = document.createElement("div");
-  document.querySelector("main").appendChild(host);
-  const textarea = surface.element.querySelector("textarea");
-  surface.setPreviewHost(host);
-  assert.equal(previews.size, 3);
-  assert.match(host.textContent, /Read-only preview/);
-  assert.equal(host.querySelectorAll("textarea, [role=tab]").length, 0);
-  document.getElementById("agents-tab-one").click();
-  assert.equal(host.querySelector('[data-agent-id="one"]').hidden, false);
-  assert.equal(host.querySelector('[data-agent-id="two"]').hidden, true);
-  setWindows(agents.map(data => data.id === "one" ? { ...data, dynamic_title: "Updated" } : data));
-  assert.match(host.textContent, /Updated/);
-  assert.equal(previews.size, 3);
-  document.querySelector('[aria-label="Close One — Updated tab"]').click();
-  assert.equal(host.querySelector('[data-agent-id="two"]').hidden, false, "closing the shared selection returns both panes to All agents");
-  const columns = surface.element.querySelector("input");
-  columns.value = "3";
-  columns.dispatchEvent(new window.Event("input"));
-  assert.equal(host.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(3, minmax(0, 1fr))");
-  setWindows(agents.slice(0, 1));
-  assert.equal(previews.size, 1);
-  assert.equal(host.querySelectorAll(".agent-tile").length, 1);
-  surface.setPreviewHost(null);
-  assert.equal(previews.size, 0);
-  assert.equal(host.childNodes.length, 0);
-  assert.equal(surface.element.querySelector("textarea"), textarea);
-});
-
-test("tiles keep terminal input as the only input path and report unavailable sessions", async () => {
-  const { surface, setWindows, document } = await fixture();
-  setWindows(agents);
-  const first = document.querySelector("[data-agent-id=one]");
-  assert.equal(document.querySelectorAll(".agent-tile form, .agent-tile__input").length, 0);
-  assert.ok(first.querySelector(".terminal-root textarea"));
-  assert.match(document.querySelector("[data-agent-id=three]").textContent, /Input unavailable/);
-  assert.match(first.textContent, /Interactive/);
-});
-
-test("launched and restored Shells are interactive without agent sessions and retain stopped status gating", async () => {
-  const { setWindows, document } = await fixture();
-  const shell = { id: "restored-shell", preset: "shell", title: "Shell", status: "running" };
-  const dedicated = { ...shell, id: "start-work-shell", surface_owner: "agents" };
-  setWindows([shell, dedicated, { id: "naming", preset: "codex", status: "running" },
-    { ...shell, id: "pm", is_pm: true }, { id: "console", preset: "console" },
-    { id: "unknown", preset: "unknown" }]);
-  const tile = document.querySelector('[data-agent-id="restored-shell"]');
-  assert.ok(tile, "restored Shell belongs to Agents");
-  assert.equal(document.querySelectorAll(".agent-tile").length, 3, "PM and non-terminal views stay outside Agents");
-  assert.match(document.querySelector('[data-agent-id="start-work-shell"]').textContent, /Interactive/);
-  const input = tile.querySelector("textarea");
-  assert.ok(input);
-  assert.match(tile.textContent, /Interactive/);
-  assert.match(document.querySelector('[data-agent-id="naming"]').textContent, /Input unavailable/, "ordinary agents still require their session");
-  setWindows([{ ...shell, status: "stopped" }]);
-  assert.match(tile.textContent, /Input unavailable/);
-  assert.equal(tile.querySelector("textarea"), input);
-});
-
-test("agent tabs select existing terminals, navigate with keys and return to the equal grid", async () => {
-  const { surface, setWindows, document, window, focused } = await fixture();
-  setWindows(agents);
-  const tabs = [...document.querySelectorAll('[role="tab"]')];
-  assert.deepEqual(tabs.map(tab => tab.textContent), ["All agents", "One", "Two", "Three"]);
-  const one = document.querySelector('[data-agent-id="one"]');
-  const terminal = one.querySelector(".terminal-root textarea");
-  tabs[2].click();
-  assert.equal(tabs[2].getAttribute("aria-selected"), "true");
-  assert.equal(tabs[2].getAttribute("tabindex"), "0");
-  assert.equal(one.hidden, true);
-  assert.equal(surface.contains("one"), true);
-  assert.equal(surface.isVisible("one"), false);
-  assert.equal(surface.isVisible("two"), true);
-  assert.deepEqual(focused, ["two"]);
-  const key = (target, value) => {
-    const event = new window.Event("keydown", { cancelable: true });
-    Object.defineProperty(event, "key", { value });
-    target.dispatchEvent(event);
+test("Agents identifies the exact PM before the implementation pool without adding a member", async () => {
+  const f = await fixture();
+  const pm = { id: "pm", session_id: "pm-session", agent_name: "Yuu", is_pm: true, status: "running" };
+  const withPm = name => {
+    const catalog = f.windowCatalogModel.read().catalog, project = catalog.appState.tabs[0];
+    f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: catalog.version + 1,
+      appState: { ...catalog.appState, tabs: [{ ...project, workspace: {
+        windows: [...project.workspace.windows.filter(window => window.id !== pm.id), { ...pm, agent_name: name }],
+      } }] } } }));
   };
-  key(tabs[2], "ArrowLeft");
-  assert.equal(tabs[1].getAttribute("aria-selected"), "true");
-  assert.equal(one.hidden, false);
-  assert.equal(one.querySelector(".terminal-root textarea"), terminal);
-  key(tabs[1], "Home");
-  assert.equal(tabs[0].getAttribute("aria-selected"), "true");
-  assert.ok(agents.slice(0, 3).every(agent => surface.isVisible(agent.id)));
-  assert.equal(document.querySelector(".agents-grid").style.gridTemplateColumns, "repeat(2, minmax(0, 1fr))");
+  withPm("Yuu");
+  f.activityModel.update(() => ({ count: 2, agents: [current,
+    { window_id: pm.id, session_id: pm.session_id, runtime_incarnation: 2, is_pm: true }] }));
+  f.flush();
+  const identity = f.surface.element.querySelector(".roster-pm-identity");
+  assert.ok(identity && !identity.hidden);
+  assert.equal(identity.getAttribute("role"), "group");
+  assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu");
+  assert.equal(identity.querySelector(".window-role-badge").textContent, "PM");
+  const children = [...f.surface.element.children];
+  assert.ok(children.indexOf(identity) < children.indexOf(f.surface.element.querySelector(".roster-team")));
+  assert.equal(identity.querySelectorAll("button").length, 0, "PM is not a selectable or restable member");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
+  assert.equal(f.surface.element.querySelectorAll(".roster-list .roster-row").length, 2);
+  assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
+  withPm("Yuu updated"); f.flush();
+  assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  f.activityModel.update(() => ({ count: 1, agents: [current] })); f.flush();
+  assert.equal(identity.hidden, true, "a stale PM catalog window cannot supply a live identity");
 });
 
-test("tab selection survives updates and falls back when the selected agent disappears", async () => {
-  const { surface, setWindows, document, layouts } = await fixture();
-  setWindows(agents);
-  const tab = [...document.querySelectorAll('[role="tab"]')].find(tab => tab.textContent === "Two");
-  assert.ok(tab, "each agent has a tab");
-  tab.click();
-  const layoutCount = layouts.length;
-  setWindows(agents.map(data => data.id === "two" ? { ...data, dynamic_title: "Updated" } : data));
-  assert.equal(layouts.length, layoutCount, "metadata updates do not trigger resize feedback");
-  assert.equal(tab.textContent, "Two — Updated");
-  assert.equal(tab.getAttribute("aria-selected"), "true");
-  setWindows(agents.filter(data => data.id !== "two"));
-  assert.equal(document.querySelector('[role="tab"]').getAttribute("aria-selected"), "true");
-  assert.equal(surface.isVisible("one"), true);
-  setWindows([]);
-  assert.equal(document.querySelectorAll('[role="tab"]').length, 1);
-  assert.equal(document.querySelector(".agents-empty").hidden, false);
+test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
+  const f = await fixture();
+  assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
+  assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
+  assert.equal(f.surface.element.querySelectorAll(".roster-row").length, 2);
+  assert.equal(f.surface.element.querySelectorAll(".roster-detail .roster-stat").length, 4);
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*GPT-6.*2026-10-20/s);
+  const history = [...f.surface.element.querySelectorAll(".roster-history li")];
+  assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
+  assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
+  assert.equal(f.surface.selectMember("m2"), true);
+  assert.ok(f.document.activeElement === f.surface.element.querySelector('.roster-row[data-member-id="m2"]'), "selection restores keyboard focus to the new selected row");
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-detail .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
+  assert.equal(f.surface.element.querySelector(".roster-detail .roster-open"), null, "idle members have no current terminal link");
+  assert.equal(f.surface.selectMember("missing"), false);
 });
 
-test("closing agent tabs preserves the live grid and reopens the same terminal", async () => {
-  const { surface, setWindows, document, window } = await fixture();
-  setWindows(agents);
-  const tab = id => document.getElementById(`agents-tab-${id}`);
-  const one = document.querySelector('[data-agent-id="one"]');
-  const terminal = one.querySelector("textarea");
-  const reopen = one.querySelector('[aria-label="Open One tab"]');
-  assert.equal(reopen.textContent, "Open tab", "reopening has a visible action label");
-  assert.equal(reopen.hidden, true, "open tabs already have a selection button");
-  tab("one").click();
-  const close = document.querySelector('[aria-label="Close One tab"]');
-  assert.ok(close, "each individual tab has a named close button");
-  assert.equal(close.closest('[role="tab"]'), null, "buttons are siblings, not nested");
-  close.click();
-  assert.equal(tab("one"), null);
-  assert.equal(tab("all").getAttribute("aria-selected"), "true");
-  assert.equal(surface.contains("one"), true);
-  assert.equal(surface.isVisible("one"), true, "All agents still shows the running agent");
-  assert.equal(reopen.hidden, false);
-  setWindows(agents);
-  assert.equal(tab("one"), null, "metadata updates do not reopen closed tabs");
-  document.querySelector('[aria-label="Open One tab"]').click();
-  assert.equal(tab("one").getAttribute("aria-selected"), "true");
-  assert.equal(one.querySelector("textarea"), terminal);
-  assert.equal(reopen.hidden, true);
-  document.querySelector('[aria-label="Close Two tab"]').click();
-  assert.equal(tab("one").getAttribute("aria-selected"), "true", "background close preserves selection");
-  const event = new window.Event("keydown", { cancelable: true });
-  Object.defineProperty(event, "key", { value: "Delete" });
-  tab("one").dispatchEvent(event);
-  assert.equal(event.defaultPrevented, true);
-  assert.equal(tab("one"), null);
-  assert.equal(tab("all").getAttribute("aria-selected"), "true");
-  setWindows(agents.filter(data => data.id !== "two"));
-  setWindows(agents);
-  assert.ok(tab("two"), "a newly arriving agent has an open tab");
-  assert.equal(document.querySelectorAll('[aria-label="Close All agents tab"]').length, 0);
+test("Agents current pill, row task and Now task open the exact assignment, while idle members only select", async () => {
+  const f = await fixture();
+  f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current').click();
+  f.surface.element.querySelector(".roster-now button").click();
+  const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
+  assert.equal(task.tagName, "BUTTON"); task.click();
+  assert.deepEqual(f.opened, [current, current, current]);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-purpose').tagName, "SPAN");
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-current'), null);
+  f.activityModel.update(() => ({ agents: [], count: 0 }));
+  f.surface.element.querySelector(".roster-now button").click();
+  task.click();
+  assert.equal(f.opened.length, 3, "links captured before the frame must recheck live membership");
+  f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
 });
 
-test("external tab selection reopens the same terminal and reports whether the agent exists", async () => {
-  const { surface, setWindows, document, focused } = await fixture();
-  setWindows(agents);
-  const terminal = document.querySelector('[data-agent-id="two"] textarea');
-  document.querySelector('[aria-label="Close Two tab"]').click();
-  assert.equal(surface.openTab("two"), true);
-  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
-  assert.equal(document.querySelector('[data-agent-id="two"] textarea'), terminal);
-  assert.equal(focused.at(-1), "two");
-  assert.equal(surface.openTab("pm"), false);
-  assert.equal(surface.openTab("missing"), false);
-  assert.equal(document.getElementById("agents-tab-two").getAttribute("aria-selected"), "true");
+const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
+  members: [{ agent_member_id: "m1", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }, { issue_number: 5004, reason: "assigned_by_you" }], empty_reason: null },
+    { agent_member_id: "m2", issues: [], empty_reason: "No queued issue" }] }, error: null, pending: false });
+
+function chooseTarget(f, issue = 5002) {
+  const entry = f.surface.element.querySelector(`.roster-plan[data-issue-number="${issue}"]`);
+  assert.ok(entry, "canonical plan has a reassignment control");
+  const select = entry.querySelector("select");
+  select.querySelector('option[value="m2"]').selected = true;
+  select.dispatchEvent(new f.window.Event("change"));
+  return entry.querySelector("button");
+}
+
+test("Agents inserts canonical ordered plans and reasons before history without inventing an idle assignment", async () => {
+  const f = await fixture({ schedule: planned() });
+  const section = f.surface.element.querySelector(".roster-plans");
+  assert.ok(section, "selected member shows canonical plans");
+  assert.ok(section.previousElementSibling.querySelector(".roster-now"), "current work precedes future plans");
+  assert.deepEqual([...section.querySelectorAll(".roster-plan")].map(node => node.dataset.issueNumber), ["5002", "5003", "5004"]);
+  assert.deepEqual([...section.querySelectorAll(".roster-plan-reason")].map(node => node.textContent), ["Same SPEC continuation", "Queue order", "Assigned by you"]);
+  assert.equal(section.nextElementSibling.className, "roster-history");
+  assert.equal(section.querySelector("select").getAttribute("aria-label"), "Assign issue #5002 to member");
+  assert.deepEqual([...section.querySelectorAll("select")[0].querySelectorAll("option")].map(node => node.value), ["", "m2"]);
+  f.surface.selectMember("m2");
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /No queued issue/);
+  assert.equal(f.surface.element.querySelector(".roster-plans select"), null);
+  assert.equal(f.surface.element.querySelector(".roster-now"), null);
 });
 
-test("the grid uses Operator tokens and contains the terminal inside each tile", () => {
-  const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
-  const surface = css.slice(css.indexOf("/* Issue 4777 T-4:"));
-  assert.match(surface, /grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(surface, /\.agent-tile \.agent-tile__terminal \{ position: relative; inset: auto;/);
-  assert.match(surface, /var\(--color-focus-ring\)/);
-  assert.match(surface, /\.agents-tabs/);
-  assert.match(surface, /\.agent-tile\[hidden\]/);
-  assert.match(surface, /\.agents-grid\.is-single > \.agent-tile \{ grid-area: 1 \/ 1;/);
-  assert.match(surface, /\.agent-tile\[hidden\] \{ display: flex; visibility: hidden;/);
-  assert.match(surface, /\.agents-tab-close/);
-  assert.match(surface, /\.agent-tile__open:focus-visible/);
-  assert.doesNotMatch(surface.replace(/\/\*[\s\S]*?\*\//g, ""), /#[a-f0-9]{3,8}\b|rgba?\(/i);
+test("Agents reassigns once with captured revisions and waits for canonical readback", async () => {
+  const f = await fixture({ schedule: planned() });
+  const button = chooseTarget(f); button.click(); button.click();
+  assert.deepEqual(f.reassigned, [{ kind: "reassign", issue_number: 5002, source_member_id: "m1", target_member_id: "m2", expected_roster_revision: 3, expected_queue_revision: "queue-v1:one", expected_schedule_revision: 7 }]);
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Updating plans/);
+  assert.equal(f.surface.element.querySelectorAll('.roster-plan[data-issue-number="5002"]').length, 1, "sending does not optimistically move the issue");
+  f.scheduleModel.update(state => ({ ...state, pending: true })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-plan select").disabled, true);
+  f.surface.element.querySelector('.roster-plans [data-action="refresh-plans"]').click();
+  assert.deepEqual(f.refreshed, [true], "Refresh remains reachable after response loss");
+  f.scheduleModel.update(state => ({ ...state, pending: false })); f.flush();
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-plans").textContent, /Updating plans/, "a canonical unchanged read releases the local response-loss guard");
+  chooseTarget(f).click(); assert.equal(f.reassigned.length, 2);
+  f.scheduleModel.update(state => ({ ...state, pending: false, snapshot: { ...state.snapshot, schedule_revision: 8, members: [
+    { agent_member_id: "m1", issues: state.snapshot.members[0].issues.slice(1), empty_reason: null },
+    { agent_member_id: "m2", issues: [state.snapshot.members[0].issues[0]], empty_reason: null },
+  ] } })); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]'), null);
+  f.surface.selectMember("m2");
+  assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]')?.dataset.issueNumber, "5002");
+});
+
+test("Agents refuses stale plan controls and preserves plans with Refresh recovery on errors", async () => {
+  const f = await fixture({ schedule: planned() });
+  const stale = chooseTarget(f);
+  f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, schedule_revision: 8 } }));
+  stale.click();
+  assert.equal(f.reassigned.length, 0);
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /changed.*Refresh/i);
+  f.scheduleModel.update(state => ({ ...state, error: "Readback unavailable", pending: false })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Readback unavailable/);
+  assert.equal(f.surface.element.querySelector(".roster-plan button").disabled, true);
+  assert.equal(f.surface.element.querySelectorAll(".roster-plan").length, 3);
+  f.surface.element.querySelector('.roster-plans [data-action="refresh-plans"]').click();
+  assert.deepEqual(f.refreshed, [true]);
+  f.scheduleModel.update(() => planned()); f.rosterModel.update(state => ({ ...state, revision: 4 })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-plan button").disabled, true);
+  f.scheduleModel.update(() => ({ snapshot: null, error: null, pending: false })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Plans unavailable/);
+});
+
+test("Agents planned controls use Operator styles and stay inert in split previews", async () => {
+  const f = await fixture({ schedule: planned() }), host = f.document.createElement("aside");
+  f.document.querySelector("main").append(host); f.surface.setPreviewHost(host);
+  assert.ok(host.querySelector("select"));
+  assert.equal(host.querySelector("select:not([disabled])"), null);
+  assert.match(styles, /\.roster-plan-controls\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(styles, /\.agents-surface select\s*\{[^}]*var\(--color-/s);
+  assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.doesNotMatch(source, /role=["']dialog|modal-backdrop|position:\s*fixed/);
+  f.surface.dispose();
+});
+
+test("Agents keeps a selected plan control and keyboard focus across unrelated catalog and usage updates", async () => {
+  const f = await fixture({ schedule: planned() }); chooseTarget(f);
+  const section = f.surface.element.querySelector(".roster-plans"), select = section.querySelector("select"), button = section.querySelector(".roster-plan button");
+  select.focus();
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } }));
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, tokens: 6000 })) })); f.flush();
+  assert.ok(f.surface.element.querySelector(".roster-plans") === section, "unchanged plan controls remain attached while surrounding details refresh");
+  assert.ok(section.querySelector("select") === select);
+  assert.equal(select.value, "m2"); assert.equal(button.disabled, false);
+  assert.ok(select.isConnected); assert.ok(f.document.activeElement === select);
+  f.surface.dispose();
+});
+
+test("Agents add and rest actions target a member and Past shows measured contributor data", async () => {
+  const f = await fixture();
+  f.surface.element.querySelector('[data-action="add"]').click();
+  f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
+  assert.deepEqual(f.added, [true]); assert.deepEqual(f.rested, ["m1"]);
+  f.surface.element.querySelector('[data-tab="past"]').click();
+  assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
+  assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
+  assert.equal(f.surface.element.querySelectorAll(".roster-past .roster-stat").length, 4);
+});
+
+test("Agents batches shared updates, keeps stable member selection, and releases read-only previews", async () => {
+  const f = await fixture(); const host = f.document.createElement("aside"); f.document.querySelector("main").append(host);
+  f.surface.selectMember("m2"); f.surface.setPreviewHost(host);
+  for (let i = 0; i < 8; i++) f.rosterModel.update(state => ({ ...state, members: state.members.map(m => m.member_id === "m2" ? { ...m, name: `Member ${i}` } : m) }));
+  assert.equal(f.frames.size, 1); assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Two/);
+  f.flush(); assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Member 7/);
+  assert.match(host.textContent, /Member 7/);
+  assert.equal(host.querySelector("button:not([disabled])"), null);
+  f.rosterModel.update(state => ({ ...state, error: "Read unavailable", past_complete: false })); f.flush();
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-past-kpis .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
+  assert.match(f.surface.element.textContent, /Read unavailable/);
+  f.activityModel.update(() => ({ agents: [], count: null })); f.surface.selectMember("m1"); f.flush();
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Activity unavailable/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current, .roster-detail .roster-open'), null);
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Activity unavailable/);
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m2"]').textContent, /Waiting for the next issue/);
+  f.surface.dispose(); assert.equal(host.childNodes.length, 0); assert.equal(f.frames.size, 0);
+});
+
+
+test("a resting busy member remains reachable from Works until its exact assignment ends", async () => {
+  let workSurface;
+  const f = await fixture({ onOpenWork: assignment => workSurface.openWork(assignment) });
+  f.surface.selectMember("m2");
+  f.rosterModel.update(state => ({ ...state, capacity: 1, members: [
+    ...state.members.map(member => member.member_id === "m1" ? { ...member, enabled: false } : member),
+    { member_id: "rested-idle", name: "Rested idle", enabled: false, assignment: null, history: [] },
+  ] })); f.flush();
+  const { createWorksSurface } = await import("../works-surface.js");
+  workSurface = createWorksSurface({ document: f.document, windowCatalogModel: f.windowCatalogModel, activityModel: f.activityModel, rosterModel: f.rosterModel,
+    windowDisplayTitle: data => data.dynamic_title || data.title || "Agent", mountTerminal() {}, mountPreview() { return () => {}; },
+    onSelectMember: id => f.surface.selectMember(id) });
+  f.document.querySelector("main").append(workSurface.element); workSurface.sync();
+  workSurface.element.querySelector(".work-member").click();
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]')?.getAttribute("aria-selected"), "true");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "1");
+  assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Resting.*Finishing/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="rested-idle"]'), null);
+  assert.equal(f.surface.element.querySelector('.roster-detail [data-action="rest"]').disabled, true);
+  f.surface.element.querySelector(".roster-now button").click();
+  assert.deepEqual(f.opened, [current]); assert.equal(workSurface.isVisible("one"), true);
+  f.activityModel.update(() => ({ agents: [], count: 0 })); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"]'), null);
+  workSurface.dispose(); f.surface.dispose();
+});
+
+
+test("an observation timestamp alone preserves roster detail, controls and selection", async () => {
+  const f = await fixture();
+  const detail = f.surface.element.querySelector(".roster-detail").firstElementChild;
+  const currentControl = f.surface.element.querySelector(".roster-now button");
+  const row = f.surface.element.querySelector('.roster-row[data-member-id="m1"]');
+  for (let i = 0; i < 8; i++) f.activityModel.update(state => ({ ...state, snapshot: { observed_at: `2026-10-25T00:00:0${i}Z` } }));
+  assert.equal(f.frames.size, 0, "census watermarks do not schedule presentation work");
+  f.flush();
+  assert.ok(f.surface.element.querySelector(".roster-detail").firstElementChild === detail);
+  assert.ok(f.surface.element.querySelector(".roster-now button") === currentControl);
+  assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row);
+  assert.equal(row.getAttribute("aria-selected"), "true");
+  f.surface.dispose();
 });

@@ -2314,6 +2314,29 @@ impl AppRuntime {
         let Some(window_id) = window_id else {
             return events;
         };
+        if event.source_event.as_deref()
+            == Some(gwt::daemon_runtime::PM_STATUS_CHANGED_SOURCE_EVENT)
+        {
+            // This authored-status notification must preserve provider state and approval latches.
+            let Some(session) = self
+                .active_agent_sessions
+                .get(&window_id)
+                .filter(|session| {
+                    event.kind == gwt::RuntimeHookEventKind::CoordinationEvent
+                        && event.status.is_none()
+                        && event.gwt_session_id.as_deref() == Some(session.session_id.as_str())
+                })
+            else {
+                return events;
+            };
+            let Some(tab) = self.tab(&session.tab_id).filter(|tab| {
+                self.pm_session_for_root(&tab.project_root) == Some(&session.session_id)
+            }) else {
+                return events;
+            };
+            events.extend(self.refresh_active_work_projection_for_project_root(&tab.project_root));
+            return events;
+        }
         self.observe_issue_monitor_startup_activity(&window_id, &event);
         let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
         let effective_before = self.window_status(&window_id);

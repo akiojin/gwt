@@ -23,12 +23,12 @@ use tokio_tungstenite::{
 use base64::Engine;
 use chrono::{TimeZone, Utc};
 use gwt::{
-    empty_workspace_state, load_restored_workspace_state, load_session_state, load_workspace_state,
-    refresh_managed_gwt_assets_for_worktree, save_workspace_state, workspace_state_path,
-    ArrangeMode, BackendEvent, BranchCleanupInfo, BranchListEntry, BranchScope, ContentLimits,
-    FocusCycleDirection, FrontendEvent, LaunchWizardAction, LaunchWizardContext, LaunchWizardState,
-    LinkedIssueKind, LogScopeSelection, ProfileEnvEntryView, ProjectKind, UiTracePayload,
-    WindowCanvasState, WindowGeometry, WindowPlacement, WindowPreset, WindowProcessStatus,
+    empty_workspace_state, load_workspace_state, refresh_managed_gwt_assets_for_worktree,
+    save_workspace_state, workspace_state_path, BackendEvent, BranchCleanupInfo, BranchListEntry,
+    BranchScope, ContentLimits, FocusCycleDirection, FrontendEvent, LaunchWizardAction,
+    LaunchWizardContext, LaunchWizardState, LinkedIssueKind, LogScopeSelection,
+    ProfileEnvEntryView, ProjectKind, UiTracePayload, WindowPlacement, WindowPreset,
+    WindowProcessStatus, WindowRegistry,
 };
 use gwt_config::{Profile, Settings};
 use gwt_core::{
@@ -79,22 +79,20 @@ use super::{
     AttachmentProgressPhase, BlockingTaskSpawner, BlockingTestTaskQueue, CachedContinueWorkOutcome,
     ContinueWorkReadinessWatch, DispatchTarget, IssueMonitorProfileSaveContext,
     KnowledgeLoadRequest, KnowledgeRefreshTask, KnowledgeSearchRequest, LaunchFeedbackContext,
-    LaunchPaneDisposition, LaunchWizardMemoryCache, LaunchWizardSession,
-    LocalIssueMonitorEffectOutcome, OutboundEvent, PendingContinueWork,
-    PendingContinueWorkExecution, PendingFreshExecutionLaunch, PreparedProjectSwitch,
-    ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenControlFailure,
-    ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision, ReadinessPaneEvidence,
-    RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent, WindowAddress,
-    WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
+    LaunchWizardMemoryCache, LaunchWizardSession, LocalIssueMonitorEffectOutcome, OutboundEvent,
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    PreparedProjectSwitch, ProcessLaunch, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenControlFailure, ProjectOpenReply, ProjectTabRuntime, ReadinessDeadlineDecision,
+    ReadinessPaneEvidence, RecentProjectKeysResolved, ScheduledIssueMonitorScanOutcome, UserEvent,
+    WindowAddress, WindowRuntime, WorkspaceLaunchProjectionKind, WorkspaceResumeContext,
 };
 use crate::app_runtime::initial_project_tab_incarnations;
 use crate::embedded_server::{
     prepare_outbound_event, AgentPmSendResponder, ClientQueue, DrainStep,
 };
 use crate::{
-    combined_window_id, geometry_to_pty_size, same_worktree_path, AgentFrontendRequest,
-    AgentSelfCloseResponder, AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry,
-    UploadedAttachment,
+    combined_window_id, same_worktree_path, AgentFrontendRequest, AgentSelfCloseResponder,
+    AgentSessionPrincipal, AttachmentUploadStore, PtyWriterRegistry, UploadedAttachment,
 };
 
 #[test]
@@ -864,15 +862,6 @@ fn pin_runtime_agents(runtime: &AppRuntime, temp_root: &Path, extra_env: &[(&str
     );
 }
 
-fn canvas_bounds() -> WindowGeometry {
-    WindowGeometry {
-        x: 0.0,
-        y: 0.0,
-        width: 1400.0,
-        height: 900.0,
-    }
-}
-
 fn sample_window(
     raw_id: &str,
     preset: WindowPreset,
@@ -882,16 +871,9 @@ fn sample_window(
         id: raw_id.to_string(),
         title: "Sample".to_string(),
         preset,
-        geometry: WindowGeometry {
-            x: 0.0,
-            y: 0.0,
-            width: 640.0,
-            height: 420.0,
-        },
-        geometry_revision: 0,
         z_index: 1,
         status,
-        placement: WindowPlacement::Canvas,
+        placement: WindowPlacement::Surface,
         persist: true,
         purpose_title: None,
         dynamic_title: None,
@@ -900,8 +882,6 @@ fn sample_window(
         agent_name: None,
         agent_color: None,
         worktree_form: gwt::WindowWorktreeForm::Unknown,
-        tab_group_id: None,
-        tab_group_active: false,
         session_id: None,
         linked_issue_number: None,
         runtime_started_at_ms: None,
@@ -942,7 +922,7 @@ fn sample_project_tab_with_window_at(
         title: "Repo".to_string(),
         project_root,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     }
@@ -955,9 +935,9 @@ fn sample_project_tab(
     kind: ProjectKind,
     presets: &[WindowPreset],
 ) -> ProjectTabRuntime {
-    let mut workspace = WindowCanvasState::from_persisted(empty_workspace_state());
+    let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
     for preset in presets {
-        let _ = workspace.add_window(*preset, canvas_bounds());
+        let _ = workspace.add_window(*preset);
     }
     ProjectTabRuntime {
         id: tab_id.to_string(),
@@ -1237,7 +1217,7 @@ fn runtime_hook_coordination_event(session_id: &str) -> gwt::RuntimeHookEvent {
     }
 }
 
-fn sample_runtime(
+pub(super) fn sample_runtime(
     temp_root: &Path,
     tabs: Vec<ProjectTabRuntime>,
     active_tab_id: Option<&str>,
@@ -2224,14 +2204,11 @@ fn dispatch_launch_materialization_request(
         wizard_id,
         client_id,
         config,
-        bounds,
     } = request
     else {
         unreachable!("matched above")
     };
-    runtime.handle_launch_wizard_launch_materialization_requested(
-        wizard_id, client_id, *config, bounds,
-    )
+    runtime.handle_launch_wizard_launch_materialization_requested(wizard_id, client_id, *config)
 }
 
 fn resolve_launch_wizard_runtime_confirmation(
@@ -2239,11 +2216,8 @@ fn resolve_launch_wizard_runtime_confirmation(
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
     label: &str,
 ) {
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        None,
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     assert_eq!(events.len(), 1);
     let pending_view = runtime
         .project_state(&runtime.test_context())
@@ -2324,7 +2298,7 @@ fn sample_launch_wizard_session(tab_id: &str, project_root: &Path) -> LaunchWiza
         ),
         workspace_resume_context: None,
         agent_kanban_target: None,
-        auto_submit_after_runtime_resolution: None,
+        auto_submit_after_runtime_resolution: false,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
         origin: super::LaunchWizardOrigin::ManualLaunchAgent,
@@ -2595,7 +2569,7 @@ fn sample_no_agent_launch_wizard_session(tab_id: &str, project_root: &Path) -> L
         ),
         workspace_resume_context: None,
         agent_kanban_target: None,
-        auto_submit_after_runtime_resolution: None,
+        auto_submit_after_runtime_resolution: false,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
         origin: super::LaunchWizardOrigin::ManualLaunchAgent,
@@ -2670,7 +2644,7 @@ fn sample_start_work_confirm_session(tab_id: &str, project_root: &Path) -> Launc
         wizard,
         workspace_resume_context: None,
         agent_kanban_target: None,
-        auto_submit_after_runtime_resolution: None,
+        auto_submit_after_runtime_resolution: false,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
         origin: super::LaunchWizardOrigin::StartWork,
@@ -2722,7 +2696,7 @@ fn sample_ready_agent_launch_wizard_session(
         ),
         workspace_resume_context: None,
         agent_kanban_target: None,
-        auto_submit_after_runtime_resolution: None,
+        auto_submit_after_runtime_resolution: false,
         issue_monitor_profile_save: None,
         issue_monitor_launch_issue_number: None,
         origin: super::LaunchWizardOrigin::ManualLaunchAgent,
@@ -2907,11 +2881,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
     settle_test_pane_child(&runtime, &holder_window_id);
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -2978,8 +2948,7 @@ fn assert_manual_launch_action_rejects_replaced_runtime(action: StaleManualHolde
             window_id: holder_window_id.clone(),
         },
     };
-    let events =
-        runtime.handle_launch_wizard_action(&runtime.test_context(), action, Some(canvas_bounds()));
+    let events = runtime.handle_launch_wizard_action(&runtime.test_context(), action);
 
     let current_runtime = runtime
         .runtimes
@@ -3102,7 +3071,10 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         },
     )
     .expect("save Auto prefs");
+    let machine_policy_before =
+        gwt::machine_agent_settings::ensure_migrated().expect("saved machine policy");
     let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+    let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .working_dir(&repo)
         .build();
@@ -3110,13 +3082,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
 
-    let rejected = runtime.spawn_agent_window_with_feedback(
-        "tab-1",
-        config.clone(),
-        canvas_bounds(),
-        None,
-        feedback.clone(),
-    );
+    let rejected =
+        runtime.spawn_agent_window_with_feedback("tab-1", config.clone(), None, feedback.clone());
     assert!(rejected.is_err_and(|reason| reason.contains("max_active")));
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
     assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
@@ -3164,10 +3131,9 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         serde_json::to_vec(&exhausted_snapshot).expect("serialize exhausted capacity"),
     )
     .expect("lower shared capacity after preparation");
-    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission_at_geometry(
+    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission(
         "tab-1",
         config.clone(),
-        canvas_bounds(),
         None,
         feedback.clone(),
         prepared,
@@ -3178,6 +3144,7 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         "a changed shared capacity must invalidate prepared admission"
     );
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
 
     fs::write(
         machine_state.join("agent-capacity.json"),
@@ -3189,13 +3156,8 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         .prepare()
         .expect("prepare current shared capacity again");
     runtime
-        .spawn_agent_window_with_prepared_monitor_admission_at_geometry(
-            "tab-1",
-            config,
-            canvas_bounds(),
-            None,
-            feedback,
-            prepared,
+        .spawn_agent_window_with_prepared_monitor_admission(
+            "tab-1", config, None, feedback, prepared,
         )
         .expect("fresh shared capacity admits the proposed Monitor pane");
     assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
@@ -3206,7 +3168,28 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
         .unwrap()
         .next()
         .is_none());
-    assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+    // Valid admission materializes the persistent roster before provider
+    // preparation. A later provider failure must release its reservation and
+    // preserve machine policy and every unrelated project preference.
+    let mut after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    let roster = after
+        .agent_roster
+        .take()
+        .expect("first valid admission initializes the roster");
+    assert_eq!(roster.enabled_count(), 1);
+    assert_eq!(after.max_active_agents, roster.enabled_count());
+    assert!(roster
+        .members
+        .iter()
+        .all(|member| member.assignment.is_none()));
+    // The roster owns the requested count; legacy on-disk compatibility
+    // mirrors are not additional project settings.
+    prefs_before_typed.max_active_agents = roster.enabled_count();
+    assert_eq!(after, prefs_before_typed);
+    assert_eq!(
+        gwt::machine_agent_settings::load().unwrap(),
+        Some(machine_policy_before)
+    );
 }
 
 #[test]
@@ -3284,6 +3267,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
         let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
+        let prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(&repo)
             .linked_issue_number(42)
@@ -3301,7 +3285,6 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             runtime.spawn_agent_window(
                 "tab-1",
                 config,
-                canvas_bounds(),
                 Some(WorkspaceResumeContext {
                     title: Some("Implementation Work".to_string()),
                     owner: Some("Issue #42".to_string()),
@@ -3310,13 +3293,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 }),
             )
         } else {
-            runtime.spawn_agent_window_with_feedback(
-                "tab-1",
-                config,
-                canvas_bounds(),
-                None,
-                feedback,
-            )
+            runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback)
         };
         if case == "active" {
             assert!(
@@ -3345,7 +3322,25 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             assert!(completion.is_err_and(|reason| reason.detail.contains("config parse error")));
         }
         assert!(runtime.runtimes.is_empty());
-        assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+        let prefs_after = fs::read(&prefs_path).unwrap();
+        if case == "expired" || case == "invalidated" {
+            let mut after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+            let roster = after
+                .agent_roster
+                .take()
+                .expect("admitted implementation initializes its roster");
+            assert_eq!(roster.enabled_count(), 3);
+            assert!(roster
+                .members
+                .iter()
+                .all(|member| member.assignment.is_none()));
+            assert_eq!(after, prefs_before_typed);
+        } else {
+            assert_eq!(
+                prefs_after, prefs_before,
+                "wait/review must not mutate the roster"
+            );
+        }
     }
 }
 
@@ -3386,8 +3381,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     let mut feedback = issue_monitor_feedback(43);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result =
-        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
     assert!(
         result
             .as_ref()
@@ -3444,8 +3438,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     let mut feedback = issue_monitor_feedback(43);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result =
-        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
     assert!(
         result
             .as_ref()
@@ -3473,8 +3466,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_project_root = Some(repo);
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result =
-        runtime.spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback);
+    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
     assert!(
         result
             .as_ref()
@@ -4234,7 +4226,6 @@ fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_bran
         "client-projection-prepared-spec",
         operation_id.to_string(),
         work_id.clone(),
-        canvas_bounds(),
     );
     let pending = runtime
         .pending_continue_work
@@ -4310,7 +4301,6 @@ fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_bran
         "client-projection-prepared-spec-retry",
         operation_id.to_string(),
         work_id,
-        canvas_bounds(),
     );
 
     if divergent_candidate_branch {
@@ -4409,7 +4399,6 @@ fn assert_projection_only_continue_rejection(
         "client-invalid-projection",
         format!("operation-{case_name}"),
         work_id,
-        canvas_bounds(),
     );
 
     assert!(
@@ -4886,7 +4875,6 @@ fn continue_work_activated_successor_recovery_case(
             "client-busy-retry",
             operation_id.to_string(),
             work_id.to_string(),
-            canvas_bounds(),
         );
         let message = busy_events
             .iter()
@@ -4930,7 +4918,6 @@ fn continue_work_activated_successor_recovery_case(
             "client-retry",
             operation_id.to_string(),
             work_id.to_string(),
-            canvas_bounds(),
         );
         let busy = events.iter().any(|event| matches!(
             &event.event,
@@ -6789,7 +6776,7 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
             .tab_mut("tab-1")
             .unwrap()
             .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds());
+            .add_window(WindowPreset::Agent);
         assert_eq!(replacement.id, failed_raw_id, "closed highest ID is reused");
         runtime.register_window("tab-1", &replacement.id);
     }
@@ -7785,7 +7772,7 @@ fn save_agent_settings_sets_in(
     recorded_events: &Arc<Mutex<Vec<UserEvent>>>,
     describe_repository: impl FnOnce(&mut gwt::LaunchWizardHydration),
 ) -> Vec<OutboundEvent> {
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
         "agent settings runtime resolution",
         recorded_events,
@@ -7817,10 +7804,10 @@ fn save_agent_settings_sets_in(
     let mut hydration = result.expect("runtime context resolves");
     describe_repository(&mut hydration);
     runtime.handle_launch_wizard_runtime_resolved(wizard_id, Ok(hydration));
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None);
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     // These cases verify saved settings and conflicts, not the save deadline.
     let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit, None)
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit)
 }
 
 // ---------------------------------------------------------------------
@@ -7841,7 +7828,7 @@ fn apply_title_sync_setup_tab_and_runtime(
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -7989,7 +7976,7 @@ fn active_work_off_loop_setup(
         title: "Repo".to_string(),
         project_root: repo.to_path_buf(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(tab_workspace),
+        workspace: WindowRegistry::from_persisted(tab_workspace),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -8077,7 +8064,7 @@ fn migration_pending_tab(tab_id: &str, project_root: PathBuf) -> ProjectTabRunti
         title: "Repo".to_string(),
         project_root,
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(empty_workspace_state()),
+        workspace: WindowRegistry::from_persisted(empty_workspace_state()),
         migration_pending: true,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     }
@@ -8601,6 +8588,10 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         .clone();
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert!(
+        windows[0].agent_name.is_some(),
+        "a fresh PM receives its assigned display name before publication"
+    );
     assert_eq!(
         runtime
             .project_state(&runtime.test_context())
@@ -8854,7 +8845,7 @@ pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime,
         title: "Repo".to_string(),
         project_root: repo.clone(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
@@ -9394,7 +9385,7 @@ fn restore_fixture_tab(
         title: "Repo".to_string(),
         project_root: repo.to_path_buf(),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     }

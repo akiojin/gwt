@@ -717,7 +717,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     let html = frontend_bundle_source();
     // The rAF must dispatch to completeInitialFitHandshake — keeping
     // the handshake idempotent and gated on real layout (see helper
-    // below). Agents tabs keep a layout box while hidden; ordinary hidden
+    // below). Works caches keep a layout box while hidden; ordinary hidden
     // windows still wait for reveal. Inlining replay before fit would
     // defeat the deferredWrites buffer (CodeRabbit PR #2693 concern).
     let create_runtime_handshake = regex::Regex::new(
@@ -725,9 +725,9 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         )
         .expect("valid regex");
     // The helper must (a) bail on hidden windows outside the measurable
-    // Agents tab layout, and (b) mark ready only after activation succeeds.
+    // Works cache layout, and (b) mark ready only after activation succeeds.
     let handshake_helper = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!runtime \|\| runtime\.isReady\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?const activation = runTerminalActivationSequence\(\{[\s\S]*?\}\);\s*if \(!activation\.ran\) \{[\s\S]*?retryInitialFitHandshake\(windowId, runtime,[\s\S]*?return;[\s\S]*?\}\s*runtime\.handshakeAttempts = 0;\s*runtime\.isReady = true;[\s\S]*?if \(pendingSnapshotMap\.has\(windowId\)\) \{\s*runtime\.snapshotWriteCoordinator\.start\(\);\s*\}[\s\S]*?const pending = pendingOutputMap\.get\(windowId\);[\s\S]*?flushDeferredTerminalWrites\(windowId, runtime\);"#,
         )
         .expect("valid regex");
     // Hidden → visible activation path also needs to drive the
@@ -752,7 +752,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
         );
     assert!(
             handshake_helper.is_match(html),
-            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Agents tabs, and only set isReady=true after activation succeeds (FR-057)",
+            "expected completeInitialFitHandshake to defer ordinary hidden windows, permit measurable Works caches, and only set isReady=true after activation succeeds (FR-057)",
         );
     assert!(
             reveal_completes_handshake.is_match(html),
@@ -790,7 +790,7 @@ fn embedded_web_terminal_runtime_buffers_writes_until_initial_fit_handshake() {
     // resize-recovers-on-move signature documented in
     // .gwt/work/memory.md 2026-05-13.
     let layout_box_gate = regex::Regex::new(
-            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(agentsHost && agentsSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
+            r#"(?s)function completeInitialFitHandshake\(windowId\) \{[\s\S]*?if \(!\(worksHost && worksSurface\?\.contains\(windowId\)\) && !canRefreshTerminalViewport\(windowId\)\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?if \(!terminalContainerHasLayoutBox\(windowId\)\) \{\s*retryInitialFitHandshake\(windowId, runtime,[\s\S]*?\);\s*return;\s*\}"#,
         )
         .expect("valid regex");
     assert!(
@@ -1089,6 +1089,7 @@ fn embedded_web_static_asset_manifest_is_complete() {
         ("/styles/tokens.css", CSS, MUTABLE),
         ("/styles/typography.css", CSS, MUTABLE),
         ("/styles/components.css", CSS, MUTABLE),
+        ("/styles/works-agents.css", CSS, MUTABLE),
         ("/styles/app.css", CSS, MUTABLE),
         ("/assets/fonts/MonaSans.woff2", FONT, IMMUTABLE),
         ("/assets/fonts/HubotSans-Regular.woff2", FONT, IMMUTABLE),
@@ -1709,24 +1710,35 @@ fn embedded_web_socket_open_replays_frontend_ready_before_flushing_pending_messa
 #[test]
 fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render() {
     let html = frontend_bundle_source();
-    let readiness_flow = regex::Regex::new(
-            r#"case\s+"workspace_state":\s*\{[\s\S]*?projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?sendStartupAutoResumeReady\(\);[\s\S]*?break;"#,
-        )
-        .expect("valid regex");
+    let subscription = js_braced_block_after(
+        html,
+        "workspaceStateModel.subscribe(state => state, snapshot => ",
+    )
+    .expect("shared workspace state subscription");
+    let mut remaining = subscription;
+    for step in [
+        "projectError = \"\";",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);",
+        "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
+        "updatePmLauncher(activeWorkspace());",
+        "resolvePendingWindowFrames();",
+        "sendStartupAutoResumeReady();",
+        "startupMetrics.onWorkspaceRendered();",
+    ] {
+        remaining = remaining
+            .split_once(step)
+            .unwrap_or_else(|| panic!("workspace subscription must preserve ordered step: {step}"))
+            .1;
+    }
 
     assert!(
         html.contains("function sendStartupAutoResumeReady()"),
         "expected a named one-shot startup auto-resume readiness helper",
     );
     assert!(
-        html.contains("kind: \"startup_auto_resume_ready\"")
-            && html.contains("bounds: visibleBounds()"),
-        "expected readiness payload to carry the current fixed surface bounds",
+        html.contains("kind: \"startup_auto_resume_ready\""),
+        "expected readiness to announce the mounted surfaces without layout coordinates",
     );
-    assert!(
-            readiness_flow.is_match(html),
-            "expected workspace_state hydration to render before announcing startup auto-resume readiness",
-        );
 }
 
 #[test]
@@ -1757,13 +1769,10 @@ fn embedded_web_websocket_contract_stays_host_neutral_for_browser_and_native_mod
 #[test]
 fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helper() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items before
-    // breaking. Tolerate the optional `{` and additional code
-    // between renderAppState and break.
+    // SPEC #5016: the receiver commits data; its synchronous subscription
+    // retains app-state rendering and the startup readiness ordering above.
     let workspace_state_flow = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*(?:renderAppState|frontendUnits\.projectWorkspaceShell\.renderAppState)\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
 
@@ -1788,7 +1797,7 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
     );
     assert!(
             workspace_state_flow.is_match(html),
-            "expected workspace_state events to clear project errors and re-render through the app-state workspace helper",
+            "expected workspace_state events to commit a fresh shared receipt before subscribed rendering",
         );
 }
 
@@ -2781,8 +2790,8 @@ fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
 #[test]
 fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
     let html = frontend_bundle_source();
-    let submit_bounds = regex::Regex::new(
-            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*bounds:\s*visibleBounds\(\),\s*\};"#,
+    let submit_action = regex::Regex::new(
+            r#"function sendWizardAction\(action,\s*\{\s*queueIfDisconnected\s*=\s*true\s*\}\s*=\s*\{\}\)\s*\{\s*const message\s*=\s*\{\s*kind:\s*"launch_wizard_action",\s*action,\s*\};"#,
         )
         .expect("valid regex");
     let footer_close_control = regex::Regex::new(
@@ -2824,8 +2833,8 @@ fn embedded_web_launch_wizard_actions_flow_through_named_transport() {
         "expected issue launch wizard entrypoint to send the canonical frontend event payload",
     );
     assert!(
-            submit_bounds.is_match(html),
-            "expected wizard actions to be normalized through launch_wizard_action and always attach visible bounds",
+            submit_action.is_match(html),
+            "expected wizard actions to be normalized through launch_wizard_action without layout coordinates",
         );
     assert!(
         !html.contains(r#"id="wizard-close-button""#) && !html.contains("wizardCloseButton"),
@@ -3077,13 +3086,10 @@ fn embedded_web_frontend_units_group_stateful_surfaces() {
 #[test]
 fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
     let html = frontend_bundle_source();
-    // SPEC-2359 US-37: workspace_state case wraps in a block to
-    // populate the Workspace Overview Completed column from
-    // event.workspace.tabs[active].workspace.work_items. Tolerate
-    // the optional `{` and additional code between renderAppState
-    // and break.
+    // SPEC #5016: workspace hydration now reaches the shell through a
+    // shared model subscription rather than direct receiver rendering.
     let workspace_event = regex::Regex::new(
-            r#"case\s*"workspace_state":\s*\{?\s*projectError\s*=\s*"";\s*frontendUnits\.projectWorkspaceShell\.renderAppState\(event\.workspace\);[\s\S]*?\bbreak;"#,
+            r#"case\s*"workspace_state":\s*\{\s*workspaceStateModel\.update\(\(\) => \(\{ workspace: event\.workspace \}\)\);\s*break;"#,
         )
         .expect("valid regex");
     let terminal_event = regex::Regex::new(
@@ -3132,7 +3138,11 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         "expected frontend bootstrap to connect through the socket transport unit",
     );
     assert!(
-        workspace_event.is_match(html),
+        workspace_event.is_match(html)
+            && html.contains("const workspaceStateModel = createUiStateStore(null);")
+            && html.contains(
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);"
+            ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
     assert!(
@@ -3651,7 +3661,7 @@ fn embedded_web_app_js_uses_modal_shell_selector() {
 
 /// SPEC-2008 FR-050 Phase 24: an OS host window (WebView) `resize` event
 /// must fan out per-terminal `fitTerminal()` so xterm.js cols/rows stay
-/// aligned with the new viewport, and `UpdateWindowGeometry` must be sent
+/// aligned with the new viewport, and `UpdateTerminalGrid` must be sent
 /// for each visible terminal so the backend PTY cols/rows match. Without
 /// this fan-out the wrap stays stuck until the user resizes a single
 /// terminal manually.
@@ -3691,10 +3701,9 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
 }
 
 /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
-/// hidden terminals (display:none-equivalent `.hidden` attribute set when
-/// a window-tab is non-active) so a fit during the hidden phase cannot
-/// pollute xterm.js with cols/rows = 0. The check must consider both
-/// minimized and the DOM `element.hidden` flag.
+/// hidden terminal hosts so a fit during the hidden phase cannot
+/// pollute xterm.js with cols/rows = 0. Surface ownership and actual DOM
+/// layout determine visibility independently of retired saved placement.
 #[test]
 fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let js = app_js();
@@ -3710,8 +3719,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
     let body = &after[..end_offset];
     // After SPEC-2008 Phase 24 follow-up, the predicate delegates to
     // `viewportEligibleForRefresh` in `terminal-viewport-reflow.js`.
-    // Behaviour (.hidden short-circuit + minimised short-circuit) is
-    // pinned by `__tests__/terminal-viewport-reflow.test.mjs`; this
+    // DOM visibility behaviour is pinned by
+    // `__tests__/terminal-viewport-reflow.test.mjs`; this
     // Rust contract only confirms the wiring stays in the bundle.
     assert!(
         body.contains("viewportEligibleForRefresh({"),
@@ -3719,9 +3728,8 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
              (SPEC-2008 FR-051 + Phase 24 follow-up); body: {body}",
     );
     assert!(
-        body.contains("windowMap.get(windowId)") && body.contains("workspaceWindowById"),
-        "expected predicate to forward both the DOM element and the workspace window \
-             so the helper can short-circuit on .hidden / minimized; body: {body}",
+        body.contains("windowMap.get(windowId)") && !body.contains("workspaceWindowById"),
+        "expected predicate to forward the DOM element without saved placement state; body: {body}",
     );
 }
 
@@ -3733,10 +3741,9 @@ fn embedded_web_can_refresh_terminal_viewport_skips_hidden_tabs() {
 #[test]
 fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
     let js = app_js();
-    // SPEC-2008 camera-focus: maximize was removed, so the visibility loop no
-    // longer ends with a maximized-viewport sync. It now recomputes operator
-    // telemetry (rail window-count badge) after mounting
-    // every window and applying its visibility transition. Issue #3365: the
+    // Surface hosts own which windows are presented. The catalog loop
+    // recomputes operator telemetry after mounting each live window and
+    // clearing stale child visibility. Issue #3365: the
     // loop is a per-window `isolate` callback inside workspaceRenderSync so
     // one poisoned window cannot block the others, and the telemetry
     // recompute is the guard's `recompute` hook (guaranteed even on a failed
@@ -3763,8 +3770,8 @@ fn embedded_web_tab_visibility_transition_triggers_terminal_focus_activation() {
              so element.hidden mutation + reveal hook share one helper; body: {body}",
     );
     assert!(
-        body.contains("visibleWindowData(windowData)"),
-        "expected the loop to compute shouldHide from visibleWindowData; body: {body}",
+        body.contains("shouldHide: false") && !body.contains("visibleWindowData"),
+        "expected catalog mounts to leave visibility to the surface host; body: {body}",
     );
     assert!(
         body.contains("onReveal: () => activateTerminalOnReveal(windowData.id)"),

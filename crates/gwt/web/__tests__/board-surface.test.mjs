@@ -70,7 +70,7 @@ test("Board surface exposes origin Agent focus and resume affordances", () => {
   assert.match(appSource, /open_board_origin_agent/);
   assert.match(appSource, /board-origin-badge/);
   assert.match(appSource, /board-origin-button/);
-  assert.match(appSource, /visibleBounds\(\)/);
+  assert.doesNotMatch(appSource, /bounds:\s*visibleBounds\(\)/);
 });
 
 test("Board surface exposes a Workspace audience filter toggle (SPEC-2359 FR-101)", () => {

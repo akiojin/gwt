@@ -1957,7 +1957,7 @@ fn app_runtime_open_active_work_launch_wizard_focuses_existing_agent_for_branch(
         event,
         OutboundEvent {
             target: DispatchTarget::Project(_),
-            event: BackendEvent::WindowCanvasState { .. },
+            event: BackendEvent::WorkspaceState { .. },
             ..
         }
     )));
@@ -2454,12 +2454,6 @@ fn unbound_agent_pty_publishes_process_identity_for_session_observation() {
         WindowPreset::Agent,
         WindowProcessStatus::Starting,
     );
-    let geometry = tab
-        .workspace
-        .window("agent-1")
-        .expect("window")
-        .geometry
-        .clone();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "agent-1");
     let mut session = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
@@ -2508,7 +2502,6 @@ fn unbound_agent_pty_publishes_process_identity_for_session_observation() {
     runtime
         .spawn_process_window_with_console_kind(
             &window_id,
-            geometry,
             ProcessLaunch {
                 initial_prompt_file: None,
                 command,
@@ -2593,13 +2586,15 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         WindowPreset::Codex,
         WindowProcessStatus::Stopped,
     );
-    let bounds = tab
-        .workspace
-        .window("legacy-codex")
-        .expect("window")
-        .geometry
-        .clone();
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    // AC27: the two direct routes need two enabled project members.
+    gwt::agent_names::mutate_project_roster(
+        &repo,
+        &runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Resize { size: 2 },
+        None,
+    )
+    .expect("two simultaneous direct agent members");
     let codex_id = combined_window_id("tab-1", "legacy-codex");
     let (spawn_env, _) = runtime
         .active_profile_spawn_env()
@@ -2618,7 +2613,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     // hide a missing direct-preset Session registration.
     let _ = runtime.launch_wizard_cache.agent_preferences();
     runtime.restart_window_events(&codex_id);
-    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, bounds, None);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, None);
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let uncached_sessions = runtime
@@ -3020,7 +3015,7 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
 
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!runtime.window_lookup.contains_key(&window_id));
     assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
@@ -3266,7 +3261,7 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
         title: "Repo".to_string(),
         project_root: temp.path().join("repo"),
         kind: ProjectKind::Git,
-        workspace: WindowCanvasState::from_persisted(persisted),
+        workspace: WindowRegistry::from_persisted(persisted),
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };

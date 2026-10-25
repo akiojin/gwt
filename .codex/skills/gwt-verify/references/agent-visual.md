@@ -14,11 +14,11 @@ escalation) and the project ships a headed runner, in every launch mode:
 
 Record the result as `Agent Visual Check: pass | fail(<reason>) | n/a (no UI
 surface)`, and list the executed headed command under `Executed` so the claim
-is backed by a `PASS` entry. In `autonomous` mode this is the GUI quality bar
-that replaces the human's eyes, so `Agent Visual Check: fail(<reason>)` — or a
+is backed by a `PASS` entry. In every launch mode this is the GUI quality bar,
+so `Agent Visual Check: fail(<reason>)` — or a
 UI surface in scope with no Agent Visual Check at all — makes `Overall: FAIL`.
 
-For an autonomous UI Ready handoff, a prose `Agent Visual Check: pass` alone
+For a UI Ready handoff, a prose `Agent Visual Check: pass` alone
 is insufficient. Pass `params.headed_e2e_commands` to `verify.run`, selecting
 exact strings already present in `params.commands`. Use Playwright commands
 or project scripts that forward extra Playwright arguments. gwtd adds

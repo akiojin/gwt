@@ -1,6 +1,98 @@
 use super::*;
 
 #[test]
+fn local_agent_activity_reports_an_observed_empty_project() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_some());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "first hydration schedules the census"
+    );
+    let view = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let wire = serde_json::to_value(view).unwrap();
+    assert_eq!(
+        wire["local_agent_activity"]["agents"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        wire["local_agent_activity"]["project_key"],
+        runtime.project_key_for_tab("tab-1").unwrap().to_string()
+    );
+    assert!(chrono::DateTime::parse_from_rfc3339(
+        wire["local_agent_activity"]["observed_at"]
+            .as_str()
+            .unwrap()
+    )
+    .is_ok());
+}
+
+#[test]
+fn local_agent_activity_cache_removes_retired_members_without_redating_proof() {
+    let temp = tempdir().unwrap();
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut view = runtime
+        .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
+        .unwrap();
+    let activity = view.local_agent_activity.as_mut().unwrap();
+    activity
+        .agents
+        .as_mut()
+        .unwrap()
+        .push(gwt::LocalAgentActivityAgentView {
+            window_id: "tab-1::retired".into(),
+            session_id: "retired-session".into(),
+            runtime_incarnation: 17,
+            issue_number: Some(4777),
+            is_pm: false,
+            current_task: None,
+        });
+    let observed_at = activity.observed_at.clone();
+    runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_cache
+        .borrow_mut()
+        .insert("tab-1".into(), view);
+    let patch = runtime
+        .cached_active_work_projection_broadcast_for_tab("tab-1")
+        .unwrap();
+    let wire = serde_json::to_value(patch.event).unwrap();
+    assert_eq!(
+        wire["projection"]["local_agent_activity"]["agents"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        wire["projection"]["local_agent_activity"]["observed_at"],
+        observed_at
+    );
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_none());
+    assert!(!runtime
+        .project_state_for_tab("tab-1")
+        .unwrap()
+        .active_work_projection_payload_cache
+        .borrow()
+        .contains_key("tab-1"));
+}
+
+#[test]
 fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
@@ -9,12 +101,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Branches,
-        canvas_bounds(),
-        None,
-    );
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Branches, None);
     let legacy = runtime
         .tab("tab-1")
         .expect("tab")
@@ -22,12 +109,7 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
         .persisted()
         .windows[0]
         .clone();
-    let events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let events = runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -41,14 +123,14 @@ fn app_runtime_work_singleton_treats_legacy_branches_as_alias() {
     assert!(windows[0].z_index > legacy.z_index);
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::TerminalStatus { .. })));
 }
 
 #[test]
-fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
+fn app_runtime_work_singleton_refocuses_existing_work_surface() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -61,34 +143,26 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
         &[WindowPreset::Work, WindowPreset::Board],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let work_id = combined_window_id("tab-1", "work-1");
     let board_id = combined_window_id("tab-1", "board-1");
 
-    runtime.dock_window_tab_events(&board_id, &work_id);
+    runtime.focus_window_events(&board_id);
     let before = runtime.tab("tab-1").expect("tab").workspace.persisted();
     assert!(
         before
             .windows
             .iter()
             .find(|window| window.id == "board-1")
-            .expect("Board tab")
-            .tab_group_active
-    );
-    assert!(
-        !before
-            .windows
-            .iter()
-            .find(|window| window.id == "work-1")
-            .expect("inactive Work tab")
-            .tab_group_active
+            .expect("Board")
+            .z_index
+            > before
+                .windows
+                .iter()
+                .find(|window| window.id == "work-1")
+                .expect("Work")
+                .z_index
     );
 
-    let events = runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    let events = runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let after = runtime.tab("tab-1").expect("tab").workspace.persisted();
     let work = after
         .windows
@@ -99,18 +173,16 @@ fn app_runtime_work_singleton_activates_inactive_grouped_work_tab() {
         .windows
         .iter()
         .find(|window| window.id == "board-1")
-        .expect("grouped Board tab");
+        .expect("Board surface");
 
     assert_eq!(after.windows.len(), 2);
     assert!(
-        work.tab_group_active,
-        "reuse must reveal the Work group tab"
+        work.z_index > board.z_index,
+        "reuse must focus the existing Work surface"
     );
-    assert!(!board.tab_group_active);
-    assert!(work.z_index >= board.z_index);
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
 }
 
 #[test]
@@ -132,12 +204,7 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Work,
-        canvas_bounds(),
-        None,
-    );
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let windows = &runtime
         .tab("tab-1")
         .expect("tab")
@@ -178,18 +245,8 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
 
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Shell,
-        canvas_bounds(),
-        None,
-    );
-    runtime.create_window_events(
-        &runtime.test_context(),
-        WindowPreset::Shell,
-        canvas_bounds(),
-        None,
-    );
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Shell, None);
+    runtime.create_window_events(&runtime.test_context(), WindowPreset::Shell, None);
     let shell_ids = runtime
         .tab("tab-1")
         .expect("tab")

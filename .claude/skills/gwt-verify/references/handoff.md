@@ -1,14 +1,17 @@
 ## User Verification Handoff (post-Executed)
 
-This phase runs in `interactive` launch mode only. In `autonomous` mode, skip
+This phase runs only when the owner explicitly requests a human check in an
+`interactive` launch. User Verification Result is optional otherwise; do not
+infer a request from a missing, pending, or legacy deferred field.
+In `autonomous` mode, skip
 straight to recording `User Verification Result: n/a (autonomous)` plus the
 `Agent Visual Check:` line, then finalize `Overall`. Do
 not execute any step below, and in particular do not call the question tool in
 step 5.
 
 When `Overall` would otherwise be `PASS` (every `Executed` entry passed) and
-the launch mode is `interactive` and `--mode full` or `--mode pre-pr` is
-active and `--skip-user-check` was not supplied:
+the owner explicitly requests the check in an `interactive` launch, and
+`--mode full` or `--mode pre-pr` is active:
 
 1. Compute the `User Verification` block:
    - `Status: required` if any changed surface is marked Required above.

@@ -33,25 +33,28 @@ pub fn handle_with_input(
     if !record.obligation_open || record.session_id != current_session {
         return HookOutput::Silent;
     }
-    let refreshed = match crate::cli::verification_record::save_work_event_settlement_record(
-        &resolved,
-        &record.session_id,
-        false,
-    ) {
-        Ok(record) => record,
-        Err(error) => {
-            tracing::warn!(%error, "work event settlement could not be refreshed");
-            if crate::cli::verification_record::pending_shard_refresh_failure_must_block(&record) {
-                return HookOutput::stop_block(format!(
+    let (refreshed, comparison) =
+        match crate::cli::verification_record::save_work_event_settlement_record_with_comparison(
+            &resolved,
+            &record.session_id,
+            false,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%error, "work event settlement could not be refreshed");
+                if crate::cli::verification_record::pending_shard_refresh_failure_must_block(
+                    &record,
+                ) {
+                    return HookOutput::stop_block(format!(
                     "A terminal Work update is still awaiting delivery. {} gwt will not commit or push automatically.",
                     crate::cli::verification_record::pending_shard_refresh_failure_description()
                 ));
-            }
-            return HookOutput::system_message(format!(
+                }
+                return HookOutput::system_message(format!(
                 "Warning: Work event settlement could not be refreshed ({error}). Stop is not blocked by this infrastructure failure."
             ));
-        }
-    };
+            }
+        };
     if !refreshed.obligation_open && refreshed.status.is_settled() {
         return HookOutput::Silent;
     }
@@ -61,7 +64,9 @@ pub fn handle_with_input(
         let reason = match &refreshed.status {
             crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
                 crate::cli::verification_record::work_event_settlement_blocker_description(
-                    blocker, &resolved,
+                    blocker,
+                    &resolved,
+                    comparison.as_deref(),
                 )
             }
             _ => "Work event settlement is waiting on the environment.".to_string(),
@@ -85,6 +90,7 @@ pub fn handle_with_input(
         crate::cli::verification_record::WorkEventSettlementStatus::Blocked(blocker) => {
             crate::cli::verification_record::work_event_settlement_blocker_description(
                 blocker, &resolved,
+                comparison.as_deref(),
             )
         }
         crate::cli::verification_record::WorkEventSettlementStatus::Settled { .. } => {
@@ -289,6 +295,11 @@ mod tests {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
         let fixture = crate::cli::verification_record::tests::WorkEventGitFixture::tracked();
         fixture.append_event("terminal-update-without-upstream");
         save_work_event_settlement_record(&fixture.repo, "session-warning", true)
@@ -300,11 +311,13 @@ mod tests {
             .expect("unset fixture upstream")
             .success());
 
-        let output = handle_with_input(
-            &fixture.repo,
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
             r#"{"stop_hook_active":false}"#,
+            &fixture.repo,
             Some("session-warning"),
-        );
+        )
+        .expect("public Stop hook");
 
         let HookOutput::SystemMessage(message) = output else {
             panic!("missing upstream must warn without blocking Stop: {output:?}");
@@ -312,5 +325,27 @@ mod tests {
         assert!(message.contains("Warning:"), "{message}");
         assert!(message.contains("upstream"), "{message}");
         assert!(message.contains("not blocked"), "{message}");
+
+        crate::cli::execution_state::materialize_at_launch(
+            &fixture.repo,
+            crate::cli::execution_state::ExecutionOwnerKind::Issue,
+            3590,
+            "session-warning",
+            "gwt-execute",
+            false,
+        )
+        .expect("active execution");
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            r#"{"stop_hook_active":false}"#,
+            &fixture.repo,
+            Some("session-warning"),
+        )
+        .expect("public Stop with active execution");
+        let HookOutput::StopBlock { reason } = output else {
+            panic!("the warning must not release an active execution: {output:?}");
+        };
+        assert!(reason.contains("execution.complete"), "{reason}");
+        assert!(reason.contains(&message), "{reason}");
     }
 }

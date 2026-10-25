@@ -295,6 +295,16 @@ pub enum HostRunnerProbeKind {
     CodexConfig,
 }
 
+impl HostRunnerProbeKind {
+    /// Deadline the production probe gives this kind of check.
+    pub fn probe_deadline(self) -> Duration {
+        match self {
+            Self::Direct => DIRECT_RUNNER_PROBE_TIMEOUT,
+            Self::CodexConfig => CODEX_CONFIG_PREFLIGHT_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostRunnerProbeOutcome {
     pub success: bool,
@@ -382,7 +392,17 @@ impl HostRunnerProbeOutcome {
     }
 }
 
-const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline for the installed-runner health probe. Windows `npm` shims for
+/// Codex take over five seconds to answer `--version` on loaded hosts, so a
+/// healthy runner must not be rejected for being slow (#6276); a runner that
+/// is still silent at this deadline keeps failing closed.
+pub const DIRECT_RUNNER_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Deadline for the Codex configuration preflight (`codex features list`).
+/// A timeout there is already inconclusive and the launch continues, so a
+/// long wait only spends the launch's window-creation budget on slow hosts
+/// (#6299). Only the installed-runner version probe keeps the longer deadline.
+pub const CODEX_CONFIG_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Stable phrase for transient launch failures that Issue Monitor retries.
 pub const TRANSIENT_LAUNCH_RETRY_HINT: &str =
@@ -776,7 +796,23 @@ pub fn resolve_launch_worktree_request(
 pub fn resolve_host_runner_health_checked(
     config: &mut LaunchConfig,
 ) -> Result<HostRunnerHealthReport, String> {
-    resolve_host_runner_health_checked_with_probe(config, probe_host_runner_outcome)
+    resolve_host_runner_health_checked_with_probe(
+        config,
+        |kind, command, args, env_vars, remove_env, cwd| {
+            direct_runner_probe_cache().probe(
+                Instant::now(),
+                HostRunnerProbeCall {
+                    kind,
+                    command,
+                    args,
+                    env_vars,
+                    remove_env,
+                    cwd,
+                },
+                probe_host_runner_outcome,
+            )
+        },
+    )
 }
 
 #[doc(hidden)]
@@ -1244,9 +1280,115 @@ fn probe_host_runner_outcome(
         env_vars,
         remove_env,
         cwd,
-        DIRECT_RUNNER_PROBE_TIMEOUT,
+        kind.probe_deadline(),
         Duration::from_millis(50),
     )
+}
+
+/// How long a successful installed-runner version probe is reused for the
+/// same executable. On a loaded Windows host `codex --version` alone can
+/// exceed the probe deadline, so re-probing an unchanged runner on every
+/// launch turns a healthy runner into a failed launch (#6299).
+const DIRECT_RUNNER_PROBE_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Identity of a resolved runner executable: a replaced or updated file gets
+/// a new modification time or size and is probed again.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DirectRunnerFingerprint {
+    command: String,
+    args: Vec<String>,
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl DirectRunnerFingerprint {
+    fn of(command: &str, args: &[String]) -> Option<Self> {
+        let metadata = std::fs::metadata(command).ok()?;
+        metadata.is_file().then_some(())?;
+        Some(Self {
+            command: command.to_string(),
+            args: args.to_vec(),
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+}
+
+struct HostRunnerProbeCall<'a> {
+    kind: HostRunnerProbeKind,
+    command: &'a str,
+    args: Vec<String>,
+    env_vars: &'a HashMap<String, String>,
+    remove_env: &'a [String],
+    cwd: Option<PathBuf>,
+}
+
+/// Process-wide reuse of successful Direct probes only. A runner with no
+/// recent success is still probed, so a hanging first probe keeps failing
+/// closed (SPEC-3864); failures are never cached.
+#[derive(Default)]
+struct DirectRunnerProbeCache {
+    entries: Mutex<HashMap<DirectRunnerFingerprint, (Instant, HostRunnerProbeOutcome)>>,
+}
+
+impl DirectRunnerProbeCache {
+    fn probe(
+        &self,
+        now: Instant,
+        call: HostRunnerProbeCall<'_>,
+        probe: impl FnOnce(
+            HostRunnerProbeKind,
+            &str,
+            Vec<String>,
+            &HashMap<String, String>,
+            &[String],
+            Option<PathBuf>,
+        ) -> HostRunnerProbeOutcome,
+    ) -> HostRunnerProbeOutcome {
+        let key = (call.kind == HostRunnerProbeKind::Direct)
+            .then(|| DirectRunnerFingerprint::of(call.command, &call.args))
+            .flatten();
+        if let Some(key) = key.as_ref() {
+            let entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((probed_at, outcome)) = entries.get(key) {
+                if now.saturating_duration_since(*probed_at) < DIRECT_RUNNER_PROBE_CACHE_TTL {
+                    tracing::debug!(
+                        command = call.command,
+                        "reusing a recent successful direct runner health probe"
+                    );
+                    return outcome.clone();
+                }
+            }
+        }
+        let outcome = probe(
+            call.kind,
+            call.command,
+            call.args,
+            call.env_vars,
+            call.remove_env,
+            call.cwd,
+        );
+        if let Some(key) = key {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if outcome.success {
+                entries.insert(key, (now, outcome.clone()));
+            } else {
+                entries.remove(&key);
+            }
+        }
+        outcome
+    }
+}
+
+fn direct_runner_probe_cache() -> &'static DirectRunnerProbeCache {
+    static CACHE: std::sync::OnceLock<DirectRunnerProbeCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(DirectRunnerProbeCache::default)
 }
 
 #[doc(hidden)]
@@ -3834,6 +3976,137 @@ fi
         assert_eq!(config.tool_version, original.tool_version);
     }
 
+    fn cache_probe_call<'a>(
+        kind: HostRunnerProbeKind,
+        command: &'a str,
+        env_vars: &'a HashMap<String, String>,
+    ) -> HostRunnerProbeCall<'a> {
+        HostRunnerProbeCall {
+            kind,
+            command,
+            args: vec!["--version".into()],
+            env_vars,
+            remove_env: &[],
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn direct_runner_probe_cache_reuses_a_recent_success_for_the_same_runner() {
+        // #6299: a loaded host must not re-run a slow `--version` for an
+        // unchanged runner that was just proven healthy.
+        let temp = tempdir().expect("tempdir");
+        let runner = temp.path().join("codex");
+        fs::write(&runner, "runner v1").expect("write runner");
+        let command = runner.display().to_string();
+        let env = HashMap::new();
+        let cache = DirectRunnerProbeCache::default();
+        let probes = std::cell::Cell::new(0);
+        let healthy = |_: HostRunnerProbeKind,
+                       _: &str,
+                       _: Vec<String>,
+                       _: &HashMap<String, String>,
+                       _: &[String],
+                       _: Option<PathBuf>| {
+            probes.set(probes.get() + 1);
+            HostRunnerProbeOutcome {
+                stdout: "codex-cli 0.164.0".into(),
+                ..HostRunnerProbeOutcome::success()
+            }
+        };
+        let probed_at = Instant::now();
+
+        let first = cache.probe(
+            probed_at,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        let reused = cache.probe(
+            probed_at,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 1);
+        assert_eq!(reused, first);
+
+        let expired = probed_at + DIRECT_RUNNER_PROBE_CACHE_TTL;
+        cache.probe(
+            expired,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 2, "an expired success is probed again");
+
+        fs::write(&runner, "runner v2 replaced").expect("replace runner");
+        cache.probe(
+            expired,
+            cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+            healthy,
+        );
+        assert_eq!(probes.get(), 3, "a changed runner file is probed again");
+    }
+
+    #[test]
+    fn direct_runner_probe_cache_never_reuses_failures_or_config_preflights() {
+        let temp = tempdir().expect("tempdir");
+        let runner = temp.path().join("codex");
+        fs::write(&runner, "runner").expect("write runner");
+        let command = runner.display().to_string();
+        let env = HashMap::new();
+        let cache = DirectRunnerProbeCache::default();
+        let probes = std::cell::Cell::new(0);
+        let probed_at = Instant::now();
+        let hanging = |_: HostRunnerProbeKind,
+                       _: &str,
+                       _: Vec<String>,
+                       _: &HashMap<String, String>,
+                       _: &[String],
+                       _: Option<PathBuf>| {
+            probes.set(probes.get() + 1);
+            HostRunnerProbeOutcome {
+                success: false,
+                timed_out: true,
+                ..HostRunnerProbeOutcome::success()
+            }
+        };
+        for _ in 0..2 {
+            let outcome = cache.probe(
+                probed_at,
+                cache_probe_call(HostRunnerProbeKind::Direct, &command, &env),
+                hanging,
+            );
+            assert!(!outcome.success, "a hanging runner keeps failing closed");
+        }
+        assert_eq!(probes.get(), 2);
+
+        for _ in 0..2 {
+            cache.probe(
+                probed_at,
+                cache_probe_call(HostRunnerProbeKind::CodexConfig, &command, &env),
+                |_, _, _, _, _, _| {
+                    probes.set(probes.get() + 1);
+                    HostRunnerProbeOutcome::success()
+                },
+            );
+        }
+        assert_eq!(probes.get(), 4, "configuration preflights are not cached");
+    }
+
+    #[test]
+    fn codex_config_preflight_uses_its_own_short_deadline() {
+        // #6299: an inconclusive preflight must not spend the Direct probe's
+        // slow-host deadline; the Direct probe keeps it (#6276).
+        assert_eq!(
+            HostRunnerProbeKind::Direct.probe_deadline(),
+            DIRECT_RUNNER_PROBE_TIMEOUT
+        );
+        assert_eq!(
+            HostRunnerProbeKind::CodexConfig.probe_deadline(),
+            CODEX_CONFIG_PREFLIGHT_TIMEOUT
+        );
+        assert!(CODEX_CONFIG_PREFLIGHT_TIMEOUT < DIRECT_RUNNER_PROBE_TIMEOUT);
+    }
+
     #[cfg(unix)]
     #[test]
     fn public_prepare_bounds_a_hanging_direct_runner_probe() {
@@ -3846,7 +4119,7 @@ fi
         // SPEC-3864: Antigravity has no runtime package route, so a hanging
         // direct runner cannot be rescued by a bunx/npx fallback.
         let direct = temp.path().join("agy");
-        fs::write(&direct, "#!/bin/sh\nsleep 8\nexit 1\n").expect("write hanging runner");
+        fs::write(&direct, "#!/bin/sh\nsleep 60\nexit 1\n").expect("write hanging runner");
         fs::set_permissions(&direct, fs::Permissions::from_mode(0o755))
             .expect("chmod hanging runner");
         let mut config = AgentLaunchBuilder::new(AgentId::Antigravity)
@@ -3859,10 +4132,39 @@ fi
 
         assert!(result.is_err(), "hanging direct runner must fail closed");
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(7),
-            "direct runner health must honor the five-second deadline: {:?}",
+            started.elapsed() < DIRECT_RUNNER_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+            "direct runner health must honor the probe deadline: {:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn public_prepare_admits_a_slow_but_healthy_direct_runner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // #6276: a runner that answers `--version` after the old five-second
+        // deadline is healthy and must launch on slow hosts.
+        let temp = tempdir().expect("tempdir");
+        let mut config = sample_direct_codex_launch_config(temp.path());
+        let direct = temp.path().join("codex");
+        fs::write(&direct, "#!/bin/sh\nsleep 6\necho 'codex-cli 0.164.0'\n")
+            .expect("write slow runner");
+        fs::set_permissions(&direct, fs::Permissions::from_mode(0o755)).expect("chmod slow runner");
+        config.command = direct.display().to_string();
+
+        let report = resolve_host_runner_health_checked_with_probe(
+            &mut config,
+            |kind, command, args, env, remove_env, cwd| match kind {
+                HostRunnerProbeKind::Direct => {
+                    probe_host_runner_outcome(kind, command, args, env, remove_env, cwd)
+                }
+                HostRunnerProbeKind::CodexConfig => HostRunnerProbeOutcome::success(),
+            },
+        )
+        .expect("slow healthy runner must be admitted");
+
+        assert_eq!(report.version_output.as_deref(), Some("0.164.0"));
     }
 
     #[test]

@@ -1083,7 +1083,8 @@ test("Agent window title starts with assigned identity before its current purpos
   assert.equal(displayTitle({ ...data, dynamic_title: null }, agentPreset, "Project Manager"), "Initial task");
   assert.equal(displayTitle({ preset: "agent", title: "Restore cache" }, agentPreset, "Project Manager"), "Restore cache");
   assert.equal(displayTitle({ preset: "agent", branch: "work/task" }, agentPreset, "Project Manager"), "work/task");
-  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager — Fix cache");
+  assert.equal(displayTitle({ ...data, is_pm: true }, agentPreset, "Project Manager"), "Project Manager");
+  assert.equal(displayTitle({ ...data, agent_name: "Yuu", is_pm: true }, agentPreset, "Project Manager"), "Yuu");
   assert.equal(displayTitle({ preset: "shell", title: "Shell" }, agentPreset, "Project Manager"), "Shell");
 });
 
@@ -4996,7 +4997,7 @@ test("Hidden window output is gated while Agents retain shared preview buffers",
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\(agentsHost\s*&&\s*agentsSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
+    /canWrite:\s*\(windowId\)\s*=>\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
     "Agents must keep shared Issue preview buffers current while other hidden windows retain output gating",
   );
 
@@ -5129,18 +5130,23 @@ test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge update
 test("branch_entries telemetry uses the guarded helper without the retired git layer (SPEC-2356)", () => {
   const branchCase = appSource.match(/case\s+"branch_entries":[\s\S]*?break;/);
   assert.ok(branchCase, "expected branch_entries receive case");
+  assert.match(branchCase[0], /branchEntriesViewModel\.update\(/);
+  assert.doesNotMatch(branchCase[0], /renderBranches\(|applyOperatorTelemetryCounts\(/);
+  assert.match(appSource, /branchEntriesViewModel\.subscribe\(state => state, renderBranchEntries\)/);
+  const view = extractFunctionBody(appSource, "renderBranchEntries");
+  assert.match(view, /renderBranches\(windowId\)[\s\S]*applyOperatorTelemetryCounts\(/);
   assert.match(
-    branchCase[0],
+    view,
     /applyOperatorTelemetryCounts\(\{\s*branches:\s*branchesCount,\s*\}\)/,
     "branch telemetry must route through the guarded applyOperatorTelemetryCounts helper",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /git:\s*branchesCount/,
     "the dead Sidebar Layers git counter must no longer be forwarded",
   );
   assert.doesNotMatch(
-    branchCase[0],
+    view,
     /window\.__operatorShell\?\.applyTelemetryCounts/,
     "branch telemetry must not call applyTelemetryCounts directly",
   );
@@ -5299,14 +5305,4 @@ test("window navigation publishes the selected pane without changing layout", ()
   assert.match(body, /navigation:\s*\{/);
   assert.match(body, /windowId, notifyFocus, serial:/);
   assert.doesNotMatch(body, /activate_window_tab|splitSurfaces\.close|pendingFrameWindowId/);
-});
-test("fixed surface bounds use the visible host dimensions", () => {
-  const body = extractFunctionBody(appSource, "visibleBounds");
-  const bounds = new Function("document", body);
-  const area = { clientWidth: 1200, clientHeight: 800 };
-  const doc = { querySelector: selector => {
-    assert.equal(selector, ".surface-area");
-    return area;
-  } };
-  assert.deepEqual(bounds(doc), { x: 0, y: 0, width: 1200, height: 800 });
 });

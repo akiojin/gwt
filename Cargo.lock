@@ -635,7 +635,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -739,7 +739,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "gwt"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "ammonia",
  "auto-launch",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-agent"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "chrono",
  "dunce",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-ai"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-clipboard"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "gwt-core",
  "thiserror 2.0.21",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-config"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "dirs 7.0.0",
  "libc",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-core"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-docker"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-git"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "chrono",
  "dirs 7.0.0",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-github"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "chrono",
  "fs2",
@@ -1492,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-skills"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-terminal"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "gwt-core",
  "libc",
@@ -1528,7 +1528,7 @@ dependencies = [
 
 [[package]]
 name = "gwt-voice"
-version = "9.139.0"
+version = "9.144.0"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -2173,9 +2173,9 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lzma-rust2"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7277c9742229dc25243236d578b6471a798c554512c6f6a04365ec2e87c2a3bb"
+checksum = "f1c46f3fcd2e888afdb01a07efc071cb21300e07c68d32c3e8b01b5c8cb1fcaa"
 dependencies = [
  "sha2 0.11.1",
 ]
@@ -2311,7 +2311,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2428,7 +2428,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2986,9 +2986,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags 2.11.1",
  "getopts",
@@ -3310,7 +3310,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3623,7 +3623,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3825,7 +3825,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3946,9 +3946,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.3"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -4256,7 +4256,7 @@ dependencies = [
  "once_cell",
  "png",
  "thiserror 2.0.21",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4299,9 +4299,9 @@ dependencies = [
 
 [[package]]
 name = "typed-path"
-version = "0.12.3"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
 
 [[package]]
 name = "typenum"
@@ -4718,7 +4718,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5387,9 +5387,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.0.4"
+version = "9.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a954114b47a54df49f83d2722814e86b23d4bb1b54a1b90fb7d92b41619ddc22"
+checksum = "2886b00003a72c4ccee3f42cfc34908d33b2508a74d827dc2a4244706475c704"
 dependencies = [
  "aes",
  "bzip2",
@@ -5408,6 +5408,7 @@ dependencies = [
  "sha1 0.11.0",
  "time",
  "typed-path",
+ "windows-sys 0.61.2",
  "zeroize",
  "zopfli",
  "zstd",

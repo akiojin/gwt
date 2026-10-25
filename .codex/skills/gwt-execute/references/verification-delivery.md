@@ -5,8 +5,9 @@ results in the evidence bundle. For a releaseable slice in a project with an app
 CI-backed policy, use `gwt-verify --mode pre-pr` instead: keep the Issue AC tests
 and checks absent from required CI locally, then wait for required CI before
 claiming delivery. Full verification remains available and is the fallback
-when the CI correspondence cannot be established. In an `interactive` launch, UI-affecting work
-requires a concrete user verification handoff and a `User Verification Result`.
+when the CI correspondence cannot be established. User Verification Result is optional
+in every launch mode. A human handoff is mandatory only when the owner explicitly requests
+it; a missing, pending, or legacy deferred field alone does not create that request.
 
 Read the launch route from the launch record, not from the environment:
 `execution.status` reports `launch_route: autonomous | manual`. The legacy
@@ -41,13 +42,13 @@ source.
 PR work goes through `gwt-manage-pr`. After automated verification and all
 other Ready PR Gate conditions pass, create a Ready PR (or call `pr.ready` for
 an existing Draft), then follow the existing CI auto-merge path until the PR is
-merged. Do not stop at Draft creation. Automated test / headed E2E / CI failures,
+merged. Draft PRs are prohibited. Automated test / headed E2E / CI failures,
 known blockers, and other Ready Gate failures still require repair.
 
 The legacy `deferred (autonomous execution)` value remains compatible on
 existing autonomous PRs: fresh passing evidence permits Ready without rewriting
-the PR body or obtaining human confirmation. Manual launch verification stays
-unchanged.
+the PR body or obtaining human confirmation. Any actual rejection still
+records a known blocker that must be repaired.
 
 **Never call `execution.blocked` merely because an autonomous launch has no
 human visual confirmation.** It is a terminal outcome, not a pause. Continue

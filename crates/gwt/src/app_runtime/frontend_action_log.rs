@@ -149,6 +149,10 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_claude_account_usage_enabled", "usage")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::AgentRoster { .. } => FrontendUserActionLog::new("agent_roster", "agents"),
+        FrontendEvent::AgentSchedule { .. } => {
+            FrontendUserActionLog::new("agent_schedule", "agents")
+        }
         FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")
@@ -186,19 +190,8 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::CycleFocus { direction, .. } => {
             FrontendUserActionLog::new("cycle_focus", "window").mode(format!("{direction:?}"))
         }
-        FrontendEvent::ArrangeWindows { mode, .. } => {
-            FrontendUserActionLog::new("arrange_windows", "window").mode(format!("{mode:?}"))
-        }
-        FrontendEvent::DockWindowTab { id, target_id } => {
-            FrontendUserActionLog::new("dock_window_tab", "window")
-                .window(id)
-                .target(target_id)
-        }
         FrontendEvent::ActivateWindowTab { id } => {
             FrontendUserActionLog::new("activate_window_tab", "window").window(id)
-        }
-        FrontendEvent::DetachWindowTab { id, .. } => {
-            FrontendUserActionLog::new("detach_window_tab", "window").window(id)
         }
         FrontendEvent::PlaceAgentWindowInKanban {
             id,
@@ -721,6 +714,11 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("set_issue_monitor_auto_refill", "issue_monitor")
                 .mode(if *enabled { "on" } else { "off" })
         }
+        FrontendEvent::SetIssueMonitorTier {
+            issue_number, tier, ..
+        } => FrontendUserActionLog::new("set_issue_monitor_tier", "issue_monitor")
+            .target(issue_number.to_string())
+            .mode(tier.to_string()),
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }
@@ -747,7 +745,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
             FrontendUserActionLog::new("issue_monitor_configure_profile", "issue_monitor")
         }
         // SPEC-3431 FR-018: the PM launcher is a deliberate user action worth
-        // logging; its payload is only optional canvas bounds.
+        // logging; it carries no project credentials or conversation content.
         FrontendEvent::OpenPmAgent { .. } => FrontendUserActionLog::new("open_pm_agent", "pm"),
         // SPEC-3431 FR-026: PM settings changes are deliberate, low-frequency
         // user actions; the agent/model they select is not sensitive.
@@ -778,8 +776,6 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         | FrontendEvent::StartupFirstFrame { .. }
         | FrontendEvent::StartupTerminalReady { .. }
         | FrontendEvent::AgentIssueMonitorScanNow { .. }
-        | FrontendEvent::UpdateViewport { .. }
-        | FrontendEvent::UpdateWindowGeometry { .. }
         | FrontendEvent::TerminalInput { .. }
         | FrontendEvent::LoadPmConversation { .. }
         | FrontendEvent::LoadPmReports { .. }

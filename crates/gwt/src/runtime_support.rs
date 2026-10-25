@@ -92,7 +92,6 @@ pub fn current_app_version() -> &'static str {
 #[cfg(test)]
 pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     gwt::WorkspaceView {
-        viewport: tab.workspace.persisted().viewport.clone(),
         windows: tab
             .workspace
             .persisted()
@@ -514,12 +513,6 @@ pub fn spawn_env() -> HashMap<String, String> {
         gwt_agent::LaunchEnvironment::from_base_env(gwt_agent::environment::host_process_env())
             .into_parts();
     env
-}
-
-pub fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
-    let cols = ((geometry.width.max(420.0) - 26.0) / 8.4).floor() as u16;
-    let rows = ((geometry.height.max(260.0) - 58.0) / 18.0).floor() as u16;
-    (cols.max(20), rows.max(6))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

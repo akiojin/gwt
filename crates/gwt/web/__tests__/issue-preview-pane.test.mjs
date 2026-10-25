@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -27,7 +28,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22preview-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -61,6 +62,7 @@ function createNode(document, tagName, className, text) {
 function previewWindow(id, issueNumber, overrides = {}) {
   return {
     id,
+    session_id: `session-${id}`,
     preset: "agent",
     title: `Agent ${id}`,
     agent_id: "codex",
@@ -89,7 +91,12 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
   const windowized = [];
   const stateSince = new Map();
   let windows = [issueWindow, ...workspaceWindows];
+  const activity = createAgentActivityModel("fixture");
+  activity.applyAgentActivitySnapshot({ project_key: "fixture", host_id: "host", observed_at: new Date().toISOString(),
+    agents: workspaceWindows.map(target => ({ window_id: target.id, session_id: target.session_id ?? `session-${target.id}`,
+      runtime_incarnation: 1, issue_number: target.placement?.issue_number, is_pm: false })) });
   const surface = mod.createKnowledgeKanbanSurface({
+    agentActivityModel: activity.model,
     scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
@@ -107,7 +114,6 @@ async function makeFixture({ workspaceWindows = [] } = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime: (id, root, options) => {
       terminalMounts.push({ id, root, options });
@@ -199,6 +205,22 @@ test("issuePreviewWindowsForIssue binds previews to their host Issue window", as
   );
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", null), []);
   assert.deepEqual(issuePreviewWindowsForIssue(windows, "win-1", 9999), []);
+});
+
+test("AC34 census filtering preserves an existing preview host before adopting its orphan", async t => {
+  const agent = previewWindow("agent-other-host", 3671, {
+    placement: { kind: "issue_preview", issue_window_id: "win-2", issue_number: 3671 },
+  });
+  const fixture = await makeFixture({ workspaceWindows: [{ id: "win-2", preset: "issue" }, agent] });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)], 3671);
+  fixture.body.querySelector('[data-issue-detail-view="output"]').click();
+  assert.ok(!fixture.body.querySelector(".issue-preview"),
+    "a proven agent still belongs to its existing Issue host");
+  fixture.setWindows([agent]);
+  fixture.surface.renderKnowledgeBridge("win-1");
+  assert.equal(fixture.body.querySelector(".issue-preview")?.dataset.windowId, agent.id,
+    "removing its host lets this Issue window adopt the same proven agent");
 });
 
 test("Issue #5321: selection opens preview, close restores full width and selecting reopens", async (t) => {
@@ -351,8 +373,8 @@ test("Windowize hands the mirrored agent back to the canvas", async (t) => {
   })]);
   fixture.surface.renderKnowledgeBridge("win-1");
   const detail = fixture.body.querySelector(".knowledge-detail-pane");
-  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
-  assert.ok(detail.querySelector('[data-action="focus-canvas-window"]'));
+  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Works/);
+  assert.ok(detail.querySelector('[data-action="focus-surface-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
 });
 
@@ -399,7 +421,7 @@ test("no preview pane is rendered when the Issue has no auto-launched agent", as
 test("app.js wires the read-only mirror and the Windowize handoff", () => {
   assert.match(
     appSource,
-    /createTerminalRuntime:\s*\(id,\s*terminalRoot,\s*options\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot,\s*\{ \.\.\.options, readOnly: Boolean\(agentsHost\) \|\| options\?\.readOnly \}\)/,
+    /createTerminalRuntime:\s*\(id,\s*terminalRoot,\s*options\)\s*=>\s*\n?\s*createTerminalRuntime\(id,\s*terminalRoot,\s*\{ \.\.\.options, readOnly: Boolean\(worksHost\) \|\| options\?\.readOnly \}\)/,
     "the Issue surface receives the shared terminal runtime factory",
   );
   assert.match(

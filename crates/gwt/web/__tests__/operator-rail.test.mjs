@@ -164,7 +164,7 @@ test("FR-039 (安心): applyTelemetryCounts が waiting を WAITING cell に反�
 });
 
 test("Issue Monitor status strip cell stays visible and requests the canonical Issue entry", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document, window } = parseHTML(html);
   const originalCustomEvent = globalThis.CustomEvent;
   globalThis.CustomEvent = window.CustomEvent;
@@ -179,7 +179,7 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
       commands.push(event.detail?.id);
     });
 
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state: "launching",
       queue_len: 3,
@@ -192,7 +192,7 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
     assert.equal(cell.getAttribute("aria-label"), "Issue Monitor: Run Q3 A1/2");
     assert.equal(cell.classList.contains("op-status-strip__cell--alert"), false);
 
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state: "error",
       queue_len: 3,
@@ -214,12 +214,12 @@ test("Issue Monitor status strip cell stays visible and requests the canonical I
 });
 
 test("Issue Monitor status strip distinguishes and clears a quota hold", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");
   const value = document.getElementById("op-strip-issue-monitor-value");
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "idle",
     queue_len: 3,
@@ -235,7 +235,7 @@ test("Issue Monitor status strip distinguishes and clears a quota hold", async (
   const quotaHoldState = cell.dataset.state;
   const quotaHoldTitle = cell.getAttribute("title") ?? "";
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "idle",
     queue_len: 3,
@@ -254,7 +254,7 @@ test("Issue Monitor status strip distinguishes and clears a quota hold", async (
 });
 
 test("Issue Monitor status strip preserves higher-priority states around quota-hold metadata", async () => {
-  const { applyIssueMonitorStatus } = await importOperatorShell();
+  const { renderIssueMonitorStatus } = await importOperatorShell();
   const { document } = parseHTML(html);
   const cell = document.getElementById("op-strip-issue-monitor");
   const value = document.getElementById("op-strip-issue-monitor-value");
@@ -263,7 +263,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
     reset_at: "2026-09-04T09:30:00Z",
   };
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "error",
     queue_len: 3,
@@ -279,7 +279,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
   assert.match(cell.getAttribute("title") ?? "", /issue #3785: failed/);
   assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: false,
     state: "disabled",
     queue_len: 3,
@@ -294,7 +294,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
   assert.doesNotMatch(cell.getAttribute("title") ?? "", /Provider|Reset/);
 
   for (const state of ["active", "launching"]) {
-    applyIssueMonitorStatus(document, {
+    renderIssueMonitorStatus(document, {
       enabled: true,
       state,
       queue_len: 3,
@@ -309,7 +309,7 @@ test("Issue Monitor status strip preserves higher-priority states around quota-h
     assert.match(cell.getAttribute("title") ?? "", /Reset 2026-09-04T09:30:00Z/);
   }
 
-  applyIssueMonitorStatus(document, {
+  renderIssueMonitorStatus(document, {
     enabled: true,
     state: "active",
     queue_len: 3,

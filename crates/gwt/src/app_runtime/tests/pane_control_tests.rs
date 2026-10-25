@@ -1712,7 +1712,7 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
             .tab_mut("tab-project")
             .expect("tab")
             .workspace
-            .add_window(WindowPreset::Agent, canvas_bounds())
+            .add_window(WindowPreset::Agent)
             .id;
         let id = combined_window_id("tab-project", &raw_id);
         runtime.register_window("tab-project", &raw_id);
@@ -2681,9 +2681,7 @@ fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() 
     assert!(tab
         .workspace
         .set_session_id("agent-caller", Some("caller-session".to_string())));
-    let launch_failed = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let launch_failed = tab.workspace.add_window(WindowPreset::Agent);
     let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
     assert!(
         tab.workspace
@@ -3018,7 +3016,7 @@ fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
     assert!(
         current_events
             .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
         "the current observation grant must still receive its scoped snapshot"
     );
 }
@@ -3709,7 +3707,7 @@ fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
     assert!(
         observed
             .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
         "the settled grant must still receive its scoped snapshot"
     );
 
@@ -3801,7 +3799,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
 
     let [OutboundEvent {
         target: DispatchTarget::Client(client_id),
-        event: BackendEvent::WindowCanvasState { workspace },
+        event: BackendEvent::WorkspaceState { workspace },
         ..
     }] = events.as_slice()
     else {
@@ -3830,7 +3828,7 @@ fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
     let ready_workspace = ready_events
         .iter()
         .find_map(|event| match &event.event {
-            BackendEvent::WindowCanvasState { workspace } => Some(workspace),
+            BackendEvent::WorkspaceState { workspace } => Some(workspace),
             _ => None,
         })
         .expect("frontend_ready workspace state");
@@ -4355,9 +4353,7 @@ fn correlated_agent_self_close_rejects_same_project_peer_window() {
     assert!(tab
         .workspace
         .set_session_id("agent-project", Some("session-project".to_string())));
-    let peer = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let peer = tab.workspace.add_window(WindowPreset::Agent);
     assert!(tab
         .workspace
         .set_session_id(&peer.id, Some("session-peer".to_string())));
@@ -4414,9 +4410,7 @@ fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
     assert!(tab
         .workspace
         .set_session_id("agent-project", Some("session-project".to_string())));
-    let duplicate = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let duplicate = tab.workspace.add_window(WindowPreset::Agent);
     assert!(tab
         .workspace
         .set_session_id(&duplicate.id, Some("session-project".to_string())));
@@ -4694,7 +4688,7 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. }))
+            .filter(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
             .count(),
         1
     );
@@ -4814,6 +4808,77 @@ fn agent_name_projects_into_active_work_without_replacing_provider_identity() {
 }
 
 #[test]
+fn agent_name_backfills_registered_pm_without_joining_the_member_pool() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&root);
+    fs::create_dir_all(&worktree).unwrap();
+    let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.project_state_root = Some(root.clone());
+    session.agent_name = Some("Falcon".into());
+    session.update_status(gwt_agent::AgentStatus::Running);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "pm",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace.set_session_id("pm", Some(session.id.clone()));
+    let implementation = tab.workspace.add_window(WindowPreset::Agent);
+    tab.workspace
+        .set_agent_name(&implementation.id, Some("Flora".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    session.save(&runtime.sessions_dir).unwrap();
+    let host_pid = std::process::id();
+    let started = gwt::process::host_process_start_time(host_pid).unwrap();
+    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    sidecar.host_started_at = Some(started);
+    sidecar.child_pid = Some(host_pid);
+    sidecar.child_started_at = Some(started);
+    sidecar
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &runtime.sessions_dir,
+            host_pid,
+            &session.id,
+        ))
+        .unwrap();
+    runtime.register_pm_after_launch(&root, &session.id, "claude", &worktree);
+    let roster = gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap();
+
+    runtime.assign_missing_agent_names();
+    assert_eq!(
+        runtime
+            .tab("tab")
+            .unwrap()
+            .workspace
+            .window("pm")
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("Falcon")
+    );
+    assert!(runtime.agent_name_reservations(None).1.contains("Falcon"));
+    runtime.sync_pm_session_cache(&root, None);
+    assert!(
+        runtime.assign_missing_agent_names().is_empty(),
+        "the assigned PM name stays stable"
+    );
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(saved.agent_name, session.agent_name);
+    assert!(saved.agent_member_id.is_none());
+    assert_eq!(
+        gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap(),
+        roster,
+        "PM display naming must not change members, assignments or capacity"
+    );
+}
+
+#[test]
 fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
@@ -4885,9 +4950,7 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
         WindowPreset::Claude,
         WindowProcessStatus::Running,
     );
-    let second = tab
-        .workspace
-        .add_window(WindowPreset::Agent, canvas_bounds());
+    let second = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace
         .set_agent_name(&second.id, Some("Falcon".into()));
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
@@ -4906,7 +4969,7 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
     );
     assert!(events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })));
+        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(runtime.assign_missing_agent_names().is_empty());
 }
 

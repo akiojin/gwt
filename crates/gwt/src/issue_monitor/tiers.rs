@@ -20,18 +20,45 @@ impl IssueMonitorTierRecord {
     }
 }
 
+/// Actual Session or prospective cached selection profile, never a global guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTierProfileProjection {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
+/// Current eligible automatic selection, subject to launch-time checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueMonitorTierSelectionProjection {
+    pub tier: u8,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+}
+
 /// Exact acknowledged launch evidence, not proof of current process liveness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorConfirmedLaunchTier {
     pub tier: u8,
     pub window_id: String,
     pub delivery_id: String,
+    /// Filled only by the runtime's exact acknowledged-window Session join.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<IssueMonitorTierProfileProjection>,
 }
 
 /// Read-only tier facts for presentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueMonitorTierFacts {
     pub issue_number: u64,
+    /// Kind observed in the inbox or current scan, independent of admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_spec: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_launch: Option<IssueMonitorConfirmedLaunchTier>,
     /// Max-merged history written before spawn, not the latest or running tier
@@ -51,21 +78,35 @@ pub struct IssueMonitorTierFacts {
     /// Absent for manual profiles or when the Issue's spec status is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_minimum_tier: Option<u8>,
+    /// Effective automatic tier count; absent for manual profiles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_count: Option<usize>,
+    /// Filled by the runtime using the existing cached launch selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_launch: Option<IssueMonitorTierSelectionProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_launch_unavailable_reason: Option<String>,
 }
 
 impl IssueMonitorState {
     pub(super) fn tier_facts(&self, auto_tier_count: Option<usize>) -> Vec<IssueMonitorTierFacts> {
-        let spec_by_issue = auto_tier_count.map(|_| {
-            self.inbox
-                .iter()
-                .map(|item| (item.issue.number, has_gwt_spec_label(&item.issue.labels)))
-                .collect::<BTreeMap<_, _>>()
-        });
+        let spec_by_issue = self
+            .dependency_facts
+            .iter()
+            .map(|(&number, facts)| (number, facts.is_spec))
+            .chain(
+                self.inbox
+                    .iter()
+                    .map(|item| (item.issue.number, has_gwt_spec_label(&item.issue.labels))),
+            )
+            .collect::<BTreeMap<_, _>>();
         self.issue_tiers
             .keys()
             .chain(self.tier_overrides.keys())
             .chain(self.autonomous_records.keys())
             .chain(self.launch_confirmations.keys())
+            .chain(self.dependency_facts.keys())
+            .chain(self.inbox.iter().map(|item| &item.issue.number))
             .copied()
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -77,18 +118,30 @@ impl IssueMonitorState {
                     .autonomous_records
                     .get(&issue_number)
                     .map_or(0, AutonomousIssueRecord::tier_input);
+                let is_spec = spec_by_issue.get(&issue_number).copied();
                 let next_minimum_tier = auto_tier_count.and_then(|count| {
-                    spec_by_issue.as_ref()?.get(&issue_number).map(|is_spec| {
+                    is_spec.map(|is_spec| {
                         tier_for(
                             agent_failures,
-                            *is_spec,
+                            is_spec,
                             history_floor.max(minimum_tier_override.unwrap_or(0)),
                             count.min(255) as u8,
                         )
                     })
                 });
+                let next_launch_unavailable_reason = Some(
+                    if auto_tier_count.is_none() {
+                        "Automatic tier selection is disabled"
+                    } else if is_spec.is_none() {
+                        "Issue kind is unavailable for automatic tier selection"
+                    } else {
+                        "Next launch profile awaits cached provider availability"
+                    }
+                    .to_string(),
+                );
                 IssueMonitorTierFacts {
                     issue_number,
+                    is_spec,
                     confirmed_launch: self.confirmed_launch_tier(issue_number),
                     recorded_launch_tier: history.and_then(|record| record.launch_tier),
                     recorded_landing_tier: history.and_then(|record| record.landing_tier),
@@ -96,6 +149,9 @@ impl IssueMonitorState {
                     minimum_tier_override,
                     agent_failures,
                     next_minimum_tier,
+                    tier_count: auto_tier_count,
+                    next_launch: None,
+                    next_launch_unavailable_reason,
                 }
             })
             .collect()
@@ -123,6 +179,7 @@ impl IssueMonitorState {
             tier: ack.tier?,
             window_id: window_id.clone(),
             delivery_id: ack.delivery_id.clone()?,
+            profile: None,
         })
     }
 }
@@ -173,6 +230,31 @@ fn default_launch_tiers() -> Vec<Vec<IssueMonitorLaunchProfile>> {
 }
 
 impl IssueMonitorPrefs {
+    /// Apply one Issue override under the caller's latest-prefs writer lock.
+    /// Keep configuration CAS, revocation, and monotonic override semantics
+    /// identical across CLI, daemon, and GUI fallback transports.
+    pub fn apply_issue_minimum_launch_tier(
+        &mut self,
+        number: u64,
+        tier: u8,
+        expected_config_token: Option<&str>,
+    ) -> io::Result<()> {
+        check_expected_issue_monitor_config_token(self, expected_config_token)?;
+        if usize::from(tier) >= self.effective_launch_tiers().len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "tier is outside the configured launch tiers",
+            ));
+        }
+        self.advance_effect_authority_epoch()
+            .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
+        let mut monitor =
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), self.clone());
+        monitor.set_issue_minimum_launch_tier(number, tier);
+        *self = monitor.prefs();
+        Ok(())
+    }
+
     /// Bind selection to the claimed fresh launch before materialization.
     pub fn record_launch_delivery_tier(
         &mut self,

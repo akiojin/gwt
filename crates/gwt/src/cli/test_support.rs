@@ -261,7 +261,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         [api, endpoint] if api == "api" && endpoint == "repos/akiojin/gwt/pulls/12" => {
-            // PR node id lookup for pr.ready / pr.draft (read:org-free REST GET).
+            // PR node id lookup for the Ready transition (read:org-free REST GET).
             println!("{{\"number\":12,\"node_id\":\"PR_node_12\",\"draft\":true}}");
             return ExitCode::SUCCESS;
         }

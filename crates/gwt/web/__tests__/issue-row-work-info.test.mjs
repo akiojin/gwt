@@ -33,7 +33,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -119,7 +119,6 @@ async function makeFixture({ projection = null, renderOtherWork } = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime() {},
     windowDisplayTitle: (windowData) => windowData?.title || windowData?.id,
@@ -129,13 +128,12 @@ async function makeFixture({ projection = null, renderOtherWork } = {}) {
     renderOtherWork,
     workAttentionFor: attentionForWorkspace,
     formatWorkLifecycleLabel: formatLifecycleStateLabel,
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
     openWorkspaceResumePicker: (workspaceId) => resumed.push(workspaceId),
     openWorkspaceCleanup: (candidate, windowId) => cleaned.push({ candidate, windowId }),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
   });
   surface.mountKnowledgeWindow(issueWindow, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
@@ -227,9 +225,9 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
   assert.equal(row.querySelector(".knowledge-row-work"), null, "no separate Work band");
   const reason = row.querySelector('.knowledge-row-secondary-item[data-kind="reason"]');
   assert.equal(reason.textContent, "Waiting on review");
-  const pr = row.querySelector('.knowledge-row-secondary-item[data-key="pr"]');
-  assert.equal(pr.textContent, "PR #3699 · open");
-  assert.equal(pr.title, "https://github.com/akiojin/gwt/pull/3699");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="recorded"]').textContent, "Recorded work");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="pr"]'), null,
+    "the recorded-work explanation takes the second bounded secondary slot");
 });
 
 test("an Issue with no correlated Work renders no Work block", async (t) => {
@@ -272,7 +270,7 @@ test("Continue work, Resume, and Clean Up are reachable from the Issue row", asy
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Launched");
   row.querySelector('[data-action="continue-work"]').click();
   assert.deepEqual(fixture.continued, [
-    { workId: "work-3671", bounds: { x: 0, y: 0, width: 1280, height: 800 } },
+    { workId: "work-3671" },
   ]);
 
   row.querySelector('[data-action="resume-work"]').click();

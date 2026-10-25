@@ -176,11 +176,8 @@ fn manual_launch_live_local_holder_requires_typed_decision_before_materializatio
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     let wizard = runtime
         .project_state(&runtime.test_context())
@@ -249,11 +246,7 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -272,7 +265,6 @@ fn manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_mate
             fingerprint: decision.fingerprint,
             window_id: holder_window_id.clone(),
         },
-        Some(canvas_bounds()),
     );
 
     assert!(!runtime.runtimes.contains_key(&holder_window_id));
@@ -398,11 +390,7 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -417,7 +405,6 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
             fingerprint: decision.fingerprint,
             window_id: holder_window_id,
         },
-        Some(canvas_bounds()),
     );
     wait_for_recorded_event(
         "replacement-safe holder materialization",
@@ -448,7 +435,6 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         wizard_id,
         client_id,
         config,
-        bounds,
     } = request
     else {
         unreachable!("matched above")
@@ -465,7 +451,6 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         wizard_id.clone(),
         client_id.clone(),
         config.as_ref().clone(),
-        bounds.clone(),
     );
 
     assert!(
@@ -498,7 +483,6 @@ fn manual_launch_stop_materialization_survives_wizard_replacement_exactly_once()
         wizard_id,
         client_id,
         config.as_ref().clone(),
-        bounds,
     );
 
     assert!(duplicate.is_empty());
@@ -572,11 +556,7 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -606,7 +586,6 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
                 fingerprint: decision.fingerprint.clone(),
                 window_id: window_id.clone(),
             },
-            Some(canvas_bounds()),
         );
     });
 
@@ -699,11 +678,7 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -723,7 +698,6 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
             fingerprint: decision.fingerprint,
             window_id: window_id.clone(),
         },
-        Some(canvas_bounds()),
     );
 
     assert!(runtime.runtimes.contains_key(&window_id));
@@ -785,11 +759,7 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -804,7 +774,6 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
             fingerprint: decision.fingerprint,
             window_id,
         },
-        Some(canvas_bounds()),
     );
     let materialization = recorded_events
         .lock()
@@ -815,12 +784,10 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
                 wizard_id,
                 client_id,
                 config,
-                bounds,
             } => Some((
                 wizard_id.clone(),
                 client_id.clone(),
                 config.as_ref().clone(),
-                bounds.clone(),
             )),
             _ => None,
         })
@@ -830,7 +797,6 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
         materialization.0,
         materialization.1,
         materialization.2,
-        materialization.3,
     );
     let session = runtime
         .project_state(&runtime.test_context())
@@ -847,7 +813,6 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
         LaunchWizardAction::SetModel {
             model: "default".to_string(),
         },
-        Some(canvas_bounds()),
     );
     assert!(!runtime
         .project_state(&runtime.test_context())
@@ -896,11 +861,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -915,7 +876,6 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
             fingerprint: decision.fingerprint,
             window_id,
         },
-        Some(canvas_bounds()),
     );
     wait_for_notified_event(
         "initial manual successor request",
@@ -947,7 +907,6 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         wizard_id,
         client_id,
         config,
-        bounds,
     } = initial_request
     else {
         unreachable!("matched above")
@@ -968,7 +927,6 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         wizard_id,
         client_id,
         config.as_ref().clone(),
-        bounds,
     );
     assert!(
         !materialization.iter().any(|event| matches!(
@@ -1021,11 +979,7 @@ fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     wait_for_notified_event(
         "manual successor exact retry",
@@ -1123,11 +1077,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     let decision = runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
@@ -1142,7 +1092,6 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
             fingerprint: decision.fingerprint,
             window_id,
         },
-        Some(canvas_bounds()),
     );
     wait_for_notified_event(
         "sync failure request",
@@ -1174,7 +1123,6 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         wizard_id,
         client_id: _client_id,
         config,
-        bounds,
     } = request
     else {
         unreachable!("matched above")
@@ -1249,11 +1197,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
         Some("none")
     );
 
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(bounds),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_notified_event(
         "exact sync failure retry",
         &recorded_events,
@@ -1291,7 +1235,7 @@ fn manual_successor_sync_spawn_failure_retains_exact_recovery_for_retry() {
 }
 
 #[test]
-fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop() {
+fn manual_holder_decision_rejects_draft_mutation_before_stop_consent() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1323,25 +1267,20 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
-    let decision = runtime
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
+    assert!(runtime
         .project_state(&runtime.test_context())
         .expect("test project state")
         .launch_wizard
         .as_ref()
         .and_then(|session| session.wizard.view().holder_decision)
-        .expect("holder decision");
+        .is_some());
 
     runtime.handle_launch_wizard_action(
         &runtime.test_context(),
         LaunchWizardAction::SetLaunchTarget {
             target: gwt::LaunchTargetKind::Shell,
         },
-        Some(canvas_bounds()),
     );
     assert_eq!(
         runtime
@@ -1354,17 +1293,9 @@ fn manual_holder_decision_rejects_draft_mutation_and_missing_bounds_before_stop(
             .launch_target,
         gwt::LaunchTargetKind::Agent
     );
-    settle_test_pane_child(&runtime, &window_id);
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::StopAndStartSuccessor {
-            fingerprint: decision.fingerprint,
-            window_id: window_id.clone(),
-        },
-        None,
-    );
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(recorded_events.lock().expect("events").is_empty());
+    settle_test_pane_child(&runtime, &window_id);
     runtime.active_agent_sessions.remove(&window_id);
     runtime.stop_window_runtime_without_session_projection(&window_id);
 }
@@ -1391,11 +1322,8 @@ fn manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     assert!(events.iter().any(|event| matches!(
         &event.event,
@@ -1491,11 +1419,7 @@ fn manual_launch_defunct_exact_holder_replays_through_typed_successor_preflight(
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     wait_for_recorded_event("defunct holder successor", &recorded_events, |events| {
         events.iter().any(|event| {
@@ -1605,11 +1529,8 @@ fn manual_launch_ambiguous_terminal_proof_refuses_before_pane_and_authority_muta
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    let events = runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    let events =
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     assert_eq!(
         runtime.tabs[0].workspace.persisted().windows.len(),
@@ -1732,11 +1653,8 @@ fn manual_launch_completed_and_blocked_use_typed_successor_routes_without_holder
                 .expect("test project state")
                 .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-            runtime.handle_launch_wizard_action(
-                &runtime.test_context(),
-                LaunchWizardAction::Submit,
-                Some(canvas_bounds()),
-            );
+            runtime
+                .handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
             wait_for_recorded_event("terminal generation route", &recorded_events, |events| {
                 events.iter().any(|event| {
@@ -1891,11 +1809,7 @@ fn manual_launch_replays_existing_prepared_owner_successor_after_response_loss()
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
 
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
     wait_for_recorded_event("existing Prepared replay", &recorded_events, |events| {
         events.iter().any(|event| {
@@ -1953,11 +1867,7 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
             .expect("test project state")
             .launch_wizard = Some(wizard);
 
-        runtime.handle_launch_wizard_action(
-            &runtime.test_context(),
-            LaunchWizardAction::Submit,
-            Some(canvas_bounds()),
-        );
+        runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
 
         wait_for_recorded_event(
             "origin-isolated automatic launch",
@@ -1998,11 +1908,7 @@ fn manual_launch_origin_isolation_and_genesis_keep_automatic_intent() {
         .project_state_mut(&runtime.test_context())
         .expect("test project state")
         .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::Submit,
-        Some(canvas_bounds()),
-    );
+    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event("manual genesis", &recorded_events, |events| {
         events.iter().any(|event| {
             matches!(
@@ -2052,7 +1958,7 @@ fn app_runtime_frontend_ready_replies_only_to_requesting_project_client_and_star
         events.get(1),
         Some(event)
             if matches!(&event.target, DispatchTarget::Client(client_id) if client_id == "client-1")
-                && matches!(event.event, BackendEvent::WindowCanvasState { .. })
+                && matches!(event.event, BackendEvent::WorkspaceState { .. })
     ));
     assert!(events.iter().all(|event| matches!(
         &event.target,
@@ -2396,167 +2302,7 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
 }
 
 #[test]
-fn app_runtime_dock_window_tab_preserves_real_fit_pty_sizes() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Claude],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let shell_id = combined_window_id("tab-1", "shell-1");
-    let claude_id = combined_window_id("tab-1", "claude-1");
-    for window_id in [&shell_id, &claude_id] {
-        let pane = Pane::new(
-            window_id.clone(),
-            if cfg!(windows) { "cmd" } else { "/bin/sh" }.to_string(),
-            if cfg!(windows) {
-                vec![
-                    "/d".to_string(),
-                    "/s".to_string(),
-                    "/c".to_string(),
-                    "exit /b 0".to_string(),
-                ]
-            } else {
-                vec!["-lc".to_string(), "exit 0".to_string()]
-            },
-            80,
-            24,
-            HashMap::new(),
-            test_pane_cwd(),
-        )
-        .expect("pane");
-        runtime.runtimes.insert(
-            window_id.clone(),
-            WindowRuntime::new(
-                super::super::next_window_runtime_incarnation(),
-                Arc::new(Mutex::new(pane)),
-            ),
-        );
-    }
-
-    const REAL_COLS: u16 = 151;
-    const REAL_ROWS: u16 = 43;
-    for window_id in [&shell_id, &claude_id] {
-        runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane")
-            .resize(REAL_COLS, REAL_ROWS)
-            .expect("resize");
-    }
-
-    let target_geometry = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("claude-1")
-        .expect("claude")
-        .geometry
-        .clone();
-    assert_ne!(
-        geometry_to_pty_size(&target_geometry),
-        (REAL_COLS, REAL_ROWS),
-        "sentinel must differ from the dock geometry approximation",
-    );
-
-    let events = runtime.dock_window_tab_events(&shell_id, &claude_id);
-
-    assert_eq!(events.len(), 1);
-    for window_id in [&shell_id, &claude_id] {
-        let pane = runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane");
-        assert_eq!(
-            pane.screen().size(),
-            (REAL_ROWS, REAL_COLS),
-            "dock must not clobber the frontend-fitted PTY size",
-        );
-    }
-}
-
-#[test]
-fn app_runtime_detach_window_tab_preserves_real_fit_pty_size() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Shell, WindowPreset::Claude],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let shell_id = combined_window_id("tab-1", "shell-1");
-    let claude_id = combined_window_id("tab-1", "claude-1");
-    assert_eq!(
-        runtime.dock_window_tab_events(&shell_id, &claude_id).len(),
-        1,
-    );
-    insert_test_pane_runtime(&mut runtime, &shell_id);
-
-    const REAL_COLS: u16 = 149;
-    const REAL_ROWS: u16 = 37;
-    runtime
-        .runtimes
-        .get(&shell_id)
-        .expect("runtime")
-        .pane
-        .lock()
-        .expect("pane")
-        .resize(REAL_COLS, REAL_ROWS)
-        .expect("resize");
-
-    let detached_geometry = WindowGeometry {
-        x: 120.0,
-        y: 80.0,
-        width: 920.0,
-        height: 580.0,
-    };
-    assert_ne!(
-        geometry_to_pty_size(&detached_geometry),
-        (REAL_COLS, REAL_ROWS),
-        "sentinel must differ from the detached geometry approximation",
-    );
-
-    let events = runtime.detach_window_tab_events(&shell_id, detached_geometry.clone());
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(runtime.active_tab_id.as_deref(), Some("tab-1"));
-    let detached = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .window("shell-1")
-        .expect("shell");
-    assert_eq!(detached.geometry, detached_geometry);
-    assert_eq!(detached.tab_group_id, None);
-    let pane = runtime
-        .runtimes
-        .get(&shell_id)
-        .expect("runtime")
-        .pane
-        .lock()
-        .expect("pane");
-    assert_eq!(
-        pane.screen().size(),
-        (REAL_ROWS, REAL_COLS),
-        "detach must not clobber the frontend-fitted PTY size",
-    );
-}
-
-#[test]
-fn app_runtime_dock_to_issue_refusals_notify_without_detaching() {
+fn app_runtime_dock_to_issue_refusals_notify_without_changing_the_window() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let tab = sample_project_tab(
@@ -2568,11 +2314,6 @@ fn app_runtime_dock_to_issue_refusals_notify_without_detaching() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let agent_id = combined_window_id("tab-1", "agent-1");
-    runtime
-        .tab_mut("tab-1")
-        .unwrap()
-        .workspace
-        .dock_window_tab("agent-1", "claude-1");
     for (linked_issue, reason) in [
         (None, "no linked Issue"),
         (Some(4812), "no Issue or Issue Monitor"),
@@ -2618,7 +2359,7 @@ fn app_runtime_places_agent_window_in_kanban_from_frontend_event() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::WindowCanvasState { .. })),
+            .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "Kanban placement must broadcast workspace state"
     );
     let agent = runtime
@@ -2731,7 +2472,6 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_places_new_window() {
         .spawn_agent_window_in_agent_kanban(
             "tab-1",
             config,
-            canvas_bounds(),
             None,
             None,
             AgentKanbanLaunchTarget {
@@ -2788,7 +2528,6 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
         .spawn_agent_window_in_agent_kanban(
             "tab-1",
             config,
-            canvas_bounds(),
             None,
             None,
             AgentKanbanLaunchTarget {
@@ -2807,7 +2546,7 @@ fn app_runtime_spawn_agent_window_in_agent_kanban_falls_back_to_canvas_when_boar
         .iter()
         .find(|window| window.preset == WindowPreset::Agent)
         .expect("agent window");
-    assert_eq!(agent.placement, WindowPlacement::Canvas);
+    assert_eq!(agent.placement, WindowPlacement::Surface);
 }
 
 // SPEC-3671 FR-002 / T-007: an Issue Monitor auto-launch is mirrored inside the Issue
@@ -2856,13 +2595,7 @@ fn app_runtime_issue_monitor_launch_places_agent_window_in_issue_preview() {
         .build();
 
     runtime
-        .spawn_agent_window_with_feedback(
-            "tab-1",
-            config,
-            canvas_bounds(),
-            None,
-            issue_monitor_feedback(3671),
-        )
+        .spawn_agent_window_with_feedback("tab-1", config, None, issue_monitor_feedback(3671))
         .expect("issue monitor launch");
 
     assert_eq!(
@@ -2909,18 +2642,12 @@ fn app_runtime_issue_monitor_launch_falls_back_to_canvas_without_issue_window() 
         .build();
 
     runtime
-        .spawn_agent_window_with_feedback(
-            "tab-1",
-            config,
-            canvas_bounds(),
-            None,
-            issue_monitor_feedback(3671),
-        )
+        .spawn_agent_window_with_feedback("tab-1", config, None, issue_monitor_feedback(3671))
         .expect("issue monitor launch without issue window");
 
     assert_eq!(
         spawned_agent_placement(&runtime, "tab-1"),
-        WindowPlacement::Canvas
+        WindowPlacement::Surface
     );
 }
 
@@ -2939,11 +2666,18 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
-        repo,
+        repo.clone(),
         ProjectKind::Git,
         &[WindowPreset::Issue],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    gwt::agent_names::mutate_project_roster(
+        &repo,
+        &runtime.sessions_dir,
+        gwt::agent_names::AgentRosterAction::Resize { size: 2 },
+        None,
+    )
+    .expect("two independent manual launch routes need two members");
 
     runtime
         .spawn_agent_window(
@@ -2951,14 +2685,13 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
             gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
                 .branch("work/manual-launch")
                 .build(),
-            canvas_bounds(),
             None,
         )
         .expect("manual launch");
 
     assert_eq!(
         spawned_agent_placement(&runtime, "tab-1"),
-        WindowPlacement::Canvas
+        WindowPlacement::Surface
     );
 
     // A Launch Agent launch carries feedback but no Issue Monitor issue number.
@@ -2968,7 +2701,6 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
             gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
                 .branch("work/manual-launch-feedback")
                 .build(),
-            canvas_bounds(),
             None,
             LaunchFeedbackContext {
                 client_id: "client-1".to_string(),
@@ -2994,7 +2726,7 @@ fn app_runtime_manual_launch_keeps_canvas_placement_with_issue_window_open() {
         if window.preset == WindowPreset::Agent {
             assert_eq!(
                 window.placement,
-                WindowPlacement::Canvas,
+                WindowPlacement::Surface,
                 "manual launches must stay on the canvas"
             );
         }
@@ -3040,7 +2772,7 @@ fn app_runtime_issue_monitor_tracks_launched_window_id_for_issue_preview() {
         .build();
 
     runtime
-        .spawn_agent_window_with_feedback("tab-1", config, canvas_bounds(), None, feedback)
+        .spawn_agent_window_with_feedback("tab-1", config, None, feedback)
         .expect("issue monitor launch");
 
     let raw_id = runtime

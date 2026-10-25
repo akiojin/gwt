@@ -340,28 +340,26 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
     send: (message) => sent.push(message),
     createOperationId: () => `continue-operation-${++operationCount}`,
   });
-  const bounds = { x: 10, y: 20, width: 800, height: 600 };
 
-  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(dispatcher.dispatch("work-opaque-1"), true);
   assert.deepEqual(sent, [{
     kind: "continue_work",
     operation_id: "continue-operation-1",
     work_id: "work-opaque-1",
-    bounds,
   }]);
   assert.deepEqual(
     Object.keys(sent[0]).sort(),
-    ["bounds", "kind", "operation_id", "work_id"],
+    ["kind", "operation_id", "work_id"],
     "Session, conversation, generation, binding, and Host authority never cross the public wire",
   );
 
   assert.equal(
-    dispatcher.dispatch("work-opaque-1", bounds),
+    dispatcher.dispatch("work-opaque-1"),
     false,
     "a duplicate click cannot send a second request",
   );
   timers.fireAll();
-  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(dispatcher.dispatch("work-opaque-1"), true);
   assert.equal(sent.length, 2);
   assert.equal(
     sent[1].operation_id,
@@ -377,7 +375,7 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
     retryable: true,
   });
   assert.equal(pending.isPending("continue:work-opaque-1"), false);
-  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(dispatcher.dispatch("work-opaque-1"), true);
   assert.equal(sent[2].operation_id, "continue-operation-1");
   dispatcher.handleOutcome({
     kind: "continue_work_outcome",
@@ -387,7 +385,7 @@ test("Continue work dispatcher emits only opaque Work intent and reuses its oper
     error_code: "candidate_launch_failed",
     retryable: true,
   });
-  assert.equal(dispatcher.dispatch("work-opaque-1", bounds), true);
+  assert.equal(dispatcher.dispatch("work-opaque-1"), true);
   assert.equal(sent[3].operation_id, "continue-operation-2");
 });
 

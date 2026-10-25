@@ -9,7 +9,8 @@
 //! Prose, Board posts, and PR body text never settle anything.
 //!
 //! Standard Stop contracts hold: `stop_hook_active` short-circuits,
-//! missing/malformed/cross-session state fails open (FR-014t/u), and
+//! read errors warn and fail open; missing/cross-session state stays silent
+//! (FR-014t/u), and
 //! intake lanes are excluded (their artifact gate owns them).
 
 use std::path::Path;
@@ -139,7 +140,15 @@ pub(crate) fn handle_with_input_with_context(
     let Some(session) = current_session else {
         return HookOutput::Silent;
     };
-    let mut open = action_obligation::open_kinds(&resolved, session.trim());
+    let mut open = match action_obligation::try_open_kinds(&resolved, session.trim()) {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(%error, "action obligation state is unreadable");
+            return HookOutput::system_message(format!(
+                "Warning: Action obligation state is unreadable ({error}). Stop is not blocked by this infrastructure failure."
+            ));
+        }
+    };
     // Old PM sessions may already carry execution obligations. Leave their
     // history intact while enforcing only the kinds the PM can settle.
     if super::is_resident_pm_worktree(worktree) {
@@ -644,6 +653,21 @@ mod tests {
     // stop_hook_active, and intake lanes stay silent.
     #[test]
     fn fail_open_contracts_hold() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_agent::GWT_SESSION_ID_ENV,
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "CODEX_THREAD_ID",
+        ]
+        .map(ScopedEnvVar::unset);
         let dir = mk_worktree();
         assert_eq!(
             handle_with_input(dir.path(), "{}", Some("sess-1")),
@@ -674,5 +698,31 @@ mod tests {
             ),
             "obligations gate uniformly after the lane removal"
         );
+
+        let malformed = mk_worktree();
+        let path = action_obligation::state_path(malformed.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{broken").unwrap();
+        assert!(action_obligation::load(malformed.path()).is_err());
+        assert!(action_obligation::open_kinds(malformed.path(), "sess-1").is_empty());
+        let output = handle_with_input(malformed.path(), "{}", Some("sess-1"));
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("unreadable obligations must warn without blocking Stop: {output:?}");
+        };
+        assert!(message.contains("obligation"), "{message}");
+        assert!(message.contains("unreadable"), "{message}");
+        assert!(message.contains("not blocked"), "{message}");
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            "{}",
+            malformed.path(),
+            Some("sess-1"),
+        )
+        .expect("public Stop hook");
+        let HookOutput::SystemMessage(public_message) = output else {
+            panic!("public Stop must retain the obligation warning: {output:?}");
+        };
+        assert!(public_message.contains(&message), "{public_message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
     }
 }

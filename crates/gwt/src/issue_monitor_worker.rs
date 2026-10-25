@@ -2116,6 +2116,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             .and_then(|issue| issue.updated_at.as_deref());
         monitor.record_urgent_assignment(*number, revision, assignment);
     }
+    if let Err(error) = monitor.synchronize_agent_issue_schedule(repo_path) {
+        monitor.record_scan_error(now, format!("Agent schedule refresh failed: {error}"));
+    }
     // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
     // ledger whether a generation-conflict hold still protects anything. The
     // reaper released 29 of the 45 stranded production generations and their
@@ -3425,6 +3428,20 @@ pub fn load_cached_issue_monitor_candidate(
         .map(cached_issue_monitor_candidate)
 }
 
+/// Resolve continuity from the existing cached owner contract without a fetch.
+pub fn cached_agent_member_spec_owner(project_root: &Path, issue_number: u64) -> Option<u64> {
+    let root = crate::issue_cache::issue_cache_root_for_repo_path(project_root)?;
+    let issue = load_cached_issue_monitor_candidate(&root, issue_number)?;
+    if issue.labels.iter().any(|label| label == "gwt-spec") {
+        Some(issue_number)
+    } else {
+        issue
+            .body
+            .as_deref()
+            .and_then(crate::knowledge_bridge::parent_spec_from_body)
+    }
+}
+
 /// Read only the target's cached dependency evidence, recording each source
 /// before it is read so launch admission can reject changes to that evidence.
 pub fn load_cached_issue_monitor_dependency_candidates(
@@ -3537,12 +3554,29 @@ impl std::error::Error for GitHubRemoteResolutionError {}
 /// Bind admission to the project's actual source repository. A failed lookup
 /// keeps restored launch work held until a later scan resolves its provenance.
 pub fn bind_issue_monitor_source_repository(monitor: &mut IssueMonitorState, project_root: &Path) {
-    let repository = github_remote_owner_and_repo(project_root).ok();
+    let repository = configured_github_owner_and_repo(project_root)
+        .or_else(|| github_remote_owner_and_repo(project_root).ok());
     monitor.set_source_repository(
         repository
             .as_ref()
             .map(|(owner, repo)| (owner.as_str(), repo.as_str())),
     );
+}
+
+/// Issue #6096: resolve a GitHub `origin` from the repository's Git config
+/// files before spawning `git remote get-url origin`. Launch admission binds
+/// the source on every attempt, and one Git spawn costs seconds on a loaded
+/// Windows host. A Nested Bare + Worktree layout root reads its bare child's
+/// config. Unresolvable layouts and non-GitHub URLs keep the Git path.
+fn configured_github_owner_and_repo(project_root: &Path) -> Option<(String, String)> {
+    if gwt_git::repository::git_health::cached_metadata_failure(project_root).is_some() {
+        return None;
+    }
+    let origin = gwt_core::repo_hash::configured_origin_url(project_root).or_else(|| {
+        let common_dir = gwt_core::repo_hash::resolve_repository_common_dir(project_root)?;
+        gwt_core::repo_hash::configured_origin_url(&common_dir)
+    })?;
+    parse_github_remote_url(origin.trim())
 }
 
 pub fn github_remote_owner_and_repo(
@@ -3773,6 +3807,57 @@ pub(crate) mod tests {
         let mut monitor = crate::IssueMonitorState::with_prefs(config, prefs);
         monitor.set_source_repository(Some(("example", "project")));
         monitor
+    }
+
+    #[test]
+    fn issue6096_source_binding_reads_github_origin_without_spawning_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let config =
+            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:acme/widget.git\n";
+        // A plain checkout and a Nested Bare + Worktree layout root.
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(checkout.join(".git").join("config"), config).unwrap();
+        std::fs::write(checkout.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let layout = temp.path().join("layout");
+        let bare = layout.join("widget.git");
+        for dir in ["objects", "refs"] {
+            std::fs::create_dir_all(bare.join(dir)).unwrap();
+        }
+        std::fs::write(
+            bare.join("config"),
+            config.replace("bare = false", "bare = true"),
+        )
+        .unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let git_spawns_before = gwt_core::process::thread_git_spawn_count();
+        for root in [&checkout, &layout] {
+            assert_eq!(
+                configured_github_owner_and_repo(root),
+                Some(("acme".to_string(), "widget".to_string())),
+                "{}",
+                root.display()
+            );
+        }
+        assert!(
+            crate::index_worker::detect_repo_hash(&layout).is_some(),
+            "a layout root resolves its repository hash from the bare child"
+        );
+        assert_eq!(
+            gwt_core::process::thread_git_spawn_count() - git_spawns_before,
+            0,
+            "launch admission must not pay a Git process spawn for the source origin"
+        );
+
+        // Git reports the first of several origin URLs while config routing
+        // prefers the last; only Git can settle that, so no fast answer.
+        std::fs::write(
+            checkout.join(".git").join("config"),
+            format!("{config}[remote \"origin\"]\n\turl = https://github.com/acme/other.git\n"),
+        )
+        .unwrap();
+        assert_eq!(configured_github_owner_and_repo(&checkout), None);
     }
 
     #[test]
@@ -5418,6 +5503,12 @@ pub(crate) mod tests {
         // Immediate admission and full scans use the durable planner, not the
         // synchronous claim API below. Both must reject before any effect.
         let mut durable = monitor.clone();
+        let mut preferred = unsupported_launch_profile("openclaw");
+        preferred.prefer_for = vec!["kind:issue".into()];
+        durable.set_launch_tiers(
+            true,
+            vec![vec![unsupported_launch_profile("codex"), preferred]],
+        );
         assert_eq!(
             durable
                 .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false),
@@ -5434,6 +5525,7 @@ pub(crate) mod tests {
             assert!(reason.contains(required), "{reason}");
         }
         durable.set_launch_profile_pool(vec![unsupported_launch_profile("codex")]);
+        durable.set_launch_tiers(false, Vec::new());
         crate::scan_issue_monitor_candidates(&mut durable, &[issue(42)], "2026-07-02T00:00:20Z");
         assert_eq!(
             durable
@@ -5505,13 +5597,16 @@ pub(crate) mod tests {
         let client = FakeIssueClient::new();
         client.seed(github_issue(42));
 
+        let mut durable = monitor.clone();
+        let mut preferred = unsupported_launch_profile("codex");
+        preferred.prefer_for = vec!["kind:issue".into()];
+        durable.set_launch_tiers(
+            true,
+            vec![vec![unsupported_launch_profile("openclaw"), preferred]],
+        );
         assert_eq!(
-            monitor.clone().prepare_claim_effects_with_probe(
-                "host:1",
-                "2026-07-02T00:00:10Z",
-                1,
-                |_| false,
-            ),
+            durable
+                .prepare_claim_effects_with_probe("host:1", "2026-07-02T00:00:10Z", 1, |_| false,),
             1,
             "a supported provider still prepares a durable claim"
         );

@@ -243,6 +243,10 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             terminal,
         } => run_monitor_queue_list(env, project_root.as_deref(), terminal.as_deref(), out)?,
+        IssueCommand::MonitorSchedule {
+            project_root,
+            action,
+        } => run_monitor_schedule(env, project_root.as_deref(), action, out)?,
         IssueCommand::MonitorQueuePush {
             project_root,
             issue_numbers,
@@ -1629,6 +1633,24 @@ fn run_monitor_priority_set<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
     out.push_str(&monitor_priority_reply(&project_root, &prefs, issue_numbers).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_schedule<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    action: crate::issue_monitor::AgentScheduleAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let schedule = crate::issue_monitor::mutate_project_agent_schedule(
+        &root,
+        &gwt_core::paths::gwt_sessions_dir(),
+        action,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    out.push_str(&serde_json::to_string(&schedule).map_err(super::serde_as_api_error)?);
     out.push('\n');
     Ok(0)
 }
@@ -4319,6 +4341,12 @@ fn apply_monitor_config_set(
     update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     caller_is_resident_pm: bool,
 ) -> io::Result<()> {
+    if max_active_auto && prefs.agent_roster.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Project Agent roster capacity is controlled by its enabled members",
+        ));
+    }
     validate_monitor_config_set(
         allowed_labels,
         enabled,
@@ -4546,7 +4574,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 caller_is_resident_pm,
             )?;
             let requested = candidate.max_active_last_change.as_ref()
-                .filter(|_| max_active.is_some() || max_active_auto);
+                .filter(|_| (max_active.is_some() || max_active_auto) && candidate.agent_roster.is_none());
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
                 prefs, expected_config_token, requested, &control_id,
@@ -4674,29 +4702,6 @@ fn run_monitor_tiers_set<E: CliEnv>(
     Ok(0)
 }
 
-fn apply_monitor_tier_set(
-    prefs: &mut crate::IssueMonitorPrefs,
-    number: u64,
-    tier: u8,
-) -> io::Result<()> {
-    if usize::from(tier) >= prefs.effective_launch_tiers().len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "tier is outside the configured launch tiers",
-        ));
-    }
-    let current = prefs
-        .tier_overrides
-        .get(&number)
-        .copied()
-        .unwrap_or_default();
-    prefs
-        .advance_effect_authority_epoch()
-        .ok_or_else(|| io::Error::other("Issue Monitor authority epoch overflow"))?;
-    prefs.tier_overrides.insert(number, current.max(tier));
-    Ok(())
-}
-
 fn run_monitor_tier_set<E: CliEnv>(
     env: &E,
     project_root: Option<&std::path::Path>,
@@ -4708,11 +4713,7 @@ fn run_monitor_tier_set<E: CliEnv>(
     let root = issue_monitor_project_root(env, project_root)?;
     let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
     let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        crate::issue_monitor::check_expected_issue_monitor_config_token(
-            prefs,
-            expected_config_token,
-        )?;
-        apply_monitor_tier_set(prefs, number, tier)
+        prefs.apply_issue_minimum_launch_tier(number, tier, expected_config_token)
     })
     .map_err(io_as_api_error)?;
     out.push_str(&monitor_tiers_projection(&prefs).to_string());
@@ -9863,6 +9864,7 @@ mod tests {
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 priority_order: vec![7, 42, 99],
                 ..Default::default()
             },
@@ -9894,6 +9896,32 @@ mod tests {
         );
         assert_eq!(prefs.priority_order, vec![42, 7, 99]);
         assert!(prefs.enabled);
+
+        let mut resumed =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        resumed.set_source_repository(Some(("example", "repo")));
+        resumed.set_gui_connected(true);
+        let candidates = [7, 42].map(|number| crate::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: format!("Issue {number}"),
+            labels: Vec::new(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        let now = "2026-09-29T00:01:00Z";
+        // Scan the persisted operation result without a fixture auto-enqueue.
+        crate::scan_issue_monitor_candidates(&mut resumed, &candidates, now);
+        assert_eq!(
+            resumed
+                .next_launch_request(now)
+                .expect("launch_now target")
+                .issue_number,
+            42
+        );
     }
 
     /// Issue #5062 AC-4: an update drain refuses every new launch, so
@@ -14108,6 +14136,7 @@ mod tests {
                 .unwrap(),
             );
         }
+        let initial_prefs = prefs.clone();
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let env = crate::cli::TestEnv::new(repo);
         let mut out = String::new();
@@ -14117,8 +14146,14 @@ mod tests {
             None,
             true,
             Some(vec![
-                vec![pool_profile("openclaw", &[])],
-                vec![pool_profile("claude", &["kind:spec"])],
+                vec![
+                    pool_profile("codex", &[]),
+                    pool_profile("openclaw", &["kind:issue"]),
+                ],
+                vec![
+                    pool_profile("openclaw", &[]),
+                    pool_profile("claude", &["kind:spec"]),
+                ],
             ]),
             &mut out,
         )
@@ -14184,6 +14219,126 @@ mod tests {
         let prefs = crate::load_issue_monitor_prefs(&path).unwrap();
         assert!(prefs.launch_tiers.is_empty());
         assert_eq!(prefs.tier_overrides[&4774], 1);
+
+        // An Issue-only override can change the effective provider too.
+        // Reuse the same cold deliveries, keeping the SPEC on a supported tier.
+        let mut override_prefs = initial_prefs.clone();
+        override_prefs.launch_auto = true;
+        override_prefs.launch_tiers = vec![
+            vec![pool_profile("claude", &[])],
+            vec![pool_profile("openclaw", &[])],
+            vec![pool_profile("claude", &[])],
+        ];
+        override_prefs.tier_overrides.insert(43, 2);
+        crate::save_issue_monitor_prefs(&path, &override_prefs).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 44, 1, &mut out).unwrap();
+        run_monitor_tier_set(&env, None, None, 42, 0, &mut out).unwrap();
+        let override_prefs = crate::load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(override_prefs.tier_overrides[&42], 1);
+        assert_eq!(
+            override_prefs.pending_launch_deliveries, prefs.pending_launch_deliveries,
+            "the Issue override must cancel only its unowned unsupported delivery"
+        );
+        assert_eq!(override_prefs.launching_issues, prefs.launching_issues);
+        assert_eq!(override_prefs.pending_effects.len(), 1);
+        assert_eq!(
+            override_prefs.pending_effects[0].payload,
+            prefs.pending_effects[0].payload
+        );
+        let mut restored = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            override_prefs,
+        );
+        assert!(restored
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!restored.claim_launch_delivery(
+            42,
+            "pending-42",
+            "gui",
+            123,
+            "tab::agent-42",
+            |_| true
+        ));
+
+        // A policy save can also leave no eligible provider, without a
+        // permission refusal. Both cold writers must release that delivery.
+        for issue_override in [false, true] {
+            let mut held_prefs = initial_prefs.clone();
+            held_prefs
+                .provider_quota_holds
+                .insert("codex".into(), "2999-01-01T00:00:00Z".into());
+            held_prefs.autonomous_records.push(
+                serde_json::from_value(serde_json::json!({
+                    "issue_number": 42, "attempts": 1, "non_agent_attempts": 1
+                }))
+                .unwrap(),
+            );
+            held_prefs.pending_launch_deliveries[0].launch_session_strategy =
+                crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired;
+            held_prefs.tier_overrides.insert(44, 2);
+            if issue_override {
+                held_prefs.launch_auto = true;
+                held_prefs.launch_tiers = vec![
+                    vec![pool_profile("claude", &[])],
+                    vec![pool_profile("claude", &[])],
+                    vec![pool_profile("codex", &[])],
+                ];
+            } else {
+                held_prefs.tier_overrides.insert(42, 2);
+            }
+            crate::save_issue_monitor_prefs(&path, &held_prefs).unwrap();
+            if issue_override {
+                run_monitor_tier_set(&env, None, None, 42, 2, &mut out).unwrap();
+            } else {
+                run_monitor_tiers_set(
+                    &env,
+                    None,
+                    None,
+                    true,
+                    Some(vec![
+                        vec![pool_profile("claude", &[])],
+                        vec![pool_profile("claude", &[])],
+                        vec![pool_profile("codex", &[])],
+                    ]),
+                    &mut out,
+                )
+                .unwrap();
+            }
+            let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+            assert_eq!(
+                saved.pending_launch_deliveries, prefs.pending_launch_deliveries,
+                "release only the unowned delivery with no eligible candidate"
+            );
+            assert_eq!(saved.launching_issues, prefs.launching_issues);
+            assert_eq!(saved.pending_effects.len(), 1);
+            assert_eq!(
+                saved.pending_effects[0].payload,
+                prefs.pending_effects[0].payload
+            );
+            assert_eq!(
+                saved.queued_launch_session_strategies[&42],
+                crate::issue_monitor::IssueMonitorLaunchSessionStrategy::FreshRequired
+            );
+            let mut restored =
+                crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), saved);
+            assert_eq!(restored.attempt_count(42), 1);
+            assert!(!restored.active_issue_numbers().contains(&42));
+            assert!(restored
+                .take_pending_launch_requests()
+                .iter()
+                .all(|request| request.issue_number != 42));
+            assert!(!restored.claim_launch_delivery(
+                42,
+                "pending-42",
+                "gui",
+                123,
+                "tab::agent-42",
+                |_| true
+            ));
+        }
     }
 
     /// SPEC #3914 FR-011 / AC-8 / SC-6: the pool is written whole, mirrored
@@ -14306,7 +14461,7 @@ command = "my-agent-cli"
             &env,
             Some(&repo),
             None,
-            vec![pool_patch("codex", &[]), pool_patch("my-agent", &[])],
+            vec![pool_patch("codex", &[]), pool_patch(" my-agent ", &[])],
             None,
             &mut String::new(),
         )

@@ -4,7 +4,7 @@
 // status row per running agent) and the split view, which lays the running
 // Issues out as "Issue detail + interactive terminal" pairs. Switching modes
 // reparents the same terminal runtime, so the PTY, its scrollback and the
-// selection survive. After Windowize the pair shows the "Shown in Agents" face
+// selection survive. After Windowize the pair shows the "Shown in Works" face
 // instead of a second input face (US-4 / FR-003a), and a pair can be expanded
 // or shrunk in place (T-005). Stopping an agent lives only in the row's ⋯ menu
 // (FR-015), and the status row's elapsed time comes from the backend's agent
@@ -16,6 +16,7 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parseHTML } from "linkedom";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appCss = readFileSync(resolve(here, "../styles/app.css"), "utf8");
@@ -32,7 +33,7 @@ async function importSurfaceModule() {
       'from "./launch-pending-controller.js"',
       'from "data:text/javascript,export function createLaunchOperationId(){return%20%22split-test%22}"',
     );
-  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
+  return import(`data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`);
 }
 
 function knowledgeEntry(number, overrides = {}) {
@@ -65,6 +66,7 @@ function createNode(document, tagName, className, text) {
 function previewWindow(id, issueNumber, overrides = {}) {
   return {
     id,
+    session_id: `session-${id}`,
     preset: "agent",
     title: `Agent ${id}`,
     agent_id: "codex",
@@ -91,7 +93,13 @@ async function makeFixture(t, { workspaceWindows = [], projection = null } = {})
   const focused = [];
   const stateSince = new Map();
   let windows = [issueWindow, ...workspaceWindows];
+  const activity = createAgentActivityModel("fixture");
+  activity.applyAgentActivitySnapshot({ project_key: "fixture", host_id: "host", observed_at: new Date().toISOString(),
+    agents: workspaceWindows.map(target => ({ window_id: target.id, session_id: target.session_id,
+      runtime_incarnation: 1, issue_number: target.linked_issue_number ?? target.placement?.issue_number,
+      is_pm: false })) });
   const surface = mod.createKnowledgeKanbanSurface({
+    agentActivityModel: activity.model,
     scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
@@ -109,7 +117,6 @@ async function makeFixture(t, { workspaceWindows = [], projection = null } = {})
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime: (id, root, options) => {
       terminalMounts.push({ id, root, options });
@@ -313,8 +320,8 @@ test("US-4 / FR-003a: a Windowized agent's pair shows the canvas face, not a sec
   );
   click(fx.body.querySelector('[data-issue-detail-view="output"]'));
   const detail = fx.body.querySelector(".knowledge-detail-pane");
-  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Agents/);
-  assert.ok(detail.querySelector('[data-action="focus-canvas-window"]'));
+  assert.match(detail.querySelector(".issue-preview-empty")?.textContent || "", /Shown in Works/);
+  assert.ok(detail.querySelector('[data-action="focus-surface-window"]'));
   assert.equal(detail.querySelectorAll(".terminal-root").length, 0);
   fx.terminalMounts.length = 0;
 
@@ -322,31 +329,31 @@ test("US-4 / FR-003a: a Windowized agent's pair shows the canvas face, not a sec
 
   const list = pairs(fx.body);
   assert.deepEqual(list.map((pair) => pair.dataset.issueNumber), ["3671", "3672"]);
-  const onCanvas = list[0];
-  assert.ok(onCanvas.classList.contains("is-on-canvas"));
-  assert.match(onCanvas.querySelector(".issue-split-placeholder").textContent, /Shown in Agents/);
-  assert.equal(Boolean(onCanvas.querySelector(".terminal-root")), false, "no second input face");
-  assert.ok(Boolean(onCanvas.querySelector('[data-action="focus-canvas-window"]')));
-  assert.equal(Boolean(onCanvas.querySelector('[data-action="windowize-issue-preview"]')), false);
+  const inAgents = list[0];
+  assert.ok(inAgents.classList.contains("is-in-agents"));
+  assert.match(inAgents.querySelector(".issue-split-placeholder").textContent, /Shown in Works/);
+  assert.equal(Boolean(inAgents.querySelector(".terminal-root")), false, "no second input face");
+  assert.ok(Boolean(inAgents.querySelector('[data-action="focus-surface-window"]')));
+  assert.equal(Boolean(inAgents.querySelector('[data-action="windowize-issue-preview"]')), false);
   assert.deepEqual(
     fx.terminalMounts.map((mount) => mount.id),
     ["agent-2"],
     "only the inline agent mounts a terminal",
   );
 
-  click(onCanvas.querySelector('[data-action="focus-canvas-window"]'));
+  click(inAgents.querySelector('[data-action="focus-surface-window"]'));
   assert.deepEqual(fx.focused, ["agent-1"]);
 
   // FR-011: the Windowized window names its own Issue, so an Issue with no agent
   // never adopts it as its canvas face.
-  const { issueCanvasAgentWindowsForIssue } = fx.mod;
+  const { issueSurfaceAgentWindowsForIssue } = fx.mod;
   const windowized = previewWindow("agent-1", 3671, { placement: { kind: "canvas" } });
   assert.deepEqual(
-    issueCanvasAgentWindowsForIssue([windowized], null, ["agent-1"], 3671).map((w) => w.id),
+    issueSurfaceAgentWindowsForIssue([windowized], null, ["agent-1"], 3671).map((w) => w.id),
     ["agent-1"],
   );
   assert.deepEqual(
-    issueCanvasAgentWindowsForIssue([windowized], null, ["agent-1"], 3999).map((w) => w.id),
+    issueSurfaceAgentWindowsForIssue([windowized], null, ["agent-1"], 3999).map((w) => w.id),
     [],
     "a remembered Windowize belongs to the Issue the window is linked to",
   );

@@ -67,7 +67,7 @@ retain their supplied inbox order without duplicates. Keep separate rows for
 duplicate or empty IDs and invalid traces; never expand membership through a Goal,
 Milestone or another row. Queue/active membership alone supplies no inbox state.
 An absent Monitor leaves every direct Issue unobserved; degraded observations
-retain their provenance. Empty membership yields empty arrays. These observations
+retain their provenance. Empty membership yields empty state and unobserved arrays. These observations
 do not establish health, completion, priority or permission to launch work.
 `target_date_observation` compares each saved milestone target with the scan's UTC calendar date.
 Only exact YYYY-MM-DD targets and valid RFC3339 scan timestamps supply
@@ -165,6 +165,15 @@ an observation then. Legacy omitted queue lists also decode to []; neither prove
 Queue residency is not execution waiting time, full queue coverage or permission to act.
 Never derive SLA, starvation, priority, preemption or launch decisions from this duration alone.
 
+`age_limits` compares each queue row with every saved starvation_after_seconds threshold.
+It retains saved policy order, ID, version and optional threshold without selecting an active policy.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete daemon
+Monitor coverage. All other cases yield `unknown`, never a within-limit PASS, with named
+missing inputs for absent, invalid, ambiguous or degraded evidence. No policies yields [].
+The comparison is only host queue membership at the supplied scan, not end-to-end starvation,
+SLA or permission to change priority, launch or preempt. Keep the enclosing scan age and provenance.
+
 `idle_windows` preserves every supplied Monitor idle window in order, including repeats
 and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
 `pane_present`; it does not reproduce rebind or requeue proposals.
@@ -177,11 +186,17 @@ an old or degraded scan is only an observation at that scan, not current idle ev
 Idle timing does not prove queue age, SLA breaches, liveness or permission to release.
 Never recompute the Monitor's idle classification or change slots, claims or launches from it.
 
+`policy.monitor.scan_aborted` exposes the supplied typed scan outcome, or null without Monitor data.
+An aborted scan can retain older observations while advancing last_scan_at.
+When true, `successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown.
+Keep the raw observations and timing; unrelated error text alone does not invalidate a normal scan.
+
 `wip_limits` compares each saved policy independently in saved order, retaining its ID,
 version and optional limit alongside `observed_issue_count` and an assessment.
 `observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
 it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
 coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time.
 Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
 there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
 Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
@@ -198,6 +213,60 @@ produce unknown duration and named missing inputs; invalid activity strings are 
 Absent Monitor yields null, while an observed snapshot with no matching rows yields [].
 Keep the enclosing Monitor provenance: an old or degraded scan is not fresh activity evidence.
 Activity timing does not establish queue age, SLA breaches or liveness, and authorizes no action.
+
+`policy.dependency_observations` preserves every supplied inbox row, including repeated owners,
+with its typed state and canonical `dependency` (`blocked_by`, `cycle`, `bundle_with`).
+An absent typed status remains null and names `dependency_status` in missing inputs.
+Neither absent nor empty dependency status proves readiness or absence of declarations;
+the Monitor may omit status for zero declarations and omit resolved or unknown blockers.
+No usable Monitor observation yields null; a supplied empty inbox yields [].
+Keep the enclosing Monitor source, scan time and coverage limits. A reported cycle is the
+Monitor's observed verdict, not a fresh project-wide graph assessment; bundle declarations
+do not prove bundle completeness. Never recompute readiness or change priority, health or launches
+from these observations.
+`policy.dependency_impacts` reverses only supplied canonical blocked_by edges.
+Each row's `issue_number` is the blocker; `dependent_issues` lists distinct direct dependents.
+Both are in numeric order; the original observations keep their row order and repeats.
+Direct impact observations never expand transitive chains or cycle/bundle declarations.
+All supplied rows contribute without reclassifying their state, even when repeated rows conflict.
+Absent Monitor yields null; supplied snapshots with no blocker edges yield [].
+Degraded or aborted snapshots retain these facts with the enclosing Monitor provenance and limits.
+An empty inverse does not prove no impact, and dependent counts do not establish importance,
+current blockage, critical path, priority, readiness or permission to act.
+Each milestone's `dependency_observations` selects only its effective member Issues:
+direct references plus roadmap links resolved through a unique nonempty milestone ID.
+It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
+Use `unobserved_issues` for missing member rows and keep the enclosing coverage limits;
+this membership join does not establish transitive delay, critical path or milestone health.
+Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents.
+Keep external blockers, preserve numeric order and distinct dependents, and omit empty blocker rows.
+The same existing membership rule applies to duplicate or blank milestone IDs; never infer roadmap membership.
+Absent Monitor yields null; no supplied member blocker edges yields []. Degraded or aborted facts retain
+the enclosing Monitor provenance and limits; this inverse does not establish delay or milestone health.
+Each Goal's `dependency_observations` selects only its existing roadmap member Issues,
+resolved through an exact unique nonempty Goal ID, including invalid links as reference facts.
+Milestone-only, category-only and other-Goal references do not add members.
+The same row order, repeats, missingness and null/[] semantics apply; keep `unobserved_issues`
+and the enclosing Monitor provenance. These observations do not prove Goal achievement,
+metric attainment, critical path or readiness, and authorize no priority or launch changes.
+Each Goal's `dependency_impacts` filters the global direct inverse to its existing roadmap member dependents.
+Keep external blockers, numeric order and distinct direct dependents; omit other dependents and empty blocker rows.
+The same exact unique nonempty Goal-ID membership applies, including invalid explicit links as reference facts.
+Duplicate or blank Goal IDs resolve no members. Absent Monitor yields null; no supplied member blocker edges yields [].
+Degraded or aborted facts keep enclosing Monitor provenance and limits. This inverse proves neither Goal achievement,
+metric attainment, transitive delay nor critical path, and grants no priority, readiness or launch authority.
+Each roadmap item's `dependency_observations` selects only that row's directly saved Issues.
+Empty or duplicate IDs and invalid traces keep independent membership; never expand it through
+a Goal, milestone or another row. Preserve the supplied row order, repeats and typed missingness.
+Absent Monitor yields null even for empty membership; supplied snapshots without matching rows
+yield []. Keep `unobserved_issues` and the enclosing Monitor source, scan time and coverage limits.
+This join does not establish a complete graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents.
+Keep external/shared blockers, numeric order and distinct direct dependents; omit other dependents and empty blocker rows.
+Duplicate/blank row IDs and invalid links keep independent membership; never expand through a Goal, milestone or another row.
+Absent Monitor yields null even for empty membership; no supplied member blocker edges yields [].
+Degraded or aborted facts retain enclosing Monitor provenance and limits. This inverse does not establish a complete graph,
+transitive delay, critical path or health, and grants no priority, readiness or launch authority.
 
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
@@ -1837,7 +1906,7 @@ quota:
     records the intent; the `Auto Merge PR` workflow performs the merge,
     and a queued or failed run of it leaves the PR exactly here. Find
     that run and rerun it with `actions.rerun`; waiting does not land it
-    (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
+    (25 minutes measured). Never reach for Draft/Ready state flips as a
     nudge — Draft cancels auto-merge. External forks have the scoped operation
     described above; ordinary PRs retain repository merge automation.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
@@ -1893,12 +1962,15 @@ do not recheck them:
   head,
 - the body records `Agent Visual Check: pass` or `n/a (no UI surface)`.
 
-`User Verification Result: deferred (autonomous execution)` is not a
-refusal. Deferral records that nobody has looked at the change yet, not
-that it may never ship; the UI question it leaves open is the one
-`Agent Visual Check` answers. Promote a `deferred` PR that satisfies the
-list above, and leave the owner's later sweep to `pr.list`'s
-`deferred_user_verification`.
+Draft PRs are prohibited; do not create one or demote a Ready PR.
+`User Verification Result: deferred (autonomous execution)` is not a refusal.
+The `deferred_user_verification` field is diagnostic, not an owner request.
+User Verification Result is optional unless the owner explicitly requests
+a human check. A missing, pending, or legacy deferred field alone does not
+create that request. `Agent Visual Check` and measured headed evidence cover
+UI quality. Promote an existing Draft that satisfies the machine checks with
+`pr.ready`; evidence belonging to another session does not by itself refuse
+the registered PM. The target head, required CI, and review gates still apply.
 
 `ready_to_promote_blocker` names the one condition still missing on a
 Draft that did not qualify, so a row never leaves you guessing why:
@@ -3977,6 +4049,9 @@ mod tests {
             "run `pr.ready` on it yourself, without asking the user",
             "Do not wait for the owning agent to come back",
             "deferred (autonomous execution)` is not a refusal",
+            "Draft PRs are prohibited",
+            "User Verification Result is optional unless the owner explicitly requests",
+            "evidence belonging to another session does not by itself refuse the registered PM",
             "`ready_to_promote_blocker` names the one condition still missing",
             "`agent_visual_check_failed` is the owner's work, never yours",
         ] {
@@ -4125,9 +4200,8 @@ mod tests {
             "cargo build -p gwt --bin gwtd",
             "`verify.lease.status`",
             "waiting, not stuck",
-            // Issue #3913: verify.run admits itself and answers `deferred`
-            // on a busy host; a deferred agent is retrying, not stuck.
-            "`deferred`",
+            // Deferred admission is verified by its actual record wording
+            // below, independently of the unrelated legacy PR body value.
             "`pending`",
             "first remaining command's admission",
             "incomplete, non-PASS deferred record",
@@ -4470,6 +4544,19 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
+            "`policy.monitor.scan_aborted` exposes the supplied typed scan outcome",
+            "An aborted scan can retain older observations while advancing last_scan_at",
+            "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
+            "`policy.dependency_observations` preserves every supplied inbox row",
+            "`policy.dependency_impacts` reverses only supplied canonical blocked_by edges",
+            "Direct impact observations never expand transitive chains or cycle/bundle declarations",
+            "Neither absent nor empty dependency status proves readiness",
+            "Each milestone's `dependency_observations` selects only its effective member Issues",
+            "Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents",
+            "Each Goal's `dependency_impacts` filters the global direct inverse to its existing roadmap member dependents",
+            "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
+            "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
+            "Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",
@@ -4502,12 +4589,15 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
             "`terminal_queue` preserves the supplied host queue projection order, repeated Issues and raw queued_at",
             "Queue residency is not execution waiting time, full queue coverage or permission to act",
+            "`age_limits` compares each queue row with every saved starvation_after_seconds threshold",
+            "`observed_age_threshold_reached` means age >= threshold, including equality and zero",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
             "`retry_deadlines` reports every inbox row with `retry_not_before`",
             "`wip_limits` compares each saved policy independently in saved order",
+            "Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time",
             "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
             "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",

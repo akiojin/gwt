@@ -1,11 +1,11 @@
 //! Read-only goal and roadmap diagnostics (SPEC #3431 T-113a/T-114a).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
 use crate::{
-    issue_monitor::IssueMonitorInboxCoverage,
+    issue_monitor::{IssueMonitorDependencyStatus, IssueMonitorInboxCoverage},
     pm_planning::{
         Goal, PlanningAction, PlanningChangeImpact, PlanningFieldChange, PmPlanningState,
         RoadmapHorizon, RoadmapItem,
@@ -177,6 +177,8 @@ pub struct PlanningAssessment {
     pub monitor: MonitorEvidence,
     pub capacity: CapacityObservation,
     pub missing_inputs: Vec<&'static str>,
+    pub dependency_observations: Option<Vec<DependencyObservation>>,
+    pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
     pub issue_traces: Vec<IssueTrace>,
     pub roadmap: RoadmapHorizons,
     pub roadmap_items: Vec<RoadmapDiagnostic>,
@@ -188,6 +190,45 @@ pub struct PlanningAssessment {
     pub forecasts: Vec<ForecastObservation>,
     pub review_dates: Vec<ReviewDateObservation>,
     pub recurring_runs: Vec<RecurringRunObservation>,
+}
+
+/// Supplied Monitor diagnostics are not a complete graph or permission to launch.
+#[derive(Debug, Clone, Serialize)]
+pub struct DependencyObservation {
+    pub issue_number: u64,
+    pub state: MonitorInboxState,
+    pub dependency: Option<IssueMonitorDependencyStatus>,
+    pub missing_inputs: Vec<&'static str>,
+}
+
+/// Direct dependents of a supplied blocker, not a complete impact graph.
+#[derive(Debug, Serialize)]
+pub struct DependencyImpactObservation {
+    pub issue_number: u64,
+    pub dependent_issues: Vec<u64>,
+}
+
+/// Select member dependents while retaining blockers outside the membership.
+fn member_dependency_impacts(
+    impacts: Option<&[DependencyImpactObservation]>,
+    members: &BTreeSet<u64>,
+) -> Option<Vec<DependencyImpactObservation>> {
+    impacts.map(|rows| {
+        rows.iter()
+            .filter_map(|row| {
+                let dependent_issues: Vec<_> = row
+                    .dependent_issues
+                    .iter()
+                    .copied()
+                    .filter(|number| members.contains(number))
+                    .collect();
+                (!dependent_issues.is_empty()).then_some(DependencyImpactObservation {
+                    issue_number: row.issue_number,
+                    dependent_issues,
+                })
+            })
+            .collect()
+    })
 }
 
 /// Authored metadata presence is not a risk assessment or action permission.
@@ -312,6 +353,7 @@ fn observe_recurring_runs(
 pub struct MonitorEvidence {
     pub source: Option<IssueMonitorStatusSource>,
     pub last_scan_at: Option<String>,
+    pub scan_aborted: Option<bool>,
     pub active_launches_incomplete: bool,
     pub inbox_coverage: Option<IssueMonitorInboxCoverage>,
 }
@@ -344,10 +386,23 @@ pub struct QueueResidencyObservation {
     pub queued_at: String,
     pub age_seconds_at_scan: Option<u64>,
     pub missing_inputs: Vec<&'static str>,
+    pub age_limits: Vec<QueueAgeLimitObservation>,
+}
+
+/// Saved thresholds compare host membership age, never canonical starvation.
+#[derive(Debug, Serialize)]
+pub struct QueueAgeLimitObservation {
+    pub id: String,
+    pub version: u64,
+    pub starvation_after_seconds: Option<u64>,
+    pub assessment: &'static str,
+    pub missing_inputs: Vec<&'static str>,
 }
 
 fn observe_terminal_queue(
+    state: &PmPlanningState,
     status: &IssueMonitorAgentStatus,
+    monitor_missing_inputs: &[&'static str],
 ) -> Option<Vec<QueueResidencyObservation>> {
     let view = status.gui_status.as_ref()?;
     let scan = status
@@ -375,11 +430,49 @@ fn observe_terminal_queue(
                         }
                     }
                 });
+                let age_limits = state
+                    .policies
+                    .iter()
+                    .map(|policy| {
+                        let mut missing = monitor_missing_inputs.to_vec();
+                        missing.extend_from_slice(&missing_inputs);
+                        if policy.id.trim().is_empty() {
+                            missing.push("policy_id");
+                        } else if state
+                            .policies
+                            .iter()
+                            .filter(|other| other.id == policy.id)
+                            .count()
+                            != 1
+                        {
+                            missing.push("unique_policy_id");
+                        }
+                        if policy.starvation_after_seconds.is_none() {
+                            missing.push("starvation_after_seconds");
+                        }
+                        let reached = missing.is_empty()
+                            && age_seconds_at_scan
+                                .zip(policy.starvation_after_seconds)
+                                .is_some_and(|(age, threshold)| age >= threshold);
+                        QueueAgeLimitObservation {
+                            id: policy.id.clone(),
+                            version: policy.version,
+                            starvation_after_seconds: policy.starvation_after_seconds,
+                            assessment: if reached {
+                                "observed_age_threshold_reached"
+                            } else {
+                                "unknown"
+                            },
+                            missing_inputs: missing,
+                        }
+                    })
+                    .collect();
                 QueueResidencyObservation {
                     issue_number: entry.number,
                     queued_at: entry.queued_at.clone(),
                     age_seconds_at_scan,
                     missing_inputs,
+                    age_limits,
                 }
             })
             .collect(),
@@ -729,7 +822,8 @@ fn observe_capacity(
     .collect();
     let scan_valid = monitor
         .and_then(|status| status.last_scan_at.as_deref())
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
+        .and_then(parse_observed_instant)
+        .is_some();
     let wip_limits = state
         .policies
         .iter()
@@ -799,7 +893,8 @@ fn observe_capacity(
         retry_deadlines: monitor.map(observe_retry_deadlines),
         wip_limits,
         idle_windows: monitor.map(observe_idle_windows),
-        terminal_queue: monitor.and_then(observe_terminal_queue),
+        terminal_queue: monitor
+            .and_then(|status| observe_terminal_queue(state, status, monitor_missing_inputs)),
         missing_inputs,
     }
 }
@@ -824,6 +919,8 @@ pub struct RoadmapHorizons {
 #[derive(Debug, Serialize)]
 pub struct RoadmapDiagnostic {
     pub id: String,
+    pub dependency_observations: Option<Vec<DependencyObservation>>,
+    pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -834,6 +931,8 @@ pub struct RoadmapDiagnostic {
 pub struct GoalDiagnostic {
     pub id: String,
     pub roadmap_item_ids: Vec<String>,
+    pub dependency_observations: Option<Vec<DependencyObservation>>,
+    pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -843,6 +942,8 @@ pub struct GoalDiagnostic {
 #[derive(Debug, Serialize)]
 pub struct MilestoneDiagnostic {
     pub id: String,
+    pub dependency_observations: Option<Vec<DependencyObservation>>,
+    pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -1037,10 +1138,50 @@ pub fn assess_planning(
         {
             missing_inputs.push("monitor_scan_time");
         }
+        if status.scan_aborted {
+            missing_inputs.push("successful_monitor_scan");
+        }
     } else {
         missing_inputs.push("monitor_observation");
         missing_inputs.push("complete_monitor_coverage");
     }
+    let dependency_observations: Option<Vec<_>> = monitor.map(|status| {
+        status
+            .inbox
+            .iter()
+            .map(|row| DependencyObservation {
+                issue_number: row.issue_number,
+                state: row.state,
+                dependency: row.dependency.clone(),
+                missing_inputs: if row.dependency.is_none() {
+                    vec!["dependency_status"]
+                } else {
+                    vec![]
+                },
+            })
+            .collect()
+    });
+    let dependency_impacts: Option<Vec<DependencyImpactObservation>> =
+        dependency_observations.as_ref().map(|rows| {
+            let mut impacts = BTreeMap::<u64, BTreeSet<u64>>::new();
+            for row in rows {
+                if let Some(dependency) = &row.dependency {
+                    for blocker in &dependency.blocked_by {
+                        impacts
+                            .entry(blocker.number)
+                            .or_default()
+                            .insert(row.issue_number);
+                    }
+                }
+            }
+            impacts
+                .into_iter()
+                .map(|(issue_number, dependents)| DependencyImpactObservation {
+                    issue_number,
+                    dependent_issues: dependents.into_iter().collect(),
+                })
+                .collect()
+        });
     let mut issues = observed.clone();
     let mut roadmap = RoadmapHorizons::default();
     let roadmap_items: Vec<_> = state
@@ -1059,6 +1200,16 @@ pub fn assess_planning(
             let (observed_issue_states, unobserved_issues) = observe_issues(&members, monitor);
             RoadmapDiagnostic {
                 id: item.id.clone(),
+                dependency_impacts: member_dependency_impacts(
+                    dependency_impacts.as_deref(),
+                    &members,
+                ),
+                dependency_observations: dependency_observations.as_ref().map(|rows| {
+                    rows.iter()
+                        .filter(|row| members.contains(&row.issue_number))
+                        .cloned()
+                        .collect()
+                }),
                 issues: item.issues.clone(),
                 observed_issue_states,
                 unobserved_issues,
@@ -1137,6 +1288,16 @@ pub fn assess_planning(
             GoalDiagnostic {
                 id: goal.id.clone(),
                 roadmap_item_ids: links.iter().map(|item| item.id.clone()).collect(),
+                dependency_observations: dependency_observations.as_ref().map(|rows| {
+                    rows.iter()
+                        .filter(|row| members.contains(&row.issue_number))
+                        .cloned()
+                        .collect()
+                }),
+                dependency_impacts: member_dependency_impacts(
+                    dependency_impacts.as_deref(),
+                    &members,
+                ),
                 issues: members.into_iter().collect(),
                 observed_issue_states,
                 unobserved_issues,
@@ -1191,6 +1352,16 @@ pub fn assess_planning(
             }
             MilestoneDiagnostic {
                 id: milestone.id.clone(),
+                dependency_observations: dependency_observations.as_ref().map(|rows| {
+                    rows.iter()
+                        .filter(|row| members.contains(&row.issue_number))
+                        .cloned()
+                        .collect()
+                }),
+                dependency_impacts: member_dependency_impacts(
+                    dependency_impacts.as_deref(),
+                    &members,
+                ),
                 issues: milestone.issues.clone(),
                 observed_issue_states,
                 unobserved_issues,
@@ -1214,11 +1385,14 @@ pub fn assess_planning(
         monitor: MonitorEvidence {
             source: monitor.map(|status| status.source),
             last_scan_at: monitor.and_then(|status| status.last_scan_at.clone()),
+            scan_aborted: monitor.map(|status| status.scan_aborted),
             active_launches_incomplete: monitor
                 .is_none_or(|status| status.active_launches_incomplete),
             inbox_coverage: monitor.and_then(|status| status.inbox_coverage.clone()),
         },
         missing_inputs,
+        dependency_observations,
+        dependency_impacts,
         issue_traces,
         roadmap,
         roadmap_items,
@@ -1437,6 +1611,83 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
+    fn dependency_observations_preserve_canonical_facts_without_evaluating_readiness() {
+        let state = PmPlanningState::default();
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":9,"state":"blocked_by_dependency","attempts":0,
+             "dependency":{"blocked_by":[{"number":3},{"number":1},{"number":3}],"cycle":true,"bundle_with":[7,5]},
+             "error_message":"private diagnostic","claim_id":"private claim"},
+            {"issue_number":9,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}},
+            {"issue_number":4,"state":"blocked_by_dependency","attempts":0},
+            {"issue_number":5,"state":"released","attempts":0,
+             "dependency":{"blocked_by":[],"cycle":true,"bundle_with":[6]}},
+            {"issue_number":3,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":1}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":8,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":3}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":9,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":1},{"number":3}],"cycle":false,"bundle_with":[]}}
+        ]))
+        .unwrap();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let expected = json!([
+            {"issue_number":9,"state":"blocked_by_dependency",
+             "dependency":{"blocked_by":[{"number":3},{"number":1},{"number":3}],"cycle":true,"bundle_with":[7,5]},
+             "missing_inputs":[]},
+            {"issue_number":9,"state":"queued",
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+            {"issue_number":4,"state":"blocked_by_dependency","dependency":null,
+             "missing_inputs":["dependency_status"]},
+            {"issue_number":5,"state":"released",
+             "dependency":{"blocked_by":[],"cycle":true,"bundle_with":[6]},"missing_inputs":[]},
+            {"issue_number":3,"state":"queued",
+             "dependency":{"blocked_by":[{"number":1}],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+            {"issue_number":8,"state":"queued",
+             "dependency":{"blocked_by":[{"number":3}],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+            {"issue_number":9,"state":"queued",
+             "dependency":{"blocked_by":[{"number":1},{"number":3}],"cycle":false,"bundle_with":[]},"missing_inputs":[]}
+        ]);
+        assert_eq!(report.get("dependency_observations"), Some(&expected));
+        // 8 depends on 3, which depends on 1: do not invent the transitive 1 -> 8 edge.
+        let impacts = json!([
+            {"issue_number":1,"dependent_issues":[3,9]},
+            {"issue_number":3,"dependent_issues":[8,9]}
+        ]);
+        assert_eq!(report.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(degraded["dependency_observations"], expected);
+        assert_eq!(degraded.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        assert!(degraded["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("complete_monitor_coverage")));
+        monitor.scan_aborted = true;
+        let aborted_before = serde_json::to_value(&monitor).unwrap();
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(aborted.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(aborted["monitor"]["scan_aborted"], true);
+        assert!(aborted["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("successful_monitor_scan")));
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), aborted_before);
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(empty.get("dependency_observations"), Some(&json!([])));
+        assert_eq!(empty.get("dependency_impacts"), Some(&json!([])));
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(absent.get("dependency_observations"), Some(&Value::Null));
+        assert_eq!(absent.get("dependency_impacts"), Some(&Value::Null));
+    }
+
+    #[test]
     fn terminal_queue_residency_preserves_supplied_rows_without_claiming_wait_time() {
         let state = PmPlanningState::default();
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
@@ -1480,7 +1731,7 @@ mod tests {
             assert_eq!(
                 *row,
                 json!({"issue_number":number,"queued_at":queued_at,
-                "age_seconds_at_scan":seconds,"missing_inputs":missing})
+                "age_seconds_at_scan":seconds,"missing_inputs":missing,"age_limits":[]})
             );
         }
         monitor.source = IssueMonitorStatusSource::DegradedCache;
@@ -1527,6 +1778,165 @@ mod tests {
                 Some(&Value::Null)
             );
         }
+    }
+
+    #[test]
+    fn queue_age_limits_compare_saved_thresholds_without_claiming_starvation() {
+        let state = PmPlanningState {
+            policies: serde_json::from_value(json!([
+                {"id":"equal","version":3,"starvation_after_seconds":60,"wip_limit":0},
+                {"id":"below","starvation_after_seconds":61},
+                {"id":"above","starvation_after_seconds":59},
+                {"id":"zero","starvation_after_seconds":0}, {"id":"unset"},
+                {"id":" ","starvation_after_seconds":0},
+                {"id":"dup","starvation_after_seconds":0},
+                {"id":"dup","version":2,"starvation_after_seconds":0}
+            ]))
+            .unwrap(),
+            ..Default::default()
+        };
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.active_launches = vec![9];
+        monitor.last_scan_at = Some("2026-10-25T01:01:00Z".into());
+        monitor.inbox_coverage = Some(serde_json::from_value(json!({
+            "github_target_count":0,"inbox_row_count":0,"missing_issue_numbers":[],"source":"live"
+        })).unwrap());
+        monitor.gui_status.as_mut().unwrap().terminal_queue = [
+            "2026-10-25T01:00:00Z",
+            "2026-10-25T01:01:00Z",
+            "invalid",
+            "2026-10-25T01:01:01Z",
+        ]
+        .map(
+            |queued_at| crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                number: 9,
+                queued_at: queued_at.into(),
+                ..Default::default()
+            },
+        )
+        .into();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["terminal_queue"].as_array().unwrap();
+        let limits = rows[0]["age_limits"]
+            .as_array()
+            .expect("per-policy age limits");
+        assert_eq!(
+            limits[0],
+            json!({"id":"equal","version":3,
+            "starvation_after_seconds":60,"assessment":"observed_age_threshold_reached","missing_inputs":[]})
+        );
+        assert_eq!(
+            limits
+                .iter()
+                .map(|row| row["assessment"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "observed_age_threshold_reached",
+                "unknown",
+                "observed_age_threshold_reached",
+                "observed_age_threshold_reached",
+                "unknown",
+                "unknown",
+                "unknown",
+                "unknown"
+            ]
+        );
+        for (index, missing) in [
+            (4, "starvation_after_seconds"),
+            (5, "policy_id"),
+            (6, "unique_policy_id"),
+            (7, "unique_policy_id"),
+        ] {
+            assert!(limits[index]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(missing)));
+        }
+        assert_eq!(
+            rows[1]["age_limits"][3]["assessment"],
+            "observed_age_threshold_reached"
+        );
+        for (index, missing) in [(2, "queued_at"), (3, "queued_after_scan")] {
+            assert_eq!(rows[index]["age_limits"][3]["assessment"], "unknown");
+            assert!(rows[index]["age_limits"][3]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(missing)));
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        // Failed scans retain these facts but their advanced timestamp must not
+        // qualify the saved-policy comparisons. Ordinary errors are unrelated.
+        monitor.last_error = Some("unrelated issue diagnostic".into());
+        let ordinary_error = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(ordinary_error, report);
+        assert_eq!(
+            report["capacity"]["wip_limits"][0]["assessment"],
+            "observed_exceeded"
+        );
+        monitor.scan_aborted = true;
+        let aborted_before = serde_json::to_value(&monitor).unwrap();
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let aborted_age = &aborted["capacity"]["terminal_queue"][0];
+        assert_eq!(aborted_age["age_limits"][0]["assessment"], "unknown");
+        assert_eq!(
+            aborted["capacity"]["wip_limits"][0]["assessment"],
+            "unknown"
+        );
+        for diagnostic in [
+            &aborted["missing_inputs"],
+            &aborted["capacity"]["missing_inputs"],
+            &aborted["capacity"]["wip_limits"][0]["missing_inputs"],
+            &aborted_age["age_limits"][0]["missing_inputs"],
+        ] {
+            assert!(diagnostic
+                .as_array()
+                .unwrap()
+                .contains(&json!("successful_monitor_scan")));
+        }
+        assert_eq!(aborted["monitor"].get("scan_aborted"), Some(&json!(true)));
+        assert_eq!(report["monitor"].get("scan_aborted"), Some(&json!(false)));
+        assert_eq!(
+            aborted["monitor"]["last_scan_at"],
+            report["monitor"]["last_scan_at"]
+        );
+        assert_eq!(aborted["capacity"]["observed_work_issues"], json!([9]));
+        for field in [
+            "issue_number",
+            "queued_at",
+            "age_seconds_at_scan",
+            "missing_inputs",
+        ] {
+            assert_eq!(aborted_age[field], rows[0][field]);
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), aborted_before);
+        assert_eq!(
+            serde_json::to_value(assess_planning(&state, None)).unwrap()["monitor"]
+                .get("scan_aborted"),
+            Some(&Value::Null)
+        );
+        monitor.scan_aborted = false;
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["terminal_queue"][0]["age_limits"][0]["assessment"],
+            "unknown"
+        );
+        assert!(
+            degraded["capacity"]["terminal_queue"][0]["age_limits"][0]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("complete_monitor_coverage"))
+        );
+        monitor.source = IssueMonitorStatusSource::Daemon;
+        monitor.active_launches_incomplete = true;
+        assert_eq!(
+            serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap()["capacity"]
+                ["terminal_queue"][0]["age_limits"][0]["assessment"],
+            "unknown"
+        );
     }
 
     fn fixture() -> PmPlanningState {
@@ -1633,7 +2043,8 @@ mod tests {
             "roadmap_items":[
                 {"id":"same","horizon":"now","issues":[3,1,3,2]},
                 {"id":"same","horizon":"next","issues":[4]},
-                {"id":"","horizon":"later","issues":[]}
+                {"id":"","horizon":"later","issues":[6]},
+                {"id":"empty","horizon":"later","issues":[]}
             ],
             "milestones":[{"id":"m","issues":[5]}]
         }))
@@ -1643,15 +2054,60 @@ mod tests {
         monitor.queue = vec![2];
         monitor.active_launches = vec![4];
         monitor.inbox = serde_json::from_value(json!([
-            {"issue_number":1,"state":"launched","attempts":0},
+            {"issue_number":3,"state":"source_excluded","attempts":0,
+             "dependency":{"blocked_by":[{"number":9}],"cycle":true,"bundle_with":[7,5]},
+             "error_message":"private diagnostic"},
+            {"issue_number":5,"state":"merged","attempts":0,
+             "dependency":{"blocked_by":[{"number":8}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":1,"state":"launched","attempts":0,
+             "dependency":{"blocked_by":[{"number":9},{"number":8},{"number":9}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":6,"state":"needs_human","attempts":0,
+             "dependency":{"blocked_by":[{"number":9}],"cycle":false,"bundle_with":[]}},
             {"issue_number":1,"state":"needs_human","attempts":0},
-            {"issue_number":1,"state":"launched","attempts":0},
-            {"issue_number":3,"state":"source_excluded","attempts":0},
-            {"issue_number":5,"state":"merged","attempts":0}
+            {"issue_number":1,"state":"launched","attempts":0,
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}}
         ]))
         .unwrap();
+        let monitor_before = serde_json::to_value(&monitor).unwrap();
         let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         let rows = &report["roadmap_items"];
+        assert_eq!(
+            rows[0].get("dependency_observations"),
+            Some(&json!([
+                {"issue_number":3,"state":"source_excluded",
+                 "dependency":{"blocked_by":[{"number":9}],"cycle":true,"bundle_with":[7,5]},
+                 "missing_inputs":[]},
+                {"issue_number":1,"state":"launched",
+                 "dependency":{"blocked_by":[{"number":9},{"number":8},{"number":9}],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+                {"issue_number":1,"state":"needs_human","dependency":null,
+                 "missing_inputs":["dependency_status"]},
+                {"issue_number":1,"state":"launched",
+                 "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]},"missing_inputs":[]}
+            ]))
+        );
+        assert_eq!(rows[1].get("dependency_observations"), Some(&json!([])));
+        assert_eq!(
+            rows[2].get("dependency_observations"),
+            Some(&json!([{"issue_number":6,"state":"needs_human",
+                         "dependency":{"blocked_by":[{"number":9}],"cycle":false,"bundle_with":[]},
+                         "missing_inputs":[]}]))
+        );
+        assert_eq!(rows[3].get("dependency_observations"), Some(&json!([])));
+        assert_eq!(
+            rows[0].get("dependency_impacts"),
+            Some(&json!([
+                {"issue_number":8,"dependent_issues":[1]},
+                {"issue_number":9,"dependent_issues":[1,3]}
+            ]))
+        );
+        assert_eq!(rows[1].get("dependency_impacts"), Some(&json!([])));
+        assert_eq!(
+            rows[2].get("dependency_impacts"),
+            Some(&json!([{"issue_number":9,"dependent_issues":[6]}]))
+        );
+        assert_eq!(rows[3].get("dependency_impacts"), Some(&json!([])));
+        assert!(!report.to_string().contains("private diagnostic"));
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
         assert_eq!(rows[0]["issues"], json!([3, 1, 3, 2]));
         assert_eq!(
             rows[0]["observed_issue_states"],
@@ -1669,9 +2125,13 @@ mod tests {
         assert_eq!(rows[1]["observed_issue_states"], json!([]));
         assert_eq!(rows[1]["unobserved_issues"], json!([4]));
         for field in ["issues", "observed_issue_states", "unobserved_issues"] {
-            assert_eq!(rows[2][field], json!([]));
+            assert_eq!(rows[3][field], json!([]));
         }
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        for row in absent["roadmap_items"].as_array().unwrap() {
+            assert_eq!(row.get("dependency_observations"), Some(&Value::Null));
+            assert_eq!(row.get("dependency_impacts"), Some(&Value::Null));
+        }
         assert_eq!(
             absent["roadmap_items"][0]["observed_issue_states"],
             json!([])
@@ -1684,6 +2144,24 @@ mod tests {
         let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(degraded["roadmap_items"], *rows);
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        monitor.scan_aborted = true;
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(aborted["roadmap_items"], *rows);
+        assert_eq!(aborted["monitor"]["scan_aborted"], true);
+        assert!(aborted["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("successful_monitor_scan")));
+        monitor.inbox.retain(|row| row.issue_number == 5);
+        let unrelated = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        monitor.inbox.clear();
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        for observation in [unrelated, empty] {
+            for row in observation["roadmap_items"].as_array().unwrap() {
+                assert_eq!(row.get("dependency_observations"), Some(&json!([])));
+                assert_eq!(row.get("dependency_impacts"), Some(&json!([])));
+            }
+        }
         assert_eq!(state, before);
     }
 
@@ -2222,15 +2700,22 @@ mod tests {
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
         monitor.queue = vec![8]; // Queue membership alone is not an inbox observation.
         monitor.inbox = serde_json::from_value(json!([
-            {"issue_number":1,"state":"blocked_by_claim","attempts":0},
-            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
-            {"issue_number":2,"state":"needs_human","attempts":0},
-            {"issue_number":2,"state":"source_excluded","attempts":0},
-            {"issue_number":3,"state":"queued","attempts":0},
-            {"issue_number":4,"state":"merged","attempts":0},
-            {"issue_number":5,"state":"released","attempts":0},
+            {"issue_number":1,"state":"blocked_by_claim","attempts":0,
+             "dependency":{"blocked_by":[{"number":77},{"number":55},{"number":77}],"cycle":true,"bundle_with":[88]}},
+            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason",
+             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}},
             {"issue_number":6,"state":"skipped","attempts":0},
-            {"issue_number":99,"state":"agent_failed","attempts":0}
+            {"issue_number":2,"state":"needs_human","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":2,"state":"source_excluded","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":99,"state":"agent_failed","attempts":0,
+             "dependency":{"blocked_by":[{"number":77},{"number":66}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":3,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77},{"number":1}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":4,"state":"merged","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":5,"state":"released","attempts":0}
         ]))
         .unwrap();
         let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
@@ -2249,6 +2734,45 @@ mod tests {
             ])
         );
         assert_eq!(milestone["unobserved_issues"], json!([7, 8]));
+        let dependencies = milestone["dependency_observations"].as_array().unwrap();
+        assert_eq!(
+            dependencies
+                .iter()
+                .map(|row| &row["issue_number"])
+                .collect::<Vec<_>>(),
+            vec![1, 2, 6, 2, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            dependencies[0],
+            json!({
+                "issue_number":1,"state":"blocked_by_claim",
+                "dependency":{"blocked_by":[{"number":77},{"number":55},{"number":77}],"cycle":true,"bundle_with":[88]},
+                "missing_inputs":[]
+            })
+        );
+        assert_eq!(
+            dependencies[1]["dependency"],
+            json!({
+                "blocked_by":[],"cycle":false,"bundle_with":[]
+            })
+        );
+        assert_eq!(dependencies[1]["missing_inputs"], json!([]));
+        assert_eq!(dependencies[2]["dependency"], Value::Null);
+        assert_eq!(
+            dependencies[2]["missing_inputs"],
+            json!(["dependency_status"])
+        );
+        // Keep external blockers; filter dependents, without expanding 55 -> 1 -> 3.
+        let impacts = json!([
+            {"issue_number":1,"dependent_issues":[3]},
+            {"issue_number":55,"dependent_issues":[1]},
+            {"issue_number":77,"dependent_issues":[1,2,3,4]}
+        ]);
+        assert_eq!(milestone.get("dependency_impacts"), Some(&impacts));
+        assert_eq!(
+            report["dependency_impacts"][3]["dependent_issues"],
+            json!([1, 2, 3, 4, 99])
+        );
         assert_eq!(milestone["health"], "unknown");
         assert_eq!(milestone["confidence"], "unknown");
         assert!(!report.to_string().contains("private reason"));
@@ -2263,6 +2787,36 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("complete_monitor_coverage")));
+        monitor.scan_aborted = true;
+        let aborted_before = serde_json::to_value(&monitor).unwrap();
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(aborted["milestones"], report["milestones"]);
+        assert_eq!(aborted["monitor"]["scan_aborted"], true);
+        assert!(aborted["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("successful_monitor_scan")));
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), aborted_before);
+        monitor.inbox.retain(|row| row.issue_number == 99);
+        assert_eq!(monitor.inbox.len(), 1);
+        let empty = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            empty["milestones"][0].get("dependency_observations"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            empty["milestones"][0].get("dependency_impacts"),
+            Some(&json!([]))
+        );
+        let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
+        assert_eq!(
+            absent["milestones"][0].get("dependency_impacts"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            absent["milestones"][0].get("dependency_observations"),
+            Some(&Value::Null)
+        );
     }
 
     #[test]
@@ -2288,12 +2842,17 @@ mod tests {
         let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
         monitor.queue = vec![5];
         monitor.inbox = serde_json::from_value(json!([
-            {"issue_number":1,"state":"queued","attempts":0},
-            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason"},
+            {"issue_number":2,"state":"needs_human","attempts":0,"error_message":"private reason",
+             "dependency":{"blocked_by":[{"number":77}],"cycle":true,"bundle_with":[88]}},
+            {"issue_number":99,"state":"released","attempts":0,
+             "dependency":{"blocked_by":[{"number":77},{"number":66}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":77,"state":"blocked_by_dependency","attempts":0,
+             "dependency":{"blocked_by":[{"number":44}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":1,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77},{"number":55},{"number":77}],"cycle":false,"bundle_with":[]}},
             {"issue_number":2,"state":"needs_human","attempts":0},
             {"issue_number":2,"state":"merged","attempts":0},
-            {"issue_number":3,"state":"source_excluded","attempts":0},
-            {"issue_number":99,"state":"released","attempts":0}
+            {"issue_number":3,"state":"source_excluded","attempts":0}
         ]))
         .unwrap();
         let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
@@ -2302,6 +2861,18 @@ mod tests {
             report["goals"][0],
             json!({
                 "id":"g", "roadmap_item_ids":["a","invalid","last"], "issues":[1,2,3,5],
+                "dependency_impacts":[{"issue_number":55,"dependent_issues":[1]},
+                    {"issue_number":77,"dependent_issues":[1,2]}],
+                "dependency_observations":[
+                    {"issue_number":2,"state":"needs_human",
+                     "dependency":{"blocked_by":[{"number":77}],"cycle":true,"bundle_with":[88]},
+                     "missing_inputs":[]},
+                    {"issue_number":1,"state":"queued",
+                     "dependency":{"blocked_by":[{"number":77},{"number":55},{"number":77}],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+                    {"issue_number":2,"state":"needs_human","dependency":null,"missing_inputs":["dependency_status"]},
+                    {"issue_number":2,"state":"merged","dependency":null,"missing_inputs":["dependency_status"]},
+                    {"issue_number":3,"state":"source_excluded","dependency":null,"missing_inputs":["dependency_status"]}
+                ],
                 "observed_issue_states":[
                     {"issue_number":1,"states":["queued"]},
                     {"issue_number":2,"states":["needs_human","merged"]},
@@ -2310,6 +2881,17 @@ mod tests {
                 "unobserved_issues":[5], "missing_inputs":["metric_evidence",
                     "outcome","metric","target","horizon","owner","status"]
             })
+        );
+        assert_eq!(
+            report["goals"][1]["dependency_impacts"],
+            json!([
+                {"issue_number":66,"dependent_issues":[99]},
+                {"issue_number":77,"dependent_issues":[99]}
+            ])
+        );
+        assert_eq!(
+            report["goals"][2].get("dependency_impacts"),
+            Some(&json!([]))
         );
         assert_eq!(
             report["goals"][1]["missing_inputs"],
@@ -2325,6 +2907,14 @@ mod tests {
         assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         assert_eq!(absent["goals"][0]["observed_issue_states"], json!([]));
+        assert_eq!(
+            absent["goals"][0].get("dependency_impacts"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            absent["goals"][0].get("dependency_observations"),
+            Some(&Value::Null)
+        );
         assert_eq!(absent["goals"][0]["unobserved_issues"], json!([1, 2, 3, 5]));
         monitor.source = IssueMonitorStatusSource::DegradedCache;
         monitor.active_launches_incomplete = true;
@@ -2335,6 +2925,27 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("complete_monitor_coverage")));
+        monitor.scan_aborted = true;
+        let aborted_before = serde_json::to_value(&monitor).unwrap();
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(aborted["goals"], report["goals"]);
+        assert_eq!(aborted["monitor"]["scan_aborted"], true);
+        assert!(aborted["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("successful_monitor_scan")));
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), aborted_before);
+        assert_eq!(state, before.0);
+        monitor.inbox.retain(|row| row.issue_number == 99);
+        let unrelated = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            unrelated["goals"][0].get("dependency_impacts"),
+            Some(&json!([]))
+        );
+        assert_eq!(
+            unrelated["goals"][0].get("dependency_observations"),
+            Some(&json!([]))
+        );
     }
 
     #[test]
@@ -2349,6 +2960,8 @@ mod tests {
         let goals = report["goals"].as_array().expect("goal diagnostics");
         assert_eq!(goals.len(), 3);
         for goal in goals {
+            assert_eq!(goal.get("dependency_observations"), Some(&Value::Null));
+            assert_eq!(goal.get("dependency_impacts"), Some(&Value::Null));
             for key in [
                 "roadmap_item_ids",
                 "issues",
@@ -2361,6 +2974,19 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("metric_evidence")));
+        }
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":1,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":2,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}}
+        ]))
+        .unwrap();
+        let supplied = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        for goal in supplied["goals"].as_array().unwrap() {
+            assert_eq!(goal.get("dependency_observations"), Some(&json!([])));
+            assert_eq!(goal.get("dependency_impacts"), Some(&json!([])));
         }
         assert_eq!(
             report["goals"][0]["missing_inputs"],
@@ -2404,6 +3030,30 @@ mod tests {
             assert_eq!(
                 report["milestones"][index]["unobserved_issues"],
                 json!([number])
+            );
+        }
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.inbox = serde_json::from_value(json!([
+            {"issue_number":1,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":2,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":3,"state":"queued","attempts":0,
+             "dependency":{"blocked_by":[{"number":77}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":99,"state":"blocked_by_dependency","attempts":0,
+             "dependency":{"blocked_by":[{"number":66},{"number":77}],"cycle":false,"bundle_with":[]}}
+        ]))
+        .unwrap();
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        for (index, number) in [1, 2, 3].into_iter().enumerate() {
+            let rows = report["milestones"][index]["dependency_observations"]
+                .as_array()
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["issue_number"], number);
+            assert_eq!(
+                report["milestones"][index].get("dependency_impacts"),
+                Some(&json!([{"issue_number":77,"dependent_issues":[number]}]))
             );
         }
     }
@@ -2588,8 +3238,15 @@ mod tests {
             "unknown"
         );
         monitor.active_launches_incomplete = false;
-        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2026-10-21T00:00:00.1234567891Z"),
+        ]
+        .map(|value| value.map(str::to_owned))
+        {
             monitor.last_scan_at = scan;
+            let before = serde_json::to_value(&monitor).unwrap();
             let untimed = evaluate(Some(&monitor));
             assert_eq!(
                 untimed["capacity"]["wip_limits"][0]["assessment"],
@@ -2599,8 +3256,21 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("monitor_scan_time")));
+            assert_eq!(
+                untimed["monitor"]["last_scan_at"],
+                json!(monitor.last_scan_at)
+            );
+            assert_eq!(
+                untimed["capacity"]["wip_limits"][0]["observed_issue_count"],
+                2
+            );
+            assert_eq!(serde_json::to_value(&monitor).unwrap(), before);
         }
-        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.last_scan_at = Some("2026-10-21T00:00:00.123456789Z".into());
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["wip_limits"][0]["assessment"],
+            "observed_exceeded"
+        );
         monitor.active_launches.clear();
         assert_eq!(
             evaluate(Some(&monitor))["capacity"]["wip_limits"][4]["assessment"],

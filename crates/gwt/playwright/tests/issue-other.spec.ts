@@ -79,6 +79,90 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
 });
 
+test("Status bridge shares canonical Issue state with the Monitor strip", async ({ page }, info) => {
+  await boot(page);
+  const other = page.locator("details.issue-other-group");
+  await other.locator("summary").click();
+  const search = page.locator(".knowledge-search");
+  await search.focus();
+  const otherNode = await other.elementHandle();
+  for (const enabled of [true, false]) {
+    await page.evaluate(enabled => (window as any).__operatorShell.applyIssueMonitorStatus({
+      enabled, autonomous_mode: enabled, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 2,
+    }), enabled);
+    await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
+    await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle Q0 A0/2" : "Off");
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "issue_monitor_status", status: {
+    enabled: true, autonomous_mode: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
+  } }));
+  await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+  await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
+  if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
+    await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
+  }
+});
+
+test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {
+  await boot(page);
+  await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();
+  await page.locator(".issue-other-summary").click();
+  const other = page.locator("details.issue-other-group");
+  await other.evaluate(node => { (window as any).__klistOther = node; });
+  await page.evaluate(() => { (window as any).__otherHoldSearch = true; });
+  const search = page.locator(".knowledge-search");
+  await search.fill("Integrate");
+  await expect.poll(() => messages(page, "search_knowledge_bridge")).not.toHaveLength(0);
+  const entry = page.locator(".knowledge-row[data-issue-number='4556']");
+  const emitList = async (title: string, overrides = {}) => page.evaluate(({ title, overrides }) => {
+    const fixture = window as any;
+    fixture.__otherEmit({ kind: "knowledge_entries", id: "tab-other::issue-1", knowledge_kind: "issue",
+      request_id: fixture.__otherLoadRequest.request_id, refresh_enabled: true, selected_number: null,
+      entries: [{ number: 4556, title, state: "open", labels: [], is_spec: false,
+        linked_branch_count: 1, match_score: 100,
+        related_work_refs: [{ id: "linked-visible", branch: "feature/linked", updated_at: "" }] }],
+      ...overrides });
+  }, { title, overrides });
+  const latest = '<img src=x> Integrate latest';
+  for (const title of ["Integrate first snapshot", latest]) {
+    await emitList(title);
+    await expect(entry.locator(".knowledge-row-title")).toHaveText(title);
+    await expect(search).toBeFocused();
+    await expect(entry.locator(".knowledge-row-select")).toHaveAttribute("aria-current", "true");
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate(node => node === (window as any).__klistOther)).toBe(true);
+  }
+  await entry.evaluate(node => { (window as any).__klistRow = node; });
+  await emitList(latest);
+  await emitList("Integrate stale request", { request_id: -1 });
+  await emitList("Integrate other window", { id: "closed-issue-window" });
+  await emitList("Integrate wrong kind", { knowledge_kind: "board" });
+  // A later message on the same FIFO proves all rejected replies were consumed.
+  const processed = page.waitForEvent("dialog");
+  await page.evaluate(() => (window as any).__otherEmit({
+    kind: "workspace_projection_prune_error", message: "Issue list snapshots processed",
+  }));
+  const dialog = await processed;
+  expect(dialog.message()).toBe("Work Projection Prune error: Issue list snapshots processed");
+  await dialog.dismiss();
+  await expect(entry.locator(".knowledge-row-title")).toHaveText(latest);
+  expect(await entry.evaluate(node => node === (window as any).__klistRow)).toBe(true);
+  await expect(entry.locator("img, script")).toHaveCount(0);
+  await search.fill("");
+  await expect(entry.locator(".knowledge-row-title")).toHaveText(latest);
+  await expect(search).toBeFocused();
+  await expect(other).toHaveAttribute("open");
+  await expect(row(page, "other-paused")).toBeVisible();
+  await page.screenshot({ path: info.outputPath("issue-list-shared-snapshot.png") });
+});
+
 test("Other stays authoritative under search and queue columns, with no Workspace surface", async ({ page }) => {
   await boot(page);
   const other = page.locator("details.issue-other-group");
@@ -314,6 +398,8 @@ async function installBackend(page: Page, preset: string) {
           this.emit({ kind: "remote_start_work_branches", id: message.id,
             branches: ["origin/feature/linked", "origin/feature/other", "origin/feature/remote"] });
         } else if (["load_knowledge_bridge", "search_knowledge_bridge"].includes(message.kind)) {
+          if (message.kind === "load_knowledge_bridge") fixture.__otherLoadRequest = message;
+          if (message.kind === "search_knowledge_bridge" && fixture.__otherHoldSearch) return;
           this.emit({ kind: "knowledge_entries", id: message.id, knowledge_kind: message.knowledge_kind,
             request_id: message.request_id, entries: message.query ? [] : entries,
             selected_number: message.query ? null : 4556, refresh_enabled: true, empty_message: null });

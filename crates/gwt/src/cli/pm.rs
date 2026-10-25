@@ -506,6 +506,7 @@ pub(super) fn run<E: CliEnv>(
                     "failed to persist PM status: {error}"
                 )))
             })?;
+            crate::daemon_runtime::notify_pm_status_changed();
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );
@@ -914,6 +915,14 @@ mod tests {
         fs::create_dir_all(&runtime).unwrap();
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
+        assert_eq!(
+            status["policy"].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"].get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(fs::read(&planning_path).unwrap(), planning_bytes);
         assert_eq!(status["policy"]["forecasts"], serde_json::json!([]));
         assert_eq!(
@@ -1088,12 +1097,28 @@ mod tests {
             assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
         }
         let roadmap = &status["policy"]["roadmap_items"][0];
+        assert_eq!(
+            roadmap.get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            roadmap.get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
         assert_eq!(roadmap["issues"], serde_json::json!([9, 7, 9]));
         assert_eq!(roadmap["observed_issue_states"], serde_json::json!([]));
         assert_eq!(roadmap["unobserved_issues"], serde_json::json!([7, 9]));
         assert_eq!(
             status["policy"]["goals"][0]["issues"],
             serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0].get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["goals"][0].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
         );
         assert_eq!(
             status["policy"]["goals"][0]["unobserved_issues"],
@@ -1117,6 +1142,14 @@ mod tests {
         assert_eq!(
             status["policy"]["milestones"][0]["unobserved_issues"],
             serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0].get("dependency_observations"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            status["policy"]["milestones"][0].get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
         );
         assert_eq!(
             status["policy"]["milestones"][0].get("target_date_observation"),

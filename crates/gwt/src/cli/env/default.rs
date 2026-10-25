@@ -426,8 +426,14 @@ impl CliEnv for DefaultCliEnv {
         &mut self,
         number: u64,
     ) -> io::Result<gwt_git::pr_status::PrCompletionSnapshot> {
-        gwt_git::pr_status::fetch_pr_completion_snapshot(&self.repo_path, number)
-            .map_err(io::Error::other)
+        self.github_repository()?;
+        let repository = format!("github.com/{}/{}", self.owner, self.repo);
+        gwt_git::pr_status::fetch_pr_completion_snapshot_in_repository(
+            &self.repo_path,
+            &repository,
+            number,
+        )
+        .map_err(io::Error::other)
     }
     fn enable_pr_auto_merge(
         &mut self,

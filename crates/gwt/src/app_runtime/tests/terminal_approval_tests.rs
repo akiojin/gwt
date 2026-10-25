@@ -724,7 +724,7 @@ fn app_runtime_workspace_projection_surface_helper_groups_state_and_active_work_
     assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].event,
-        BackendEvent::WindowCanvasState { .. }
+        BackendEvent::WorkspaceState { .. }
     ));
     let projection = wait_for_active_work_projection(&mut runtime);
     assert_eq!(projection.active_agents, 1);
@@ -829,6 +829,76 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
         events[0].event,
         BackendEvent::RuntimeHookEvent { .. }
     ));
+}
+
+#[test]
+fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    for (claimed_session, registered_pm, should_refresh) in [
+        ("session-1", true, true),
+        ("retired-session", true, false),
+        ("session-1", false, false),
+    ] {
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            root.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Waiting,
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let id = combined_window_id("tab-1", "agent-1");
+        runtime
+            .active_agent_sessions
+            .insert(id.clone(), sample_active_agent_session("tab-1", &id));
+        let context = runtime.project_context("tab-1").unwrap();
+        if registered_pm {
+            runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .pm_sessions
+                .insert(root.clone(), "session-1".into());
+        }
+        let latch = ApprovalPromptLatch {
+            active_fingerprint: Some(7),
+            ..Default::default()
+        };
+        runtime.window_approval_waiting.insert(id.clone(), latch);
+        let status_before = runtime.window_status(&id);
+        let mut event = runtime_hook_coordination_event(claimed_session);
+        event.source_event = Some("PmStatusChanged".into());
+        event.message = Some("coordination:PmStatusChanged".into());
+        event.project_root = Some(root.display().to_string());
+        // A provider-id fallback match must never grant PM notification authority.
+        event.agent_session_id = Some("session-1".into());
+
+        let events = runtime.handle_runtime_hook_event(event);
+
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            usize::from(should_refresh),
+            "only the exact registered PM requests the existing observer"
+        );
+        assert_eq!(runtime.window_status(&id), status_before);
+        assert_eq!(runtime.window_approval_waiting.get(&id), Some(&latch));
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
+        )));
+        if should_refresh {
+            let task = tasks.lock().unwrap().remove(0);
+            task();
+            assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
+                recorded_project_payload(event),
+                UserEvent::ActiveWorkProjectionPrepared(_)
+            )));
+        }
+    }
 }
 
 #[test]
@@ -1090,7 +1160,7 @@ fn app_runtime_persistence_excludes_only_the_approval_overlay_state() {
     assert!(!serialized.contains("fingerprint"));
     assert!(!serialized.contains("approval"));
 
-    let restored = WindowCanvasState::from_persisted(persisted);
+    let restored = WindowRegistry::from_persisted(persisted);
     assert_eq!(
         restored.window("agent-1").expect("restored window").status,
         WindowProcessStatus::Running
@@ -2041,7 +2111,7 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
     let window_id = combined_window_id("tab-1", &window.id);
 
-    let events = runtime.start_window("tab-1", &window.id, window.preset, window.geometry.clone());
+    let events = runtime.start_window("tab-1", &window.id, window.preset);
 
     assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| matches!(
@@ -2453,234 +2523,6 @@ fn restart_window_events_is_noop_when_window_already_running() {
     );
 
     runtime.stop_window_runtime(&window_id);
-}
-
-#[test]
-fn app_runtime_viewport_and_geometry_updates_persist_workspace_state() {
-    // Persistence flows through `workspace_state_path()` which is
-    // HOME-based, so we must serialize against other HOME-touching
-    // tests and pin HOME to this test's tempdir for the duration.
-    // Without this guard, parallel tests that mutate HOME race
-    // with our persist + load pair and the workspace file ends up
-    // missing (or pointing at another test's already-cleaned
-    // tempdir).
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "shell-1",
-        repo.clone(),
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "shell-1");
-
-    assert_eq!(
-        runtime
-            .update_viewport_events(
-                &runtime.test_context(),
-                gwt::CanvasViewport {
-                    x: 12.0,
-                    y: 34.0,
-                    zoom: 1.25,
-                }
-            )
-            .len(),
-        1
-    );
-    assert_eq!(
-        runtime
-            .update_window_geometry_events(
-                &window_id,
-                WindowGeometry {
-                    x: 56.0,
-                    y: 78.0,
-                    width: 720.0,
-                    height: 480.0,
-                },
-                100,
-                30,
-                None,
-            )
-            .len(),
-        1
-    );
-
-    assert!(
-        runtime
-            .persist_dispatcher
-            .wait_idle(std::time::Duration::from_secs(5)),
-        "persist dispatcher should drain before disk readback",
-    );
-    let session = load_session_state(&temp.path().join("session-state.json"))
-        .expect("load persisted session state");
-    // Issue #4535 AC-4: `active_tab_id` is no longer persisted.
-    assert_eq!(session.legacy_active_tab_id, None);
-    assert_eq!(session.tabs.len(), 1);
-    assert_eq!(session.tabs[0].id, "tab-1");
-    assert_eq!(session.tabs[0].project_root, repo);
-
-    let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");
-    assert_eq!(workspace.viewport.x, 12.0);
-    assert_eq!(workspace.viewport.y, 34.0);
-    assert_eq!(workspace.viewport.zoom, 1.25);
-    let window = workspace
-        .windows
-        .iter()
-        .find(|window| window.id == "shell-1")
-        .expect("persisted window");
-    assert_eq!(window.geometry.x, 56.0);
-    assert_eq!(window.geometry.y, 78.0);
-    assert_eq!(window.geometry.width, 720.0);
-    assert_eq!(window.geometry.height, 480.0);
-}
-
-#[test]
-fn app_runtime_duplicate_viewport_update_skips_workspace_broadcast_and_persist() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "shell-1",
-        repo,
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let viewport = gwt::CanvasViewport {
-        x: 12.0,
-        y: 34.0,
-        zoom: 1.25,
-    };
-
-    assert_eq!(
-        runtime
-            .update_viewport_events(&runtime.test_context(), viewport.clone())
-            .len(),
-        1
-    );
-    assert_eq!(runtime.persist_dispatcher.enqueued_count(), 1);
-
-    assert!(
-        runtime
-            .update_viewport_events(&runtime.test_context(), viewport)
-            .is_empty(),
-        "duplicate viewport payload should not broadcast a workspace_state",
-    );
-    assert_eq!(
-        runtime.persist_dispatcher.enqueued_count(),
-        1,
-        "duplicate viewport payload should not enqueue another persist snapshot",
-    );
-
-    assert_eq!(
-        runtime
-            .update_viewport_events(
-                &runtime.test_context(),
-                gwt::CanvasViewport {
-                    x: 12.0,
-                    y: 34.0,
-                    zoom: 1.5,
-                }
-            )
-            .len(),
-        1,
-        "changed zoom must still broadcast workspace_state",
-    );
-    assert_eq!(
-        runtime.persist_dispatcher.enqueued_count(),
-        2,
-        "changed viewport must still enqueue persistence",
-    );
-}
-
-#[test]
-fn app_runtime_geometry_update_rejects_stale_base_revision() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "shell-1",
-        repo.clone(),
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "shell-1");
-
-    assert_eq!(
-        runtime
-            .update_window_geometry_events(
-                &window_id,
-                WindowGeometry {
-                    x: 56.0,
-                    y: 78.0,
-                    width: 720.0,
-                    height: 480.0,
-                },
-                100,
-                30,
-                Some(0),
-            )
-            .len(),
-        1
-    );
-
-    assert_eq!(
-        runtime
-            .update_window_geometry_events(
-                &window_id,
-                WindowGeometry {
-                    x: 90.0,
-                    y: 120.0,
-                    width: 960.0,
-                    height: 640.0,
-                },
-                120,
-                40,
-                Some(0),
-            )
-            .len(),
-        1,
-        "stale updates should return the current workspace state so the frontend can resync"
-    );
-
-    assert!(
-        runtime
-            .persist_dispatcher
-            .wait_idle(std::time::Duration::from_secs(5)),
-        "persist dispatcher should drain before disk readback",
-    );
-    let workspace = load_restored_workspace_state(&repo).expect("load persisted workspace");
-    let window = workspace
-        .windows
-        .iter()
-        .find(|window| window.id == "shell-1")
-        .expect("persisted window");
-    assert_eq!(window.geometry.x, 56.0);
-    assert_eq!(window.geometry.y, 78.0);
-    assert_eq!(window.geometry.width, 720.0);
-    assert_eq!(window.geometry.height, 480.0);
-    assert_eq!(window.geometry_revision, 1);
 }
 
 #[test]
