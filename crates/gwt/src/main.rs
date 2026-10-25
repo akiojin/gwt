@@ -1368,19 +1368,8 @@ fn spawn_workspace_projection_watcher(
             }
         };
 
-        for watch_dir in &watch_dirs {
-            if let Err(error) = debouncer
-                .watcher()
-                .watch(watch_dir, notify::RecursiveMode::NonRecursive)
-            {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    watch_dir = %watch_dir.display(),
-                    error = %error,
-                    "workspace projection watcher path failed"
-                );
-                return;
-            }
+        if watch_workspace_projection_dirs(&project_root, &watch_dirs, debouncer.watcher()).is_err() {
+            return;
         }
 
         while let Ok(message) = rx.recv() {
@@ -1405,6 +1394,27 @@ fn spawn_workspace_projection_watcher(
         tx: stop_tx,
         join_handle: Some(join_handle),
     })
+}
+
+fn watch_workspace_projection_dirs(
+    project_root: &Path,
+    watch_dirs: &[PathBuf],
+    watcher: &mut dyn notify::Watcher,
+) -> notify::Result<()> {
+    for (index, watch_dir) in watch_dirs.iter().enumerate() {
+        if let Err(error) = watcher.watch(watch_dir, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                project_root = %project_root.display(),
+                watch_dir = %watch_dir.display(),
+                error = %error,
+                "workspace projection watcher path failed"
+            );
+            if index == 0 {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
@@ -3755,6 +3765,12 @@ mod tests {
                 Ok(Self(Box::new(handler)))
             }
             fn watch(&mut self, path: &Path, _mode: notify::RecursiveMode) -> notify::Result<()> {
+                if path
+                    .file_name()
+                    .is_some_and(|name| name == "unavailable-pm-status")
+                {
+                    return Err(notify::Error::generic("secondary watch unavailable"));
+                }
                 // The error callback gates the worker until all ten raw
                 // notifications are queued, regardless of thread scheduling.
                 self.0
@@ -3809,10 +3825,17 @@ mod tests {
             },
         )
         .unwrap();
-        debouncer
-            .watcher()
-            .watch(path.parent().unwrap(), notify::RecursiveMode::NonRecursive)
-            .unwrap();
+        let unavailable = temp.path().join("unavailable-pm-status");
+        let registration = super::watch_workspace_projection_dirs(
+            &root,
+            &[path.parent().unwrap().to_path_buf(), unavailable.clone()],
+            debouncer.watcher(),
+        );
+        let primary_failure = super::watch_workspace_projection_dirs(
+            &root,
+            std::slice::from_ref(&unavailable),
+            debouncer.watcher(),
+        );
         projection.title = "final state after ten notifications".to_string();
         gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
         release_tx.send(()).unwrap();
@@ -3822,6 +3845,11 @@ mod tests {
         // Shutdown drops the callback's sender. Drain until disconnect to
         // count every reload instead of assuming a second of silence is final.
         reloads.extend(rx);
+        registration.expect("a secondary failure must preserve the primary watch");
+        assert!(
+            primary_failure.is_err(),
+            "a primary failure must still fail registration"
+        );
         assert_eq!(reloads.len(), 1);
         match &reloads[0] {
             UserEvent::WorkspaceProjectionLoaded {
