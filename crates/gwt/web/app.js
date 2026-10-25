@@ -5104,10 +5104,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       const branchEntriesViewModel = createUiStateStore(null);
-      function renderBranchEntries(completion) {
-        if (!completion) return;
-        const { windowId } = completion;
+      function renderBranchEntries(event) {
+        if (!event) return;
+        const windowId = event.id;
         const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(windowId);
+        // Ingest only the store-owned snapshot. Stale loads must not redraw
+        // branches or advance the Status Strip count.
+        // FR-065/FR-067: inventory phases keep the last verified cleanup
+        // badges instead of flashing "Safety unknown".
+        const { applied } = applyBranchEntriesEvent(state, event);
+        if (!applied) return;
+        syncBranchSelectionState(state);
         frontendUnits.branchesFileTreeSurface.renderBranches(windowId);
         // Read the post-ingest state and retain the guarded Status Strip path.
         const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
@@ -5293,19 +5300,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             handleProjectIndexSearchError(event);
             break;
           case "branch_entries": {
-            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-              event.id,
-            );
-            // FR-065/FR-067: ingest via the shared state helper so a stale
-            // (older load_id) event is dropped and inventory phases keep the
-            // last verified cleanup badges instead of flashing "Safety unknown".
-            // Single trailing break (no early break) so the SPEC-2356 telemetry
-            // contract test can extract this whole case body.
-            const { applied } = applyBranchEntriesEvent(state, event);
-            if (applied) {
-              syncBranchSelectionState(state);
-              branchEntriesViewModel.update(() => ({ windowId: event.id }));
-            }
+            branchEntriesViewModel.update(() => ({ ...event }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup progress/result state
