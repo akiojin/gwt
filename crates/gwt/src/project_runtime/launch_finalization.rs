@@ -10,7 +10,8 @@ use crate::project_runtime::launch_authority::{
     AgentCapabilityLaunchAuthority,
 };
 use crate::project_runtime::launch_payload::{
-    AgentLaunchError, LaunchFeedbackContext, PendingFreshExecutionLaunch, WorkspaceResumeContext,
+    AgentLaunchError, LaunchFeedbackContext, PendingContinueWork, PendingContinueWorkExecution,
+    PendingFreshExecutionLaunch, WorkspaceResumeContext,
 };
 use crate::session_launch::durable_launch_recovery_exists;
 use crate::session_launch::recovery::{
@@ -18,6 +19,200 @@ use crate::session_launch::recovery::{
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
     DurableLaunchRecoveryKind,
 };
+
+pub fn pending_execution_activation_status(pending: &PendingContinueWork) -> Option<bool> {
+    match &pending.execution {
+        PendingContinueWorkExecution::Successor(_) => {
+            crate::cli::execution_state::continuation_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::ContinuationAttemptStatus::Activated
+                })
+            })
+        }
+        PendingContinueWorkExecution::Takeover(_) => {
+            crate::cli::execution_state::generation_takeover_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+                })
+            })
+        }
+    }
+}
+
+pub fn pending_fresh_execution_activation_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<bool> {
+    pending_fresh_execution_attempt_status(pending)
+        .map(|status| status == crate::cli::execution_state::ContinuationAttemptStatus::Activated)
+}
+
+pub fn pending_fresh_execution_attempt_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<crate::cli::execution_state::ContinuationAttemptStatus> {
+    crate::cli::execution_state::continuation_attempt_for_operation(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.operation_id,
+    )
+    .ok()
+    .flatten()
+    .map(|attempt| attempt.status)
+}
+
+pub fn pending_continue_work_session_identity(
+    pending: &PendingContinueWork,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let mut session = gwt_agent::Session::new(
+        &pending.worktree_path,
+        pending.work_branch.clone(),
+        pending.work_agent_id.clone(),
+    );
+    session.id = pending.binding.session_id.clone();
+    session.project_state_root = Some(pending.project_root.clone());
+    session.repo_hash = Some(pending.binding.repo_hash.clone());
+    session.linked_issue_number = Some(pending.owner.number);
+    gwt_agent::SessionExecutionIdentity::for_binding(&session, &pending.binding)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn abort_prepared_execution_and_remove_exact_session<F>(
+    worktree: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    execution: &PendingContinueWorkExecution,
+    reason: &str,
+    sessions_dir: &Path,
+    session_identity: &gwt_agent::SessionExecutionIdentity,
+    after_abort: F,
+) -> std::io::Result<bool>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    match execution {
+        PendingContinueWorkExecution::Successor(request) => {
+            crate::cli::execution_state::abort_successor_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+        PendingContinueWorkExecution::Takeover(request) => {
+            crate::cli::execution_state::abort_generation_takeover_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+    }
+}
+
+/// Return false only for an irreversible Activated generation. Exact candidate
+/// conflicts and unreadable authority retain their evidence for reconciliation.
+pub fn rollback_worker_continue_work(
+    sessions_dir: &Path,
+    pending: &PendingContinueWork,
+) -> Result<bool, String> {
+    match pending_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("continuation activation status is unreadable".into()),
+    }
+    let identity = pending_continue_work_session_identity(pending)?;
+    let cleanup = abort_prepared_execution_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.execution,
+        "continuation launch failed before SessionStart",
+        sessions_dir,
+        &identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err("continuation candidate Session changed before exact rollback".into())
+        }
+        Err(_) if pending_execution_activation_status(pending) == Some(true) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    Ok(true)
+}
+
+pub fn rollback_worker_fresh_execution(
+    sessions_dir: &Path,
+    pending: &PendingFreshExecutionLaunch,
+) -> Result<bool, String> {
+    match pending_fresh_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("fresh launch activation status is unreadable".into()),
+    }
+    let cleanup = crate::cli::execution_state::abort_successor_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.request,
+        "fresh linked-owner launch failed before SessionStart",
+        sessions_dir,
+        &pending.session_identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => return Err("fresh candidate Session changed before exact rollback".into()),
+        Err(_) if pending_fresh_execution_activation_status(pending) == Some(true) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
+    Ok(true)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn pending_fresh_execution_launch_from_session(

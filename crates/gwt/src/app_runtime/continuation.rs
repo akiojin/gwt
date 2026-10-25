@@ -1,9 +1,12 @@
+pub(super) use gwt::project_runtime::launch_finalization::{
+    abort_prepared_execution_and_remove_exact_session, pending_continue_work_session_identity,
+    pending_execution_activation_status, pending_fresh_execution_activation_status,
+    pending_fresh_execution_attempt_status, reject_continue_work_workspace_commit,
+    resolve_split_workspace_state_external_commit,
+};
 use gwt::project_runtime::launch_finalization::{
     durable_fresh_execution_candidate, path_matches,
     resolve_split_workspace_state_external_commit_with_retry_hint, DurableFreshExecutionCandidate,
-};
-pub(super) use gwt::project_runtime::launch_finalization::{
-    reject_continue_work_workspace_commit, resolve_split_workspace_state_external_commit,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -1547,59 +1550,6 @@ fn projection_continue_authority_matches(
     }
 }
 
-pub(super) fn pending_execution_activation_status(pending: &PendingContinueWork) -> Option<bool> {
-    match &pending.execution {
-        PendingContinueWorkExecution::Successor(_) => {
-            gwt::cli::execution_state::continuation_attempt_for_operation(
-                &pending.worktree_path,
-                pending.owner,
-                &pending.operation_id,
-            )
-            .ok()
-            .map(|attempt| {
-                attempt.is_some_and(|attempt| {
-                    attempt.status
-                        == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
-                })
-            })
-        }
-        PendingContinueWorkExecution::Takeover(_) => {
-            gwt::cli::execution_state::generation_takeover_attempt_for_operation(
-                &pending.worktree_path,
-                pending.owner,
-                &pending.operation_id,
-            )
-            .ok()
-            .map(|attempt| {
-                attempt.is_some_and(|attempt| {
-                    attempt.status
-                        == gwt::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
-                })
-            })
-        }
-    }
-}
-
-pub(super) fn pending_fresh_execution_activation_status(
-    pending: &PendingFreshExecutionLaunch,
-) -> Option<bool> {
-    pending_fresh_execution_attempt_status(pending)
-        .map(|status| status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated)
-}
-
-pub(super) fn pending_fresh_execution_attempt_status(
-    pending: &PendingFreshExecutionLaunch,
-) -> Option<gwt::cli::execution_state::ContinuationAttemptStatus> {
-    gwt::cli::execution_state::continuation_attempt_for_operation(
-        &pending.worktree_path,
-        pending.owner,
-        &pending.operation_id,
-    )
-    .ok()
-    .flatten()
-    .map(|attempt| attempt.status)
-}
-
 #[derive(Clone, Copy)]
 enum GenesisCompensationAuthority {
     Terminalized,
@@ -2141,60 +2091,6 @@ pub(super) fn abort_prepared_execution(
                 .map(|_| ())
         }
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn abort_prepared_execution_and_remove_exact_session<F>(
-    worktree: &Path,
-    owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    execution: &PendingContinueWorkExecution,
-    reason: &str,
-    sessions_dir: &Path,
-    session_identity: &gwt_agent::SessionExecutionIdentity,
-    after_abort: F,
-) -> std::io::Result<bool>
-where
-    F: FnOnce() -> std::io::Result<()>,
-{
-    match execution {
-        PendingContinueWorkExecution::Successor(request) => {
-            gwt::cli::execution_state::abort_successor_and_remove_exact_session(
-                worktree,
-                owner,
-                request,
-                reason,
-                sessions_dir,
-                session_identity,
-                after_abort,
-            )
-        }
-        PendingContinueWorkExecution::Takeover(request) => {
-            gwt::cli::execution_state::abort_generation_takeover_and_remove_exact_session(
-                worktree,
-                owner,
-                request,
-                reason,
-                sessions_dir,
-                session_identity,
-                after_abort,
-            )
-        }
-    }
-}
-
-pub(super) fn pending_continue_work_session_identity(
-    pending: &PendingContinueWork,
-) -> Result<gwt_agent::SessionExecutionIdentity, String> {
-    let mut session = gwt_agent::Session::new(
-        &pending.worktree_path,
-        pending.work_branch.clone(),
-        pending.work_agent_id.clone(),
-    );
-    session.id = pending.binding.session_id.clone();
-    session.project_state_root = Some(pending.project_root.clone());
-    session.repo_hash = Some(pending.binding.repo_hash.clone());
-    session.linked_issue_number = Some(pending.owner.number);
-    gwt_agent::SessionExecutionIdentity::for_binding(&session, &pending.binding)
 }
 
 fn continue_work_commit_readback_matches(pending: &PendingContinueWork) -> bool {
