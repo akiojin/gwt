@@ -2737,6 +2737,8 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         "Restore the owning branch environment and its usable configured upstream through the repository's normal work-environment path, then retry. Keep the existing event commit and source unchanged.".to_string()
     } else if matches!(blocker, WorkEventSettlementBlocker::RemoteReadbackError) {
         "Restore the Git environment and access to the configured upstream so it can be fetched and read back, then retry. Keep the existing event commit and source unchanged.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::GitStatusError) {
+        "Restore the Git environment so the Work event store and existing commit information can be inspected, then retry. Keep the existing event commit and source unchanged.".to_string()
     } else {
         format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
     };
@@ -14868,8 +14870,11 @@ fn default_integration_test_builds_a_guarded_binary() {
     #[test]
     fn work_event_settlement_fails_closed_when_git_status_is_unreadable() {
         let fixture = WorkEventGitFixture::tracked();
-        fs::write(fixture.repo.join(".git/index"), b"corrupt-index")
-            .expect("corrupt fixture index");
+        let head = fixture.git_stdout(&["rev-parse", "HEAD"]);
+        let work_bytes = fs::read(fixture.event_path()).unwrap();
+        let index_path = fixture.repo.join(".git/index");
+        let index_bytes = fs::read(&index_path).unwrap();
+        fs::write(&index_path, b"corrupt-index").expect("corrupt fixture index");
 
         let status = evaluate_work_event_settlement(&fixture.repo);
         assert_eq!(
@@ -14877,6 +14882,30 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Warning);
+
+        let description = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::GitStatusError,
+            false,
+            None,
+        );
+        assert!(
+            description.contains("Restore the Git environment")
+                && description.contains("Work event store and existing commit information"),
+            "{description}"
+        );
+        assert!(
+            !description.contains("Commit `")
+                && !description.contains("related source changes")
+                && !description.contains("force-add"),
+            "{description}"
+        );
+        fs::write(index_path, index_bytes).expect("restore fixture index");
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), head);
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), work_bytes);
     }
 
     #[test]
