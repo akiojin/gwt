@@ -17372,6 +17372,51 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
     }
 
+    /// Commit readiness cancellation only from a newer complete live scan,
+    /// after the caller has adopted the latest durable ownership under its CAS.
+    pub fn reconcile_unowned_not_ready_launches(&mut self, last_committed_scan: Option<&str>) {
+        if !matches!(
+            self.queue_label_observation,
+            Some((IssueMonitorCandidateSource::Live, _))
+        ) {
+            return;
+        }
+        let Some(scan_at) = self.last_scan_at.as_deref().and_then(parse_rfc3339_utc) else {
+            return;
+        };
+        if last_committed_scan
+            .is_some_and(|at| parse_rfc3339_utc(at).is_none_or(|committed| scan_at <= committed))
+        {
+            return;
+        }
+        let candidates = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                let number = item.issue.number;
+                matches!(
+                    issue_monitor_candidate_exclusion(&item.issue, self.source_repository),
+                    Some((MonitorInboxState::NotReady, _))
+                ) && !self.launched_windows.contains_key(&number)
+                    && !self.process_held_issues.contains(&number)
+                    && !self.has_monitor_pane_for_issue(number)
+                    && self
+                        .pending_launch_deliveries
+                        .iter()
+                        .filter(|delivery| delivery.issue_number == number)
+                        .all(|delivery| {
+                            delivery.materializer_id.is_none()
+                                && delivery.materialized_window_id.is_none()
+                        })
+            })
+            .map(|item| item.issue.clone())
+            .collect::<Vec<_>>();
+        self.compensate_uncommitted_claims(&candidates.iter().map(|issue| issue.number).collect());
+        for issue in candidates {
+            self.record_candidate(issue);
+        }
+    }
+
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         self.observe_dependency_candidate(&issue);
         let issue_number = issue.number;
@@ -21333,10 +21378,10 @@ impl IssueMonitorState {
     }
 
     /// Adopt an exact cancellation before replacing the local delivery journal.
-    /// Otherwise the launch-reservation union can resurrect a committed pool
+    /// Otherwise the launch-reservation union can resurrect a committed
     /// cancellation and prevent the control receipt from converging.
     fn adopt_compensated_launch_deliveries(&mut self, disk: &IssueMonitorPrefs) {
-        if disk.effect_authority_epoch <= self.effect_authority_epoch {
+        if disk.effect_authority_epoch < self.effect_authority_epoch {
             return;
         }
         let protected = disk
@@ -21399,6 +21444,11 @@ impl IssueMonitorState {
             .map(|delivery| delivery.issue_number)
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled);
+        for number in cancelled {
+            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+                self.record_candidate(issue);
+            }
+        }
     }
 
     /// Exact pre-materialization compensation shared by provider holds and
