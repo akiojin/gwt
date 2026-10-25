@@ -90,6 +90,7 @@ test("Agents inserts canonical ordered plans and reasons before history without 
   const f = await fixture({ schedule: planned() });
   const section = f.surface.element.querySelector(".roster-plans");
   assert.ok(section, "selected member shows canonical plans");
+  assert.ok(section.previousElementSibling.querySelector(".roster-now"), "current work precedes future plans");
   assert.deepEqual([...section.querySelectorAll(".roster-plan")].map(node => node.dataset.issueNumber), ["5002", "5003", "5004"]);
   assert.deepEqual([...section.querySelectorAll(".roster-plan-reason")].map(node => node.textContent), ["Same SPEC continuation", "Queue order", "Assigned by you"]);
   assert.equal(section.nextElementSibling.className, "roster-history");

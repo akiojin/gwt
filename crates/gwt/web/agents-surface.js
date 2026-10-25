@@ -124,10 +124,13 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol"), current = liveWork(member);
     if (current) {
+      const currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
+      currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
       const li = document.createElement("li"); li.className = "roster-now";
       const label = document.createElement("small"), button = document.createElement("button"), result = document.createElement("span");
       label.textContent = "Now"; button.type = "button"; button.textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
-      button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result); ol.append(li);
+      button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result);
+      currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
