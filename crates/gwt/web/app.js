@@ -5128,6 +5128,19 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updatePmLauncher(activeWorkspace());
       });
 
+      const workspaceStateModel = createUiStateStore(null);
+      workspaceStateModel.subscribe(state => state, snapshot => {
+        if (!snapshot) return;
+        projectError = "";
+        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);
+        projectPageMetadata.setProjectName(activeProjectTab()?.title);
+        // Keep launcher, pending navigation and startup ACKs in render order.
+        updatePmLauncher(activeWorkspace());
+        resolvePendingWindowFrames();
+        sendStartupAutoResumeReady();
+        startupMetrics.onWorkspaceRendered();
+      });
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5157,17 +5170,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyWorkspaceStateNoticeReceiveEvent(event.notice);
             break;
           case "workspace_state": {
-            projectError = "";
-            frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
-            projectPageMetadata.setProjectName(activeProjectTab()?.title);
-            // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
-            // floating CTA in step with every surface render.
-            updatePmLauncher(activeWorkspace());
-            // FR-019: `windowMap` is current now, so a frame requested for a
-            // window that had not been mounted yet can finally run.
-            resolvePendingWindowFrames();
-            sendStartupAutoResumeReady();
-            startupMetrics.onWorkspaceRendered();
+            workspaceStateModel.update(() => ({ workspace: event.workspace }));
             break;
           }
           case "workspace_projection_prune_result": {
