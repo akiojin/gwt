@@ -770,72 +770,11 @@ struct WorkspaceWorktreeReconcileOutcome {
     backfilled: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct ActiveAgentSession {
-    pub(crate) window_id: String,
-    pub(crate) session_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) branch_name: String,
-    pub(crate) display_name: String,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) agent_project_root: String,
-    pub(crate) runtime_target: gwt_agent::LaunchRuntimeTarget,
-    pub(crate) tab_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceResumeContext {
-    pub(crate) title: Option<String>,
-    pub(crate) owner: Option<String>,
-    pub(crate) summary: Option<String>,
-    pub(crate) next_action: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingContinueWork {
-    pub(crate) client_id: ClientId,
-    pub(crate) operation_id: String,
-    pub(crate) work_id: String,
-    pub(crate) project_root: PathBuf,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    pub(crate) work_branch: String,
-    pub(crate) work_agent_id: gwt_agent::AgentId,
-    pub(crate) work_agent_session_id: Option<String>,
-    pub(crate) execution: PendingContinueWorkExecution,
-    pub(crate) binding: gwt_agent::SessionExecutionBinding,
-    pub(crate) readiness_nonce: String,
-    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
-    pub(crate) resume_context: WorkspaceResumeContext,
-    pub(crate) predecessor_session_id: String,
-    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PendingContinueWorkExecution {
-    Successor(gwt::cli::execution_state::SuccessorRequest),
-    #[allow(dead_code)] // Retained for reconciliation of legacy in-memory fixtures.
-    Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
-}
-
-/// Explicit linked-owner launch that is waiting for an authenticated
-/// SessionStart before replacing an integrity-valid Blocked generation.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingFreshExecutionLaunch {
-    pub(crate) operation_id: String,
-    pub(crate) project_root: PathBuf,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    pub(crate) request: gwt::cli::execution_state::SuccessorRequest,
-    pub(crate) binding: gwt_agent::SessionExecutionBinding,
-    pub(crate) session_identity: gwt_agent::SessionExecutionIdentity,
-    pub(crate) readiness_nonce: String,
-    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
-    pub(crate) base_branch: Option<String>,
-    pub(crate) linked_issue_number: Option<u64>,
-    pub(crate) resume_context: Option<WorkspaceResumeContext>,
-    pub(crate) launch_feedback_context: Option<LaunchFeedbackContext>,
-}
+pub use gwt::project_runtime::launch_payload::{ActiveAgentSession, LaunchFeedbackContext};
+pub(crate) use gwt::project_runtime::launch_payload::{
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    WorkspaceResumeContext,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedContinueWorkOutcome {
@@ -844,18 +783,6 @@ pub(crate) struct CachedContinueWorkOutcome {
     pub(crate) message: Option<String>,
     pub(crate) error_code: Option<String>,
     pub(crate) retryable: bool,
-}
-
-impl WorkspaceResumeContext {
-    fn purpose_title(&self) -> Option<String> {
-        self.title
-            .as_deref()
-            .or(self.summary.as_deref())
-            .or(self.owner.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1169,29 +1096,6 @@ pub struct AgentKanbanLaunchTarget {
 }
 
 #[derive(Debug, Clone)]
-pub struct LaunchFeedbackContext {
-    pub(crate) client_id: ClientId,
-    pub(crate) title: String,
-    pub(crate) issue_monitor_issue_number: Option<u64>,
-    pub(crate) issue_monitor_delivery_id: Option<String>,
-    pub(crate) issue_monitor_project_root: Option<PathBuf>,
-    pub(crate) issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
-    /// Write-ahead answered handoff carried by a native Resume. Only the
-    /// provider's UserPromptSubmit receipt may mark it delivered.
-    pub(crate) issue_monitor_autonomous_handoff: Option<gwt::AutonomousHandoffDeliveryAttempt>,
-    /// Set immediately before the provider process spawn call. Failures while
-    /// false are definitely pre-submit and keep the bounded retry ladder;
-    /// failures while true have an ambiguous provider outcome.
-    pub(crate) issue_monitor_autonomous_submit_started: bool,
-    /// SPEC #3200 Option A / Issue #4041: the independent review agent is
-    /// subordinate to the implementing launch. Its window must never be
-    /// ACKed as the Issue's launch: that rebinds `launched_issues` to the
-    /// review window, drops the implementation claim, and takes an active
-    /// slot while the implementation window is still running.
-    pub(crate) issue_monitor_review_dispatch: bool,
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct PreparedIssueMonitorLaunchFailure {
     retryable: bool,
     monitor: Option<gwt::IssueMonitorState>,
@@ -1260,19 +1164,6 @@ pub(crate) struct PreparedRuntimeHookAgentFailure {
     issue_number_hint: Option<u64>,
     result: PreparedIssueMonitorAgentFailure,
     status: Option<Box<gwt::IssueMonitorStatusView>>,
-}
-
-impl LaunchFeedbackContext {
-    /// The Issue whose Monitor launch this window materializes. `None` for a
-    /// review dispatch, whose window observes the Issue without owning its
-    /// launch binding (Issue #4041).
-    pub(crate) fn issue_monitor_launch_binding_issue_number(&self) -> Option<u64> {
-        if self.issue_monitor_review_dispatch {
-            None
-        } else {
-            self.issue_monitor_issue_number
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

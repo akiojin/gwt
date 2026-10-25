@@ -186,19 +186,6 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
 }
 
 #[test]
-fn review_dispatch_feedback_context_does_not_own_the_issue_launch_binding() {
-    // Issue #4041: the independent review window observes the Issue but never
-    // materializes its launch.
-    let mut context = issue_monitor_feedback(42);
-    assert_eq!(
-        context.issue_monitor_launch_binding_issue_number(),
-        Some(42)
-    );
-    context.issue_monitor_review_dispatch = true;
-    assert_eq!(context.issue_monitor_launch_binding_issue_number(), None);
-}
-
-#[test]
 fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
     // Issue #4041: on 2026-09-06 the review dispatches for #4037 / #4033 were
     // ACKed as the Issues' launches, so `launched_issues` moved to the review
