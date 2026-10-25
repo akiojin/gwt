@@ -28,8 +28,9 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
       && assignment.session_id === member.assignment.session_id) || null;
   }
   function workTitle(assignment) {
-    const app = windowCatalogModel.read().catalog.appState;
-    const data = app.tabs.flatMap(tab => tab.workspace?.windows || [])
+    const app = windowCatalogModel.read().catalog.appState, activity = activityModel.read();
+    const data = (app.tabs || []).filter(tab => !activity.snapshot?.project_key
+      || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || [])
       .find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
     return assignment.current_task || data?.dynamic_title || data?.title || (assignment.issue_number ? `Issue #${assignment.issue_number}` : "—");
   }
@@ -183,7 +184,8 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   function sync() {
     if (disposed) return;
     const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
-    const windows = catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || []);
+    const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
+      || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
     const pm = windows.find(window => (activity.agents || []).some(assignment => assignment.is_pm
       && assignment.window_id === window.id && assignment.session_id === window.session_id));
     const identity = element.querySelector(".roster-pm-identity");

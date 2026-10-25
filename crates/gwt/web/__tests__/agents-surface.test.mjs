@@ -66,6 +66,11 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
   withPm("Yuu updated"); f.flush();
   assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: state.catalog.version + 1,
+    appState: { ...state.catalog.appState, tabs: state.catalog.appState.tabs.map(tab => ({ ...tab, project_key: "another-project" })) } } }));
+  f.flush();
+  assert.equal(identity.hidden, true, "another project's catalog cannot supply the current PM's name");
   f.activityModel.update(() => ({ count: 1, agents: [current] })); f.flush();
   assert.equal(identity.hidden, true, "a stale PM catalog window cannot supply a live identity");
 });
@@ -126,6 +131,13 @@ test("Issue #6362 Agents keeps census-proven work busy before catalog hydration 
   assert.equal(task.textContent, "Current issue", "window metadata enriches the same observed assignment across tabs");
   task.click();
   assert.deepEqual(f.opened, [current]);
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 4,
+    appState: { ...catalog.appState, tabs: [{ ...project, project_key: "another-project" }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent,
+    "Issue #4777", "another project's catalog cannot enrich the observed assignment");
   f.surface.dispose();
 });
 

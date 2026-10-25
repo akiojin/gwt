@@ -2615,7 +2615,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // state enriches that proof; a historical Work never creates an agent.
         const activity = agentActivityModel.read();
         const catalog = windowCatalogModel.read().catalog;
-        const windows = catalog.appState.tabs.flatMap(tab => tab.workspace?.windows || []);
+        const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
+          || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
         counts.agents = activity.count ?? "—";
         let unknown = activity.count === null;
         for (const agent of activity.agents) {

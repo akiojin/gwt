@@ -348,7 +348,8 @@ test("Issue #6362 Status Strip counts the observed census before terminals mount
   const dependencies = { window: { __operatorShell: { applyTelemetryCounts() {} } },
     agentActivityModel: { read: () => activity },
     windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
-      { id: "active", workspace: { windows: [] } }, { id: "sibling", workspace: { windows } },
+      { id: "active", project_key: "this-project", workspace: { windows: [] } },
+      { id: "sibling", project_key: "this-project", workspace: { windows } },
     ] }, runtimeStates: {} } }) },
     allProjectWindowIds: () => windows.map(window => window.id),
     activeWorkItemsFromProjection: () => activeWorks,
@@ -363,6 +364,9 @@ test("Issue #6362 Status Strip counts the observed census before terminals mount
   assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
   assert.equal(counts.waiting, 1);
   assert.equal(counts.agents, 2);
+  activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
+  assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
+  assert.equal(counts.agents, 2, "catalog scope does not change observed membership");
   activity = { count: 0, agents: [] }; recompute();
   assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
   activity = { count: null, agents: [] }; recompute();
