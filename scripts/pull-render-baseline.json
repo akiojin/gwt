@@ -1,7 +1,6 @@
 [
   "[\"crates/gwt/web/app.js\",\"receive\",\"\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/branch_entries\"]",
-  "[\"crates/gwt/web/app.js\",\"receive\",\"/hub_state\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_resumable_agents\"]",
   "[\"crates/gwt/web/app.js\",\"receive\",\"/workspace_state\"]",
   "[\"crates/gwt/web/board-logs-surface.js\",\"applyBoardLogsReceiveEvent\",\"/board_entries\"]",
