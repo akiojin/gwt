@@ -1082,8 +1082,9 @@ queue-age comparisons `unknown`, while retaining the observed facts and timing.
 Saved WIP policies are compared independently, in saved order, with the distinct
 observed Issue count. `observed_exceeded` means only that this snapshot's count
 strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
-limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
-missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+limit, complete daemon coverage and a valid scan time. Scan fractions beyond nine digits
+yield `unknown` with `monitor_scan_time`. Equal or smaller counts and missing or degraded
+inputs yield `unknown`, never a within-limit PASS. Without Monitor
 data the count is null; without policies the list is empty. This comparison does not
 establish canonical WIP, a current breach or permission to act, and does not select
 or combine policies. Verification and full WIP remain missing.
