@@ -119,7 +119,7 @@ export function scanModule(source, file, { modules, rootName } = {}) {
     for (let current = scopes.get(node); current; current = current.parent) {
       if (current.bindings.has(name)) {
         const binding = current.bindings.get(name);
-        return { fn: binding?.type && !mutatedFunctions.has(binding) ? binding : null, handler: binding?.handler, members: binding?.members, imported: binding?.imported,
+        return { scope: current, fn: binding?.type && !mutatedFunctions.has(binding) ? binding : null, handler: binding?.handler, members: binding?.members, imported: binding?.imported,
           module: binding?.module, model: current.models.has(name) };
       }
     }
@@ -128,8 +128,10 @@ export function scanModule(source, file, { modules, rootName } = {}) {
   function invalidateMutatedControllers(node) {
     if (["AssignmentExpression", "UpdateExpression", "ForOfStatement", "ForInStatement"].includes(node.type) || (node.type === "UnaryExpression" && node.operator === "delete")) {
       for (let target of bindingTargets(node.left || node.argument)) {
-        const fn = target.type === "Identifier" && resolve(node, target.name).fn;
-        if (fn) mutatedFunctions.add(fn);
+        const binding = target.type === "Identifier" && resolve(node, target.name);
+        if (binding.fn) mutatedFunctions.add(binding.fn);
+        // Factory aliases share cached handlers; invalidate only this binding.
+        if (binding.handler) binding.scope.bindings.set(target.name, null);
         while (target.type === "MemberExpression") target = target.object;
         if (target.type === "Identifier") resolve(node, target.name).members?.clear();
       }
