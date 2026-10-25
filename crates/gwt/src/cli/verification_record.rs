@@ -2729,20 +2729,25 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         Some(comparison) => format!("{reason} ({comparison})"),
         None => reason,
     };
+    let recovery = if matches!(blocker, WorkEventSettlementBlocker::CommitNotPushed) {
+        "Push the existing event commit through the repository's normal delivery path, then retry once the compared upstream contains it. Later source-only commits do not need to be pushed.".to_string()
+    } else {
+        format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
+    };
     format!(
-        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. {recovery}{}",
         identity_gate_escape_suffix(identity_gate_closed)
     )
 }
 
 /// Issue #4533 (AC-1/AC-3): the ordered escape from the identity gate,
-/// appended to any refusal that demands a commit while the gate is closed.
+/// appended to any refusal that demands a commit or push while the gate is closed.
 /// Empty when the gate is open, so the common refusal stays short.
 fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
     if !identity_gate_closed {
         return "";
     }
-    " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
+    " The Agent Workspace identity gate is closed for this session, so the required Git operations are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then retry the required Git operations and settlement. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
 /// Only the successful PR mutation path calls this with the event returned by
@@ -14620,11 +14625,48 @@ fn default_integration_test_builds_a_guarded_binary() {
         fixture.commit("chore(work): unpushed Work event");
         let event_commit = fixture.latest_event_commit();
 
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after unpushed Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
+
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an unpushed event commit is refused");
         assert!(refusal.contains(&event_commit), "{refusal}");
         assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
         assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Push the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let gated = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::CommitNotPushed,
+            true,
+            None,
+        );
+        assert!(gated.contains("Lift the gate first"), "{gated}");
+        assert!(!gated.contains("commit and push"), "{gated}");
+        assert!(!gated.contains("Then commit"), "{gated}");
+
+        fixture.git_ok(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("{event_commit}:refs/heads/main"),
+        ]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(
+            fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]),
+            event_commit
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
     }
 
     #[test]
