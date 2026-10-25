@@ -322,6 +322,7 @@ fn observe_recurring_runs(
 pub struct MonitorEvidence {
     pub source: Option<IssueMonitorStatusSource>,
     pub last_scan_at: Option<String>,
+    pub scan_aborted: Option<bool>,
     pub active_launches_incomplete: bool,
     pub inbox_coverage: Option<IssueMonitorInboxCoverage>,
 }
@@ -354,10 +355,23 @@ pub struct QueueResidencyObservation {
     pub queued_at: String,
     pub age_seconds_at_scan: Option<u64>,
     pub missing_inputs: Vec<&'static str>,
+    pub age_limits: Vec<QueueAgeLimitObservation>,
+}
+
+/// Saved thresholds compare host membership age, never canonical starvation.
+#[derive(Debug, Serialize)]
+pub struct QueueAgeLimitObservation {
+    pub id: String,
+    pub version: u64,
+    pub starvation_after_seconds: Option<u64>,
+    pub assessment: &'static str,
+    pub missing_inputs: Vec<&'static str>,
 }
 
 fn observe_terminal_queue(
+    state: &PmPlanningState,
     status: &IssueMonitorAgentStatus,
+    monitor_missing_inputs: &[&'static str],
 ) -> Option<Vec<QueueResidencyObservation>> {
     let view = status.gui_status.as_ref()?;
     let scan = status
@@ -385,11 +399,49 @@ fn observe_terminal_queue(
                         }
                     }
                 });
+                let age_limits = state
+                    .policies
+                    .iter()
+                    .map(|policy| {
+                        let mut missing = monitor_missing_inputs.to_vec();
+                        missing.extend_from_slice(&missing_inputs);
+                        if policy.id.trim().is_empty() {
+                            missing.push("policy_id");
+                        } else if state
+                            .policies
+                            .iter()
+                            .filter(|other| other.id == policy.id)
+                            .count()
+                            != 1
+                        {
+                            missing.push("unique_policy_id");
+                        }
+                        if policy.starvation_after_seconds.is_none() {
+                            missing.push("starvation_after_seconds");
+                        }
+                        let reached = missing.is_empty()
+                            && age_seconds_at_scan
+                                .zip(policy.starvation_after_seconds)
+                                .is_some_and(|(age, threshold)| age >= threshold);
+                        QueueAgeLimitObservation {
+                            id: policy.id.clone(),
+                            version: policy.version,
+                            starvation_after_seconds: policy.starvation_after_seconds,
+                            assessment: if reached {
+                                "observed_age_threshold_reached"
+                            } else {
+                                "unknown"
+                            },
+                            missing_inputs: missing,
+                        }
+                    })
+                    .collect();
                 QueueResidencyObservation {
                     issue_number: entry.number,
                     queued_at: entry.queued_at.clone(),
                     age_seconds_at_scan,
                     missing_inputs,
+                    age_limits,
                 }
             })
             .collect(),
@@ -739,7 +791,8 @@ fn observe_capacity(
     .collect();
     let scan_valid = monitor
         .and_then(|status| status.last_scan_at.as_deref())
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
+        .and_then(parse_observed_instant)
+        .is_some();
     let wip_limits = state
         .policies
         .iter()
@@ -809,7 +862,8 @@ fn observe_capacity(
         retry_deadlines: monitor.map(observe_retry_deadlines),
         wip_limits,
         idle_windows: monitor.map(observe_idle_windows),
-        terminal_queue: monitor.and_then(observe_terminal_queue),
+        terminal_queue: monitor
+            .and_then(|status| observe_terminal_queue(state, status, monitor_missing_inputs)),
         missing_inputs,
     }
 }
@@ -1050,6 +1104,9 @@ pub fn assess_planning(
         {
             missing_inputs.push("monitor_scan_time");
         }
+        if status.scan_aborted {
+            missing_inputs.push("successful_monitor_scan");
+        }
     } else {
         missing_inputs.push("monitor_observation");
         missing_inputs.push("complete_monitor_coverage");
@@ -1261,6 +1318,7 @@ pub fn assess_planning(
         monitor: MonitorEvidence {
             source: monitor.map(|status| status.source),
             last_scan_at: monitor.and_then(|status| status.last_scan_at.clone()),
+            scan_aborted: monitor.map(|status| status.scan_aborted),
             active_launches_incomplete: monitor
                 .is_none_or(|status| status.active_launches_incomplete),
             inbox_coverage: monitor.and_then(|status| status.inbox_coverage.clone()),
@@ -1573,7 +1631,7 @@ mod tests {
             assert_eq!(
                 *row,
                 json!({"issue_number":number,"queued_at":queued_at,
-                "age_seconds_at_scan":seconds,"missing_inputs":missing})
+                "age_seconds_at_scan":seconds,"missing_inputs":missing,"age_limits":[]})
             );
         }
         monitor.source = IssueMonitorStatusSource::DegradedCache;
@@ -1620,6 +1678,165 @@ mod tests {
                 Some(&Value::Null)
             );
         }
+    }
+
+    #[test]
+    fn queue_age_limits_compare_saved_thresholds_without_claiming_starvation() {
+        let state = PmPlanningState {
+            policies: serde_json::from_value(json!([
+                {"id":"equal","version":3,"starvation_after_seconds":60,"wip_limit":0},
+                {"id":"below","starvation_after_seconds":61},
+                {"id":"above","starvation_after_seconds":59},
+                {"id":"zero","starvation_after_seconds":0}, {"id":"unset"},
+                {"id":" ","starvation_after_seconds":0},
+                {"id":"dup","starvation_after_seconds":0},
+                {"id":"dup","version":2,"starvation_after_seconds":0}
+            ]))
+            .unwrap(),
+            ..Default::default()
+        };
+        let mut monitor = crate::IssueMonitorState::new(Default::default()).agent_status();
+        monitor.active_launches = vec![9];
+        monitor.last_scan_at = Some("2026-10-25T01:01:00Z".into());
+        monitor.inbox_coverage = Some(serde_json::from_value(json!({
+            "github_target_count":0,"inbox_row_count":0,"missing_issue_numbers":[],"source":"live"
+        })).unwrap());
+        monitor.gui_status.as_mut().unwrap().terminal_queue = [
+            "2026-10-25T01:00:00Z",
+            "2026-10-25T01:01:00Z",
+            "invalid",
+            "2026-10-25T01:01:01Z",
+        ]
+        .map(
+            |queued_at| crate::issue_monitor::IssueMonitorTerminalQueueEntry {
+                number: 9,
+                queued_at: queued_at.into(),
+                ..Default::default()
+            },
+        )
+        .into();
+        let before = (state.clone(), serde_json::to_value(&monitor).unwrap());
+        let report = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let rows = report["capacity"]["terminal_queue"].as_array().unwrap();
+        let limits = rows[0]["age_limits"]
+            .as_array()
+            .expect("per-policy age limits");
+        assert_eq!(
+            limits[0],
+            json!({"id":"equal","version":3,
+            "starvation_after_seconds":60,"assessment":"observed_age_threshold_reached","missing_inputs":[]})
+        );
+        assert_eq!(
+            limits
+                .iter()
+                .map(|row| row["assessment"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "observed_age_threshold_reached",
+                "unknown",
+                "observed_age_threshold_reached",
+                "observed_age_threshold_reached",
+                "unknown",
+                "unknown",
+                "unknown",
+                "unknown"
+            ]
+        );
+        for (index, missing) in [
+            (4, "starvation_after_seconds"),
+            (5, "policy_id"),
+            (6, "unique_policy_id"),
+            (7, "unique_policy_id"),
+        ] {
+            assert!(limits[index]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(missing)));
+        }
+        assert_eq!(
+            rows[1]["age_limits"][3]["assessment"],
+            "observed_age_threshold_reached"
+        );
+        for (index, missing) in [(2, "queued_at"), (3, "queued_after_scan")] {
+            assert_eq!(rows[index]["age_limits"][3]["assessment"], "unknown");
+            assert!(rows[index]["age_limits"][3]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(missing)));
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), before.1);
+        // Failed scans retain these facts but their advanced timestamp must not
+        // qualify the saved-policy comparisons. Ordinary errors are unrelated.
+        monitor.last_error = Some("unrelated issue diagnostic".into());
+        let ordinary_error = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(ordinary_error, report);
+        assert_eq!(
+            report["capacity"]["wip_limits"][0]["assessment"],
+            "observed_exceeded"
+        );
+        monitor.scan_aborted = true;
+        let aborted_before = serde_json::to_value(&monitor).unwrap();
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        let aborted_age = &aborted["capacity"]["terminal_queue"][0];
+        assert_eq!(aborted_age["age_limits"][0]["assessment"], "unknown");
+        assert_eq!(
+            aborted["capacity"]["wip_limits"][0]["assessment"],
+            "unknown"
+        );
+        for diagnostic in [
+            &aborted["missing_inputs"],
+            &aborted["capacity"]["missing_inputs"],
+            &aborted["capacity"]["wip_limits"][0]["missing_inputs"],
+            &aborted_age["age_limits"][0]["missing_inputs"],
+        ] {
+            assert!(diagnostic
+                .as_array()
+                .unwrap()
+                .contains(&json!("successful_monitor_scan")));
+        }
+        assert_eq!(aborted["monitor"].get("scan_aborted"), Some(&json!(true)));
+        assert_eq!(report["monitor"].get("scan_aborted"), Some(&json!(false)));
+        assert_eq!(
+            aborted["monitor"]["last_scan_at"],
+            report["monitor"]["last_scan_at"]
+        );
+        assert_eq!(aborted["capacity"]["observed_work_issues"], json!([9]));
+        for field in [
+            "issue_number",
+            "queued_at",
+            "age_seconds_at_scan",
+            "missing_inputs",
+        ] {
+            assert_eq!(aborted_age[field], rows[0][field]);
+        }
+        assert_eq!(state, before.0);
+        assert_eq!(serde_json::to_value(&monitor).unwrap(), aborted_before);
+        assert_eq!(
+            serde_json::to_value(assess_planning(&state, None)).unwrap()["monitor"]
+                .get("scan_aborted"),
+            Some(&Value::Null)
+        );
+        monitor.scan_aborted = false;
+        monitor.source = IssueMonitorStatusSource::DegradedCache;
+        let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(
+            degraded["capacity"]["terminal_queue"][0]["age_limits"][0]["assessment"],
+            "unknown"
+        );
+        assert!(
+            degraded["capacity"]["terminal_queue"][0]["age_limits"][0]["missing_inputs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("complete_monitor_coverage"))
+        );
+        monitor.source = IssueMonitorStatusSource::Daemon;
+        monitor.active_launches_incomplete = true;
+        assert_eq!(
+            serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap()["capacity"]
+                ["terminal_queue"][0]["age_limits"][0]["assessment"],
+            "unknown"
+        );
     }
 
     fn fixture() -> PmPlanningState {
@@ -2816,8 +3033,15 @@ mod tests {
             "unknown"
         );
         monitor.active_launches_incomplete = false;
-        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2026-10-21T00:00:00.1234567891Z"),
+        ]
+        .map(|value| value.map(str::to_owned))
+        {
             monitor.last_scan_at = scan;
+            let before = serde_json::to_value(&monitor).unwrap();
             let untimed = evaluate(Some(&monitor));
             assert_eq!(
                 untimed["capacity"]["wip_limits"][0]["assessment"],
@@ -2827,8 +3051,21 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("monitor_scan_time")));
+            assert_eq!(
+                untimed["monitor"]["last_scan_at"],
+                json!(monitor.last_scan_at)
+            );
+            assert_eq!(
+                untimed["capacity"]["wip_limits"][0]["observed_issue_count"],
+                2
+            );
+            assert_eq!(serde_json::to_value(&monitor).unwrap(), before);
         }
-        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.last_scan_at = Some("2026-10-21T00:00:00.123456789Z".into());
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["wip_limits"][0]["assessment"],
+            "observed_exceeded"
+        );
         monitor.active_launches.clear();
         assert_eq!(
             evaluate(Some(&monitor))["capacity"]["wip_limits"][4]["assessment"],

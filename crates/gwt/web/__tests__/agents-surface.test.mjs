@@ -6,6 +6,7 @@ import { createUiStateStore } from "../ui-state-store.js";
 import { createAgentsSurface } from "../agents-surface.js";
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
+const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
     { session_id: "s0", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
@@ -14,7 +15,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {} } = {}) {
+async function fixture({ onOpenWork = () => {}, schedule } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -22,14 +23,15 @@ async function fixture({ onOpenWork = () => {} } = {}) {
   const createElement = document.createElement.bind(document);
   document.createElement = (...args) => { const node = createElement(...args); node.focus = () => { activeElement = node; }; return node; };
   const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
-  const rosterModel = createUiStateStore({ members, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] }, options);
+  const rosterModel = createUiStateStore({ members, revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] }, options);
+  const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
-  const opened = [], rested = [], added = [];
-  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, onAddMember: () => added.push(true), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const opened = [], rested = [], added = [], reassigned = [], refreshed = [];
+  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, scheduleModel, onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: () => added.push(true), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, opened, rested, added };
+  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed };
 }
 
 test("Agents replaces the old terminal surface with the approved roster contract", () => {
@@ -55,16 +57,115 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.equal(f.surface.selectMember("missing"), false);
 });
 
-test("Agents current pill and Now task open the exact assignment, while idle members only select", async () => {
+test("Agents current pill, row task and Now task open the exact assignment, while idle members only select", async () => {
   const f = await fixture();
   f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current').click();
   f.surface.element.querySelector(".roster-now button").click();
-  assert.deepEqual(f.opened, [current, current]);
+  const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
+  assert.equal(task.tagName, "BUTTON"); task.click();
+  assert.deepEqual(f.opened, [current, current, current]);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-purpose').tagName, "SPAN");
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-current'), null);
   f.activityModel.update(() => ({ agents: [], count: 0 }));
   f.surface.element.querySelector(".roster-now button").click();
-  assert.equal(f.opened.length, 2, "a link captured before the frame must recheck live membership");
+  task.click();
+  assert.equal(f.opened.length, 3, "links captured before the frame must recheck live membership");
   f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
+});
+
+const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
+  members: [{ agent_member_id: "m1", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }, { issue_number: 5004, reason: "assigned_by_you" }], empty_reason: null },
+    { agent_member_id: "m2", issues: [], empty_reason: "No queued issue" }] }, error: null, pending: false });
+
+function chooseTarget(f, issue = 5002) {
+  const entry = f.surface.element.querySelector(`.roster-plan[data-issue-number="${issue}"]`);
+  assert.ok(entry, "canonical plan has a reassignment control");
+  const select = entry.querySelector("select");
+  select.querySelector('option[value="m2"]').selected = true;
+  select.dispatchEvent(new f.window.Event("change"));
+  return entry.querySelector("button");
+}
+
+test("Agents inserts canonical ordered plans and reasons before history without inventing an idle assignment", async () => {
+  const f = await fixture({ schedule: planned() });
+  const section = f.surface.element.querySelector(".roster-plans");
+  assert.ok(section, "selected member shows canonical plans");
+  assert.ok(section.previousElementSibling.querySelector(".roster-now"), "current work precedes future plans");
+  assert.deepEqual([...section.querySelectorAll(".roster-plan")].map(node => node.dataset.issueNumber), ["5002", "5003", "5004"]);
+  assert.deepEqual([...section.querySelectorAll(".roster-plan-reason")].map(node => node.textContent), ["Same SPEC continuation", "Queue order", "Assigned by you"]);
+  assert.equal(section.nextElementSibling.className, "roster-history");
+  assert.equal(section.querySelector("select").getAttribute("aria-label"), "Assign issue #5002 to member");
+  assert.deepEqual([...section.querySelectorAll("select")[0].querySelectorAll("option")].map(node => node.value), ["", "m2"]);
+  f.surface.selectMember("m2");
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /No queued issue/);
+  assert.equal(f.surface.element.querySelector(".roster-plans select"), null);
+  assert.equal(f.surface.element.querySelector(".roster-now"), null);
+});
+
+test("Agents reassigns once with captured revisions and waits for canonical readback", async () => {
+  const f = await fixture({ schedule: planned() });
+  const button = chooseTarget(f); button.click(); button.click();
+  assert.deepEqual(f.reassigned, [{ kind: "reassign", issue_number: 5002, source_member_id: "m1", target_member_id: "m2", expected_roster_revision: 3, expected_queue_revision: "queue-v1:one", expected_schedule_revision: 7 }]);
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Updating plans/);
+  assert.equal(f.surface.element.querySelectorAll('.roster-plan[data-issue-number="5002"]').length, 1, "sending does not optimistically move the issue");
+  f.scheduleModel.update(state => ({ ...state, pending: true })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-plan select").disabled, true);
+  f.surface.element.querySelector('.roster-plans [data-action="refresh-plans"]').click();
+  assert.deepEqual(f.refreshed, [true], "Refresh remains reachable after response loss");
+  f.scheduleModel.update(state => ({ ...state, pending: false })); f.flush();
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-plans").textContent, /Updating plans/, "a canonical unchanged read releases the local response-loss guard");
+  chooseTarget(f).click(); assert.equal(f.reassigned.length, 2);
+  f.scheduleModel.update(state => ({ ...state, pending: false, snapshot: { ...state.snapshot, schedule_revision: 8, members: [
+    { agent_member_id: "m1", issues: state.snapshot.members[0].issues.slice(1), empty_reason: null },
+    { agent_member_id: "m2", issues: [state.snapshot.members[0].issues[0]], empty_reason: null },
+  ] } })); f.flush();
+  assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]'), null);
+  f.surface.selectMember("m2");
+  assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]')?.dataset.issueNumber, "5002");
+});
+
+test("Agents refuses stale plan controls and preserves plans with Refresh recovery on errors", async () => {
+  const f = await fixture({ schedule: planned() });
+  const stale = chooseTarget(f);
+  f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, schedule_revision: 8 } }));
+  stale.click();
+  assert.equal(f.reassigned.length, 0);
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /changed.*Refresh/i);
+  f.scheduleModel.update(state => ({ ...state, error: "Readback unavailable", pending: false })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Readback unavailable/);
+  assert.equal(f.surface.element.querySelector(".roster-plan button").disabled, true);
+  assert.equal(f.surface.element.querySelectorAll(".roster-plan").length, 3);
+  f.surface.element.querySelector('.roster-plans [data-action="refresh-plans"]').click();
+  assert.deepEqual(f.refreshed, [true]);
+  f.scheduleModel.update(() => planned()); f.rosterModel.update(state => ({ ...state, revision: 4 })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-plan button").disabled, true);
+  f.scheduleModel.update(() => ({ snapshot: null, error: null, pending: false })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-plans").textContent, /Plans unavailable/);
+});
+
+test("Agents planned controls use Operator styles and stay inert in split previews", async () => {
+  const f = await fixture({ schedule: planned() }), host = f.document.createElement("aside");
+  f.document.querySelector("main").append(host); f.surface.setPreviewHost(host);
+  assert.ok(host.querySelector("select"));
+  assert.equal(host.querySelector("select:not([disabled])"), null);
+  assert.match(styles, /\.roster-plan-controls\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(styles, /\.agents-surface select\s*\{[^}]*var\(--color-/s);
+  assert.doesNotMatch(styles, /#[0-9a-f]{3,8}\b|rgba?\(/i);
+  assert.doesNotMatch(source, /role=["']dialog|modal-backdrop|position:\s*fixed/);
+  f.surface.dispose();
+});
+
+test("Agents keeps a selected plan control and keyboard focus across unrelated catalog and usage updates", async () => {
+  const f = await fixture({ schedule: planned() }); chooseTarget(f);
+  const section = f.surface.element.querySelector(".roster-plans"), select = section.querySelector("select"), button = section.querySelector(".roster-plan button");
+  select.focus();
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } }));
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, tokens: 6000 })) })); f.flush();
+  assert.ok(f.surface.element.querySelector(".roster-plans") === section, "unchanged plan controls remain attached while surrounding details refresh");
+  assert.ok(section.querySelector("select") === select);
+  assert.equal(select.value, "m2"); assert.equal(button.disabled, false);
+  assert.ok(select.isConnected); assert.ok(f.document.activeElement === select);
+  f.surface.dispose();
 });
 
 test("Agents add and rest actions target a member and Past shows measured contributor data", async () => {

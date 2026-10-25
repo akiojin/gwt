@@ -1723,6 +1723,17 @@ pub fn save_work_event_settlement_record(
     session_id: &str,
     open_obligation: bool,
 ) -> io::Result<WorkEventSettlementRecord> {
+    save_work_event_settlement_record_with_comparison(worktree, session_id, open_obligation)
+        .map(|(record, _)| record)
+}
+
+/// Keep the comparison observed by this refresh for immediate diagnostics,
+/// without changing the durable receipt or re-reading moving Git refs.
+pub(crate) fn save_work_event_settlement_record_with_comparison(
+    worktree: &Path,
+    session_id: &str,
+    open_obligation: bool,
+) -> io::Result<(WorkEventSettlementRecord, Option<String>)> {
     let trusted_dir = required_work_event_settlement_trusted_dir(worktree)?;
     crate::cli::trusted_store::with_write_lease_for_resolved_dir(&trusted_dir, || {
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
@@ -1746,7 +1757,8 @@ pub fn save_work_event_settlement_record(
                             &trusted_dir,
                             record,
                             &delivery,
-                        );
+                        )
+                        .map(|record| (record, None));
                     }
                     Err(error) => return Err(error),
                 }
@@ -1763,8 +1775,12 @@ pub fn save_work_event_settlement_record(
             .as_ref()
             .map(|delivery| pending_work_event_shard_relative_path(worktree, &delivery.event_id))
             .transpose()?;
-        let mut status =
-            evaluate_work_event_settlement_for_path(worktree, exact_event_path.as_deref());
+        let mut comparison = None;
+        let mut status = evaluate_work_event_settlement_for_path(
+            worktree,
+            exact_event_path.as_deref(),
+            &mut comparison,
+        );
         if status.is_settled() {
             if let Some(delivery) = pending_delivery.as_ref() {
                 if !pending_work_event_shard_matches_head(worktree, &delivery.event_id)? {
@@ -1794,7 +1810,7 @@ pub fn save_work_event_settlement_record(
         };
         require_unchanged_work_event_settlement_trusted_dir(worktree, &trusted_dir)?;
         persist_work_event_settlement_record_to_resolved_dir(&trusted_dir, &record)?;
-        Ok(record)
+        Ok((record, comparison))
     })
 }
 
@@ -2139,12 +2155,13 @@ fn pending_legacy_work_event_is_persisted(
 /// a failed probe as evidence of settlement.
 #[must_use]
 pub fn evaluate_work_event_settlement(worktree: &Path) -> WorkEventSettlementStatus {
-    evaluate_work_event_settlement_for_path(worktree, None)
+    evaluate_work_event_settlement_for_path(worktree, None, &mut None)
 }
 
 fn evaluate_work_event_settlement_for_path(
     worktree: &Path,
     exact_event_path: Option<&str>,
+    comparison: &mut Option<String>,
 ) -> WorkEventSettlementStatus {
     let states = match work_event_path_states(worktree) {
         Ok(states) => states,
@@ -2214,10 +2231,15 @@ fn evaluate_work_event_settlement_for_path(
     let (remote, merge_ref, upstream_ref) = match configured_upstream(worktree) {
         Ok(upstream) => upstream,
         Err(UpstreamFailure::Missing) => {
-            return terminal_work_integration_delivery(worktree, "origin", &event_commit)
-                .unwrap_or(WorkEventSettlementStatus::Blocked(
-                    WorkEventSettlementBlocker::MissingUpstream,
-                ));
+            return terminal_work_integration_delivery(
+                worktree,
+                "origin",
+                &event_commit,
+                comparison,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::MissingUpstream,
+            ));
         }
         Err(UpstreamFailure::Git) => {
             return WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::GitStatusError);
@@ -2226,11 +2248,22 @@ fn evaluate_work_event_settlement_for_path(
     let remote_tip = match fetch_upstream_tip(worktree, &remote, &merge_ref) {
         Ok(remote_tip) => remote_tip,
         Err(()) => {
-            return terminal_work_integration_delivery(worktree, &remote, &event_commit).unwrap_or(
-                WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteReadbackError),
-            );
+            return terminal_work_integration_delivery(
+                worktree,
+                &remote,
+                &event_commit,
+                comparison,
+            )
+            .unwrap_or(WorkEventSettlementStatus::Blocked(
+                WorkEventSettlementBlocker::RemoteReadbackError,
+            ));
         }
     };
+    *comparison = Some(work_event_settlement_comparison(
+        &event_commit,
+        &upstream_ref,
+        &remote_tip,
+    ));
     // SPEC #3590 FR-027: only the event commit has to be reachable. A later
     // unpushed source commit is delivery's business, not bookkeeping's.
     let event_on_remote = match git_is_ancestor(worktree, &event_commit, &remote_tip) {
@@ -2271,26 +2304,33 @@ fn terminal_work_integration_delivery(
     worktree: &Path,
     remote: &str,
     event_commit: &str,
+    comparison: &mut Option<String>,
 ) -> Option<WorkEventSettlementStatus> {
     if !canonical_work_for_worktree_is_terminal(worktree) {
         return None;
     }
-    let mut observed_base = false;
+    let mut comparisons = Vec::new();
     for branch in ["develop", "main"] {
         let Ok(tip) = fetch_upstream_tip(worktree, remote, &format!("refs/heads/{branch}")) else {
             continue;
         };
-        observed_base = true;
+        let upstream_ref = format!("{remote}/{branch}");
+        comparisons.push(work_event_settlement_comparison(
+            event_commit,
+            &upstream_ref,
+            &tip,
+        ));
+        *comparison = Some(comparisons.join("; "));
         if git_is_ancestor(worktree, event_commit, &tip) == Ok(true) {
             return Some(WorkEventSettlementStatus::Settled {
                 event_commit: event_commit.to_string(),
-                upstream_ref: format!("{remote}/{branch}"),
+                upstream_ref,
             });
         }
     }
     // A deleted upstream is no longer a mere network warning when the remote
     // bases were read successfully and prove this event commit has not landed there.
-    observed_base.then_some(WorkEventSettlementStatus::Blocked(
+    (!comparisons.is_empty()).then_some(WorkEventSettlementStatus::Blocked(
         WorkEventSettlementBlocker::CommitNotPushed,
     ))
 }
@@ -2433,9 +2473,17 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
         _ => {}
     }
 
+    let mut comparison = None;
     let status = if let Some(receipt) = receipt {
-        match save_work_event_settlement_record(worktree, &receipt.session_id, false) {
-            Ok(refreshed) => refreshed.status,
+        match save_work_event_settlement_record_with_comparison(
+            worktree,
+            &receipt.session_id,
+            false,
+        ) {
+            Ok((refreshed, observed)) => {
+                comparison = observed;
+                refreshed.status
+            }
             Err(error) => {
                 tracing::warn!(%error, "work event settlement receipt could not be refreshed");
                 if pending_shard_refresh_failure_must_block(&receipt) {
@@ -2445,7 +2493,7 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             }
         }
     } else {
-        evaluate_work_event_settlement(worktree)
+        evaluate_work_event_settlement_for_path(worktree, None, &mut comparison)
     };
     match status {
         WorkEventSettlementStatus::PendingMutation {
@@ -2465,7 +2513,7 @@ pub fn work_event_settlement_refusal(worktree: &Path) -> Option<String> {
             None
         }
         WorkEventSettlementStatus::Blocked(blocker) => Some(
-            work_event_settlement_blocker_description(&blocker, worktree),
+            work_event_settlement_blocker_description(&blocker, worktree, comparison.as_deref()),
         ),
     }
 }
@@ -2586,50 +2634,30 @@ pub(crate) fn work_event_settlement_pending_description(
 pub(crate) fn work_event_settlement_blocker_description(
     blocker: &WorkEventSettlementBlocker,
     worktree: &Path,
+    comparison: Option<&str>,
 ) -> String {
-    let comparison = matches!(
-        blocker,
-        WorkEventSettlementBlocker::CommitNotPushed | WorkEventSettlementBlocker::RemoteDiverged
-    )
-    .then(|| work_event_settlement_comparison(worktree));
+    let comparison = comparison.filter(|_| {
+        matches!(
+            blocker,
+            WorkEventSettlementBlocker::CommitNotPushed
+                | WorkEventSettlementBlocker::RemoteDiverged
+        )
+    });
     work_event_settlement_blocker_description_with_gate(
         blocker,
         crate::cli::hook::workflow_policy::identity_gate_closed(worktree),
-        comparison.as_deref(),
+        comparison,
     )
 }
 
 /// SPEC #3590 FR-028: name the two refs and SHAs the delivery check compared.
-/// Read from local refs only: the evaluator has just fetched the upstream.
-fn work_event_settlement_comparison(worktree: &Path) -> String {
-    let resolve = |args: &[&str]| {
-        git_stdout(worktree, args)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "unresolved".to_string())
-    };
-    let event_commit = resolve(&[
-        "rev-list",
-        "-1",
-        "HEAD",
-        "--",
-        WORK_EVENT_LOG_RELATIVE,
-        WORK_EVENT_STORE_RELATIVE,
-    ]);
-    match configured_upstream(worktree) {
-        Ok((_, _, upstream_ref)) => {
-            let upstream_tip = resolve(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{upstream_ref}^{{commit}}"),
-            ]);
-            format!("compared event commit `{event_commit}` with `{upstream_ref}` at `{upstream_tip}`")
-        }
-        Err(_) => format!(
-            "compared event commit `{event_commit}` with the remote `develop` / `main` (no configured upstream)"
-        ),
-    }
+/// Use the evaluator's values, including the exact shard and integration base.
+fn work_event_settlement_comparison(
+    event_commit: &str,
+    upstream_ref: &str,
+    upstream_tip: &str,
+) -> String {
+    format!("compared event commit `{event_commit}` with `{upstream_ref}` at `{upstream_tip}`")
 }
 
 /// Issue #4533 (AC-1): the refusal demands a commit, and while the Agent
@@ -2701,20 +2729,27 @@ pub(crate) fn work_event_settlement_blocker_description_with_gate(
         Some(comparison) => format!("{reason} ({comparison})"),
         None => reason,
     };
+    let recovery = if matches!(blocker, WorkEventSettlementBlocker::CommitNotPushed) {
+        "Push the existing event commit through the repository's normal delivery path, then retry once the compared upstream contains it. Later source-only commits do not need to be pushed.".to_string()
+    } else if matches!(blocker, WorkEventSettlementBlocker::RemoteDiverged) {
+        "Integrate the existing event commit with the compared upstream without rewriting it, using the repository's normal delivery path, then retry once that upstream contains the event commit. Later source-only commits do not need to be pushed.".to_string()
+    } else {
+        format!("Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.")
+    };
     format!(
-        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. Commit `{WORK_EVENT_STORE_RELATIVE}/` (or legacy `{WORK_EVENT_LOG_RELATIVE}`) with the related source changes (or use the exact `chore(work):` prefix for a bookkeeping-only commit), push the commit that contains it to its configured upstream, and retry. If `.gwt/` is broadly ignored, force-add every exact canonical shard individually; never force-add the event directory.{}",
+        "Work event settlement is not closed: {reason}. This is a bookkeeping delivery requirement, separate from product verification evidence. {recovery}{}",
         identity_gate_escape_suffix(identity_gate_closed)
     )
 }
 
 /// Issue #4533 (AC-1/AC-3): the ordered escape from the identity gate,
-/// appended to any refusal that demands a commit while the gate is closed.
+/// appended to any refusal that demands a commit or push while the gate is closed.
 /// Empty when the gate is open, so the common refusal stays short.
 fn identity_gate_escape_suffix(identity_gate_closed: bool) -> &'static str {
     if !identity_gate_closed {
         return "";
     }
-    " The Agent Workspace identity gate is closed for this session, so that commit and push are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then commit, push, and retry. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
+    " The Agent Workspace identity gate is closed for this session, so the required Git operations are denied before they run. Lift the gate first, one single-segment gwtd command each: (1) `execution.adopt` with `params.reason` to take over this worktree's Execution Control Record, (2) `workspace.ensure` with `params.purpose` + `params.current_focus`, (3) `workspace.update` with the same two fields. Then retry the required Git operations and settlement. While the gate is closed you may also run `execution.repair`, `execution.reopen`, `execution.release_prepared`, and `memory.add`, so record what trapped you before escaping."
 }
 
 /// Only the successful PR mutation path calls this with the event returned by
@@ -14216,6 +14251,18 @@ fn default_integration_test_builds_a_guarded_binary() {
             "SPEC #3590 FR-027: an unpublished source commit is delivery's business; \
              the event commit is already on the remote base"
         );
+
+        let base_sha = fixture.git_stdout(&["rev-parse", "refs/remotes/origin/develop"]);
+        fixture.append_event("undelivered-after-upstream-deletion");
+        fixture.stage_events();
+        fixture.commit("chore(work): undelivered event after integration");
+        let event_commit = fixture.latest_event_commit();
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("event is not on develop");
+        assert!(refusal.contains(&event_commit), "{refusal}");
+        assert!(refusal.contains("origin/develop"), "{refusal}");
+        assert!(refusal.contains(&base_sha), "{refusal}");
+        assert!(!refusal.contains("refs/remotes/origin/main"), "{refusal}");
     }
 
     #[test]
@@ -14580,11 +14627,48 @@ fn default_integration_test_builds_a_guarded_binary() {
         fixture.commit("chore(work): unpushed Work event");
         let event_commit = fixture.latest_event_commit();
 
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after unpushed Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
+
         let refusal = work_event_settlement_refusal(&fixture.repo)
             .expect("an unpushed event commit is refused");
         assert!(refusal.contains(&event_commit), "{refusal}");
         assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
         assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Push the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let gated = work_event_settlement_blocker_description_with_gate(
+            &WorkEventSettlementBlocker::CommitNotPushed,
+            true,
+            None,
+        );
+        assert!(gated.contains("Lift the gate first"), "{gated}");
+        assert!(!gated.contains("commit and push"), "{gated}");
+        assert!(!gated.contains("Then commit"), "{gated}");
+
+        fixture.git_ok(&[
+            "push",
+            "-q",
+            "origin",
+            &format!("{event_commit}:refs/heads/main"),
+        ]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(
+            fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]),
+            event_commit
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
     }
 
     #[test]
@@ -14680,6 +14764,12 @@ fn default_integration_test_builds_a_guarded_binary() {
             .expect("write local divergent source");
         fixture.git_ok(&["add", "--", WORK_EVENTS_PATH, "src.txt"]);
         fixture.commit("fix: local source and Work event");
+        let event_commit = fixture.latest_event_commit();
+        let event_bytes = fs::read(fixture.event_path()).unwrap();
+        fs::write(fixture.repo.join("src.txt"), "later local source\n").unwrap();
+        fixture.git_ok(&["add", "--", "src.txt"]);
+        fixture.commit("fix: source after divergent Work event");
+        let source_commit = fixture.git_stdout(&["rev-parse", "HEAD"]);
         fixture.advance_remote_from_peer();
         fixture.git_ok(&["fetch", "-q", "origin", "main"]);
 
@@ -14689,6 +14779,60 @@ fn default_integration_test_builds_a_guarded_binary() {
             WorkEventSettlementStatus::Blocked(WorkEventSettlementBlocker::RemoteDiverged)
         );
         assert_eq!(status.severity(), WorkEventSettlementSeverity::Blocked);
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("diverged event is refused");
+        assert!(
+            refusal.contains(&fixture.latest_event_commit()),
+            "{refusal}"
+        );
+        assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
+        let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
+        assert!(refusal.contains(&upstream_sha), "{refusal}");
+        assert!(
+            refusal.contains("Integrate the existing event commit"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("Commit `"), "{refusal}");
+        assert!(!refusal.contains("force-add"), "{refusal}");
+        assert!(!refusal.contains("related source changes"), "{refusal}");
+
+        let peer = fixture._root.path().join("peer");
+        let peer = peer.to_str().unwrap();
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "fetch",
+            "-q",
+            fixture.repo.to_str().unwrap(),
+            &event_commit,
+        ]);
+        fixture.git_ok(&[
+            "-C",
+            peer,
+            "merge",
+            "-qm",
+            "fix: integrate existing Work event",
+            "FETCH_HEAD",
+        ]);
+        fixture.git_ok(&["-C", peer, "push", "-q", "origin", "main"]);
+        assert_eq!(
+            evaluate_work_event_settlement(&fixture.repo),
+            fixture.settled_status()
+        );
+        assert_eq!(fixture.git_stdout(&["rev-parse", "HEAD"]), source_commit);
+        assert_eq!(
+            fixture
+                .git_output(&[
+                    "merge-base",
+                    "--is-ancestor",
+                    &source_commit,
+                    &fixture.upstream_ref(),
+                ])
+                .status
+                .code(),
+            Some(1)
+        );
+        assert_eq!(fs::read(fixture.event_path()).unwrap(), event_bytes);
     }
 
     #[test]
@@ -15184,6 +15328,30 @@ fn default_integration_test_builds_a_guarded_binary() {
 
         fixture.stage_event_shards();
         fixture.commit("chore(work): settle prepared immutable Work event");
+        let event_commit = fixture.latest_event_commit();
+        let upstream_sha = fixture.git_stdout(&["rev-parse", &fixture.upstream_ref()]);
+        fixture.write_event_shard("later-unrelated-event", b"{}\n");
+        fixture.stage_event_shards();
+        fixture.commit("chore(work): later unrelated Work event");
+        let later_commit = fixture.latest_event_commit();
+        let refusal =
+            work_event_settlement_refusal(&fixture.repo).expect("exact event is unpushed");
+        assert!(refusal.contains(&event_commit), "{refusal}");
+        assert!(!refusal.contains(&later_commit), "{refusal}");
+        assert!(refusal.contains(&fixture.upstream_ref()), "{refusal}");
+        assert!(refusal.contains(&upstream_sha), "{refusal}");
+        let stop = crate::cli::hook::work_event_settlement_stop_check::handle_with_input(
+            &fixture.repo,
+            "{}",
+            Some("session-pending-shard"),
+        );
+        let crate::cli::hook::HookOutput::StopBlock { reason } = stop else {
+            panic!("an unpushed exact event must block Stop: {stop:?}");
+        };
+        assert!(reason.contains(&event_commit), "{reason}");
+        assert!(!reason.contains(&later_commit), "{reason}");
+        assert!(reason.contains(&fixture.upstream_ref()), "{reason}");
+        assert!(reason.contains(&upstream_sha), "{reason}");
         fixture.push();
         let final_refresh =
             save_work_event_settlement_record(&fixture.repo, "session-pending-shard", false)

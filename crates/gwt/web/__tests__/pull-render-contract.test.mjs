@@ -10,6 +10,55 @@ import { scanModule, assertBaseline, checkRepository } from "../../../../scripts
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
+test("Workspace snapshots commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/app.js';
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding =>
+    finding.root === 'receive' && finding.context === '/workspace_state');
+  assert.deepEqual(findings(app), []);
+  for (const bypass of ['document.body.textContent = event.workspace.app_version;',
+    'frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);']) {
+    const mutated = app.replace('case "workspace_state": {', `case "workspace_state": { ${bypass}`);
+    assert.notEqual(mutated, app);
+    assert.ok(findings(mutated).length > 0);
+  }
+});
+
+test("Hub open results commit shared state and reject bypass rendering", () => {
+  const file = 'crates/gwt/web/hub-app.js';
+  const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding => finding.root === 'receive');
+  const clean = findings(hub);
+  assert.deepEqual(clean.filter(finding => /receive>(showNotice|showError)(>|$)/.test(finding.path)), []);
+  const existing = new Set(keys(clean));
+  for (const [kind, bypass] of [
+    ['project_opened', 'notice.hidden = false;'],
+    ['project_opened', 'showNotice(event);'],
+    ['project_open_error', 'error.textContent = event.message;'],
+    ['project_open_error', 'showError(event.message);'],
+  ]) {
+    const marker = `if (event.kind === "${kind}") {`;
+    const mutated = hub.replace(marker, `${marker} ${bypass}`);
+    assert.notEqual(mutated, hub);
+    assert.ok(findings(mutated).some(finding => !existing.has(finding.key)));
+  }
+});
+
+test("Hub catalog receiver commits shared state and rejects bypass rendering", () => {
+  const file = 'crates/gwt/web/hub-app.js';
+  const hub = readFileSync(new URL('../hub-app.js', import.meta.url), 'utf8');
+  const findings = source => scanModule(source, file).filter(finding => finding.root === 'receive');
+  const clean = findings(hub);
+  assert.deepEqual(clean.filter(finding => finding.path.includes('>receiveCatalog')), []);
+  const existing = new Set(keys(clean));
+  for (const bypass of ['version.textContent = event.hub.app_version;', 'receiveCatalog(event.hub);']) {
+    const mutated = hub.replace('if (event.kind === "hub_state") {',
+      `if (event.kind === "hub_state") { ${bypass}`);
+    assert.notEqual(mutated, hub);
+    assert.ok(findings(mutated).some(finding => !existing.has(finding.key)));
+  }
+});
+
 test("Project hub catalog receiver commits shared state and rejects bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');

@@ -42,6 +42,23 @@ pub(super) fn spawn(
                     )
                 })?;
         monitor.set_source_repository(Some((&owner, &repo)));
+        monitor.rebase_daemon_driver_prefs(&prefs);
+        monitor
+            .synchronize_agent_issue_schedule(&scope.project_root)
+            .map_err(|error| {
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::CandidateLoad,
+                    error.to_string(),
+                )
+            })?;
+        // Roster cleanup may have advanced its canonical revision.
+        let prefs = crate::issue_monitor::load_issue_monitor_prefs_for_running_version(&prefs_path)
+            .map_err(|error| {
+                IssueMonitorScanFailure::new(
+                    IssueMonitorScanStage::CandidateLoad,
+                    error.to_string(),
+                )
+            })?;
         prepare_with(
             monitor,
             &prefs,

@@ -50,6 +50,34 @@ test.describe("Works and Agents approved baseline", () => {
     expect((await sent(page)).filter(message => ["close_window", "stop_agent", "stop_window", "restart_window"].includes(message.kind))).toEqual([]);
   });
 
+  test("workspace snapshots refresh Works and Agents while preserving native controls", async ({ page }, info) => {
+    const terminal = works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm');
+    await terminal.evaluate(node => { (window as any).__workspaceTerminal = node; });
+    const rail = page.locator('.op-rail__surface[data-surface="works"]');
+    await rail.focus();
+    for (const title of ['First workspace snapshot', '<img src=x> latest workspace']) {
+      await page.evaluate(title => (window as any).__worksAgentsFixture.workspaceTitle(title), title);
+      await expect(workRow(page, "agent-one").locator(".work-purpose")).toHaveText(title);
+      await expect(rail).toBeFocused();
+      expect(await terminal.evaluate(node => node === (window as any).__workspaceTerminal)).toBe(true);
+    }
+    await page.screenshot({ path: info.outputPath("workspace-state-works.png") });
+    await openRail(page, "agents");
+    const current = roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose');
+    await expect(current).toHaveText('<img src=x> latest workspace');
+    await expect(current.locator("img")).toHaveCount(0);
+    for (const title of ['Shared workspace title', 'Shared workspace title']) {
+      await page.evaluate(title => (window as any).__worksAgentsFixture.workspaceTitle(title), title);
+      await expect(current).toHaveText(title);
+    }
+    await page.screenshot({ path: info.outputPath("workspace-state-agents.png") });
+    await current.click();
+    await expect(full(page)).toBeVisible();
+    expect(await full(page).locator(".xterm").evaluate(node => node === (window as any).__workspaceTerminal)).toBe(true);
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await expect(workRow(page, "agent-one").locator(".work-purpose")).toHaveText("Shared workspace title");
+  });
+
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
     await expect(works(page).locator(".work-row")).toHaveCount(3);
     expect(await works(page).locator(".work-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.windowId))).toEqual(["pm-window", "agent-one", "agent-two"]);
@@ -112,7 +140,7 @@ test.describe("Works and Agents approved baseline", () => {
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
-    await roster(page).locator(".roster-now button").press("Enter");
+    await roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose').press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
 
@@ -149,6 +177,8 @@ test.describe("Works and Agents approved baseline", () => {
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').focus(); await page.keyboard.press("Enter");
     await expect(roster(page).locator(".roster-detail h3")).toHaveText("Cedar");
     await expect(roster(page).locator('.roster-row[data-member-id="m-idle"]')).toBeFocused();
+    await expect(roster(page).locator('.roster-row[data-member-id="m-idle"] .roster-purpose')).not.toHaveAttribute("role", "button");
+    expect(await roster(page).locator('.roster-row[data-member-id="m-idle"] .roster-purpose').evaluate(node => node.tagName)).toBe("SPAN");
     await expect(roster(page).locator(".roster-detail .roster-open, .roster-detail .roster-now, .roster-row[data-member-id='m-idle'] .roster-current")).toHaveCount(0);
     await expect(roster(page).locator(".roster-detail .roster-stat b")).toHaveText(["—", "—", "—", "—"]);
     await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
@@ -193,6 +223,77 @@ test.describe("Works and Agents approved baseline", () => {
     await expectNoHorizontalOverflow(page, ".works-surface:not([hidden]):not(.works-surface--preview)");
     await page.screenshot({ path: info.outputPath("works-approved-400.png") });
   });
+
+  test("ordered member plans keep current work through pending readback, stale rejection and reassignment", async ({ page }, info) => {
+    await openRail(page, "agents");
+    const plans = roster(page).locator(".roster-plans");
+    const plan = (number: number) => plans.locator(`.roster-plan[data-issue-number="${number}"]`);
+    const currentIdentity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
+    await expect(plans).toBeVisible();
+    expect(await plans.evaluate(node => node.previousElementSibling?.classList.contains("roster-current-work"))).toBe(true);
+    await expect(roster(page).locator(".roster-row")).toHaveCount(3);
+    await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
+    await expect(plans).toContainText("No queued issue");
+    await expect(plans.locator(".roster-plan")).toHaveCount(0);
+    await roster(page).locator('.roster-row[data-member-id="m-one"]').click();
+    expect(await plans.locator(".roster-plan").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.issueNumber))).toEqual(["5002", "5003"]);
+    await expect(plan(5002).locator(".roster-plan-reason")).toHaveText("Same SPEC continuation");
+    await expect(plan(5003).locator(".roster-plan-reason")).toHaveText("Queue order");
+    const target = plan(5002).getByRole("combobox", { name: "Assign issue #5002 to member", exact: true });
+    expect(await target.evaluate(node => node.tagName)).toBe("SELECT");
+    expect(await target.locator("option").evaluateAll(nodes => nodes.map(node => (node as HTMLOptionElement).value))).not.toContain("m-one");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.deferSchedule());
+    await target.selectOption("m-idle");
+    await target.focus();
+    await target.evaluate(node => { (window as any).__t20aSelectedTarget = node; });
+    const previousCatalogVersion = await roster(page).getAttribute("data-catalog-version");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-two", "running"));
+    await page.waitForFunction(previous => document.querySelector(".agents-surface:not(.agents-surface--preview)")?.getAttribute("data-catalog-version") !== previous, previousCatalogVersion);
+    await expect(target).toHaveValue("m-idle");
+    await expect(target).toBeFocused();
+    expect(await target.evaluate(node => node === (window as any).__t20aSelectedTarget)).toBe(true);
+    const updatedCatalogVersion = await roster(page).getAttribute("data-catalog-version");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-two", "waiting"));
+    await page.waitForFunction(previous => document.querySelector(".agents-surface:not(.agents-surface--preview)")?.getAttribute("data-catalog-version") !== previous, updatedCatalogVersion);
+    await plan(5002).getByRole("button", { name: "Reassign issue #5002", exact: true }).click();
+    await expect.poll(async () => (await sent(page)).filter(message => message.kind === "agent_schedule" && message.action.kind === "reassign").length).toBe(1);
+    const first = (await sent(page)).filter(message => message.kind === "agent_schedule" && message.action.kind === "reassign")[0];
+    expect(first.action).toEqual({ kind: "reassign", issue_number: 5002, source_member_id: "m-one", target_member_id: "m-idle", expected_roster_revision: 3, expected_queue_revision: "queue-v1:fixture-1", expected_schedule_revision: 7 });
+    await expect(plan(5002)).toBeVisible();
+    await expect(plan(5002).locator(".roster-plan-reason")).toHaveText("Same SPEC continuation");
+    await expect(plans.getByRole("button", { name: "Refresh plans", exact: true })).toBeEnabled();
+    await page.evaluate(() => { (window as any).__worksAgentsFixture.changeQueueRevision(); (window as any).__worksAgentsFixture.releaseSchedule(); });
+    await expect(plans).toContainText("Queue changed; refresh plans before retrying");
+    await expect(plan(5002)).toBeVisible();
+    await expect(plan(5002).getByRole("button", { name: "Reassign issue #5002", exact: true })).toBeDisabled();
+    await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
+    await expect(plans).not.toContainText("Queue changed; refresh plans before retrying");
+
+    await plan(5002).getByRole("combobox", { name: "Assign issue #5002 to member", exact: true }).selectOption("m-idle");
+    await plan(5002).getByRole("button", { name: "Reassign issue #5002", exact: true }).click();
+    await expect.poll(async () => (await sent(page)).filter(message => message.kind === "agent_schedule" && message.action.kind === "reassign").length).toBe(2);
+    await expect(plan(5002)).toBeVisible();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseSchedule());
+    await expect(plan(5002)).toHaveCount(0);
+    await expect(plan(5003)).toBeVisible();
+    await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
+    await expect(plan(5002).locator(".roster-plan-reason")).toHaveText("Assigned by you");
+    await expect(roster(page).locator(".roster-now, .roster-detail .roster-open")).toHaveCount(0);
+    await page.screenshot({ path: info.outputPath("agents-plans-reassigned.png") });
+    await roster(page).locator('.roster-row[data-member-id="m-two"]').click();
+    await expect(plan(5004).locator(".roster-plan-reason")).toHaveText("Queue order");
+    await expect(roster(page).locator(".roster-now")).toContainText("Second issue");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity())).toEqual(currentIdentity);
+    const mutations = (await sent(page)).filter(message => message.kind === "agent_schedule" && message.action.kind === "reassign");
+    expect(mutations[1].action).toEqual({ ...first.action, expected_queue_revision: "queue-v1:fixture-2" });
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedScheduleRevisions)).toHaveLength(1);
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await plans.scrollIntoViewIfNeeded();
+    await expect(plan(5004).getByRole("combobox", { name: "Assign issue #5004 to member", exact: true })).toBeInViewport();
+    await expect(plan(5004).getByRole("button", { name: "Reassign issue #5004", exact: true })).toBeInViewport();
+    await page.screenshot({ path: info.outputPath("agents-plans-400.png") });
+  });
 });
 
 async function installWorksAgentsBackend(page: Page) {
@@ -227,9 +328,32 @@ async function installWorksAgentsBackend(page: Page) {
       { window_id: "pm-window", session_id: "s-pm", runtime_incarnation: 3, issue_number: null, is_pm: true },
     ];
     const sentMessages: any[] = [], rejectedRevisions: any[] = [];
+    const rejectedScheduleRevisions: any[] = [];
+    let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
+    let pendingSchedule: any = null;
+    const planned = [
+      { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
+      { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
+      { agent_member_id: "m-idle", issues: [] },
+    ];
     let socket: FixtureWebSocket;
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
     const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const scheduleSnapshot = () => ({ kind: "agent_schedule", schedule: { project_key: projectKey, roster_revision: revision, queue_revision: queueRevision, schedule_revision: scheduleRevision, members: members.filter(member => member.enabled).map(member => ({ agent_member_id: member.agent_member_id, issues: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues || [], empty_reason: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues.length ? null : "No queued issue" })) } });
+    const applySchedule = (action: any) => {
+      if (action.expected_roster_revision !== revision || action.expected_queue_revision !== queueRevision || action.expected_schedule_revision !== scheduleRevision) {
+        rejectedScheduleRevisions.push(action);
+        socket.emit({ kind: "agent_schedule_error", project_key: projectKey, message: "Queue changed; refresh plans before retrying" });
+        return;
+      }
+      const source = planned.find(plan => plan.agent_member_id === action.source_member_id);
+      const target = planned.find(plan => plan.agent_member_id === action.target_member_id);
+      const issue = source?.issues.find(issue => issue.issue_number === action.issue_number);
+      if (!source || !target || !issue) throw new Error("fixture received an invalid schedule move");
+      source.issues = source.issues.filter(issue => issue.issue_number !== action.issue_number);
+      target.issues.push({ ...issue, reason: "assigned_by_you" }); scheduleRevision++;
+      socket.emit(scheduleSnapshot());
+    };
     const activity = () => ({ kind: "active_work_projection", projection: { id: "works-agents-fixture", active_works: [], local_agent_activity: { project_key: projectKey, host_id: "fixture-host", observed_at: new Date(1792886400000 + activityRevision++).toISOString(), agents } } });
     class FixtureWebSocket extends EventTarget {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
@@ -246,13 +370,23 @@ async function installWorksAgentsBackend(page: Page) {
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           this.emit(rosterSnapshot());
         }
+        if (message.kind === "agent_schedule") {
+          if (message.action.kind === "read") this.emit(scheduleSnapshot());
+          else if (deferredSchedule) pendingSchedule = message.action;
+          else applySchedule(message.action);
+        }
       }
       emit(payload: unknown) { const serialized = JSON.stringify(payload); setTimeout(() => this.dispatchEvent(new MessageEvent("message", { data: serialized })), 0); }
       close() { this.readyState = FixtureWebSocket.CLOSED; this.dispatchEvent(new CloseEvent("close")); }
     }
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
-      sent: sentMessages, members, rejectedRevisions,
+      sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
+      currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
+      deferSchedule() { deferredSchedule = true; },
+      changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
+      releaseSchedule() { if (!pendingSchedule) throw new Error("no schedule mutation is pending"); const action = pendingSchedule; pendingSchedule = null; applySchedule(action); },
       output(id: string, text: string) { socket.emit({ kind: "terminal_output", id, data_base64: btoa(text) }); },
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },

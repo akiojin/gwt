@@ -2,6 +2,43 @@ import { createUiStateStore } from "./ui-state-store.js";
 
 const unknownActivity = () => ({ snapshot: null, agents: [], byIssue: {}, count: null, issueCount: 0, pmCount: 0 });
 
+export function createAgentScheduleModel(projectKey) {
+  const empty = () => ({ snapshot: null, error: null, pending: false });
+  const model = createUiStateStore(empty());
+  let pendingMutationRevision = null;
+  function applyAgentScheduleSnapshot(snapshot) {
+    if (!snapshot || snapshot.project_key !== projectKey || !Array.isArray(snapshot.members) ||
+        !Number.isSafeInteger(snapshot.roster_revision) || !Number.isSafeInteger(snapshot.schedule_revision) ||
+        typeof snapshot.queue_revision !== "string") return;
+    model.update(state => {
+      if (state.snapshot && (snapshot.roster_revision < state.snapshot.roster_revision ||
+          snapshot.schedule_revision < state.snapshot.schedule_revision)) return state;
+      if (pendingMutationRevision !== null && snapshot.schedule_revision <= pendingMutationRevision) return state;
+      pendingMutationRevision = null;
+      if (state.snapshot && JSON.stringify(snapshot) === JSON.stringify(state.snapshot)) snapshot = state.snapshot;
+      return { snapshot, error: null, pending: false };
+    });
+  }
+  function applyAgentScheduleError(event) {
+    if (event?.project_key === projectKey) {
+      pendingMutationRevision = null;
+      model.update(state => ({ ...state, error: event.message, pending: false }));
+    }
+  }
+  function beginAgentScheduleRequest(action) {
+    const state = model.read(), snapshot = state.snapshot;
+    if (action.kind !== "read" && (state.pending || state.error || !snapshot ||
+        action.expected_roster_revision !== snapshot.roster_revision ||
+        action.expected_queue_revision !== snapshot.queue_revision ||
+        action.expected_schedule_revision !== snapshot.schedule_revision)) return false;
+    pendingMutationRevision = action.kind === "read" ? null : snapshot.schedule_revision;
+    model.update(current => ({ ...current, pending: true }));
+    return true;
+  }
+  return { model, applyAgentScheduleSnapshot, applyAgentScheduleError, beginAgentScheduleRequest,
+    clearAgentSchedule: () => { pendingMutationRevision = null; model.update(empty); } };
+}
+
 export function createAgentRosterModel(projectKey) {
   let latestSnapshot = null, memberUsage = {};
   const model = createUiStateStore({ members: [], revision: null, capacity: null,

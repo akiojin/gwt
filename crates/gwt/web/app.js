@@ -1,6 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -428,6 +428,8 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
+        beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const worksTelemetryModel = createUiStateStore({ sessions: [] });
       const sessionUsageModel = createUiStateStore([]);
       let routeProjectMissing = false;
@@ -1162,7 +1164,7 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
       });
 
       function setConnectionState(connected) {
-        if (!connected) clearAgentActivity();
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -5126,6 +5128,19 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
         updatePmLauncher(activeWorkspace());
       });
 
+      const workspaceStateModel = createUiStateStore(null);
+      workspaceStateModel.subscribe(state => state, snapshot => {
+        if (!snapshot) return;
+        projectError = "";
+        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);
+        projectPageMetadata.setProjectName(activeProjectTab()?.title);
+        // Keep launcher, pending navigation and startup ACKs in render order.
+        updatePmLauncher(activeWorkspace());
+        resolvePendingWindowFrames();
+        sendStartupAutoResumeReady();
+        startupMetrics.onWorkspaceRendered();
+      });
+
       function receive(event) {
         if (routeProjectMissing) return;
         if (closeProjectController.receive(event)) return;
@@ -5155,17 +5170,7 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
             applyWorkspaceStateNoticeReceiveEvent(event.notice);
             break;
           case "workspace_state": {
-            projectError = "";
-            frontendUnits.projectWorkspaceShell.renderAppState(event.workspace);
-            projectPageMetadata.setProjectName(activeProjectTab()?.title);
-            // SPEC-3431 FR-018/FR-021: keep the PM launcher's state and the
-            // floating CTA in step with every surface render.
-            updatePmLauncher(activeWorkspace());
-            // FR-019: `windowMap` is current now, so a frame requested for a
-            // window that had not been mounted yet can finally run.
-            resolvePendingWindowFrames();
-            sendStartupAutoResumeReady();
-            startupMetrics.onWorkspaceRendered();
+            workspaceStateModel.update(() => ({ workspace: event.workspace }));
             break;
           }
           case "workspace_projection_prune_result": {
@@ -5202,6 +5207,12 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
             break;
           case "agent_roster":
             applyAgentRosterSnapshot(event.roster);
+            break;
+          case "agent_schedule":
+            applyAgentScheduleSnapshot(event.schedule);
+            break;
+          case "agent_schedule_error":
+            applyAgentScheduleError(event);
             break;
           case "provider_usage":
             sessionUsageModel.update(() => event.sessions || []);
@@ -5743,6 +5754,9 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      rosterModel.subscribe(state => state.revision, () => {
+        if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
+      });
       agentActivityModel.subscribe(state => state.agents.map(agent => `${agent.session_id}:${agent.runtime_incarnation}`).join("|"), () => {
         updateWorksTelemetry(); requestAgentRoster();
       });
@@ -5750,13 +5764,21 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
       function requestAgentRoster(action = { kind: "read" }) {
         send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
       }
+      function requestAgentSchedule(action = { kind: "read" }) {
+        if (action.kind !== "read" && action.expected_roster_revision !== rosterModel.read().revision) {
+          applyAgentScheduleError({ project_key: routeProjectKey, message: "Members changed. Refresh plans before reassigning." });
+          return;
+        }
+        if (beginAgentScheduleRequest(action)) send({ kind: "agent_schedule", action });
+      }
       function setRosterHost(host, previewHost = null) {
         const changed = rosterHost !== host;
         rosterHost = host;
         agentsSurface.element.hidden = !host;
-        (host || document.querySelector(".surface-area")).appendChild(agentsSurface.element);
+        const targetHost = host || document.querySelector(".surface-area");
+        if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
-        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); }
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5765,9 +5787,11 @@ import { createAgentActivityModel, createAgentRosterModel, selectWorksTelemetry 
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, activityModel: agentActivityModel, windowCatalogModel,
+      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, activityModel: agentActivityModel, windowCatalogModel,
         onAddMember: () => requestAgentRoster({ kind: "add" }),
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onReassign: requestAgentSchedule,
+        onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); },
         onOpenWork: openAssignedWork,
       });
       agentsSurface.element.hidden = true;

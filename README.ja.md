@@ -975,10 +975,15 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 統合した Issue 一覧はキュー待ちだけの作業を除く下限集合で、全工程の WIP ではありません。
 取得不能な観測は不明のまま扱い、verification と全工程 WIP の不足も示します。
 この診断の読み取りで起動判断や WIP 上限の強制は行いません。
+`policy.monitor.scan_aborted` は供給されたスキャン結果を保持し、Monitor 不在なら null です。
+中断したスキャンは古い観測を保持したまま時刻を進める場合があります。
+その場合は `successful_monitor_scan` の不足を示し、保存 WIP・queue age の比較を
+`unknown` にします。観測された事実と時刻の計算結果は保持します。
 保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
 `observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
 示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
-必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
+必要とします。スキャン時刻の小数秒が9桁を超える場合は `monitor_scan_time` の不足を示し、
+`unknown` とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
 返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
 超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
 `policy.capacity.terminal_queue` は、urgent 順序付けとラベル除外後のホスト別 queue を、
@@ -991,6 +996,14 @@ RFC3339 の時差を反映し、秒未満を切り捨てます。時刻の欠測
 全体の queue が空である証明ではありません。旧 payload の queue リスト省略も [] となるため、
 ホスト内の空 queue も証明しません。所属滞留時間は実行待ち時間、SLA 違反、starvation、
 優先順位、preemption や起動許可の判定には使いません。
+各行の `age_limits` は、全保存 policy の `starvation_after_seconds` と所属滞留秒を
+保存順に照合し、ID・version・設定閾値を保持します。`observed_age_threshold_reached` は
+滞留秒が閾値以上（同値・0を含む）であることを示し、一意かつ空でない policy ID、設定済み閾値、
+有効な滞留秒と daemon の完全な観測範囲を必要とします。それ以外は `unknown` とし、欠測・
+不正・曖昧・degraded な入力を不足情報名で示します。閾値内 PASS は返さず、policy がなければ
+`[]` です。方針の選択や合成は行いません。これは記録されたスキャン時点のホスト内所属時間の
+比較であり、全工程の starvation・SLA や、優先順位変更・起動・preemption の許可ではありません。
+取得元とスキャンの古さも併せて確認してください。
 idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
 pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
 現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。
@@ -1598,6 +1611,7 @@ project 固有の規約を明示的に渡すには、
 - **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近3行の出力を載せます。行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
 - **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
+- **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
 - **Add member** はプロジェクトの希望同時実行数を1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
 - **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
 

@@ -243,6 +243,10 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             terminal,
         } => run_monitor_queue_list(env, project_root.as_deref(), terminal.as_deref(), out)?,
+        IssueCommand::MonitorSchedule {
+            project_root,
+            action,
+        } => run_monitor_schedule(env, project_root.as_deref(), action, out)?,
         IssueCommand::MonitorQueuePush {
             project_root,
             issue_numbers,
@@ -1629,6 +1633,24 @@ fn run_monitor_priority_set<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
     out.push_str(&monitor_priority_reply(&project_root, &prefs, issue_numbers).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_schedule<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    action: crate::issue_monitor::AgentScheduleAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let schedule = crate::issue_monitor::mutate_project_agent_schedule(
+        &root,
+        &gwt_core::paths::gwt_sessions_dir(),
+        action,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    out.push_str(&serde_json::to_string(&schedule).map_err(super::serde_as_api_error)?);
     out.push('\n');
     Ok(0)
 }
@@ -9842,6 +9864,7 @@ mod tests {
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 enabled: true,
+                max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 priority_order: vec![7, 42, 99],
                 ..Default::default()
             },
@@ -9873,6 +9896,32 @@ mod tests {
         );
         assert_eq!(prefs.priority_order, vec![42, 7, 99]);
         assert!(prefs.enabled);
+
+        let mut resumed =
+            crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs);
+        resumed.set_source_repository(Some(("example", "repo")));
+        resumed.set_gui_connected(true);
+        let candidates = [7, 42].map(|number| crate::IssueMonitorIssue {
+            author_login: None,
+            number,
+            title: format!("Issue {number}"),
+            labels: Vec::new(),
+            state: crate::IssueMonitorIssueState::Open,
+            body: None,
+            url: None,
+            readiness: crate::IssueMonitorReadiness::NotApplicable,
+            updated_at: None,
+        });
+        let now = "2026-09-29T00:01:00Z";
+        // Scan the persisted operation result without a fixture auto-enqueue.
+        crate::scan_issue_monitor_candidates(&mut resumed, &candidates, now);
+        assert_eq!(
+            resumed
+                .next_launch_request(now)
+                .expect("launch_now target")
+                .issue_number,
+            42
+        );
     }
 
     /// Issue #5062 AC-4: an update drain refuses every new launch, so

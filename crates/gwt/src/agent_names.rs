@@ -422,45 +422,76 @@ fn dead_project_assignments(
 }
 
 /// History supplies a preference, never evidence that a member is idle.
-fn previous_spec_member(root: &Path, sessions_dir: &Path, spec_number: u64) -> Option<String> {
-    let sessions = gwt_agent::session_ledger::load_sessions_shared(sessions_dir).ok()?;
+pub(crate) fn previous_spec_members(
+    root: &Path,
+    sessions_dir: &Path,
+    requested: &std::collections::BTreeSet<u64>,
+) -> std::collections::BTreeMap<u64, String> {
+    let mut newest = std::collections::BTreeMap::new();
+    if requested.is_empty() {
+        return newest;
+    }
+    let Ok(sessions) = gwt_agent::session_ledger::load_sessions_shared(sessions_dir) else {
+        return newest;
+    };
     let normalized = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let project_root = normalized(root);
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(root);
     let mut specs = std::collections::HashMap::new();
-    sessions
-        .into_iter()
-        .filter_map(|session| {
-            let member = session
-                .agent_member_id
+    let mut history = std::collections::BTreeMap::new();
+    for session in sessions {
+        let Some(member) = session.agent_member_id.as_ref().filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let Some(issue) = session.linked_issue_number else {
+            continue;
+        };
+        if session.review_dispatch
+            || crate::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
+            || (!repo_hash
                 .as_ref()
-                .filter(|id| !id.is_empty())?;
-            let issue = session.linked_issue_number?;
-            if session.review_dispatch
-                || crate::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
-                || (!repo_hash
-                    .as_ref()
-                    .is_some_and(|hash| session.repo_hash.as_deref() == Some(hash.as_str()))
-                    && normalized(
-                        session
-                            .project_state_root
-                            .as_deref()
-                            .unwrap_or(&session.worktree_path),
-                    ) != project_root)
+                .is_some_and(|hash| session.repo_hash.as_deref() == Some(hash.as_str()))
+                && normalized(
+                    session
+                        .project_state_root
+                        .as_deref()
+                        .unwrap_or(&session.worktree_path),
+                ) != project_root)
+        {
+            continue;
+        }
+        let owner = if requested.contains(&issue) {
+            Some(issue)
+        } else {
+            *specs.entry(issue).or_insert_with(|| {
+                crate::issue_monitor_worker::cached_agent_member_spec_owner(root, issue)
+            })
+        };
+        if let Some(owner) = owner.filter(|owner| requested.contains(owner)) {
+            let candidate = (session.created_at, session.id.clone(), member.clone());
+            if history
+                .get(&owner)
+                .is_none_or(|existing| &candidate > existing)
             {
-                return None;
+                history.insert(owner, candidate);
             }
-            let same_spec = issue == spec_number
-                || *specs.entry(issue).or_insert_with(|| {
-                    crate::issue_monitor_worker::cached_agent_member_spec_owner(root, issue)
-                }) == Some(spec_number);
-            if !same_spec {
-                return None;
-            }
-            Some((session.created_at, session.id.clone(), member.clone()))
-        })
-        .max()
-        .map(|(_, _, member)| member)
+        }
+    }
+    newest.extend(
+        history
+            .into_iter()
+            .map(|(spec, (_, _, member))| (spec, member)),
+    );
+    newest
+}
+
+fn previous_spec_member(root: &Path, sessions_dir: &Path, spec_number: u64) -> Option<String> {
+    previous_spec_members(
+        root,
+        sessions_dir,
+        &std::collections::BTreeSet::from([spec_number]),
+    )
+    .remove(&spec_number)
 }
 
 /// Reserve one exact assignment; retries reuse the delivery's existing member.
@@ -544,10 +575,21 @@ pub fn reserve_project_member(
                 "Agent roster capacity is occupied, including resting members",
             ));
         }
+        let host = crate::process::current_hostname();
+        let scheduled = if inherited_member_id.is_none() {
+            if issue_number.is_some_and(|number| prefs.agent_issue_schedule.reservations.iter().any(|entry| entry.issue_number == number && entry.host_id != host)) {
+                return Err(std::io::Error::other("Issue is scheduled on another host; read issue.monitor.schedule.read on its queue owner"));
+            }
+            delivery_id.and_then(|id| prefs.pending_launch_deliveries.iter().find(|entry| entry.delivery_id == id && Some(entry.issue_number) == issue_number).and_then(|entry| entry.agent_member_id.clone()))
+                .or_else(|| prefs.agent_issue_schedule.reservations.iter().find(|entry| Some(entry.issue_number) == issue_number && entry.host_id == host && prefs.terminal_queues.get(&host).is_some_and(|queue| queue.entries.iter().any(|queued| queued.number == entry.issue_number))).map(|entry| entry.agent_member_id.clone()))
+        } else { None };
+        let pinned_elsewhere = |member_id: &str| prefs.pending_launch_deliveries.iter().any(|entry| entry.agent_member_id.as_deref() == Some(member_id) && Some(entry.issue_number) != issue_number);
         let index = if let Some(member_id) = inherited_member_id {
             roster.members.iter().position(|member| {
                 member.agent_member_id == member_id && member.assignment.is_none()
             })
+        } else if let Some(member_id) = scheduled.as_deref() {
+            Some(roster.members.iter().position(|member| member.agent_member_id == member_id && member.enabled && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id)).ok_or_else(|| std::io::Error::other(format!("Scheduled Agent {member_id} is not enabled and idle on this host; read issue.monitor.schedule.read and wait or reassign")))?)
         } else {
             roster
                 .members
@@ -555,12 +597,14 @@ pub fn reserve_project_member(
                 .position(|member| {
                     member.enabled
                         && member.assignment.is_none()
+                        && !pinned_elsewhere(&member.agent_member_id)
                         && historical_member.as_deref() == Some(member.agent_member_id.as_str())
                 })
                 .or_else(|| {
                     roster.members.iter().position(|member| {
                         member.enabled
                             && member.assignment.is_none()
+                            && !pinned_elsewhere(&member.agent_member_id)
                             && spec_number.is_some()
                             && member.last_spec_number == spec_number
                     })
@@ -569,7 +613,7 @@ pub fn reserve_project_member(
                     roster
                         .members
                         .iter()
-                        .position(|member| member.enabled && member.assignment.is_none())
+                        .position(|member| member.enabled && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id))
                 })
         }
         .ok_or_else(|| std::io::Error::other("No idle Agent member is available"))?;
@@ -591,6 +635,7 @@ pub fn reserve_project_member(
             .revision
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
+        if let Some(number) = issue_number { prefs.agent_issue_schedule.consume(&host, number)?; }
         Ok(result)
     })
     .map_err(|error| error.to_string())?;
@@ -1182,6 +1227,51 @@ mod tests {
             .is_err(),
             "a same-name different Session cannot inherit the member"
         );
+    }
+
+    #[test]
+    fn scheduled_issue_uses_its_exact_member_after_preferences_reload() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Resize { size: 2 },
+            None,
+        )
+        .unwrap();
+        let target = &roster.members[1];
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut value =
+            serde_json::to_value(crate::load_issue_monitor_prefs(&path).unwrap()).unwrap();
+        value["terminal_queues"] = serde_json::json!({crate::process::current_hostname(): {
+            "entries": [{"number":42,"queued_at":"2026-10-25T00:00:00Z","queued_by":"test"}],
+            "last_seen_at":null
+        }});
+        value["agent_issue_schedule"] = serde_json::json!({"revision":1,"reservations":[{
+            "host_id":crate::process::current_hostname(),"agent_member_id":target.agent_member_id,
+            "issue_number":42,"reason":"assigned_by_you"
+        }]});
+        let prefs = serde_json::from_value(value).unwrap();
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let selected = reserve_project_member(
+            &root,
+            &sessions,
+            "scheduled-launch",
+            Some(42),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.agent_member_id, target.agent_member_id,
+            "saved reservation must select the scheduled member instead of the first idle member"
+        );
+        assert_eq!(selected.name, target.name);
     }
 
     #[test]

@@ -221,6 +221,7 @@
 .roster-who { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 .roster-who h3 { margin: 0; max-width: 100%; font-size: var(--type-base); white-space: nowrap; overflow-x: auto; }
 .roster-purpose { color: var(--color-text-muted); max-width: 100%; font-size: var(--type-xs); white-space: nowrap; overflow-x: auto; }
+.agents-surface button.roster-purpose { align-self: flex-start; padding: 0; border: 0; background: transparent; color: var(--color-link); text-align: start; }
 .roster-state { max-width: 100%; color: var(--color-state-idle); font-family: var(--font-mono); font-size: var(--type-xs); }
 .agents-surface .roster-current { border-radius: var(--radius-pill); border-color: currentColor; color: var(--color-state-active); text-align: start; }
 .roster-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-2); }
@@ -238,6 +239,17 @@
 .roster-detail-heading h3 { margin: 0; font-size: var(--type-md); white-space: nowrap; overflow-x: auto; }
 .roster-detail-heading p { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-text-muted); overflow-wrap: anywhere; }
 .roster-history h4 { margin: var(--space-1) 0 var(--space-2); font-size: var(--type-sm); }
+.roster-plans { min-width: 0; border-top: 1px solid var(--color-border); padding-top: var(--space-3); }
+.roster-plans header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.roster-plans h4 { margin: 0; font-size: var(--type-sm); }
+.roster-plans ol { margin: var(--space-2) 0 0; padding-inline-start: var(--space-5); }
+.roster-plan { padding: var(--space-2) 0; overflow-wrap: anywhere; }
+.roster-plan-reason { display: block; margin: var(--space-1) 0; color: var(--color-text-muted); font-size: var(--type-xs); }
+.roster-plan-controls { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.agents-surface select { min-width: 0; max-width: 100%; padding: var(--space-1) var(--space-2); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface); font: inherit; }
+.agents-surface select:disabled { color: var(--color-text-disabled); }
+.roster-plan-status,
+.roster-plan-empty { color: var(--color-text-muted); font-size: var(--type-xs); }
 .roster-history ol { list-style: none; margin: 0 0 0 var(--space-1); padding: 0; border-left: 2px solid var(--color-border); }
 .roster-history li { position: relative; display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; padding: var(--space-1) 0 var(--space-3) var(--space-3); overflow-wrap: anywhere; }
 .roster-history li::before { content: ""; position: absolute; left: -6px; top: var(--space-2); width: 8px; height: 8px; border: 2px solid var(--color-state-active); border-radius: var(--radius-pill); background: var(--color-surface); }

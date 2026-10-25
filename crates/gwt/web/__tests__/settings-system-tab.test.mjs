@@ -82,7 +82,7 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
     focusOrSpawnPreset() {}, renderUsagePanel() {},
     indexStatusByProjectRoot: new Map(), pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) {
-      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><button data-action="monitor-settings"></button></div>';
+      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>';
     },
   });
   const body = document.querySelector("main");

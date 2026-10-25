@@ -1356,15 +1356,15 @@ export function createKnowledgeKanbanSurface({
               : state === "error" && issueMonitorErrorText() ? ISSUE_MONITOR_ERROR_KEY : ""
             : "";
           pill.dataset.notificationKey = errorKey;
-          pill.disabled = false;
-          pill.setAttribute("aria-disabled", String(!errorKey));
+          pill.setAttribute("aria-disabled", "true");
+          const diagnostics = bar.querySelector('[data-action="monitor-diagnostics"]');
+          if (diagnostics) diagnostics.hidden = !errorKey;
           pill.title = [
             errorKey ? "Details in notifications" : state === "quota_hold"
               ? `Provider ${quotaHold.provider} | Reset ${quotaHold.reset_at}` : "",
             issueMonitorGitHubBudgetText(issueMonitorModel.read().status),
           ].filter(Boolean).join(" | ");
-          if (errorKey) pill.setAttribute("aria-haspopup", "dialog");
-          else pill.removeAttribute("aria-haspopup");
+
           explainIssueControl(pill, `Issue Monitor status: ${view.label}. ${pill.title || "The monitor checks the launch queue for eligible issues."}`);
         }
         const active = bar.querySelector('[data-metric="active"]');
@@ -1381,6 +1381,26 @@ export function createKnowledgeKanbanSurface({
             ? `Total ${issueMonitorModel.read().status.total_candidates}`
             : "";
           explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
+        }
+        const status = issueMonitorModel.read().status;
+        const capacity = bar.querySelector('[data-metric="capacity"]');
+        if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
+        const backlog = bar.querySelector('[data-metric="backlog"]');
+        if (backlog) backlog.textContent = String(status.unqueued_open_count ?? "—");
+        const scan = bar.querySelector('[data-metric="last-scan"]');
+        if (scan) {
+          const instant = Date.parse(status.last_scan_at);
+          scan.textContent = Number.isFinite(instant) ? `${new Date(instant).toISOString().slice(11,19)} UTC` : "Not yet";
+          scan.title = status.last_scan_at || "No scan has been reported.";
+        }
+        const limit = bar.querySelector('[data-action="monitor-limit"]');
+        if (limit) {
+          limit.disabled = status.agent_roster_capacity != null || status.max_active_agents_override == null;
+          if (!limit.dataset.draft || limit.disabled) {
+            delete limit.dataset.draft;
+            limit.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? maxActive);
+          }
+          limit.title = limit.disabled ? "Automatic or roster-managed limit. Configure in Issues settings." : "Machine-wide agent limit; existing agents continue.";
         }
         // Issue #4366 AC-6b: the saved settings and the held fallback stay two
         // separate lines, now of the ⚙ tooltip.
@@ -1405,6 +1425,7 @@ export function createKnowledgeKanbanSurface({
           toggle.textContent = enabled ? "Stop" : "Start";
           toggle.dataset.enabled = enabled ? "true" : "false";
           toggle.classList.toggle("primary", !enabled);
+          toggle.classList.toggle("destructive", enabled);
         }
         // Issue #3561 / #4499: each control is a WAI-ARIA switch whose label
         // names the setting and whose aria-checked + state word carry the
@@ -1428,6 +1449,7 @@ export function createKnowledgeKanbanSurface({
           ...model.status,
           ...(nextStatus || {}),
           max_active_agents_override: nextStatus?.max_active_agents_override ?? null,
+          agent_roster_capacity: nextStatus?.agent_roster_capacity ?? null,
           agent_capacity: nextStatus?.agent_capacity ?? null,
           quota_hold: normalizedIssueMonitorQuotaHold(nextStatus),
           github_budget: nextStatus?.github_budget ?? null,
@@ -1607,7 +1629,7 @@ export function createKnowledgeKanbanSurface({
           reportSurfaceNotice(notice);
           openSurfaceNotice(notice.key);
         });
-        bar.querySelector(".knowledge-monitor-pill")?.addEventListener("click", () => {
+        bar.querySelector('[data-action="monitor-diagnostics"]')?.addEventListener("click", () => {
           const key = bar.querySelector(".knowledge-monitor-pill").dataset.notificationKey;
           if (!key) return;
           if (!openSurfaceNotice(key)) {
@@ -1616,6 +1638,23 @@ export function createKnowledgeKanbanSurface({
             reportSurfaceError({ key, title: "Issue Monitor", message });
             openSurfaceNotice(key);
           }
+        });
+        bar.querySelector('[data-action="monitor-limit"]')?.addEventListener("input", event => {
+          event.currentTarget.dataset.draft = "true";
+        });
+        bar.querySelector('[data-action="monitor-limit"]')?.addEventListener("blur", event => {
+          delete event.currentTarget.dataset.draft;
+          renderIssueMonitorControls(body);
+        });
+        bar.querySelector('[data-action="monitor-limit"]')?.addEventListener("change", event => {
+          const input = event.currentTarget;
+          const status = issueMonitorModel.read().status;
+          const value = Number(input.value);
+          delete input.dataset.draft;
+          if (!input.disabled && Number.isInteger(value) && value > 0) {
+            send({kind:"set_issue_monitor_max_active_agents",max_active_agents:value});
+          }
+          input.value = String(status.agent_roster_capacity ?? status.max_active_agents_override ?? status.max_active_agents ?? 1);
         });
         bar
           .querySelector('[data-action="monitor-toggle"]')
@@ -3311,6 +3350,7 @@ export function createKnowledgeKanbanSurface({
         state.queueBoardEntries = entries;
         state.queueSelection ??= new Set();
         const queued = canonicalQueuedKnowledgeEntries(state);
+        const focusedNumber = Number(document.activeElement?.closest?.("[data-issue-number]")?.dataset.issueNumber);
         const queuePositions = new Map(queued.map((entry, index) => [entry.number, index]));
         for (const phase of ["backlog", "queued", "active", "done"]) {
           const column = board.querySelector(`[data-queue-column="${phase}"]`) || createNode("section", "issue-queue-column");
@@ -3335,7 +3375,36 @@ export function createKnowledgeKanbanSurface({
           const headingText = `${label} · ${items.length}${phase === "active" ? (items.length === 1 ? " issue" : " issues") : ""}`;
           if (heading.textContent !== headingText) heading.textContent = headingText;
           explainIssueControl(heading, explanations[phase], `column-${phase}`);
-          reconcileKnowledgeList(body, items, {
+          let rule = column.querySelector(".issue-queue-rule");
+          if (!rule) {
+            rule = createNode("div", "issue-queue-rule", {
+              backlog:"Will not launch", queued:"Launches from top to bottom",
+              active:"System controlled", done:"System controlled",
+            }[phase]);
+            heading.after(rule);
+          }
+          if (phase === "backlog" && items.some((entry,index) => index >= 5 &&
+              (entry.number === focusedNumber || entry.number === state.selectedNumber))) state.backlogExpanded = true;
+          const collapsed = phase === "backlog" && !state.backlogExpanded && !state.query.trim();
+          const visibleItems = collapsed ? items.slice(0,5) : items;
+          let more = column.querySelector('[data-action="show-backlog"]');
+          if (phase === "backlog" && items.length > 5 && !more) {
+            more = createNode("button", "wizard-button is-compact issue-backlog-more");
+            more.type = "button";
+            more.dataset.action = "show-backlog";
+            more.addEventListener("click", () => {
+              state.backlogExpanded = true;
+              issueWindowViewModel.update(() => ({windowId}));
+              body.querySelectorAll('.knowledge-row-select')[5]?.focus();
+            });
+            column.appendChild(more);
+          }
+          if (more) {
+            more.hidden = !collapsed || items.length <= 5;
+            more.textContent = `${items.length - 5} more · Show all`;
+            more.setAttribute("aria-expanded", String(!collapsed));
+          }
+          reconcileKnowledgeList(body, visibleItems, {
             scrollRoot: list.closest(".knowledge-list-pane") || list,
             virtualize: entries.length > 200,
             mounted: () => publishIssueControlExplanations(windowId),
@@ -3359,7 +3428,13 @@ export function createKnowledgeKanbanSurface({
             },
             render: entry => {
               const row = renderIssueRow(windowId, state, entry);
+              row.dataset.queueSource = entry.queued_by === "auto-refill" ? "auto"
+                : entry.queued_by === "operator" ? "manual" : "other";
               if (phase === "active") {
+                const work = issueWorkRowForEntry(getActiveWorkProjection?.(), entry);
+                const updated = work?.updated_at || entry.updated_at;
+                row.appendChild(createNode("div", "issue-card-updated",
+                  updated ? `Updated ${updated}` : "Activity time not reported"));
                 const windows = issueCurrentAgentWindows(issueProjectWindows(windowId), entry);
                 for (const target of windows) {
                   if (!row.classList.contains("has-live-output")) {
@@ -3410,7 +3485,7 @@ export function createKnowledgeKanbanSurface({
           let empty = column.querySelector(".knowledge-empty");
           if (!items.length && !empty) {
             empty = createNode("div", "knowledge-empty", phase === "queued"
-              ? "Nothing will launch until an issue is queued." : `No ${phase} items`);
+              ? "Nothing will launch until an issue is queued. Move cards from Backlog, or turn on Auto-refill above." : `No ${phase} items`);
             column.appendChild(empty);
           } else if (items.length) empty?.remove();
           if (column.parentNode) continue;
@@ -4833,12 +4908,19 @@ export function createKnowledgeKanbanSurface({
 
         const main = createNode("div", "knowledge-row-main");
         const titleWrap = createNode("div", "");
-        titleWrap.appendChild(
-          createNode("div", "knowledge-row-title", entry.title || `Issue #${entry.number}`),
-        );
-        titleWrap.appendChild(
-          createNode("div", "knowledge-row-number", `#${entry.number}`),
-        );
+        titleWrap.appendChild(createNode("div", "knowledge-row-number", `#${entry.number}`));
+        titleWrap.appendChild(createNode("div", "knowledge-row-title", entry.title || `Issue #${entry.number}`));
+        const labels = createNode("div", "issue-card-labels");
+        for (const label of entry.labels || []) {
+          labels.appendChild(createNode("span", "issue-card-label", label === "gwt-spec" ? "spec" : label));
+        }
+        if (Number.isFinite(entry.queue_position) && entry.queued_by) {
+          const source = createNode("span", "issue-card-provenance",
+            entry.queued_by === "operator" ? "You" : entry.queued_by === "auto-refill" ? "Auto" : entry.queued_by);
+          source.title = issueQueueSourceExplanation(entry);
+          labels.appendChild(source);
+        }
+        if (labels.childElementCount) titleWrap.appendChild(labels);
         main.appendChild(titleWrap);
         const badge = createNode("span", "knowledge-row-badge", model.primary.label);
         badge.dataset.tone = model.primary.tone;
@@ -5207,6 +5289,33 @@ export function createKnowledgeKanbanSurface({
           if (knowledgeKind === "issue") {
             body.innerHTML = `
               <div class="knowledge-root issue-bridge-root">
+                <section class="knowledge-monitor-bar" aria-label="Issues summary">
+                  <div class="knowledge-monitor-status" role="group" aria-label="Monitor status">
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Monitor</span><span class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite" aria-disabled="true">Stopped</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Agent slots</span><span class="issue-monitor-stat-value"><span class="knowledge-monitor-metric" data-metric="capacity">0 of 1</span><span class="knowledge-monitor-metric issue-monitor-census" data-metric="active">Active —</span></span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Queued</span><span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Backlog</span><span class="knowledge-monitor-metric" data-metric="backlog">—</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Verification slots</span><span class="knowledge-monitor-metric" data-metric="verification" title="The Monitor does not report host verification capacity.">Not reported</span></div>
+                    <div class="issue-monitor-stat"><span class="issue-monitor-stat-label">Last scan</span><span class="knowledge-monitor-metric" data-metric="last-scan">Not yet</span></div>
+                  </div>
+                  <div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
+                    <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Auto-refill" data-action="monitor-auto-refill" data-enabled="false">
+                      <span class="knowledge-monitor-switch__label">Auto-refill</span>
+                      <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
+                      <span class="knowledge-monitor-switch__state">Off</span>
+                    </button>
+                    <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Autonomous mode" data-action="monitor-autonomous" data-enabled="false">
+                      <span class="knowledge-monitor-switch__label">Autonomous</span>
+                      <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
+                      <span class="knowledge-monitor-switch__state">Off</span>
+                    </button>
+                    <label class="issue-monitor-limit">Agent limit <input type="number" min="1" step="1" data-action="monitor-limit" aria-label="Agent limit" value="1" disabled /></label>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
+                    <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
+                    <button type="button" class="wizard-button is-compact" data-action="monitor-diagnostics" aria-haspopup="dialog" hidden>Monitor details</button>
+                    <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
+                  </div>
+                </section>
                 <div class="workspace-toolbar kanban-toolbar is-stacked">
                   <div class="workspace-toolbar-main">
                     <div class="knowledge-heading">${knowledgeHeading(knowledgeKind)}</div>
@@ -5216,6 +5325,7 @@ export function createKnowledgeKanbanSurface({
                       <button type="button" data-issue-view="split">Split</button>
                     </div>
 
+                    <span class="issue-filter-hint">Columns show issue state</span>
                   </div>
                   <div class="workspace-toolbar-actions">
                     <button type="button" class="wizard-button is-compact" data-action="toggle-issue-preview" aria-expanded="false" hidden>Close preview</button>
@@ -5223,27 +5333,6 @@ export function createKnowledgeKanbanSurface({
                     <button class="wizard-button is-compact" data-action="refresh-knowledge" aria-label="Refresh cached work items" title="Refresh cached work items">↻ Refresh</button>
                   </div>
                 </div>
-                <section class="knowledge-monitor-bar" aria-label="Issues summary">
-                  <div class="knowledge-monitor-status" role="group" aria-label="Monitor status">
-                  <button type="button" class="knowledge-row-badge knowledge-monitor-pill" data-tone="idle" aria-live="polite" aria-disabled="true">Stopped</button>
-                  <span class="knowledge-monitor-metric" data-metric="active">Active 0/1</span>
-                  <span class="knowledge-monitor-metric" data-metric="queue">Queue 0</span>
-                  </div><div class="knowledge-monitor-controls" role="group" aria-label="Monitor controls">
-                  <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Auto-refill" data-action="monitor-auto-refill" data-enabled="false">
-                    <span class="knowledge-monitor-switch__label">Auto-refill</span>
-                    <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
-                    <span class="knowledge-monitor-switch__state">Off</span>
-                  </button>
-                  <button type="button" class="knowledge-monitor-switch" role="switch" aria-checked="false" aria-label="Autonomous mode" data-action="monitor-autonomous" data-enabled="false">
-                    <span class="knowledge-monitor-switch__label">Autonomous</span>
-                    <span class="knowledge-monitor-switch__track" aria-hidden="true"><span class="knowledge-monitor-switch__knob"></span></span>
-                    <span class="knowledge-monitor-switch__state">Off</span>
-                  </button>
-                  <button type="button" class="wizard-button is-compact primary" data-action="monitor-toggle">Start</button>
-                  <button type="button" class="wizard-button is-compact" data-action="monitor-settings" aria-label="Issues settings">⚙ Issues settings</button>
-                  </div>
-                  <button type="button" class="knowledge-row-badge knowledge-notification-badge knowledge-monitor-capacity-badge" aria-haspopup="dialog" hidden></button>
-                </section>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
                     <div class="knowledge-list" role="list" aria-label="Cached work items"></div>

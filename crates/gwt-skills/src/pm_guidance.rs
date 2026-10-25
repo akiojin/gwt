@@ -165,6 +165,15 @@ an observation then. Legacy omitted queue lists also decode to []; neither prove
 Queue residency is not execution waiting time, full queue coverage or permission to act.
 Never derive SLA, starvation, priority, preemption or launch decisions from this duration alone.
 
+`age_limits` compares each queue row with every saved starvation_after_seconds threshold.
+It retains saved policy order, ID, version and optional threshold without selecting an active policy.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete daemon
+Monitor coverage. All other cases yield `unknown`, never a within-limit PASS, with named
+missing inputs for absent, invalid, ambiguous or degraded evidence. No policies yields [].
+The comparison is only host queue membership at the supplied scan, not end-to-end starvation,
+SLA or permission to change priority, launch or preempt. Keep the enclosing scan age and provenance.
+
 `idle_windows` preserves every supplied Monitor idle window in order, including repeats
 and unknown Issue owners. It retains window identity, canonical `idle_kind`, `bound` and
 `pane_present`; it does not reproduce rebind or requeue proposals.
@@ -177,11 +186,17 @@ an old or degraded scan is only an observation at that scan, not current idle ev
 Idle timing does not prove queue age, SLA breaches, liveness or permission to release.
 Never recompute the Monitor's idle classification or change slots, claims or launches from it.
 
+`policy.monitor.scan_aborted` exposes the supplied typed scan outcome, or null without Monitor data.
+An aborted scan can retain older observations while advancing last_scan_at.
+When true, `successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown.
+Keep the raw observations and timing; unrelated error text alone does not invalidate a normal scan.
+
 `wip_limits` compares each saved policy independently in saved order, retaining its ID,
 version and optional limit alongside `observed_issue_count` and an assessment.
 `observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
 it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
 coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time.
 Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
 there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
 Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
@@ -4498,6 +4513,9 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "re-read status and reconsider",
             "`pm.plan.status`",
             "`pm.plan.apply`",
+            "`policy.monitor.scan_aborted` exposes the supplied typed scan outcome",
+            "An aborted scan can retain older observations while advancing last_scan_at",
+            "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
             "`policy.dependency_observations` preserves every supplied inbox row",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
@@ -4535,12 +4553,15 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Idle timing does not prove queue age, SLA breaches, liveness or permission to release",
             "`terminal_queue` preserves the supplied host queue projection order, repeated Issues and raw queued_at",
             "Queue residency is not execution waiting time, full queue coverage or permission to act",
+            "`age_limits` compares each queue row with every saved starvation_after_seconds threshold",
+            "`observed_age_threshold_reached` means age >= threshold, including equality and zero",
             "`launch_activity` reports only Launching/Launched inbox rows",
             "`inactivity_seconds_at_scan` uses the supplied scan time",
             "`claim_blocks` reports only BlockedByClaim inbox rows",
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
             "`retry_deadlines` reports every inbox row with `retry_not_before`",
             "`wip_limits` compares each saved policy independently in saved order",
+            "Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time",
             "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
             "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",

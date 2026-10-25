@@ -181,6 +181,74 @@ async function installRouteBackend(page: Page) {
 }
 
 test.describe("Project Hub and routes", () => {
+  test("Hub root catalog pulls consecutive snapshots and keeps action focus", async ({ page }, testInfo) => {
+    const errors = collectBrowserErrors(page);
+    const theme = testInfo.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await installRouteBackend(page);
+    await page.goto(new URL("/", base || ORIGIN_URL).href);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+    const control = page.locator('[data-hub-action="open-folder"]');
+    await expect(control).toBeVisible();
+    await control.focus();
+    await control.evaluate(element => { (window as any).__hubRootControl = element; });
+    const literal = '<img src=x onerror="window.__hubRootExecuted=true"> Updated catalog';
+    for (const [index, title] of ["First catalog", literal].entries()) {
+      await page.evaluate(({ title, index, project }) => {
+        (window as any).__gwtHubReply({ kind: "hub_state", hub: {
+          app_version: `9.9.${20 + index}`,
+          projects: [{ ...project, title }],
+          recent_projects: [{ title, project_key: null, path: "/private/catalog-path" }],
+        } });
+      }, { title, index, project: projectA });
+      await expect(page.locator(".gwt-hub__version")).toHaveText(`v9.9.${20 + index}`);
+      const link = page.locator('[data-hub-list="open"] a');
+      await expect(link).toHaveCount(1);
+      await expect(link).toHaveText(title);
+      await expect(link).toHaveAttribute("href", `/p/${projectA.project_key}`);
+      await expect(link).toHaveAttribute("target", "_blank");
+      await expect(link).toHaveAttribute("rel", "noopener");
+      await expect(page.locator('[data-hub-list="recent"] .is-pending')).toHaveText(title);
+      await expect(control).toBeFocused();
+      expect(await control.evaluate(element => element === (window as any).__hubRootControl)).toBe(true);
+    }
+    await expect(page.locator(".gwt-hub img")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__hubRootExecuted)).toBeUndefined();
+    expect(await page.locator(".gwt-hub").textContent()).not.toContain("/private/catalog-path");
+    const notice = page.locator(".gwt-hub__notice");
+    const error = page.locator(".gwt-hub__error");
+    for (const project of [projectA, { ...projectB, title: literal }]) {
+      await page.evaluate(project => (window as any).__gwtHubReply({ ...project, kind: "project_opened" }), project);
+      await expect(notice).toHaveText(`Opened ${project.title}. Open in a new tab`);
+      await expect(notice).toBeVisible();
+      await expect(notice.locator("a")).toHaveAttribute("href", `/p/${project.project_key}`);
+      await expect(notice.locator("a")).toHaveAttribute("target", "_blank");
+      await expect(notice.locator("a")).toHaveAttribute("rel", "noopener");
+      await expect(control).toBeFocused();
+    }
+    // A new local open clears the prior result; the same server failure must
+    // render again after that reset rather than being treated as unchanged.
+    await page.getByText("Enter folder path…", { exact: true }).click();
+    for (const message of [literal, literal, ""]) {
+      await page.locator("[data-open-project-path]").fill("/private/open-path");
+      await page.locator("[data-open-project-submit]").click();
+      await expect(notice).toBeHidden();
+      await expect(error).toBeHidden();
+      await control.focus();
+      await page.evaluate(message => (window as any).__gwtHubReply({ kind: "project_open_error", message }), message);
+      await expect(error).toHaveText(message || "Could not open the project.");
+      await expect(error).toBeVisible();
+      await expect(control).toBeFocused();
+      expect(await control.evaluate(element => element === (window as any).__hubRootControl)).toBe(true);
+    }
+    await expect(page.locator(".gwt-hub img")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as any).__hubRootExecuted)).toBeUndefined();
+    await page.screenshot({ path: testInfo.outputPath("hub-root-catalog.png"), fullPage: true });
+    expect(errors).toEqual([]);
+  });
+
   test("Project hub catalog pulls consecutive snapshots without replacing active controls", async ({ page }, testInfo) => {
     const errors = collectBrowserErrors(page);
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";

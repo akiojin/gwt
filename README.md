@@ -1075,11 +1075,16 @@ occupancy and limit, which cannot be recalculated from Issue counts. The combine
 Issue list excludes queued-only work and is a lower bound, not full WIP; unavailable
 observations stay unknown. Verification and full WIP remain unobserved, and reading
 these diagnostics does not change admission or enforce WIP limits.
+`policy.monitor.scan_aborted` preserves the supplied scan outcome (null without
+Monitor data). An aborted scan can retain older observations while advancing its
+timestamp. It names `successful_monitor_scan` as missing and leaves saved WIP and
+queue-age comparisons `unknown`, while retaining the observed facts and timing.
 Saved WIP policies are compared independently, in saved order, with the distinct
 observed Issue count. `observed_exceeded` means only that this snapshot's count
 strictly exceeds that saved limit; it requires an unambiguous policy ID, a configured
-limit, complete daemon coverage and a valid scan time. Equal or smaller counts and
-missing or degraded inputs yield `unknown`, never a within-limit PASS. Without Monitor
+limit, complete daemon coverage and a valid scan time. Scan fractions beyond nine digits
+yield `unknown` with `monitor_scan_time`. Equal or smaller counts and missing or degraded
+inputs yield `unknown`, never a within-limit PASS. Without Monitor
 data the count is null; without policies the list is empty. This comparison does not
 establish canonical WIP, a current breach or permission to act, and does not select
 or combine policies. Verification and full WIP remain missing.
@@ -1093,6 +1098,15 @@ null; a supplied view without rows yields []. Keep its source, scan time and cov
 an old or degraded snapshot is only an observation then. Legacy omitted queue lists
 also decode to []; neither proves the host or whole project queue is empty. Queue residency is not execution waiting time, an SLA
 or starvation verdict, priority, preemption or permission to launch.
+Each row's `age_limits` compares its age with every saved policy's
+`starvation_after_seconds`, retaining policy order, ID, version and optional threshold.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete
+daemon Monitor coverage. Other cases yield `unknown`, never a within-limit PASS, with
+named missing inputs for absent, invalid, ambiguous or degraded evidence. No policies
+yields []. No active policy is selected or combined. This compares host membership at
+the recorded scan; it does not establish end-to-end starvation, SLA or permission to
+change priority, launch or preempt. Keep the source and scan age alongside it.
 Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
 idle classification and binding/pane facts. They show elapsed whole seconds from idle start
 to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,
@@ -1746,6 +1760,7 @@ an entry removes its copied policy on the next refresh.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works.
 - **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 

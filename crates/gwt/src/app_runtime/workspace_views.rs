@@ -4289,6 +4289,45 @@ fn agent_roster_view(
 }
 
 impl AppRuntime {
+    pub(crate) fn agent_schedule_events(
+        &mut self,
+        context: &ProjectContext,
+        client_id: &ClientId,
+        action: gwt::issue_monitor::AgentScheduleAction,
+    ) -> Vec<OutboundEvent> {
+        let context_owned = context.clone();
+        let reply_to = client_id.clone();
+        let proxy = self.proxy.clone();
+        let sessions_dir = self.sessions_dir.clone();
+        let spawn = self.blocking_tasks.try_spawn(move || {
+            let event = match gwt::issue_monitor::mutate_project_agent_schedule(
+                &context_owned.project_root,
+                &sessions_dir,
+                action,
+            ) {
+                Ok(schedule) => BackendEvent::AgentSchedule { schedule },
+                Err(message) => BackendEvent::AgentScheduleError {
+                    project_key: context_owned.project_key.to_string(),
+                    message,
+                },
+            };
+            proxy.send(UserEvent::ProjectDispatch {
+                context: context_owned,
+                events: vec![OutboundEvent::reply(&reply_to, event)],
+            });
+        });
+        match spawn {
+            Ok(()) => Vec::new(),
+            Err(message) => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::AgentScheduleError {
+                    project_key: context.project_key.to_string(),
+                    message,
+                },
+            )],
+        }
+    }
+
     pub(crate) fn agent_roster_events(
         &mut self,
         context: &ProjectContext,
