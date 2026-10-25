@@ -9529,7 +9529,13 @@ impl IssueMonitorState {
             );
             let is_spec = self
                 .inbox_item(issue_number)
-                .is_some_and(|item| has_gwt_spec_label(&item.issue.labels));
+                .map(|item| has_gwt_spec_label(&item.issue.labels))
+                .unwrap_or_else(|| {
+                    self.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.issue_number == issue_number
+                            && delivery.linked_issue_kind == LinkedIssueKind::Spec
+                    })
+                });
             if self
                 .prefs()
                 .select_auto_launch_profile(issue_number, is_spec, None, |pool| {
@@ -31491,6 +31497,59 @@ mod tests {
             "claim-effect-44",
             "2026-08-22T02:00:00Z",
         ));
+
+        // A restart restores deliveries before the inbox. An initial SPEC
+        // still requires tier 1 even without recorded attempts or tier history.
+        let mut cold_prefs = monitor.prefs();
+        cold_prefs.issue_tiers.remove(&43);
+        cold_prefs
+            .autonomous_records
+            .iter_mut()
+            .find(|record| record.issue_number == 43)
+            .unwrap()
+            .attempts = 0;
+        cold_prefs
+            .pending_launch_deliveries
+            .iter_mut()
+            .find(|delivery| delivery.issue_number == 43)
+            .unwrap()
+            .linked_issue_kind = LinkedIssueKind::Spec;
+        let mut cold = test_monitor_with_prefs(IssueMonitorConfig::default(), cold_prefs);
+        assert!(cold.inbox_item(43).is_none());
+        assert_eq!(
+            cold.try_hold_provider_usage_limit(
+                42,
+                "tab-1::agent-42",
+                "claude",
+                "Claude quota exhausted",
+                Some("2026-08-22T04:00:00Z"),
+                None,
+                "2026-08-22T02:01:00Z",
+            ),
+            IssueMonitorProviderUsageLimitOutcome::Held
+        );
+        assert_eq!(cold.pending_launch_delivery_id(43), None);
+        assert!(!cold.active_issue_numbers().contains(&43));
+        assert_eq!(cold.attempt_count(43), 0);
+        assert_eq!(
+            cold.prefs().queued_launch_session_strategies.get(&43),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(cold.pending_effects().len(), 1);
+        assert!(matches!(
+            &cold.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!cold.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert_eq!(cold.take_pending_launch_requests()[0].issue_number, 44);
 
         // An unheld fallback can still be unable to run unattended. Revoke
         // the unowned delivery before a GUI can materialize that fallback.
