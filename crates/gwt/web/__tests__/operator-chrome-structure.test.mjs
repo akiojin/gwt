@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
+import { mapAgentTelemetryState } from "../window-runtime-state.js";
 
 test("Issue #5531: Profile resync reloads a lost read while preserving the draft and save", () => {
   const source = readFileSync(new URL("../profile-window-surface.js", import.meta.url), "utf8");
@@ -333,7 +334,7 @@ test("frontend handles active work projection as status-strip telemetry", () => 
   );
 });
 
-test("Issue #6362 Status Strip counts the observed census before terminals mount", () => {
+test("Issue #6362 Status Strip counts live census separately from catalog mission progress", () => {
   let activity = { count: 2, agents: [
     { window_id: "agent", session_id: "current" },
     { window_id: "pm", session_id: "manager", is_pm: true },
@@ -350,12 +351,13 @@ test("Issue #6362 Status Strip counts the observed census before terminals mount
     windowCatalogModel: { read: () => ({ catalog: { appState: { tabs: [
       { id: "active", project_key: "this-project", workspace: { windows: [] } },
       { id: "sibling", project_key: "this-project", workspace: { windows } },
-    ] }, runtimeStates: {} } }) },
+    ] }, runtimeStates: { old: "stopped" } } }) },
     allProjectWindowIds: () => windows.map(window => window.id),
     activeWorkItemsFromProjection: () => activeWorks,
     activeWorkProjection: { active_agents: 9 }, windowMap: new Map(),
     workspaceWindowById: id => windows.find(window => window.id === id),
     presetSupportsWaitingStatus: preset => ["codex", "claude"].includes(preset),
+    mapAgentTelemetryState,
     applyOperatorTelemetryCounts: value => { counts = value; },
   };
   const recompute = Function(...Object.keys(dependencies),
@@ -363,14 +365,20 @@ test("Issue #6362 Status Strip counts the observed census before terminals mount
   recompute();
   assert.equal(counts.running, 1, "Work history and unmounted terminals cannot replace the census");
   assert.equal(counts.waiting, 1);
-  assert.equal(counts.agents, 2);
+  assert.equal(counts.agents, 3, "MISSION includes the project's agent panes without requiring a census");
+  assert.equal(counts.done, 1, "runtime state overrides catalog status for completed panes");
   activity = { ...activity, snapshot: { project_key: "another-project" } }; recompute();
   assert.equal(counts.running, "—", "another project's catalog cannot supply runtime state");
-  assert.equal(counts.agents, 2, "catalog scope does not change observed membership");
+  assert.equal(counts.agents, 0, "another project's catalog cannot supply MISSION progress");
+  assert.equal(counts.done, 0);
   activity = { count: 0, agents: [] }; recompute();
   assert.equal(counts.running, 0, "a retired child cannot be resurrected from Work history");
+  assert.equal(counts.agents, 3, "retiring a live child does not erase MISSION panes");
+  assert.equal(counts.done, 1);
   activity = { count: null, agents: [] }; recompute();
   assert.equal(counts.running, "—", "unknown is never a measured zero");
+  assert.equal(counts.agents, 3, "an unavailable census preserves MISSION progress");
+  assert.equal(counts.done, 1);
   activeWorks = []; recompute();
   assert.equal(Object.hasOwn(counts, "branches"), false, "catalog refresh preserves independent branch inventory");
 });

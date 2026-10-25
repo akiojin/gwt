@@ -2487,9 +2487,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
-      // Aggregates `data-agent-state` across all open windows and pushes the
-      // counts into the bottom strip. We also expose agent count to the
-      // sidebar layer for the "Quick" section's hint.
+      // Live state uses the host census enriched by the window catalog;
+      // MISSION tracks completion across the project's agent panes.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
         appendRenderKeyPart(parts, "running");
@@ -2617,7 +2616,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const catalog = windowCatalogModel.read().catalog;
         const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
           || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
-        counts.agents = activity.count ?? "—";
+        // MISSION tracks completion of project panes after their children exit.
+        for (const data of windows) {
+          if (!presetSupportsWaitingStatus(data.preset)) continue;
+          counts.agents += 1;
+          if (mapAgentTelemetryState(catalog.runtimeStates[data.id] ?? data.status) === "done") counts.done += 1;
+        }
         let unknown = activity.count === null;
         for (const agent of activity.agents) {
           const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
