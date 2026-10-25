@@ -975,6 +975,10 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 統合した Issue 一覧はキュー待ちだけの作業を除く下限集合で、全工程の WIP ではありません。
 取得不能な観測は不明のまま扱い、verification と全工程 WIP の不足も示します。
 この診断の読み取りで起動判断や WIP 上限の強制は行いません。
+`policy.monitor.scan_aborted` は供給されたスキャン結果を保持し、Monitor 不在なら null です。
+中断したスキャンは古い観測を保持したまま時刻を進める場合があります。
+その場合は `successful_monitor_scan` の不足を示し、保存 WIP・queue age の比較を
+`unknown` にします。観測された事実と時刻の計算結果は保持します。
 保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
 `observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
 示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
