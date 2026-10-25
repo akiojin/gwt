@@ -155,3 +155,118 @@ impl std::fmt::Display for AgentLaunchError {
 }
 
 pub type AgentLaunchResult = Result<AgentLaunchCompletion, AgentLaunchError>;
+
+#[derive(Debug, Clone)]
+pub struct ActiveAgentSession {
+    pub window_id: String,
+    pub session_id: String,
+    pub agent_id: String,
+    pub branch_name: String,
+    pub display_name: String,
+    pub worktree_path: PathBuf,
+    pub agent_project_root: String,
+    pub runtime_target: gwt_agent::LaunchRuntimeTarget,
+    pub tab_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceResumeContext {
+    pub title: Option<String>,
+    pub owner: Option<String>,
+    pub summary: Option<String>,
+    pub next_action: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingContinueWork {
+    pub client_id: String,
+    pub operation_id: String,
+    pub work_id: String,
+    pub project_root: PathBuf,
+    pub worktree_path: PathBuf,
+    pub owner: crate::cli::execution_state::ExecutionOwnerKey,
+    pub work_branch: String,
+    pub work_agent_id: gwt_agent::AgentId,
+    pub work_agent_session_id: Option<String>,
+    pub execution: PendingContinueWorkExecution,
+    pub binding: gwt_agent::SessionExecutionBinding,
+    pub readiness_nonce: String,
+    pub outcome: crate::ContinueWorkOutcomeKind,
+    pub resume_context: WorkspaceResumeContext,
+    pub predecessor_session_id: String,
+    pub predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+}
+
+#[derive(Debug, Clone)]
+pub enum PendingContinueWorkExecution {
+    Successor(crate::cli::execution_state::SuccessorRequest),
+    #[allow(dead_code)] // Retained for reconciliation of legacy in-memory fixtures.
+    Takeover(crate::cli::execution_state::GenerationTakeoverRequest),
+}
+
+/// Explicit linked-owner launch that is waiting for an authenticated
+/// SessionStart before replacing an integrity-valid Blocked generation.
+#[derive(Debug, Clone)]
+pub struct PendingFreshExecutionLaunch {
+    pub operation_id: String,
+    pub project_root: PathBuf,
+    pub worktree_path: PathBuf,
+    pub owner: crate::cli::execution_state::ExecutionOwnerKey,
+    pub request: crate::cli::execution_state::SuccessorRequest,
+    pub binding: gwt_agent::SessionExecutionBinding,
+    pub session_identity: gwt_agent::SessionExecutionIdentity,
+    pub readiness_nonce: String,
+    pub predecessor_binding: gwt_agent::ExecutionBindingIdentity,
+    pub base_branch: Option<String>,
+    pub linked_issue_number: Option<u64>,
+    pub resume_context: Option<WorkspaceResumeContext>,
+    pub launch_feedback_context: Option<LaunchFeedbackContext>,
+}
+
+impl WorkspaceResumeContext {
+    pub fn purpose_title(&self) -> Option<String> {
+        self.title
+            .as_deref()
+            .or(self.summary.as_deref())
+            .or(self.owner.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LaunchFeedbackContext {
+    pub client_id: String,
+    pub title: String,
+    pub issue_monitor_issue_number: Option<u64>,
+    pub issue_monitor_delivery_id: Option<String>,
+    pub issue_monitor_project_root: Option<PathBuf>,
+    pub issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
+    /// Write-ahead answered handoff carried by a native Resume. Only the
+    /// provider's UserPromptSubmit receipt may mark it delivered.
+    pub issue_monitor_autonomous_handoff: Option<crate::AutonomousHandoffDeliveryAttempt>,
+    /// Set immediately before the provider process spawn call. Failures while
+    /// false are definitely pre-submit and keep the bounded retry ladder;
+    /// failures while true have an ambiguous provider outcome.
+    pub issue_monitor_autonomous_submit_started: bool,
+    /// SPEC #3200 Option A / Issue #4041: the independent review agent is
+    /// subordinate to the implementing launch. Its window must never be
+    /// ACKed as the Issue's launch: that rebinds `launched_issues` to the
+    /// review window, drops the implementation claim, and takes an active
+    /// slot while the implementation window is still running.
+    pub issue_monitor_review_dispatch: bool,
+}
+
+impl LaunchFeedbackContext {
+    /// The Issue whose Monitor launch this window materializes. `None` for a
+    /// review dispatch, whose window observes the Issue without owning its
+    /// launch binding (Issue #4041).
+    pub fn issue_monitor_launch_binding_issue_number(&self) -> Option<u64> {
+        if self.issue_monitor_review_dispatch {
+            None
+        } else {
+            self.issue_monitor_issue_number
+        }
+    }
+}
