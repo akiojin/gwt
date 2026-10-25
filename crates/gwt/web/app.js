@@ -6074,6 +6074,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             return;
           case "open-issue-monitor":
             focusOrSpawnPreset("issue");
+            send({ kind: "open_issue_monitor" });
             return;
           case "open-recovery-center":
             recoveryCenterController?.open();

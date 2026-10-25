@@ -974,6 +974,9 @@ pub enum FrontendEvent {
         tier: u8,
         expected_config_token: String,
     },
+    /// Audit-only notice for client-side Open Monitor navigation.
+    /// It does not control monitoring or create/focus a backend window.
+    OpenIssueMonitor,
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,
