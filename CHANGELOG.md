@@ -1,6 +1,53 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.142.0] - 2026-10-25
+
+### Bug Fixes
+
+- **issue:** Expose auto-refill beside autonomous
+- **gui:** Count observed local agents in Active views
+- **gui:** Fence stale agent activity and focus targets
+- **gui:** Pluralize active issue counts correctly
+- **hooks:** Warn when skill-state cannot be read
+- **agents:** Preserve spec member continuity across reuse
+- **hooks:** Obligation読取失敗のStop警告を保持する
+- **launch:** Raise direct runner health probe deadline to 20s for slow hosts
+- **hooks:** Warn on unreadable discussion state
+
+### Features
+
+- **issue:** Connect per-issue tier controls
+- **pm:** ロードマップ項目に依存診断を表示する
+- **agents:** Add persistent roster and live works
+
+### Miscellaneous Tasks
+
+- **work:** Record issue kanban acceptance audit
+- **work:** Issue #3431 の PR 関連付けを保存する
+- **work:** Record T-095 delivery settlement audit
+- **work:** Link T-095 settlement audit PR
+- **work:** Link skill-state warning delivery PR
+- **work:** Record local live activity delivery PR
+- **work:** Reconcile issue kanban acceptance records
+- **work:** Obligation警告の配送PRを関連付ける
+- **work:** Record discussion warning delivery PR
+
+### Refactor
+
+- **ui:** 詳細応答の描画を共有状態購読へ移す
+- **ui:** Render knowledge errors from shared state
+- **ui:** Render active card previews from shared state
+- **ui:** Render branch entries from shared state
+- **ui:** Recovery Centerを共有状態から描画
+- **ui:** Render recovery Board responses from shared state
+- **ui:** Hub カタログを共有状態から描画する
+
+### Testing
+
+- **issue:** Align legacy controls with the refill switch
+- **gui:** Close live client before fixture shutdown
+
 ## [9.141.2] - 2026-10-24
 
 ### Bug Fixes
