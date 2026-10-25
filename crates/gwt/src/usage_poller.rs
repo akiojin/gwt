@@ -513,6 +513,12 @@ fn collect_sessions_at(
     cache: &mut UsageCache,
     now: DateTime<Utc>,
 ) -> Vec<SessionUsage> {
+    #[derive(PartialEq, Eq)]
+    enum ConversationOwner {
+        Member(String),
+        ProjectManager(PathBuf),
+    }
+
     let mut out = Vec::new();
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
@@ -551,45 +557,80 @@ fn collect_sessions_at(
         }
     }
     let confirmed_identity = |session: &gwt_agent::Session| {
-        session
+        let project = dunce::canonicalize(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        )
+        .ok()?;
+        if let Some(member) = session
             .agent_member_id
             .as_ref()
             .filter(|id| !id.trim().is_empty())
-            .cloned()
-            .zip(
-                dunce::canonicalize(
-                    session
-                        .project_state_root
-                        .as_deref()
-                        .unwrap_or(&session.worktree_path),
-                )
-                .ok(),
-            )
+        {
+            return Some((ConversationOwner::Member(member.clone()), project));
+        }
+        // The resident PM has no roster member. Its canonical project-owned
+        // container is the stable identity retained across restored Sessions.
+        let worktree = dunce::canonicalize(&session.worktree_path).ok()?;
+        let expected = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+        (gwt::pm_registry::is_canonical_pm_worktree(&worktree)
+            && dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
+        .then_some((ConversationOwner::ProjectManager(worktree), project))
     };
+    let mut registered_pms = HashMap::<PathBuf, Option<String>>::new();
     for (session, provider, agent_sid) in references {
         let conversation_owners = owners
             .get(&(provider, agent_sid.clone()))
             .expect("every conversation reference has an owner");
-        let same_identity = conversation_owners
+        let identity = conversation_owners
             .first()
-            .and_then(|owner| confirmed_identity(owner))
-            .is_some_and(|identity| {
-                conversation_owners
-                    .iter()
-                    .all(|owner| confirmed_identity(owner).as_ref() == Some(&identity))
-            });
+            .and_then(|owner| confirmed_identity(owner));
+        let same_identity = identity.as_ref().is_some_and(|identity| {
+            conversation_owners
+                .iter()
+                .all(|owner| confirmed_identity(owner).as_ref() == Some(identity))
+        });
         let ambiguous = conversation_owners.len() > 1 && !same_identity;
         if !ambiguous && conversation_owners.len() > 1 {
             // A restore can retain the same provider conversation across gwt
-            // Sessions. Count it once on the newest exact project/member owner.
+            // Sessions. Prefer the registered PM, otherwise the newest exact
+            // project/member owner, and count the conversation only once.
             // Ledger status is a display hint, never a proof of physical liveness.
-            let newest = conversation_owners
-                .iter()
-                .max_by(|a, b| {
-                    (a.created_at, a.updated_at, &a.id).cmp(&(b.created_at, b.updated_at, &b.id))
+            let registered_pm = identity.as_ref().and_then(|(owner, project)| {
+                let ConversationOwner::ProjectManager(worktree) = owner else {
+                    return None;
+                };
+                registered_pms
+                    .entry(project.clone())
+                    .or_insert_with(|| {
+                        let registration = gwt::pm_registry::load_pm_prefs(
+                            &gwt::pm_registry::pm_prefs_path_for_repo_path(project),
+                        )
+                        .ok()?
+                        .registration?;
+                        (dunce::canonicalize(registration.worktree_path)
+                            .ok()
+                            .as_ref()
+                            == Some(worktree))
+                        .then_some(registration.session_id)
+                    })
+                    .as_deref()
+            });
+            let selected = registered_pm
+                .and_then(|id| conversation_owners.iter().find(|owner| owner.id == id))
+                .or_else(|| {
+                    conversation_owners.iter().max_by(|a, b| {
+                        (a.created_at, a.updated_at, &a.id).cmp(&(
+                            b.created_at,
+                            b.updated_at,
+                            &b.id,
+                        ))
+                    })
                 })
                 .expect("a shared conversation has owners");
-            if newest.id != session.id {
+            if selected.id != session.id {
                 continue;
             }
         }
@@ -747,6 +788,130 @@ mod tests {
             .unwrap();
         assert_eq!(missing.state, UsageState::NoData);
         assert!(missing.telemetry.is_none());
+    }
+
+    #[test]
+    fn collect_sessions_attributes_restored_pm_usage_to_registered_session() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let claude_home = home.path().join("claude");
+        let _claude = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let make_session = |path: &std::path::Path, sid: &str, status, age| {
+            let mut session = gwt_agent::Session::new(path, "work", AgentId::ClaudeCode);
+            session.project_state_root = Some(project.clone());
+            session.agent_session_id = Some(sid.to_owned());
+            session.status = status;
+            session.created_at = now() + chrono::Duration::seconds(age);
+            session.updated_at = session.created_at;
+            session
+        };
+        let current = make_session(&worktree, "pm-conversation", AgentStatus::Running, 0);
+        for session in [
+            current.clone(),
+            make_session(&worktree, "pm-conversation", AgentStatus::Stopped, -1),
+            make_session(&worktree, "pm-conversation", AgentStatus::Stopped, 1),
+            make_session(&project, "ordinary-conversation", AgentStatus::Running, 0),
+            make_session(&project, "ordinary-conversation", AgentStatus::Stopped, -1),
+        ] {
+            session.save(&sessions_dir).unwrap();
+        }
+        gwt::pm_registry::save_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+            &gwt::pm_registry::PmPrefs {
+                registration: Some(gwt::pm_registry::PmRegistration {
+                    session_id: current.id.clone(),
+                    agent_id: "claude".into(),
+                    worktree_path: worktree.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let transcripts = claude_home.join("projects/project");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let line = serde_json::json!({"type": "assistant", "timestamp": now().to_rfc3339(),
+        "message": {"model": "claude-sonnet-4-5", "usage": {
+            "input_tokens": 80, "output_tokens": 12,
+            "cache_read_input_tokens": 40, "cache_creation_input_tokens": 5
+        }}});
+        for sid in ["pm-conversation", "ordinary-conversation"] {
+            std::fs::write(transcripts.join(format!("{sid}.jsonl")), line.to_string()).unwrap();
+        }
+        let config = UsageConfig {
+            codex_enabled: false,
+            claude_account_enabled: false,
+        };
+        let rows = collect_sessions_at(&config, &mut UsageCache::default(), now());
+        let pm = rows
+            .iter()
+            .filter(|row| row.provider_session_id.as_deref() == Some("pm-conversation"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pm.len(),
+            1,
+            "restored PM Sessions share one canonical PM identity"
+        );
+        assert_eq!(
+            pm[0].session_id, current.id,
+            "the registered PM wins over newer stopped history"
+        );
+        assert!(pm[0].active);
+        assert_eq!(pm[0].state, UsageState::Ok);
+        assert_eq!(pm[0].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!((pm[0].input_tokens, pm[0].output_tokens), (80, 12));
+        assert_eq!(
+            (pm[0].cache_read_tokens, pm[0].cache_creation_tokens),
+            (Some(40), Some(5))
+        );
+        assert!(pm[0]
+            .telemetry
+            .as_ref()
+            .unwrap()
+            .minute_buckets
+            .iter()
+            .any(|bucket| bucket.tokens == Some(137)));
+        let ordinary = rows
+            .iter()
+            .filter(|row| row.provider_session_id.as_deref() == Some("ordinary-conversation"))
+            .collect::<Vec<_>>();
+        assert_eq!(ordinary.len(), 2);
+        assert!(
+            ordinary
+                .iter()
+                .all(|row| row.state == UsageState::NoData && row.telemetry.is_none()),
+            "memberless ordinary work must remain ambiguous"
+        );
+
+        let foreign_project = home.path().join("foreign");
+        std::fs::create_dir_all(&foreign_project).unwrap();
+        let foreign_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&foreign_project);
+        std::fs::create_dir_all(&foreign_worktree).unwrap();
+        let mut foreign = make_session(
+            &foreign_worktree,
+            "pm-conversation",
+            AgentStatus::Stopped,
+            -2,
+        );
+        foreign.project_state_root = Some(foreign_project);
+        foreign.save(&sessions_dir).unwrap();
+        let rows = collect_sessions_at(&config, &mut UsageCache::default(), now());
+        assert!(
+            rows.iter()
+                .filter(|row| row.provider_session_id.as_deref() == Some("pm-conversation"))
+                .all(|row| row.state == UsageState::NoData && row.telemetry.is_none()),
+            "a different project's PM must not inherit the conversation"
+        );
     }
 
     #[test]

@@ -506,6 +506,7 @@ pub(super) fn run<E: CliEnv>(
                     "failed to persist PM status: {error}"
                 )))
             })?;
+            crate::daemon_runtime::notify_pm_status_changed();
             out.push_str(
                 &serde_json::json!({"schema_version": 1, "ok": true, "status": status}).to_string(),
             );

@@ -8589,6 +8589,10 @@ fn assert_pm_ensure_spawns_from_default_branch(default_branch: &str, cached_defa
         .clone();
     assert_eq!(windows.len(), 1, "exactly one PM pane spawned");
     assert_eq!(windows[0].preset, WindowPreset::Agent);
+    assert!(
+        windows[0].agent_name.is_some(),
+        "a fresh PM receives its assigned display name before publication"
+    );
     assert_eq!(
         runtime
             .project_state(&runtime.test_context())

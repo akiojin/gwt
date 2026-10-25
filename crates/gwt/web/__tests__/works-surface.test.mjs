@@ -8,10 +8,11 @@ const moduleUrl = new URL("../works-surface.js", import.meta.url);
 const source = existsSync(moduleUrl) ? readFileSync(moduleUrl, "utf8") : "";
 const windows = [
   { id: "one", preset: "codex", agent_name: "One", dynamic_title: "First issue", session_id: "s1", agent_member_id: "m1", status: "running" },
-  { id: "pm", preset: "claude", agent_name: "Manager", is_pm: true, session_id: "sp", status: "waiting" },
+  { id: "pm", title: "Claude Code", preset: "agent", agent_id: "claude", agent_name: "Manager", purpose_title: "Project management", is_pm: true, session_id: "sp", status: "waiting" },
   { id: "old", preset: "codex", agent_name: "Old", session_id: "old-session", status: "running" },
 ];
-const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777 }));
+const live = windows.slice(0, 2).map((w, i) => ({ window_id: w.id, session_id: w.session_id, runtime_incarnation: i + 1, is_pm: !!w.is_pm, issue_number: w.is_pm ? null : 4777,
+  current_task: w.is_pm ? "Coordinate the current project work" : null }));
 function catalog(wins, version = 1) { return { version, runtimeStates: {}, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: wins } }] } }; }
 async function fixture(telemetry = null) {
   const { createWorksSurface } = await import(moduleUrl);
@@ -50,6 +51,10 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.equal(surface.element.querySelector('[data-metric="today-total"]')?.textContent, "—");
   assert.match(rows[1].textContent, /Context remaining.*Branch.*Verification.*Last action/s);
   assert.equal(rows[0].querySelector(".work-member"), null, "PM is a role, not a fictional member link");
+  assert.equal(rows[0].querySelector(".work-name").textContent, "Manager");
+  assert.equal(rows[0].querySelector(".window-role-badge").textContent, "PM");
+  assert.equal(rows[0].querySelector(".work-purpose").textContent, "Coordinate the current project work");
+  assert.equal(rows[0].querySelector(".work-identity").textContent, "PM · claude");
   rows[1].querySelector(".work-member").click();
   assert.deepEqual(selected, ["m1"]);
   assert.equal(document.querySelectorAll(".work-runtime-cache textarea").length, 2, "list hosts fit the existing native runtimes without accepting input");

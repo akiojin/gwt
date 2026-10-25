@@ -64,8 +64,9 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   let selected = null, previewElement = null, previewCleanups = [], disposed = false;
   let renderedCatalog, renderedActivity, renderedRoster;
   const isPresented = () => element.isConnected && !element.hidden;
-  const nameFor = work => work.assignment.is_pm ? "PM" : work.member?.name || work.data.agent_name || "Agent";
-  const purposeFor = work => work.data.dynamic_title || (work.assignment.is_pm ? "Project Manager" : work.data.title) || "—";
+  const nameFor = work => work.member?.name || work.data.agent_name || (work.assignment.is_pm ? "Project Manager" : "Agent");
+  const purposeFor = work => work.assignment.current_task || work.data.dynamic_title || work.data.purpose_title || (work.assignment.is_pm ? "Project Manager" : work.data.title) || "—";
+  const providerFor = work => work.member?.provider || work.data.agent_id || work.data.preset || "—";
   const telemetryFor = work => getTelemetry()?.by_window?.[work.data.id] || {};
   function setName(host, work) {
     const memberId = work.member?.member_id || "";
@@ -83,6 +84,11 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     }
     name.textContent = nameFor(work);
     if (memberId) name.setAttribute("aria-label", `View ${nameFor(work)} in Agents`);
+    let badge = host.querySelector(".window-role-badge");
+    if (work.assignment.is_pm && !badge) {
+      badge = document.createElement("span"); badge.className = "window-role-badge"; badge.textContent = "PM";
+      host.append(badge);
+    } else if (!work.assignment.is_pm) badge?.remove();
   }
   function park(entry, rehost = false) {
     const moved = entry.terminal.parentElement !== entry.cache;
@@ -112,7 +118,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     setName(full.querySelector(".works-full-name"), work);
     const t = telemetryFor(work);
     const available = work.data.session_id && ["running", "waiting", "idle"].includes(work.state);
-    full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${work.member?.provider || work.data.preset || "—"} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
+    full.querySelector(".works-full-meta").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${purposeFor(work)} · ${labelFor(work.state)} · ${seconds(t.elapsed_seconds)} · ${providerFor(work)} / ${work.member?.model || t.model || "—"} · ${available ? "Interactive" : "Input unavailable"}`;
     full.querySelector(".works-full-usage").textContent = `${number(t.input_tokens)} input / ${number(t.cache_tokens)} cache / ${number(t.output_tokens)} output · Context ${finite(t.context_remaining_percent) ? `${t.context_remaining_percent}%` : "—"}`;
     if (rehost && isPresented()) mountTerminal(work.data.id, entry.terminal, { readOnly: false });
   }
@@ -153,7 +159,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     setName(row.querySelector(".work-name-host"), work);
     row.querySelector(".work-purpose").textContent = purposeFor(work);
     row.querySelector(".work-purpose").title = windowDisplayTitle(work.data);
-    row.querySelector(".work-identity").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${work.member?.provider || work.data.preset || "—"}`;
+    row.querySelector(".work-identity").textContent = `${work.assignment.is_pm ? "PM" : work.assignment.issue_number ? `#${work.assignment.issue_number}` : "—"} · ${providerFor(work)}`;
     row.querySelector(".work-state").textContent = labelFor(work.state);
     row.querySelector(".work-elapsed").textContent = seconds(t.elapsed_seconds);
     row.querySelector(".work-model").textContent = work.member?.model || t.model || "—";

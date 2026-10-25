@@ -39,6 +39,37 @@ test("Agents replaces the old terminal surface with the approved roster contract
   assert.doesNotMatch(source, /agents-grid|agent-tile|All agents|Columns|openTab|localStorage|mountTerminal/);
 });
 
+test("Agents identifies the exact PM before the implementation pool without adding a member", async () => {
+  const f = await fixture();
+  const pm = { id: "pm", session_id: "pm-session", agent_name: "Yuu", is_pm: true, status: "running" };
+  const withPm = name => {
+    const catalog = f.windowCatalogModel.read().catalog, project = catalog.appState.tabs[0];
+    f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: catalog.version + 1,
+      appState: { ...catalog.appState, tabs: [{ ...project, workspace: {
+        windows: [...project.workspace.windows.filter(window => window.id !== pm.id), { ...pm, agent_name: name }],
+      } }] } } }));
+  };
+  withPm("Yuu");
+  f.activityModel.update(() => ({ count: 2, agents: [current,
+    { window_id: pm.id, session_id: pm.session_id, runtime_incarnation: 2, is_pm: true }] }));
+  f.flush();
+  const identity = f.surface.element.querySelector(".roster-pm-identity");
+  assert.ok(identity && !identity.hidden);
+  assert.equal(identity.getAttribute("role"), "group");
+  assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu");
+  assert.equal(identity.querySelector(".window-role-badge").textContent, "PM");
+  const children = [...f.surface.element.children];
+  assert.ok(children.indexOf(identity) < children.indexOf(f.surface.element.querySelector(".roster-team")));
+  assert.equal(identity.querySelectorAll("button").length, 0, "PM is not a selectable or restable member");
+  assert.equal(f.surface.element.querySelector(".roster-count").textContent, "2");
+  assert.equal(f.surface.element.querySelectorAll(".roster-list .roster-row").length, 2);
+  assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
+  withPm("Yuu updated"); f.flush();
+  assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  f.activityModel.update(() => ({ count: 1, agents: [current] })); f.flush();
+  assert.equal(identity.hidden, true, "a stale PM catalog window cannot supply a live identity");
+});
+
 test("Agents keeps Team and Past tabs, capacity, member details, four real aggregates and reverse history", async () => {
   const f = await fixture();
   assert.deepEqual([...f.surface.element.querySelectorAll('[role="tab"]')].map(tab => tab.textContent), ["Team", "Past"]);

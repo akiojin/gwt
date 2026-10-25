@@ -832,6 +832,76 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
 }
 
 #[test]
+fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("repo");
+    for (claimed_session, registered_pm, should_refresh) in [
+        ("session-1", true, true),
+        ("retired-session", true, false),
+        ("session-1", false, false),
+    ] {
+        let tab = sample_project_tab_with_window_at(
+            "tab-1",
+            "agent-1",
+            root.clone(),
+            WindowPreset::Agent,
+            WindowProcessStatus::Waiting,
+        );
+        let (mut runtime, recorded_events) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let id = combined_window_id("tab-1", "agent-1");
+        runtime
+            .active_agent_sessions
+            .insert(id.clone(), sample_active_agent_session("tab-1", &id));
+        let context = runtime.project_context("tab-1").unwrap();
+        if registered_pm {
+            runtime
+                .project_state_mut(&context)
+                .unwrap()
+                .pm_sessions
+                .insert(root.clone(), "session-1".into());
+        }
+        let latch = ApprovalPromptLatch {
+            active_fingerprint: Some(7),
+            ..Default::default()
+        };
+        runtime.window_approval_waiting.insert(id.clone(), latch);
+        let status_before = runtime.window_status(&id);
+        let mut event = runtime_hook_coordination_event(claimed_session);
+        event.source_event = Some("PmStatusChanged".into());
+        event.message = Some("coordination:PmStatusChanged".into());
+        event.project_root = Some(root.display().to_string());
+        // A provider-id fallback match must never grant PM notification authority.
+        event.agent_session_id = Some("session-1".into());
+
+        let events = runtime.handle_runtime_hook_event(event);
+
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            usize::from(should_refresh),
+            "only the exact registered PM requests the existing observer"
+        );
+        assert_eq!(runtime.window_status(&id), status_before);
+        assert_eq!(runtime.window_approval_waiting.get(&id), Some(&latch));
+        assert!(!events.iter().any(|event| matches!(
+            event.event,
+            BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
+        )));
+        if should_refresh {
+            let task = tasks.lock().unwrap().remove(0);
+            task();
+            assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
+                recorded_project_payload(event),
+                UserEvent::ActiveWorkProjectionPrepared(_)
+            )));
+        }
+    }
+}
+
+#[test]
 fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());

@@ -7,7 +7,17 @@ fn local_agent_activity_reports_an_observed_empty_project() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).unwrap();
     let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
-    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    assert!(runtime
+        .active_work_projection_reply("client", "tab-1")
+        .is_some());
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "first hydration schedules the census"
+    );
     let view = runtime
         .build_active_work_projection_for_tab_for_test("tab-1", &runtime.tabs[0])
         .unwrap();
@@ -50,6 +60,7 @@ fn local_agent_activity_cache_removes_retired_members_without_redating_proof() {
             runtime_incarnation: 17,
             issue_number: Some(4777),
             is_pm: false,
+            current_task: None,
         });
     let observed_at = activity.observed_at.clone();
     runtime

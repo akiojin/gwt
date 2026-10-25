@@ -53,7 +53,8 @@ test.describe("Works and Agents approved baseline", () => {
   test("PM-first list opens the same native terminal, passes Esc and links exact current members", async ({ page }, info) => {
     await expect(works(page).locator(".work-row")).toHaveCount(3);
     expect(await works(page).locator(".work-row").evaluateAll(rows => rows.map(row => (row as HTMLElement).dataset.windowId))).toEqual(["pm-window", "agent-one", "agent-two"]);
-    await expect(workRow(page, "pm-window").locator(".work-name")).toHaveText("PM");
+    await expect(workRow(page, "pm-window").locator(".work-name")).toHaveText("Yuu");
+    await expect(workRow(page, "pm-window").locator(".window-role-badge")).toHaveText("PM");
     await expect(workRow(page, "pm-window").locator(".work-member")).toHaveCount(0);
     for (const [state, count] of [["running", "2"], ["waiting", "1"], ["idle", "0"], ["error", "0"]]) await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText(count);
     await expect(works(page).locator(".works-active")).toHaveText("Active 3");
@@ -99,7 +100,8 @@ test.describe("Works and Agents approved baseline", () => {
     expect(await works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm').evaluate(node => node === (window as any).__worksNativeTerminal)).toBe(true);
     await page.keyboard.press("Space"); await expect(full(page)).toBeVisible();
     await full(page).getByRole("button", { name: "Previous work" }).click();
-    await expect(full(page).locator(".works-full-name")).toHaveText("PM");
+    await expect(full(page).locator(".works-full-name .work-name")).toHaveText("Yuu");
+    await expect(full(page).locator(".works-full-name .window-role-badge")).toHaveText("PM");
     await full(page).getByRole("button", { name: "Next work" }).click();
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
     await page.screenshot({ path: info.outputPath("works-native-terminal.png") });
@@ -202,6 +204,7 @@ test.describe("Works and Agents approved baseline", () => {
     const plan = (number: number) => plans.locator(`.roster-plan[data-issue-number="${number}"]`);
     const currentIdentity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
     await expect(plans).toBeVisible();
+    await expect(roster(page).locator(".roster-current-work")).toBeVisible();
     expect(await plans.evaluate(node => node.previousElementSibling?.classList.contains("roster-current-work"))).toBe(true);
     await expect(roster(page).locator(".roster-row")).toHaveCount(3);
     await roster(page).locator('.roster-row[data-member-id="m-idle"]').click();
@@ -281,7 +284,7 @@ async function installWorksAgentsBackend(page: Page) {
       baseWindow("board-window", { title: "Board", preset: "board", z_index: 100 }),
       baseWindow("agent-one", { preset: "codex", agent_id: "codex", session_id: "s-one", agent_name: "Aster", dynamic_title: "Current issue", linked_issue_number: 4777 }),
       baseWindow("agent-two", { preset: "claude", agent_id: "claude", session_id: "s-two", agent_name: "Birch", dynamic_title: "Second issue", linked_issue_number: 4001, status: "waiting" }),
-      baseWindow("pm-window", { preset: "claude", agent_id: "claude", session_id: "s-pm", is_pm: true, title: "Project Manager", dynamic_title: "Project supervision" }),
+      baseWindow("pm-window", { preset: "claude", agent_id: "claude", session_id: "s-pm", is_pm: true, agent_name: "Yuu", title: "Project Manager", dynamic_title: "Project supervision" }),
       baseWindow("recorded-window", { preset: "codex", session_id: "s-recorded", agent_name: "Recorded only", status: "running" }),
     ];
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
