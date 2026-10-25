@@ -636,6 +636,15 @@ test("migrated Issue Monitor and Usage receiver roots contain no DOM sinks", () 
       && finding.kind.startsWith("dom-"));
     assert.deepEqual(migrated, [], file);
   }
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const bridge = app.match(/applyIssueMonitorStatus:\s*([^\n]+),/)[1];
+  const committed = [];
+  const applyStatus = new Function('applyKnowledgeIssueMonitorStatus', 'applyIssueMonitorStatus', 'document',
+    `return (${bridge});`)(status => committed.push(status),
+      () => assert.fail('the public status bridge must not bypass the shared Issue model'), {});
+  const status = { enabled: true, state: 'active' };
+  applyStatus(status);
+  assert.deepEqual(committed, [status]);
 });
 
 test("Reports and raw terminal receivers resolve only shared model updates", () => {

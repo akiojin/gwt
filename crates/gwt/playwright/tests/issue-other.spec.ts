@@ -79,6 +79,37 @@ test("Work projection snapshots and patches update Other while retaining session
   await expect(other.locator('[data-action="resume-session"]')).toHaveCount(0);
 });
 
+test("Status bridge shares canonical Issue state with the Monitor strip", async ({ page }, info) => {
+  await boot(page);
+  const other = page.locator("details.issue-other-group");
+  await other.locator("summary").click();
+  const search = page.locator(".knowledge-search");
+  await search.focus();
+  const otherNode = await other.elementHandle();
+  for (const enabled of [true, false]) {
+    await page.evaluate(enabled => (window as any).__operatorShell.applyIssueMonitorStatus({
+      enabled, autonomous_mode: enabled, state: "idle", queue_len: 0, active_count: 0, max_active_agents: 2,
+    }), enabled);
+    await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText(enabled ? "Stop" : "Start");
+    await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", String(enabled));
+    await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText(enabled ? "Idle Q0 A0/2" : "Off");
+    await expect(search).toBeFocused();
+    await expect(other).toHaveAttribute("open");
+    expect(await other.evaluate((node, original) => node === original, otherNode)).toBe(true);
+  }
+  await page.evaluate(() => (window as any).__otherEmit({ kind: "issue_monitor_status", status: {
+    enabled: true, autonomous_mode: true, state: "active", queue_len: 3, active_count: 1, max_active_agents: 2,
+  } }));
+  await expect(page.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+  await expect(page.locator('[data-action="monitor-autonomous"]')).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator("#op-strip-issue-monitor-value")).toHaveText("Run Q3 A1/2");
+  expect(await messages(page, "set_issue_monitor_enabled")).toEqual([]);
+  await page.screenshot({ path: info.outputPath("issue-status-bridge.png"), fullPage: true });
+  if (process.env.GWT_PLAYWRIGHT_CHECK_HOME) {
+    await page.screenshot({ path: `${process.env.GWT_PLAYWRIGHT_CHECK_HOME}/issue-status-bridge-${info.project.name}.png`, fullPage: true });
+  }
+});
+
 test("Issue list snapshots refresh a queued query through shared views", async ({ page }, info) => {
   await boot(page);
   await page.locator(".knowledge-row[data-issue-number='4556'] .knowledge-row-select").click();

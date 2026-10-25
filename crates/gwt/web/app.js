@@ -8,7 +8,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import {
         initOperatorShell,
         applyTelemetryCounts,
-        applyIssueMonitorStatus,
         subscribeIssueMonitorStatus,
         applyProviderUsage,
         subscribeRuntimeHealth,
@@ -196,7 +195,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         hotkey: __op.hotkey,
         palette: __op.palette,
         applyTelemetryCounts: (counts) => applyTelemetryCounts(document, counts),
-        applyIssueMonitorStatus: (status) => applyIssueMonitorStatus(document, status),
+        applyIssueMonitorStatus: (status) => applyKnowledgeIssueMonitorStatus(status),
         applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot),
         applyRuntimeHealth: (snapshot) => runtimeHealthModel.update(() => snapshot || {}),
       };
