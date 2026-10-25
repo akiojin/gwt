@@ -10,7 +10,7 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
-  test("T18 reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
+  test("T20a UI reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -36,6 +36,14 @@ test.describe("Issue queue real backend launch", () => {
     };
     const owner = (snapshot: any) => snapshot.members.find((member: any) =>
       member.issues.some((issue: any) => issue.issue_number === fixture.issueNumber));
+    const openMemberPlans = async (memberId: string) => {
+      await current.locator('.op-rail__surface[data-surface="agents"]').click();
+      const main = current.getByRole("region", { name: "Main pane", exact: true });
+      await expect(main).toHaveAttribute("data-surface", "agents");
+      const agents = main.locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      return agents.locator(".roster-plans");
+    };
     capture(current);
     try {
       await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -68,11 +76,19 @@ test.describe("Issue queue real backend launch", () => {
         expected_queue_revision: observed.queue_revision,
         expected_schedule_revision: observed.schedule_revision,
       };
-      const moved = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
-      expect(moved.ok, JSON.stringify(moved)).toBe(true);
-      const saved = JSON.parse(moved.output);
+      const sourcePlans = await openMemberPlans(source.agent_member_id);
+      const queuedPlan = sourcePlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"]`);
+      await expect(queuedPlan).toBeVisible();
+      await queuedPlan.getByRole("combobox", { name: `Assign issue #${fixture.issueNumber} to member`, exact: true })
+        .selectOption(target.agent_member_id);
+      await queuedPlan.getByRole("button", { name: `Reassign issue #${fixture.issueNumber}`, exact: true }).click();
+      const targetPlans = await openMemberPlans(target.agent_member_id);
+      await expect(targetPlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"] .roster-plan-reason`))
+        .toHaveText("Assigned by you");
+      const saved = schedule();
       expect(owner(saved)).toMatchObject({ agent_member_id: target.agent_member_id,
         issues: [{ issue_number: fixture.issueNumber, reason: "assigned_by_you" }] });
+      await info.attach(`agent-schedule-ui-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       const beforeStale = await fixture.monitorPreferencesBytes();
       const stale = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
       expect(stale.ok).toBe(false);
@@ -101,7 +117,13 @@ test.describe("Issue queue real backend launch", () => {
       await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
       await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
       expect(owner(schedule()), "fresh GUI retains the reassigned member").toEqual(owner(saved));
+      const restoredPlans = await openMemberPlans(target.agent_member_id);
+      await expect(restoredPlans.locator(`.roster-plan[data-issue-number="${fixture.issueNumber}"] .roster-plan-reason`))
+        .toHaveText("Assigned by you");
+      await expect(current.getByRole("region", { name: "Main pane", exact: true }).locator(".roster-detail h3"))
+        .toHaveText(target.name);
       expect(await fixture.launches(), "disabled Monitor stays idle across restart").toEqual([]);
+      await info.attach(`agent-schedule-ui-restored-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
       await expect.poll(async () => (await fixture.launches()).length,
         { timeout: 90_000, message: "normal Monitor launches the reassigned queued Issue" }).toBe(1);
@@ -121,7 +143,7 @@ test.describe("Issue queue real backend launch", () => {
       await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
         target: { agent_member_id: target.agent_member_id, name: target.name }, launch }, null, 2), contentType: "application/json" });
-      expect(errors, "zero console/page errors across JSON reassignment, GUI restart and real launch").toEqual([]);
+      expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
     } finally {
       try { await current.close(); } finally { await fixture.stop(); }
     }

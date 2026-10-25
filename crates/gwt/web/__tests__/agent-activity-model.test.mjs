@@ -1,6 +1,46 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createAgentActivityModel } from "../agent-activity-model.js";
+import { createAgentActivityModel, createAgentScheduleModel } from "../agent-activity-model.js";
+
+test("plans accept only canonical project revisions and keep the current plan until readback", () => {
+  const { model, applyAgentScheduleSnapshot, applyAgentScheduleError,
+    beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel("project");
+  const snapshot = { project_key: "project", roster_revision: 3, queue_revision: "queue-3",
+    schedule_revision: 2, members: [{ agent_member_id: "m1", issues: [{ issue_number: 42, reason: "queue_order" }], empty_reason: null }] };
+  applyAgentScheduleSnapshot({ ...snapshot, project_key: "other" });
+  assert.equal(model.read().snapshot, null);
+  applyAgentScheduleSnapshot(snapshot);
+  const action = { kind: "reassign", issue_number: 42, source_member_id: "m1", target_member_id: "m2",
+    expected_roster_revision: 3, expected_queue_revision: "queue-3", expected_schedule_revision: 2 };
+  assert.equal(beginAgentScheduleRequest(action), true);
+  assert.equal(beginAgentScheduleRequest(action), false, "only one move can be pending");
+  assert.equal(model.read().pending, true);
+  assert.deepEqual(model.read().snapshot, snapshot, "sending is not a successful move");
+  applyAgentScheduleSnapshot({ ...snapshot });
+  assert.equal(model.read().pending, true, "a delayed pre-move read is not the move's acknowledgement");
+  applyAgentScheduleError({ project_key: "other", message: "unrelated" });
+  assert.equal(model.read().pending, true);
+  applyAgentScheduleError({ project_key: "project", message: "Schedule changed; refresh and retry" });
+  assert.deepEqual(model.read().snapshot, snapshot);
+  assert.equal(model.read().pending, false);
+  assert.match(model.read().error, /refresh/);
+  assert.equal(beginAgentScheduleRequest(action), false, "an error requires a canonical refresh");
+  assert.equal(beginAgentScheduleRequest({ kind: "read" }), true);
+  assert.equal(beginAgentScheduleRequest({ kind: "read" }), true, "Refresh recovers a lost response");
+  applyAgentScheduleSnapshot({ ...snapshot, schedule_revision: 1 });
+  assert.equal(model.read().pending, true, "a stale reply cannot ACK the pending read");
+  const saved = { ...snapshot, schedule_revision: 3, members: [{ agent_member_id: "m2", issues: [{ issue_number: 42, reason: "assigned_by_you" }] }] };
+  applyAgentScheduleSnapshot(saved);
+  assert.deepEqual(model.read().snapshot, saved);
+  assert.equal(model.read().error, null);
+  assert.equal(model.read().pending, false);
+  assert.equal(beginAgentScheduleRequest(action), false, "a captured stale action cannot be submitted");
+  applyAgentScheduleSnapshot({ ...snapshot, roster_revision: 2, schedule_revision: 4 });
+  assert.deepEqual(model.read().snapshot, saved, "an older roster cannot resurrect members");
+  clearAgentSchedule();
+  assert.equal(model.read().snapshot, null, "disconnect invalidates mutation authority");
+  assert.equal(beginAgentScheduleRequest(action), false);
+});
 
 test("roster receipts are project-scoped and stale revisions cannot undo a member change", async () => {
   const { createAgentRosterModel } = await import("../agent-activity-model.js");
