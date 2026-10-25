@@ -4808,6 +4808,77 @@ fn agent_name_projects_into_active_work_without_replacing_provider_identity() {
 }
 
 #[test]
+fn agent_name_backfills_registered_pm_without_joining_the_member_pool() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&root);
+    fs::create_dir_all(&worktree).unwrap();
+    let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    session.project_state_root = Some(root.clone());
+    session.agent_name = Some("Falcon".into());
+    session.update_status(gwt_agent::AgentStatus::Running);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "pm",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace.set_session_id("pm", Some(session.id.clone()));
+    let implementation = tab.workspace.add_window(WindowPreset::Agent);
+    tab.workspace
+        .set_agent_name(&implementation.id, Some("Flora".into()));
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    session.save(&runtime.sessions_dir).unwrap();
+    let host_pid = std::process::id();
+    let started = gwt::process::host_process_start_time(host_pid).unwrap();
+    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    sidecar.host_started_at = Some(started);
+    sidecar.child_pid = Some(host_pid);
+    sidecar.child_started_at = Some(started);
+    sidecar
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &runtime.sessions_dir,
+            host_pid,
+            &session.id,
+        ))
+        .unwrap();
+    runtime.register_pm_after_launch(&root, &session.id, "claude", &worktree);
+    let roster = gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap();
+
+    runtime.assign_missing_agent_names();
+    assert_eq!(
+        runtime
+            .tab("tab")
+            .unwrap()
+            .workspace
+            .window("pm")
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("Falcon")
+    );
+    assert!(runtime.agent_name_reservations(None).1.contains("Falcon"));
+    runtime.sync_pm_session_cache(&root, None);
+    assert!(
+        runtime.assign_missing_agent_names().is_empty(),
+        "the assigned PM name stays stable"
+    );
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(saved.agent_name, session.agent_name);
+    assert!(saved.agent_member_id.is_none());
+    assert_eq!(
+        gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap(),
+        roster,
+        "PM display naming must not change members, assignments or capacity"
+    );
+}
+
+#[test]
 fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

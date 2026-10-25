@@ -107,8 +107,9 @@ export function selectWorksTelemetry({ sessions = [], projectRoot, agents = [], 
       verification,
       last_action: recorded?.last_board_entry_kind && recorded?.updated_at
         ? `${recorded.last_board_entry_kind} · ${recorded.updated_at}` : null,
-      model: usage?.model ?? null, elapsed_seconds: null, warning_count: null,
+      elapsed_seconds: null, warning_count: null,
       ...bySession[agent.session_id],
+      model: usage?.model ?? bySession[agent.session_id]?.model ?? null,
     };
   }
   // Each bucket needs evidence for every live participant at the same timestamp.

@@ -1858,6 +1858,8 @@ pub struct LocalAgentActivityAgentView {
     pub runtime_incarnation: u64,
     pub issue_number: Option<u64>,
     pub is_pm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2062,7 +2064,7 @@ pub struct AgentPastContributorView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentWorkFactsView {
-    pub branch: String,
+    pub branch: Option<String>,
     pub ahead_of_develop: Option<usize>,
     pub model: Option<String>,
     pub provider: String,
@@ -2109,6 +2111,9 @@ pub enum BackendEvent {
     #[serde(rename = "workspace_state")]
     WorkspaceState {
         workspace: AppStateView,
+    },
+    LocalAgentActivity {
+        activity: LocalAgentActivityView,
     },
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
@@ -3067,6 +3072,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "local_agent_activity",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "active_work_projection",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3626,6 +3636,7 @@ impl BackendEvent {
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::LocalAgentActivity { .. } => "local_agent_activity",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
@@ -4725,16 +4736,14 @@ mod tests {
         );
         assert!(workspace_state.coalesces_on_frontend());
 
-        let active_work_projection =
-            backend_event_policy("active_work_projection").expect("active_work_projection policy");
-        assert_eq!(
-            active_work_projection.delivery,
-            BackendEventDeliveryClass::IdempotentLatest
-        );
-        assert_eq!(
-            active_work_projection.backpressure,
-            BackendEventBackpressurePolicy::LatestWins
-        );
+        for kind in ["active_work_projection", "local_agent_activity"] {
+            let policy = backend_event_policy(kind).expect("projection policy");
+            assert_eq!(policy.delivery, BackendEventDeliveryClass::IdempotentLatest);
+            assert_eq!(
+                policy.backpressure,
+                BackendEventBackpressurePolicy::LatestWins
+            );
+        }
 
         let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
         assert_eq!(

@@ -6477,10 +6477,13 @@ impl AppRuntime {
             .as_deref()
             .is_some_and(gwt::pm_registry::is_canonical_pm_worktree)
         {
-            config.env_vars.remove("GWT_AGENT_NAME");
             config.env_vars.remove("GWT_AGENT_MEMBER_ID");
             config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
-            None
+            let name = self.allocate_pm_display_name(&project_root_path, inherited_agent_name)?;
+            config
+                .env_vars
+                .insert("GWT_AGENT_NAME".into(), name.clone());
+            Some(name)
         } else if is_review {
             // Independent reviewers have their own admission slot and cannot
             // borrow an implementation member while it is working.

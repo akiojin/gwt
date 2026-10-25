@@ -4868,12 +4868,8 @@ impl AppRuntime {
         let mut known = HashSet::new();
         let mut active = HashSet::new();
         for tab in &self.tabs {
-            let pm = self.pm_session_for_root(&tab.project_root);
             for window in &tab.workspace.persisted().windows {
-                if !window.preset.is_agent_terminal()
-                    || window.is_pm
-                    || pm.is_some_and(|id| window.session_id.as_ref() == Some(id))
-                {
+                if !window.preset.is_agent_terminal() {
                     continue;
                 }
                 if let Some(name) = &window.agent_name {
@@ -4915,6 +4911,20 @@ impl AppRuntime {
         gwt::agent_names::allocate(&history, language, &active, &known)
     }
 
+    fn allocate_pm_display_name(
+        &self,
+        root: &Path,
+        inherited: Option<String>,
+    ) -> Result<String, String> {
+        let Some(name) = inherited else {
+            return self.allocate_agent_name(root, None);
+        };
+        let history =
+            gwt_core::paths::gwt_project_dir_for_repo_path(root).join("agent-names.jsonl");
+        gwt::agent_names::remember(&history, &HashSet::from([name.clone()]))?;
+        Ok(name)
+    }
+
     fn ensure_window_agent_name(
         &mut self,
         tab_id: &str,
@@ -4925,14 +4935,13 @@ impl AppRuntime {
             .workspace
             .window(raw_id)
             .ok_or("Agent window is missing")?;
-        if !window.preset.is_agent_terminal()
-            || window.is_pm
-            || self
-                .pm_session_for_root(&tab.project_root)
-                .is_some_and(|id| window.session_id.as_ref() == Some(id))
-        {
+        if !window.preset.is_agent_terminal() {
             return Ok(None);
         }
+        let is_pm = window.is_pm
+            || self
+                .pm_session_for_root(&tab.project_root)
+                .is_some_and(|id| window.session_id.as_ref() == Some(id));
         let existing_name = window.agent_name.clone();
         let root = tab.project_root.clone();
         let session_path = window
@@ -4942,20 +4951,25 @@ impl AppRuntime {
         let mut session = session_path
             .as_ref()
             .and_then(|path| gwt_agent::Session::load(path).ok());
+        let is_pm = is_pm
+            || session.as_ref().is_some_and(|session| {
+                gwt::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
+            });
+        let inherited_name = session
+            .as_ref()
+            .and_then(|session| session.agent_name.clone());
         let name = match existing_name {
             Some(name) => name,
-            None => self.allocate_agent_name(
-                &root,
-                session
-                    .as_ref()
-                    .and_then(|session| session.agent_name.clone()),
-            )?,
+            None if is_pm => self.allocate_pm_display_name(&root, inherited_name)?,
+            None => self.allocate_agent_name(&root, inherited_name)?,
         };
         if let Some(session) = &mut session {
-            if !matches!(
-                session.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            ) && !session.review_dispatch
+            if !is_pm
+                && !matches!(
+                    session.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                )
+                && !session.review_dispatch
                 && !gwt::session_inventory::observe_session(session, &self.sessions_dir)
                     .sessions
                     .is_empty()
@@ -5000,7 +5014,7 @@ impl AppRuntime {
                     .persisted()
                     .windows
                     .iter()
-                    .filter(|window| window.preset.is_agent_terminal() && !window.is_pm)
+                    .filter(|window| window.preset.is_agent_terminal())
                     .map(|window| {
                         (
                             tab.id.clone(),

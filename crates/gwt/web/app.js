@@ -1704,14 +1704,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           windowData?.agent_id,
         ];
         if (windowData?.is_pm) {
-          // Keep the identity fixed and append whatever the PM is currently
-          // focused on, so the window never stops saying what it is.
-          const focus = String(
-            windowData?.dynamic_title || windowData?.purpose_title || "",
-          ).trim();
-          return focus && focus !== PM_WINDOW_TITLE
-            ? `${PM_WINDOW_TITLE} — ${focus}`
-            : PM_WINDOW_TITLE;
+          // The assigned identity leads; the existing adjacent badge names
+          // the PM role independently from its current task.
+          return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
           const name = String(windowData?.agent_name || "").trim();
@@ -5197,6 +5192,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "active_work_projection_patch":
             applyAgentActivitySnapshot(event.projection?.local_agent_activity);
             applyActiveWorkProjectionReceiveEvent(event);
+            break;
+          case "local_agent_activity":
+            applyAgentActivitySnapshot(event.activity);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
           case "window_list":

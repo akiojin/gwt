@@ -1324,17 +1324,27 @@ fn spawn_workspace_projection_watcher(
         let Some(watch_dir) = projection_path.parent().map(Path::to_path_buf) else {
             return;
         };
+        let mut watch_dirs = vec![watch_dir];
+        let pm_status_path = gwt::pm_current::status_path(&project_root);
+        if let Some(status_dir) = pm_status_path
+            .parent()
+            .filter(|status_dir| !same_worktree_path(status_dir, &watch_dirs[0]))
+        {
+            watch_dirs.push(status_dir.to_path_buf());
+        }
         // The workspace dir is created lazily by `save_workspace_projection`;
         // the watcher needs the directory to exist before `notify` can attach.
         // Best-effort create — if it fails, the watcher just won't fire until
         // the dir appears on its own.
-        if let Err(error) = std::fs::create_dir_all(&watch_dir) {
-            tracing::debug!(
-                project_root = %project_root.display(),
-                watch_dir = %watch_dir.display(),
-                error = %error,
-                "workspace projection watcher could not ensure watch dir (will retry on first write)"
-            );
+        for watch_dir in &watch_dirs {
+            if let Err(error) = std::fs::create_dir_all(watch_dir) {
+                tracing::debug!(
+                    project_root = %project_root.display(),
+                    watch_dir = %watch_dir.display(),
+                    error = %error,
+                    "workspace projection watcher could not ensure watch dir (will retry on first write)"
+                );
+            }
         }
         let mut debouncer = match notify_debouncer_mini::new_debouncer_opt::<_, notify::RecommendedWatcher>(
             workspace_projection_debounce_config(),
@@ -1358,23 +1368,25 @@ fn spawn_workspace_projection_watcher(
             }
         };
 
-        if let Err(error) = debouncer
-            .watcher()
-            .watch(&watch_dir, notify::RecursiveMode::NonRecursive)
-        {
-            tracing::warn!(
-                project_root = %project_root.display(),
-                watch_dir = %watch_dir.display(),
-                error = %error,
-                "workspace projection watcher path failed"
-            );
-            return;
+        for watch_dir in &watch_dirs {
+            if let Err(error) = debouncer
+                .watcher()
+                .watch(watch_dir, notify::RecursiveMode::NonRecursive)
+            {
+                tracing::warn!(
+                    project_root = %project_root.display(),
+                    watch_dir = %watch_dir.display(),
+                    error = %error,
+                    "workspace projection watcher path failed"
+                );
+                return;
+            }
         }
 
         while let Ok(message) = rx.recv() {
             match message {
                 WorkspaceProjectionWatcherMessage::Changed(paths) => {
-                    if let Some(event) = workspace_projection_watch_event(&project_root, &paths) {
+                    for event in workspace_projection_watch_events(&project_root, &paths) {
                         proxy.send(event);
                     }
                 }
@@ -1399,15 +1411,26 @@ fn workspace_projection_debounce_config() -> notify_debouncer_mini::Config {
     notify_debouncer_mini::Config::default().with_timeout(Duration::from_millis(250))
 }
 
-fn workspace_projection_watch_event(project_root: &Path, paths: &[PathBuf]) -> Option<UserEvent> {
-    if !paths
+fn workspace_projection_watch_events(project_root: &Path, paths: &[PathBuf]) -> Vec<UserEvent> {
+    let mut events = Vec::new();
+    if paths
         .iter()
         .any(|path| path.file_name().is_some_and(|name| name == "current.json"))
     {
-        return None;
+        tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
+        events.extend(load_workspace_projection_user_event(project_root));
     }
-    tracing::info!(project_root = %project_root.display(), "workspace projection watcher detected current.json change");
-    load_workspace_projection_user_event(project_root)
+    let pm_status_path = gwt::pm_current::status_path(project_root);
+    if paths.iter().any(|path| {
+        path.file_name()
+            .is_some_and(|name| name == "pm-status.jsonl")
+            && same_worktree_path(path, &pm_status_path)
+    }) {
+        events.push(UserEvent::ActiveWorkProjectionChanged {
+            project_root: project_root.to_path_buf(),
+        });
+    }
+    events
 }
 
 /// Issue #4406: Board refreshes run off the GUI event loop, one per project at
@@ -3661,6 +3684,67 @@ mod tests {
     }
 
     #[test]
+    fn workspace_projection_pm_status_write_refreshes_local_activity() {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let status_path = gwt::pm_current::status_path(&root);
+        let input = serde_json::from_value(serde_json::json!({
+            "items": [{"kind": "working", "text": "Review the next Issue", "started_at": "2026-10-25T00:00:00Z"}],
+            "next_trigger": "Next scan"
+        })).unwrap();
+        gwt_core::pm_status::set_status_from_path(&status_path, input, None).unwrap();
+        let pm_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&root);
+        fs::create_dir_all(&pm_worktree).unwrap();
+
+        for watched_root in [&root, &pm_worktree] {
+            let events = super::workspace_projection_watch_events(
+                watched_root,
+                std::slice::from_ref(&status_path),
+            );
+            assert!(
+                matches!(
+                    events.as_slice(),
+                    [UserEvent::ActiveWorkProjectionChanged { project_root }] if project_root == watched_root
+                ),
+                "a canonical PM status write must remeasure local activity"
+            );
+            assert!(super::workspace_projection_watch_events(
+                watched_root,
+                &[temp.path().join("other/pm-status.jsonl")]
+            )
+            .is_empty());
+        }
+        let current = gwt_core::paths::gwt_workspace_projection_path_for_repo_path(&root);
+        let projection =
+            gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&root);
+        gwt_core::workspace_projection::save_workspace_projection(&root, &projection).unwrap();
+        let paths = [current.clone(), status_path.clone()];
+        let events = super::workspace_projection_watch_events(&root, &paths);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [UserEvent::WorkspaceProjectionLoaded { projection: Some(actual), .. },
+                 UserEvent::ActiveWorkProjectionChanged { project_root }]
+                 if actual.as_ref() == &projection && project_root == &root
+            ),
+            "a mixed batch must retain both the current snapshot and PM refresh"
+        );
+        fs::write(&current, b"{broken").unwrap();
+        let events = super::workspace_projection_watch_events(&root, &paths);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [UserEvent::WorkspaceStateLoadFailed { .. },
+                 UserEvent::ActiveWorkProjectionChanged { project_root }]
+                 if project_root == &root
+            ),
+            "a current snapshot load failure must not discard the PM refresh"
+        );
+    }
+
+    #[test]
     fn workspace_projection_ten_notifications_trigger_one_reload() {
         struct BurstWatcher(Box<dyn notify::EventHandler>);
         impl notify::Watcher for BurstWatcher {
@@ -3719,8 +3803,7 @@ mod tests {
                     .into_iter()
                     .map(|event| event.path)
                     .collect::<Vec<_>>();
-                if let Some(event) = super::workspace_projection_watch_event(&watched_root, &paths)
-                {
+                for event in super::workspace_projection_watch_events(&watched_root, &paths) {
                     tx.send(event).unwrap();
                 }
             },
@@ -11229,6 +11312,7 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::ActiveWorkProjectionPrepared(prepared)) => {
                 let commit = app.handle_active_work_projection_prepared(*prepared);
+                clients.dispatch(commit.local_activity.into_iter().collect());
                 let mut dispatch_ms = 0;
                 if let Some(prepared_dispatch) = commit.prepared_dispatch {
                     let dispatch_started = std::time::Instant::now();

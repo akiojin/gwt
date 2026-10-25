@@ -1,12 +1,13 @@
 /* SPEC #1921 T447 / SC-069: exact relaunch continuity on an isolated checkout.
  * gwt runs from this checkout with a fresh HOME on a throwaway project
- * repository; only the Codex executable is an argv recorder, so no provider conversation or quota is involved. The
+ * repository; provider executables are argv recorders, so no remote conversation or quota is involved. The
  * contract under test ends where gwt hands off to the provider:
  *   (a) the exact native resume identity reaches the provider argv, and
  *   (b) after a window restart and an app restart the relaunched window is
  *       rebound to that same exact session.
  */
-import { readdir, readFile } from "node:fs/promises";
+import { chmod, readdir, readFile, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_helpers/exact-relaunch";
@@ -150,6 +151,197 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
     } finally {
       await fixture.stop();
+    }
+  });
+
+  test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
+    test.setTimeout(420_000);
+    const purpose = "Review active work and coordinate delivery";
+    const fixture = await startExactRelaunchFixture(info, {
+      monitorPreferences: { max_active_agents: 4 },
+      async prepare({ home, bin, project, env }) {
+        const git = (...args: string[]) => execFileSync("git", args, { cwd: project, env, encoding: "utf8" });
+        git("clone", "--bare", "--quiet", project, join(home, "origin.git"));
+        git("remote", "add", "origin", join(home, "origin.git")); git("fetch", "--quiet", "origin");
+        for (let i = 1; i <= 4; i += 1) git("branch", `worker-${i}`);
+        let provider = await readFile(join(bin, "codex"), "utf8");
+        provider = provider.replace(/const native = resumed \|\| requested \|\| [^;]+;/,
+          "const native = resumed || requested || require('node:crypto').randomUUID();");
+        provider = provider.replace("  if (line.trim() === 'GWT_FIXTURE_EXIT')", `
+  if (['GWT_FIXTURE_BEGIN', 'GWT_FIXTURE_IDLE', 'GWT_FIXTURE_PM_BEGIN'].includes(line.trim())) {
+    const event = line.trim() === 'GWT_FIXTURE_IDLE' ? 'Stop' : 'UserPromptSubmit';
+    const hook = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH,
+      ['hook', 'event', event], {cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
+        input:JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd()})});
+    if (hook.status !== 0) { console.log('WORKS_HOOK_FAILED'); return; }
+    if (line.trim() === 'GWT_FIXTURE_PM_BEGIN') {
+      const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+        cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:30000,
+        input:JSON.stringify({schema_version:1,operation:'pm.status.set',params:{
+          items:[{kind:'working',text:${JSON.stringify(purpose)},started_at:new Date().toISOString()}],
+          next_trigger:'Agent update'}})});
+      if (result.status !== 0 || !JSON.parse(result.stdout).ok) { console.log('WORKS_STATUS_FAILED'); return; }
+    }
+    console.log('WORKS_STATE ' + event); return;
+  }
+  if (line.trim() === 'GWT_FIXTURE_EXIT')`);
+        await writeFile(join(bin, "codex"), provider);
+        let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
+          .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
+          .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
+          .replace(" ?? null);\nconst requested", " ?? null));\nconst requested");
+        const transcriptStart = claude.indexOf("const directory = path.join(process.env.HOME, '.codex'");
+        const transcriptEnd = claude.indexOf("fs.appendFileSync(", transcriptStart);
+        claude = claude.slice(0, transcriptStart) + `
+const directory = path.join(process.env.HOME, '.claude', 'projects', 'works-fixture');
+fs.mkdirSync(directory, {recursive:true});
+const rollout = path.join(directory, native + '.jsonl');
+for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
+  type:'assistant',sessionId:native,cwd:process.cwd(),timestamp:new Date(Date.now()-age).toISOString(),
+  message:{id:require('node:crypto').randomUUID(),model:'claude-sonnet-4-5',usage:{
+    input_tokens:80,output_tokens:12,cache_read_input_tokens:40,cache_creation_input_tokens:5}}}) + '\\n');
+` + claude.slice(transcriptEnd);
+        await writeFile(join(bin, "claude"), claude);
+        await chmod(join(bin, "claude"), 0o755);
+        execFileSync(process.execPath, ["--check", join(bin, "claude")]);
+      },
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    const rows = main.locator(".works-surface:not(.works-surface--preview) .work-row");
+    let workspace: any = null, activity: any = null, usage: any = null;
+    // Observe the real wire independently of the bridge's bounded event log.
+    page.on("websocket", socket => {
+      if (!new URL(socket.url()).searchParams.has("repo_hash")) return;
+      socket.on("framereceived", ({ payload }) => {
+        try {
+          const event = JSON.parse(String(payload));
+          if (event.kind === "workspace_state") workspace = event.workspace;
+          if (event.kind === "local_agent_activity") activity = event.activity;
+          if (event.projection?.local_agent_activity) activity = event.projection.local_agent_activity;
+          if (event.kind === "provider_usage") usage = event.sessions;
+        }
+        catch { /* Native binary terminal frames are unrelated to membership. */ }
+      });
+    });
+    const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
+      .filter((window: any) => window.session_id) ?? [];
+    const input = (id: string, command: string) => sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+    try {
+      await page.setViewportSize({ width: 1600, height: 1500 });
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true, suppressProjectSurfaces: true });
+      await sendLiveGwtEvent(page, { kind: "open_pm_agent" });
+      await expect.poll(async () => (await windows()).filter((window: any) => window.is_pm).length, { timeout: 90_000 }).toBe(1);
+      for (let i = 1; i <= 4; i += 1) {
+        await launchCodex(page, `worker-${i}`);
+        await expect.poll(async () => (await windows()).filter((window: any) => window.agent_id === "codex").length,
+          { timeout: 60_000 }).toBe(i);
+      }
+      await expect.poll(async () => (await windows()).length, { timeout: 60_000 }).toBe(5);
+      const live = await windows(), pm = live.find((window: any) => window.is_pm);
+      expect(live).toHaveLength(5);
+      const pmName = pm.agent_name;
+      expect(typeof pmName === "string" && pmName.trim().length > 0).toBe(true);
+      await expect.poll(async () => (await fixture.launches()).length).toBe(5);
+      for (const worker of live.filter((window: any) => !window.is_pm)) await input(worker.id, "GWT_FIXTURE_BEGIN");
+      await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(rows).toHaveCount(5, { timeout: 60_000 });
+      await expect(rows.last()).toBeInViewport({ ratio: 1 });
+      expect(await rows.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.windowId)))
+        .toEqual([pm.id, ...live.filter((window: any) => !window.is_pm).map((window: any) => window.id)]);
+      const first = rows.first();
+      await expect(first.locator(".work-name")).toHaveText(pmName);
+      await expect(first.locator(".work-name-host .window-role-badge")).toHaveText("PM");
+      await expect(first.locator(".work-purpose")).toHaveText(purpose, { timeout: 30_000 });
+      await expect(first.locator(".work-identity")).toHaveText("PM · claude");
+      await expect(first).toHaveAttribute("data-state", "running");
+      await expect(main.locator('[data-count="running"]')).toHaveText("5");
+      await expect(main.locator(".works-active")).toHaveText("Active 5");
+      await expect(first.locator(".work-model")).toHaveText("claude-sonnet-4-5", { timeout: 45_000 });
+      for (const metric of ["input", "cache", "output"]) await expect(first.locator(`[data-stat="${metric}"]`)).toHaveText(/^[1-9]/);
+      await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
+      await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
+      const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
+      expect(pmWorktree).toBeTruthy();
+      const pmBranch = execFileSync("git", ["-C", pmWorktree!, "branch", "--show-current"], { encoding: "utf8" }).trim();
+      await expect(first.locator('[data-stat="branch"]')).toHaveText(pmBranch);
+      for (const worker of live.filter((window: any) => !window.is_pm)) {
+        const launch = (await fixture.launches()).find(entry => entry.gwt_session_id === worker.session_id)!;
+        const branch = execFileSync("git", ["-C", launch.cwd, "branch", "--show-current"], { encoding: "utf8" }).trim();
+        await expect(main.locator(`.work-row[data-window-id="${worker.id}"] [data-stat="branch"]`)).toHaveText(branch);
+      }
+      await page.screenshot({ path: info.outputPath("works-live-five.png") });
+      await input(pm.id, "GWT_FIXTURE_IDLE");
+      await expect(first).toHaveAttribute("data-state", "idle");
+      await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
+      await expect(first).toHaveAttribute("data-state", "running");
+      await page.reload();
+      await expect(rows).toHaveCount(5, { timeout: 60_000 });
+      await expect(rows.first().locator(".work-name")).toHaveText(pmName);
+      await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
+      await expect(rows.first().locator(".work-purpose")).toHaveText(purpose);
+      await expect(rows.first().locator(".work-identity")).toHaveText("PM · claude");
+      await expect(rows.first()).toHaveAttribute("data-state", "running");
+      await expect(main.locator(".works-active")).toHaveText("Active 5");
+      const restarted = await fixture.restart(); workspace = null;
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(rows).toHaveCount(5, { timeout: 90_000 });
+      await expect(rows.first().locator(".work-name")).toHaveText(pmName);
+      await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
+      await expect(rows.first().locator(".work-purpose")).toHaveText(purpose);
+      await expect(rows.first().locator(".work-identity")).toHaveText("PM · claude");
+      await expect(rows.first()).toHaveAttribute("data-state", "idle");
+      await expect(rows.first().locator(".work-model")).toHaveText("claude-sonnet-4-5", { timeout: 45_000 });
+      for (const metric of ["input", "cache", "output"]) await expect(rows.first().locator(`[data-stat="${metric}"]`)).toHaveText(/^[1-9]/);
+      await expect.poll(async () => Number(await rows.first().locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
+      await expect.poll(() => rows.first().locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
+      await expect(rows.first().locator('[data-stat="branch"]')).toHaveText(pmBranch);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors).toEqual([]);
+      await page.screenshot({ path: info.outputPath("works-live-five-reloaded.png") });
+      const images: { name: string; image: string }[] = [];
+      for (const surface of ["pm", "agents", "works"]) {
+        if (surface === "pm") await page.locator("#op-pm-entry").click();
+        else await page.locator(`.op-rail__surface[data-surface="${surface}"]`).click();
+        await expect(main).toHaveAttribute("data-surface", surface);
+        if (surface === "pm") {
+          const header = main.locator('.workspace-window[data-pm="true"]');
+          await expect(header.locator(".title-text")).toHaveText(pmName);
+          await expect(header.locator(".window-role-badge")).toHaveText("PM");
+        } else if (surface === "agents") {
+          await expect(main.locator(".roster-pm-identity .roster-pm-name")).toHaveText(pmName);
+          await expect(main.locator(".roster-pm-identity .window-role-badge")).toHaveText("PM");
+          await expect(main.locator(".roster-list .roster-row")).toHaveCount(4);
+          await expect(main.locator(".roster-count")).toHaveText("4");
+        } else {
+          await expect(rows).toHaveCount(5);
+          await expect(rows.first().locator(".work-name")).toHaveText(pmName);
+          await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
+        }
+        images.push({ name: surface, image: (await page.screenshot({ path: info.outputPath(`pm-identity-${surface}.png`) })).toString("base64") });
+      }
+      const sheet = await page.context().newPage();
+      try {
+        await sheet.setViewportSize({ width: 4832, height: 1540 });
+        await sheet.setContent(`<main style="display:flex;gap:16px">${images.map(({ name, image }) =>
+          `<figure style="margin:0"><figcaption>${name} · ${theme} · same isolated GUI</figcaption><img width="1600" height="1500" src="data:image/png;base64,${image}"></figure>`).join("")}</main>`);
+        await sheet.screenshot({ path: info.outputPath("pm-identity-three-surfaces.png"), fullPage: true });
+      } finally { await sheet.close(); }
+      expect(errors).toEqual([]);
+      const current = await windows(), sessions = new Set(current.map((window: any) => window.session_id));
+      const children = [...new Map((await fixture.launches()).filter(launch => sessions.has(launch.gwt_session_id))
+        .map(launch => [launch.gwt_session_id, launch])).values()];
+      expect(children).toHaveLength(5);
+      for (const child of children) expect(() => process.kill(child.pid, 0)).not.toThrow();
+      await info.attach("real-child-membership", { body: JSON.stringify({ windows: current, children }), contentType: "application/json" });
+    } finally {
+      try {
+        await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage }), contentType: "application/json" });
+      } finally { await fixture.stop(); }
     }
   });
 

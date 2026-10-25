@@ -228,6 +228,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
 test("default coalescing policy mirrors backend latest-wins event policy", () => {
   for (const kind of [
     "workspace_state",
+    "local_agent_activity",
     "active_work_projection",
     "window_list",
     "runtime_health",
