@@ -195,6 +195,7 @@ fn issue_3809_scheduled_scan_preserves_child_activity_after_disk_rebase() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scheduled scan");
     super::super::wait_scan_generation_reaper(&prefs_path);
