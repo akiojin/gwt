@@ -362,24 +362,37 @@ test("a search completion cannot move a newer explicit selection (AS-17.5)", asy
     // The user explicitly selects B while the search is in flight.
     surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
 
+    const entries = [{ ...ROW_A, labels: ["bug"] }, { ...ROW_B }];
     surface.applyKnowledgeReceiveEvent({
       kind: "knowledge_search_results",
       id: "win-1",
       knowledge_kind: "issue",
       query: "alpha",
       request_id: searchRequestId,
-      entries: [ROW_A, ROW_B],
+      entries,
       selected_number: ROW_A.number,
       empty_message: "",
       refresh_enabled: true,
     });
 
+    entries[0].title = "Caller mutation";
+    entries[0].labels.push("caller");
+    entries.pop();
+    assert.equal(state.entries.length, 2);
+    assert.equal(state.entries[0].title, ROW_A.title);
+    assert.deepEqual(state.entries[0].labels, ["bug"]);
+    assert.ok(Object.isFrozen(state.entries[0].labels));
     assert.equal(
       state.selectedNumber,
       ROW_B.number,
       "a search completion may refresh its rows but must not move the newer explicit selection (FR-101)",
     );
     assert.equal(state.detail?.number, ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+      result: { kind: "ok", fresh_entry: { ...ROW_A, title: "Updated phase" } },
+    });
+    assert.equal(state.entries[0].title, "Updated phase");
   });
 });
 
