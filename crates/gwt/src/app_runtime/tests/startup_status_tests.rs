@@ -2842,7 +2842,8 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         &repo,
         &[("agent-terminal".into(), "startup-terminal-holder".into())],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-repo"));
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-repo"));
     // The real snapshot reads launch provenance from the canonical Session store.
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     let protected_owner = gwt::cli::execution_state::ExecutionOwnerKey {
@@ -3121,6 +3122,90 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
         monitor.inbox_item(terminal_owner.number).unwrap().state,
         gwt::MonitorInboxState::Queued
     );
+
+    // The periodic reaper must preserve the same restore provenance across
+    // queue drain and launch preparation, even before any PTY sidecar exists.
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            enabled: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let daemon = gwt::IssueMonitorAuthorityFence::current_process();
+    let (_, _daemon_lease) =
+        gwt::establish_issue_monitor_authority_fence(&prefs_path, &daemon, |_| false).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    for phase in ["queued", "inflight", "released"] {
+        if phase == "inflight" {
+            for pending in std::mem::take(&mut runtime.pending_startup_auto_resume_sessions) {
+                runtime.restore_launch_windows.insert(
+                    format!("tab-repo::{}", pending.session.id),
+                    Some(pending.session.id),
+                );
+            }
+            assert!(runtime.pending_auto_resume_sources.is_empty());
+        } else if phase == "released" {
+            runtime.restore_launch_windows.clear();
+        }
+        // Advance the existing cadence deterministically, without wall time.
+        super::super::scan_generation_reapers()
+            .lock()
+            .unwrap()
+            .remove(&prefs_path);
+        runtime
+            .enqueue_issue_monitor_scan_worker(
+                &repo,
+                &prefs_path,
+                "tab-repo",
+                now,
+                Vec::new(),
+                None,
+            )
+            .unwrap();
+        let (root, prefs, at, outcome) = run_scheduled_scan_to_completion(&tasks, &recorded);
+        super::super::wait_scan_generation_reaper(&prefs);
+        runtime.complete_scheduled_scan_for_test(&root, &prefs, &at, outcome);
+        assert_eq!(
+            gwt::cli::execution_state::load(&protected_worktree)
+                .unwrap()
+                .unwrap()
+                .status,
+            if phase == "released" {
+                gwt::cli::execution_state::ExecutionControlStatus::Blocked
+            } else {
+                gwt::cli::execution_state::ExecutionControlStatus::Active
+            },
+            "scan recovery must respect {phase} automatic restore provenance"
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load(&protected_unknown_worktree)
+                .unwrap()
+                .unwrap()
+                .status,
+            gwt::cli::execution_state::ExecutionControlStatus::Active,
+            "missing exact identity remains fail-closed"
+        );
+        if phase == "inflight" {
+            let (receipt, binding) = gwt::try_prepare_resume_producing_authority(
+                &repo,
+                "startup-protected-holder",
+                true,
+            )
+            .expect("automatic restore must recover producing authority after the scan");
+            assert_eq!(
+                receipt.outcome,
+                gwt::AgentExecutionContinuationOutcome::ReboundCurrent
+            );
+            assert!(receipt.validated);
+            assert_eq!(binding.session_id, "startup-protected-holder");
+            assert_eq!(binding.owner_kind, protected_owner.kind.as_str());
+            assert_eq!(binding.owner_number, protected_owner.number);
+        }
+    }
 }
 
 /// Issue #4378 AC-1: bootstrap lists each project's worktrees once and hands
