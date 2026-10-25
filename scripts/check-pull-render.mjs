@@ -133,7 +133,11 @@ export function scanModule(source, file, { modules, rootName } = {}) {
         // Factory aliases share cached handlers; invalidate only this binding.
         if (binding.handler) binding.scope.bindings.set(target.name, null);
         while (target.type === "MemberExpression") target = target.object;
-        if (target.type === "Identifier") resolve(node, target.name).members?.clear();
+        if (target.type === "Identifier") {
+          const binding = resolve(node, target.name);
+          binding.members?.clear();
+          binding.scope?.models.delete(target.name);
+        }
       }
     }
     for (const child of childNodes(node)) invalidateMutatedControllers(child);

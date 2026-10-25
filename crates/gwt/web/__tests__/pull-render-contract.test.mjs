@@ -561,6 +561,22 @@ test("model updates, subscriptions, and uncalled local handlers are legal", () =
   assert.deepEqual(findings, []);
 });
 
+test("rewritten shared models fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "model") => scanModule(`
+    import { createUiStateStore } from "./ui-state-store.js";
+    let model = createUiStateStore(null);
+    const stable = createUiStateStore(null);
+    ${mutation}
+    function receive(event) { ${call}.update(event); }`, "entry.js");
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated(model) { model.update = external; }"), []);
+  assert.deepEqual(inspect("model.update = external;", "stable"), []);
+  for (const mutation of ["model = external;", "model.update = external;"]) {
+    assert.ok(inspect(mutation).some(finding =>
+      finding.kind === "unresolved-call" && finding.path === "receive"), mutation);
+  }
+});
+
 test("factory return aliases resolve model handlers without trusting controller.update", () => {
   const module = `import { createUiStateStore } from "./ui-state-store.js";
     export function createSurface() {
