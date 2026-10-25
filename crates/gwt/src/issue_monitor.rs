@@ -30,9 +30,19 @@ use crate::{
 };
 
 mod schedule;
+mod switch;
+mod switch_checkpoint;
 pub use schedule::{
     mutate_project_agent_schedule, AgentIssueReservation, AgentIssueSchedule, AgentMemberSchedule,
     AgentScheduleAction, AgentScheduleReason, AgentScheduleSnapshot, AgentScheduledIssue,
+};
+pub use switch::{
+    mutate_project_agent_switch, AgentSwitchAction, AgentSwitchCheckpoint, AgentSwitchIntent,
+    AgentSwitchRequest, AgentSwitchSnapshot, AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
+};
+pub use switch_checkpoint::{
+    observe_agent_switch_cwd, verify_switch_continuation, verify_switch_git_checkpoint,
+    AgentSwitchCwdObservation,
 };
 
 mod urgent;
@@ -997,6 +1007,8 @@ pub struct IssueMonitorPrefs {
     pub agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
     pub agent_issue_schedule: AgentIssueSchedule,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_switch_intents: BTreeMap<String, AgentSwitchIntent>,
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
         default = "current_issue_monitor_prefs_schema_version",
@@ -1343,6 +1355,7 @@ impl Default for IssueMonitorPrefs {
         Self {
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_switch_intents: BTreeMap::new(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
@@ -5052,6 +5065,8 @@ pub struct IssueMonitorState {
     agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
     agent_issue_schedule: AgentIssueSchedule,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    agent_switch_intents: BTreeMap<String, AgentSwitchIntent>,
     // Automatic scan proposals are valid only against this exact source snapshot.
     #[serde(skip)]
     agent_schedule_source: Option<(AgentIssueSchedule, String, u64)>,
@@ -7985,6 +8000,7 @@ impl IssueMonitorState {
         Self {
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_switch_intents: BTreeMap::new(),
             agent_schedule_source: None,
             roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
@@ -8096,6 +8112,7 @@ impl IssueMonitorState {
         let mut state = Self::new(config);
         state.agent_roster = prefs.agent_roster.clone();
         state.agent_issue_schedule = prefs.agent_issue_schedule.clone();
+        state.agent_switch_intents = prefs.agent_switch_intents.clone();
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
@@ -8276,6 +8293,7 @@ impl IssueMonitorState {
         IssueMonitorPrefs {
             agent_roster: self.agent_roster.clone(),
             agent_issue_schedule: self.agent_issue_schedule.clone(),
+            agent_switch_intents: self.agent_switch_intents.clone(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
@@ -11607,6 +11625,8 @@ impl IssueMonitorState {
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
         self.rebase_agent_issue_schedule(disk);
+        // Switch intents are written only by explicit controls and Host transactions.
+        self.agent_switch_intents = disk.agent_switch_intents.clone();
         // SPEC #3914 FR-012: the pool has no daemon control of its own for
         // GUI saves, so disk owns it; a stale in-memory copy must not shrink it.
         self.launch_profiles = disk.launch_profile_pool();

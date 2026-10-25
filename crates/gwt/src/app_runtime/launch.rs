@@ -1816,7 +1816,7 @@ enum IssueMonitorAdmissionDependencyRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct IssueMonitorAdmissionFileStamp {
+pub(super) struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
     role: IssueMonitorAdmissionDependencyRole,
     version: IssueMonitorAdmissionFileVersion,
@@ -1961,7 +1961,7 @@ impl IssueMonitorAdmissionFileStamp {
         })
     }
 
-    fn is_current(&self) -> bool {
+    pub(super) fn is_current(&self) -> bool {
         match &self.version {
             IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(expected) => {
                 super::IssueMonitorPrefsStamp::matches_current(expected.as_ref(), &self.path)
@@ -2236,7 +2236,7 @@ impl IssueMonitorSpawnAdmissionInput {
     }
 }
 
-fn prepare_issue_monitor_spawn_capacity(
+pub(super) fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
     issue_number: u64,
     dependencies: &mut Vec<IssueMonitorAdmissionFileStamp>,

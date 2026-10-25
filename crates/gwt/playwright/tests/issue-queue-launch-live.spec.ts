@@ -10,6 +10,234 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  test("T20b pending switch preserves current and cancels without replay after restart", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true });
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    let current = page;
+    const capture = (target: typeof page) => {
+      target.on("pageerror", error => errors.push(error.message));
+      target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    };
+    const request = async (event: unknown, kind: string): Promise<any> => {
+      const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(current, event);
+      return (await current.waitForFunction(({ after, kind }) => {
+        const found = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+        return found?.payload || null;
+      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+    };
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const intent = async (operation: string) => (await preferences()).agent_switch_intents?.[operation];
+    const openPlans = async (memberId: string) => {
+      await current.locator('.op-rail__surface[data-surface="agents"]').click();
+      const agents = current.getByRole("region", { name: "Main pane", exact: true })
+        .locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      return agents.locator(".roster-plans");
+    };
+    capture(current);
+    try {
+      expect(fixture.targetIssueNumber).toBe(44);
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(async () => (await preferences()).max_active_agents_mode, { timeout: 30_000 }).toBe("manual");
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] }, "issue_monitor_queue_result");
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const source = (await fixture.launches())[0];
+      await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+        entry.stage === "idle" && entry.gwt_session_id === source.gwt_session_id), { timeout: 60_000 }).toBe(true);
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.targetIssueNumber] }, "issue_monitor_queue_result");
+      const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+      const member = roster.members.find((member: any) => member.assignment?.session_id === source.gwt_session_id);
+      expect(member).toBeTruthy();
+      const sourceAssignment = member.assignment;
+      let plans = await openPlans(member.agent_member_id);
+      await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
+      const change = plans.locator('[data-action="switch-next"]');
+      await expect(change).toBeEnabled();
+      await change.click();
+      await expect.poll(async () => Object.keys((await preferences()).agent_switch_intents || {}).length).toBe(1);
+      const operation = Object.keys((await preferences()).agent_switch_intents)[0];
+      await expect.poll(async () => (await intent(operation))?.reason, { timeout: 45_000 }).toMatch(/Waiting.*(?:background|complete activity)/);
+      const saved = await intent(operation);
+      expect(saved.stage).toBe("requested");
+      const duplicate = await request({ kind: "agent_switch", action: { kind: "request", ...saved.request } }, "agent_switch");
+      expect(duplicate.snapshot.intents.filter((value: any) => value.operation_id === operation)).toHaveLength(1);
+      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
+      expect(fixture.processAlive(source.pid)).toBe(true);
+      expect(await fixture.launches()).toHaveLength(1);
+      await info.attach(`agent-switch-pending-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      await plans.getByRole("button", { name: "Cancel switch", exact: true }).click();
+      await expect.poll(async () => (await intent(operation))?.stage).toBe("cancelled");
+      expect(fixture.processAlive(source.pid)).toBe(true);
+      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id).assignment).toEqual(sourceAssignment);
+      await expect(change).toBeEnabled();
+      await change.click();
+      await expect.poll(async () => Object.keys((await preferences()).agent_switch_intents).length).toBe(2);
+      const pending = Object.keys((await preferences()).agent_switch_intents).find(value => value !== operation)!;
+      const unfinishedWork = (await fixture.workItems()).work_items.find((work: any) =>
+        work.events.some((event: any) => event.agent_session_id === source.gwt_session_id));
+      expect(unfinishedWork).toBeTruthy();
+      expect(unfinishedWork.status_category).not.toMatch(/done|blocked/);
+      expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+      await current.close();
+      await fixture.restart();
+      current = await page.context().newPage();
+      capture(current);
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      plans = await openPlans(member.agent_member_id);
+      await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
+      await expect.poll(async () => (await intent(pending))?.stage, { timeout: 45_000 }).toBe("cancelled");
+      expect((await preferences()).monitor_runtime_stop_requests || []).toEqual([]);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 45_000 }).toBe(2);
+      const restored = (await fixture.launches())[1];
+      expect(restored.provider_session_id).toBe(source.provider_session_id);
+      expect(restored.resume_session_id).toBe(source.provider_session_id);
+      await expect.poll(async () => (await fixture.actorEvents()).some((entry: any) =>
+        entry.stage === "idle" && entry.gwt_session_id === restored.gwt_session_id), { timeout: 60_000 }).toBe(true);
+      expect(fixture.processAlive(restored.pid)).toBe(true);
+      const restoredSession = await readFile(join(fixture.home, ".gwt", "sessions", `${restored.gwt_session_id}.toml`), "utf8");
+      expect(restoredSession).toContain(`agent_member_id = "${member.agent_member_id}"`);
+      expect(restoredSession).toContain(`agent_name = "${member.name}"`);
+      expect((await intent(pending)).source.assignment.session_id).toBe(source.gwt_session_id);
+      expect((await fixture.launchIssues()).every((number: number) => number === fixture.issueNumber)).toBe(true);
+      expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+      const retainedWork = (await fixture.workItems()).work_items.find((work: any) => work.id === unfinishedWork.id);
+      expect(retainedWork).toBeTruthy();
+      expect(retainedWork.status_category).not.toMatch(/done|blocked/);
+      await expect(plans.locator(".roster-switch-status")).toContainText(/cancelled|Cancelled/);
+      await info.attach(`agent-switch-restarted-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try {
+        await info.attach("agent-switch-actor-events", { body: JSON.stringify(await fixture.actorEvents()), contentType: "application/json" });
+      } finally {
+        try { await current.close(); } finally { await fixture.stop(); }
+      }
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("T20b saved checkpoint switches through the real Host and Monitor", async ({ page }, info) => {
+    test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
+      "positive proof requires the isolated Linux root process namespace");
+    const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true, positive: true });
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const preferences = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const actor = async (stage: string) => (await fixture.actorEvents()).find((entry: any) => entry.stage === stage);
+    const session = async (id: string) => readFile(join(fixture.home, ".gwt", "sessions", `${id}.toml`), "utf8");
+    const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+    const request = async (event: unknown, kind: string): Promise<any> => {
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, event);
+      return (await page.waitForFunction(({ after, kind }) => {
+        const found = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+        return found?.payload || null;
+      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+    };
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
+      await expect.poll(async () => (await preferences()).max_active_agents_mode, { timeout: 30_000 }).toBe("manual");
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] }, "issue_monitor_queue_result");
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const source = (await fixture.launches())[0];
+      await expect.poll(async () => !!await actor("idle"), { timeout: 60_000 }).toBe(true);
+      const idle = await actor("idle");
+      expect(idle.owner_number).toBe(fixture.issueNumber);
+      expect(idle.cwd).not.toBe(source.cwd);
+      expect(idle.tree_child_pid).toBeGreaterThan(0);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
+      expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.targetIssueNumber] }, "issue_monitor_queue_result");
+      const roster = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(1);
+      const member = roster.members.find((member: any) => member.assignment?.session_id === source.gwt_session_id);
+      expect(member).toBeTruthy();
+      const before = await session(source.gwt_session_id!);
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const agents = page.getByRole("region", { name: "Main pane", exact: true })
+        .locator(".agents-surface:not(.agents-surface--preview)");
+      await agents.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+      const plans = agents.locator(".roster-plans");
+      await plans.getByRole("button", { name: "Refresh plans", exact: true }).click();
+      await expect(plans.locator('[data-action="switch-next"]')).toBeEnabled();
+      await plans.locator('[data-action="switch-next"]').click();
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 120_000, message: "actual source checkpoint ACK, physical exit and ordinary target Monitor launch" }).toBe(2);
+      const launches = await fixture.launches();
+      const target = launches[1];
+      await expect.poll(async () => Object.values((await preferences()).agent_switch_intents || {})
+        .map((intent: any) => intent.stage), { timeout: 30_000 }).toEqual(["completed"]);
+      const saved = Object.values((await preferences()).agent_switch_intents)[0] as any;
+      expect(saved.runtime_exit_confirmed).toBe(true);
+      expect(saved.source.assignment.session_id).toBe(source.gwt_session_id);
+      expect(saved.request.member_id).toBe(member.agent_member_id);
+      expect(saved.request.target_issue_number).toBe(44);
+      const ack = await actor("checkpoint_acked");
+      expect(ack).toMatchObject({ operation: saved.request.operation_id, head: saved.checkpoint.verified_head,
+        work_id: saved.checkpoint.work_id, board_entry_id: saved.checkpoint.board_entry_id });
+      expect(fixture.processAlive(source.pid)).toBe(false);
+      expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
+      expect(fixture.processAlive(target.pid)).toBe(true);
+      expect(target.gwt_session_id).not.toBe(source.gwt_session_id);
+      expect(target.provider_session_id).not.toBe(source.provider_session_id);
+      expect(await fixture.launchIssues()).toEqual([43, 44]);
+      await expect.poll(async () => field(await session(target.gwt_session_id!), "agent_session_id"),
+        { timeout: 45_000 }).toBe(target.provider_session_id);
+      const after = await session(target.gwt_session_id!);
+      expect(field(after, "agent_member_id")).toBe(member.agent_member_id);
+      expect(field(after, "agent_name")).toBe(field(before, "agent_name"));
+      expect(field(after, "agent_name")).toBe(member.name);
+      expect((await preferences()).agent_roster.members.find((value: any) => value.agent_member_id === member.agent_member_id)
+        .assignment.session_id).toBe(target.gwt_session_id);
+      expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
+      const work = (await fixture.workItems()).work_items.find((value: any) => value.id === ack.work_id);
+      expect(work.status_category).toBe("idle");
+      expect(work.owner).toBe("Issue #43");
+      expect(work.board_refs).toContain(ack.board_entry_id);
+      const checkpoint = fixture.savedSource(source.cwd);
+      expect(checkpoint.head).toBe(ack.head);
+      expect(checkpoint.remoteHead).toBe(ack.head);
+      expect(checkpoint.porcelain).toBe("");
+      await expect(plans.locator(".roster-switch-status")).toContainText("Switch completed");
+      await info.attach(`agent-switch-completed-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      await info.attach("agent-switch-native-proof", { body: JSON.stringify({ source, target, idle,
+        checkpoint, operation: ack.operation, work_id: ack.work_id, board_entry_id: ack.board_entry_id }), contentType: "application/json" });
+      expect((await fixture.actorEvents()).filter((entry: any) => entry.stage === "actor_failed")).toEqual([]);
+      expect(errors).toEqual([]);
+    } finally {
+      try {
+        if (!page.isClosed()) {
+          const admission = await page.evaluate(() => {
+            const status = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+              entry.payload.kind === "issue_monitor_status")?.payload.status;
+            return status ? { active_count: status.active_count, max_active_agents: status.max_active_agents,
+              occupied_slot_count: status.occupied_slot_count, pending_claim_issues: status.pending_claim_issues,
+              last_error: status.last_error, capacity_reason: status.agent_capacity?.reason } : null;
+          });
+          await info.attach("agent-switch-monitor-admission", { body: JSON.stringify(admission), contentType: "application/json" });
+        }
+        await info.attach("agent-switch-actor-events", { body: JSON.stringify(await fixture.actorEvents()), contentType: "application/json" });
+      } finally {
+        try { await page.close(); } finally { await fixture.stop(); }
+      }
+    }
+    expect(errors).toEqual([]);
+  });
+
   test("T20a UI reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
