@@ -9,6 +9,48 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
+test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async ({ page }, info) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  const theme = info.project.name.includes("light") ? "light" : "dark";
+  const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+  if (!base) await installEmbeddedRoutes(page);
+  await installIssueBridgeBackend(page, { theme });
+  await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+  const settings = page.locator('.workspace-window[data-preset="settings"]');
+  await expect(settings).toHaveCount(1);
+  const monitor = page.locator("#op-strip-issue-monitor");
+  await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+  await expect(monitor).toHaveAttribute("title", "Open Monitor | Issue Monitor: Off");
+  const messageCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+  for (const activation of ["click", "Enter", "Space"]) {
+    await settings.getByRole("tab", { name: "System", exact: true }).click();
+    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
+      .toHaveAttribute("aria-selected", "false");
+    if (activation === "click") await monitor.click();
+    else await monitor.press(activation);
+    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
+      .toHaveAttribute("aria-selected", "true");
+    await expect(settings).toHaveCount(1);
+    await expect(page.locator(".surface-knowledge")).toBeVisible();
+    await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+  }
+  const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+    .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), messageCursor);
+  expect(controls, "opening Monitor must not enable, configure, reorder or launch").toEqual([]);
+  await page.evaluate(() => window.__issueBridgeFixtureSocket.emit({ kind: "issue_monitor_status", status: {
+    enabled: true, state: "error", queue_len: 3, active_count: 0, max_active_agents: 2,
+    last_error: "Monitor navigation fixture error",
+  } }));
+  await expect(monitor).toHaveAccessibleName("Open Monitor: Error Q3 A0/2");
+  await expect(monitor).toHaveAttribute("title", /Open Monitor.*Monitor navigation fixture error/);
+  await expect(monitor).toHaveClass(/op-status-strip__cell--alert/);
+  await page.screenshot({ path: info.outputPath(`monitor-navigation-${theme}.png`) });
+  expect(errors, "zero console/page errors").toEqual([]);
+});
+
 test.describe("Legacy SPEC preset Work Item compatibility", () => {
   test.use({
     deviceScaleFactor: 1,

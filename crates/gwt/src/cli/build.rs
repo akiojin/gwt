@@ -1457,6 +1457,7 @@ mod tests {
                                 .tx
                                 .send((headers, body))
                                 .expect("capture materialization probe request");
+                            (state.before_response)();
                             (
                                 state.status,
                                 [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -4682,6 +4683,104 @@ format_version: Some(1),
             "successful managed preflight may create lifecycle state"
         );
         accepted.receive();
+    }
+
+    #[test]
+    fn managed_build_start_accepts_host_response_after_forty_seconds() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let budget = &crate::daemon_runtime::WORK_MATERIALIZATION_PROBE_BUDGET;
+        assert!(budget.default_value() > Duration::from_secs(40));
+        let _budget = gwt_core::deadline_budget::ScopedDeadlineBudget::hang_guard(budget);
+        let server = TerminalBridgeServer::start_with_hook(
+            StatusCode::OK,
+            serde_json::json!({
+                "schema_version": 1,
+                "owner_number": 3403,
+                "work_id": "work-feature-build-start"
+            }),
+            || std::thread::sleep(Duration::from_secs(40)),
+        );
+        let (code, output, fixture) =
+            run_start_action(Some(&server.forward_url), Some("terminal-secret"), true);
+        assert_eq!(code, 0, "{output}");
+        assert!(
+            gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+                .expect("load delayed build state")
+                .expect("delayed Host response must create build state")
+                .active
+        );
+        server.receive();
+    }
+
+    #[test]
+    fn managed_build_start_diagnoses_host_timeout_without_creating_state() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _budget = gwt_core::deadline_budget::ScopedDeadlineBudget::pin(
+            &crate::daemon_runtime::WORK_MATERIALIZATION_PROBE_BUDGET,
+            Duration::from_millis(100),
+        );
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let server = TerminalBridgeServer::start_with_hook(
+            StatusCode::OK,
+            serde_json::json!({
+                "schema_version": 1,
+                "owner_number": 3403,
+                "work_id": "work-feature-build-start"
+            }),
+            move || {
+                let _ = release_rx.lock().unwrap().recv();
+            },
+        );
+        // Dropping this closure also releases the Host if the client panics.
+        let release_host = move || drop(release_tx);
+        let (code, output, fixture) =
+            run_start_action(Some(&server.forward_url), Some("terminal-secret"), true);
+        // Release only after the client returns, so the verdict does not race a sleep.
+        release_host();
+        assert_eq!(code, 2, "{output}");
+        let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(refusal["error_code"], "host_outcome_unknown");
+        assert!(output.contains("timed out after 100 ms"), "{output}");
+        assert!(output.contains("Host may be overloaded"), "{output}");
+        assert!(!output.contains("terminal-secret"));
+        assert!(gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn managed_build_start_rejects_stopped_host_without_creating_state() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("trusted store home");
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!(
+            "http://{}/internal/hook-live",
+            listener.local_addr().unwrap()
+        );
+        drop(listener);
+        let (code, output, fixture) = run_start_action(Some(&url), Some("terminal-secret"), true);
+        assert_eq!(code, 2, "{output}");
+        let refusal: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(refusal["error_code"], "host_outcome_unknown");
+        assert!(!output.contains("terminal-secret"));
+        assert!(gwt_core::skill_state::load(&fixture.repo, SKILL_NAME)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

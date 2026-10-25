@@ -1490,8 +1490,19 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
     previous.reasoning_level = Some("high".to_string());
     previous.save(&sessions_dir).expect("save previous session");
 
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    gwt::save_issue_monitor_prefs(
+        &prefs_path,
+        &gwt::IssueMonitorPrefs {
+            priority_order: vec![3165, 3214],
+            ..Default::default()
+        },
+    )
+    .expect("save stopped monitor without launch profiles");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let before_start = gwt::load_issue_monitor_prefs(&prefs_path).expect("read saved monitor");
+    assert_eq!(before_start.priority_order, vec![3165, 3214]);
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -1520,15 +1531,15 @@ fn app_runtime_issue_monitor_start_without_saved_profile_opens_global_settings_b
         })
         .expect("status resets optimistic enabled UI");
     assert!(!status.enabled);
+    assert_eq!(status.active_count, 0, "settings must not reserve capacity");
     assert!(
         runtime.window_details.is_empty(),
         "missing saved profile must not spawn an agent window"
     );
-    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
-        .unwrap_or_default();
-    assert!(
-        !prefs.enabled,
-        "Start with only last settings must not publish or persist enabled state"
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path).expect("reload saved monitor"),
+        before_start,
+        "settings-only Start must preserve queue, profiles, claims and launch deliveries"
     );
 }
 

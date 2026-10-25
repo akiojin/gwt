@@ -10,7 +10,8 @@ use crate::project_runtime::launch_authority::{
     AgentCapabilityLaunchAuthority,
 };
 use crate::project_runtime::launch_payload::{
-    AgentLaunchError, LaunchFeedbackContext, PendingFreshExecutionLaunch, WorkspaceResumeContext,
+    ActiveAgentSession, AgentLaunchError, LaunchFeedbackContext, PendingContinueWork,
+    PendingContinueWorkExecution, PendingFreshExecutionLaunch, WorkspaceResumeContext,
 };
 use crate::session_launch::durable_launch_recovery_exists;
 use crate::session_launch::recovery::{
@@ -18,6 +19,200 @@ use crate::session_launch::recovery::{
     persist_durable_launch_recovery, persist_durable_launch_recovery_with_identity,
     DurableLaunchRecoveryKind,
 };
+
+pub fn pending_execution_activation_status(pending: &PendingContinueWork) -> Option<bool> {
+    match &pending.execution {
+        PendingContinueWorkExecution::Successor(_) => {
+            crate::cli::execution_state::continuation_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::ContinuationAttemptStatus::Activated
+                })
+            })
+        }
+        PendingContinueWorkExecution::Takeover(_) => {
+            crate::cli::execution_state::generation_takeover_attempt_for_operation(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.operation_id,
+            )
+            .ok()
+            .map(|attempt| {
+                attempt.is_some_and(|attempt| {
+                    attempt.status
+                        == crate::cli::execution_state::GenerationTakeoverAttemptStatus::Activated
+                })
+            })
+        }
+    }
+}
+
+pub fn pending_fresh_execution_activation_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<bool> {
+    pending_fresh_execution_attempt_status(pending)
+        .map(|status| status == crate::cli::execution_state::ContinuationAttemptStatus::Activated)
+}
+
+pub fn pending_fresh_execution_attempt_status(
+    pending: &PendingFreshExecutionLaunch,
+) -> Option<crate::cli::execution_state::ContinuationAttemptStatus> {
+    crate::cli::execution_state::continuation_attempt_for_operation(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.operation_id,
+    )
+    .ok()
+    .flatten()
+    .map(|attempt| attempt.status)
+}
+
+pub fn pending_continue_work_session_identity(
+    pending: &PendingContinueWork,
+) -> Result<gwt_agent::SessionExecutionIdentity, String> {
+    let mut session = gwt_agent::Session::new(
+        &pending.worktree_path,
+        pending.work_branch.clone(),
+        pending.work_agent_id.clone(),
+    );
+    session.id = pending.binding.session_id.clone();
+    session.project_state_root = Some(pending.project_root.clone());
+    session.repo_hash = Some(pending.binding.repo_hash.clone());
+    session.linked_issue_number = Some(pending.owner.number);
+    gwt_agent::SessionExecutionIdentity::for_binding(&session, &pending.binding)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn abort_prepared_execution_and_remove_exact_session<F>(
+    worktree: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    execution: &PendingContinueWorkExecution,
+    reason: &str,
+    sessions_dir: &Path,
+    session_identity: &gwt_agent::SessionExecutionIdentity,
+    after_abort: F,
+) -> std::io::Result<bool>
+where
+    F: FnOnce() -> std::io::Result<()>,
+{
+    match execution {
+        PendingContinueWorkExecution::Successor(request) => {
+            crate::cli::execution_state::abort_successor_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+        PendingContinueWorkExecution::Takeover(request) => {
+            crate::cli::execution_state::abort_generation_takeover_and_remove_exact_session(
+                worktree,
+                owner,
+                request,
+                reason,
+                sessions_dir,
+                session_identity,
+                after_abort,
+            )
+        }
+    }
+}
+
+/// Return false only for an irreversible Activated generation. Exact candidate
+/// conflicts and unreadable authority retain their evidence for reconciliation.
+pub fn rollback_worker_continue_work(
+    sessions_dir: &Path,
+    pending: &PendingContinueWork,
+) -> Result<bool, String> {
+    match pending_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("continuation activation status is unreadable".into()),
+    }
+    let identity = pending_continue_work_session_identity(pending)?;
+    let cleanup = abort_prepared_execution_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.execution,
+        "continuation launch failed before SessionStart",
+        sessions_dir,
+        &identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err("continuation candidate Session changed before exact rollback".into())
+        }
+        Err(_) if pending_execution_activation_status(pending) == Some(true) => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    }
+    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    Ok(true)
+}
+
+pub fn rollback_worker_fresh_execution(
+    sessions_dir: &Path,
+    pending: &PendingFreshExecutionLaunch,
+) -> Result<bool, String> {
+    match pending_fresh_execution_activation_status(pending) {
+        Some(true) => return Ok(false),
+        Some(false) => {}
+        None => return Err("fresh launch activation status is unreadable".into()),
+    }
+    let cleanup = crate::cli::execution_state::abort_successor_and_remove_exact_session(
+        &pending.worktree_path,
+        pending.owner,
+        &pending.request,
+        "fresh linked-owner launch failed before SessionStart",
+        sessions_dir,
+        &pending.session_identity,
+        || {
+            reject_continue_work_workspace_commit(
+                &pending.project_root,
+                &pending.worktree_path,
+                &pending.operation_id,
+            )
+        },
+    );
+    match cleanup {
+        Ok(true) => {}
+        Ok(false) => return Err("fresh candidate Session changed before exact rollback".into()),
+        Err(_) if pending_fresh_execution_activation_status(pending) == Some(true) => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    if !pending
+        .launch_feedback_context
+        .as_ref()
+        .is_some_and(|context| {
+            context
+                .issue_monitor_launch_binding_issue_number()
+                .is_some()
+                && context.issue_monitor_delivery_id.is_some()
+                && context.issue_monitor_autonomous_handoff.is_none()
+        })
+    {
+        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
+    }
+    Ok(true)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn pending_fresh_execution_launch_from_session(
@@ -1575,4 +1770,565 @@ fn same_worktree_path(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+#[derive(Clone, Copy)]
+pub enum GenesisCompensationAuthority {
+    Terminalized,
+    SupersededByDifferentOwner,
+}
+
+pub fn genesis_initial_execution_binding_matches(
+    worktree_path: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    binding: &gwt_agent::SessionExecutionBinding,
+) -> bool {
+    binding.schema_version == gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION
+        && binding.session_id == session_id
+        && gwt_core::repo_hash::detect_repo_hash(worktree_path)
+            .is_some_and(|repo_hash| repo_hash.to_string() == binding.repo_hash)
+        && binding.owner_kind == owner.kind.as_str()
+        && binding.owner_number == owner.number
+        && binding.capability_generation > 0
+        && crate::cli::execution_state::genesis_initial_execution_binding_matches(
+            worktree_path,
+            owner,
+            session_id,
+            &binding.identity,
+        )
+        .unwrap_or(false)
+}
+
+fn genesis_compensation_authority_matches(
+    worktree_path: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    expected_binding: Option<&gwt_agent::SessionExecutionBinding>,
+    authority: GenesisCompensationAuthority,
+) -> Result<(), String> {
+    let ledger = crate::cli::execution_state::load_owner_generation_ledger(worktree_path, owner)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "terminalized genesis generation ledger is missing".to_string())?;
+    let generation = ledger
+        .generations
+        .iter()
+        .find(|generation| {
+            generation.identity.predecessor_generation_id.is_none()
+                && generation.identity.initial_session_id == session_id
+                && expected_binding.is_none_or(|binding| {
+                    generation.identity.generation_id == binding.identity.generation_id
+                        && generation.identity.session_binding_id == binding.identity.binding_id
+                })
+        })
+        .ok_or_else(|| "terminalized genesis generation is missing".to_string())?;
+    if ledger.owner != owner {
+        return Err("genesis authority owner no longer matches the failed launch".to_string());
+    }
+    if expected_binding.is_some_and(|binding| {
+        !genesis_initial_execution_binding_matches(worktree_path, owner, session_id, binding)
+    }) {
+        return Err("terminalized genesis binding no longer matches the failed launch".to_string());
+    }
+    match authority {
+        GenesisCompensationAuthority::Terminalized => {
+            let terminal = ledger
+                .lifecycle_events
+                .iter()
+                .filter(|event| event.generation_id == generation.identity.generation_id)
+                .max_by_key(|event| event.sequence);
+            let terminalization_operation_id =
+                crate::cli::execution_state::genesis_terminalization_operation_id(
+                    &generation.identity.generation_id,
+                    &generation.identity.session_binding_id,
+                );
+            if !terminal.is_some_and(|event| {
+                event.from_status == crate::cli::execution_state::ExecutionControlStatus::Active
+                    && event.to_status
+                        == crate::cli::execution_state::ExecutionControlStatus::Blocked
+                    && event.session_id == session_id
+                    && event.operation_id.as_deref() == Some(terminalization_operation_id.as_str())
+            }) {
+                return Err(
+                    "terminalized genesis authority no longer matches the failed launch"
+                        .to_string(),
+                );
+            }
+        }
+        GenesisCompensationAuthority::SupersededByDifferentOwner => {
+            let current_owner =
+                crate::cli::execution_state::recovery_generation_owner(worktree_path)
+                    .map_err(|error| error.to_string())?;
+            if !current_owner.is_some_and(|current_owner| current_owner != owner) {
+                return Err(
+                    "genesis authority is not superseded by a different current owner".to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn failed_genesis_work_has_session_event(
+    item: &gwt_core::workspace_projection::WorkItem,
+    session_id: &str,
+) -> bool {
+    item.events
+        .iter()
+        .any(|event| event.agent_session_id.as_deref() == Some(session_id))
+}
+
+fn failed_genesis_work_is_new(
+    item: &gwt_core::workspace_projection::WorkItem,
+    session_id: &str,
+) -> bool {
+    item.legacy_metadata_snapshot.is_none()
+        && !item.legacy_metadata_authoritative
+        && item.duplicate_event_containers.is_empty()
+        && item.events.len() == 1
+        && item.events[0].kind == gwt_core::workspace_projection::WorkEventKind::Start
+        && item.events[0].agent_session_id.as_deref() == Some(session_id)
+        && item.agents.len() == 1
+        && item.agents[0].session_id == session_id
+}
+
+fn failed_genesis_work_is_already_paused(
+    item: &gwt_core::workspace_projection::WorkItem,
+    session_id: &str,
+) -> bool {
+    item.events
+        .iter()
+        .rev()
+        .find(|event| event.agent_session_id.as_deref() == Some(session_id))
+        .is_some_and(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Pause)
+}
+
+fn failed_genesis_agent_matches_container(
+    agent: &gwt_core::workspace_projection::WorkspaceAgentSummary,
+    worktree_path: &Path,
+    branch_hint: Option<&str>,
+) -> Result<String, String> {
+    let agent_worktree = agent
+        .worktree_path
+        .as_deref()
+        .ok_or_else(|| "failed genesis Workspace agent has no canonical worktree".to_string())?;
+    if !path_matches(agent_worktree, worktree_path) {
+        return Err(
+            "failed genesis Workspace agent no longer matches its launch container".to_string(),
+        );
+    }
+    let branch = agent
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| "failed genesis Workspace agent has no canonical branch".to_string())?;
+    if branch_hint
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .is_some_and(|hint| hint != branch)
+    {
+        return Err("failed genesis Workspace branch changed before compensation".to_string());
+    }
+    Ok(branch.to_string())
+}
+
+fn failed_genesis_work_container_matches(
+    item: &gwt_core::workspace_projection::WorkItem,
+    worktree_path: &Path,
+    branch_hint: Option<&str>,
+) -> bool {
+    let branch_hint = branch_hint
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
+    item.execution_containers
+        .iter()
+        .filter(|container| {
+            container
+                .worktree_path
+                .as_deref()
+                .is_some_and(|path| path_matches(path, worktree_path))
+                && container
+                    .branch
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|branch| !branch.is_empty())
+                    .is_some_and(|branch| branch_hint.is_none_or(|hint| hint == branch))
+        })
+        .count()
+        == 1
+}
+
+pub fn compensate_terminalized_genesis_workspace_projection(
+    project_root: &Path,
+    worktree_path: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    expected_binding: Option<&gwt_agent::SessionExecutionBinding>,
+    branch_hint: Option<&str>,
+) -> Result<(), String> {
+    compensate_genesis_workspace_projection(
+        project_root,
+        worktree_path,
+        owner,
+        session_id,
+        expected_binding,
+        branch_hint,
+        GenesisCompensationAuthority::Terminalized,
+    )
+}
+
+pub fn compensate_genesis_workspace_projection(
+    project_root: &Path,
+    worktree_path: &Path,
+    owner: crate::cli::execution_state::ExecutionOwnerKey,
+    session_id: &str,
+    expected_binding: Option<&gwt_agent::SessionExecutionBinding>,
+    branch_hint: Option<&str>,
+    authority: GenesisCompensationAuthority,
+) -> Result<(), String> {
+    genesis_compensation_authority_matches(
+        worktree_path,
+        owner,
+        session_id,
+        expected_binding,
+        authority,
+    )?;
+    gwt_core::workspace_projection::recover_pending_workspace_state_transaction_for_work_event_root(
+        project_root,
+        worktree_path,
+    )
+    .map_err(|error| error.to_string())?;
+    genesis_compensation_authority_matches(
+        worktree_path,
+        owner,
+        session_id,
+        expected_binding,
+        authority,
+    )?;
+
+    let projection = gwt_core::workspace_projection::load_workspace_projection(project_root)
+        .map_err(|error| error.to_string())?;
+    let work_items = gwt_core::workspace_projection::load_workspace_work_items(project_root)
+        .map_err(|error| error.to_string())?;
+    if work_items.is_none() {
+        if let Some(agent) = projection
+            .as_ref()
+            .and_then(|projection| projection.latest_agent_for_session(session_id))
+        {
+            failed_genesis_agent_matches_container(agent, worktree_path, branch_hint)?;
+            if agent.affiliation_status
+                == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+            {
+                return Err(
+                    "failed genesis Workspace assignment has no exact Work event evidence"
+                        .to_string(),
+                );
+            }
+        } else {
+            return Ok(());
+        }
+        gwt_core::workspace_projection::mark_workspace_agent_stopped(
+            project_root,
+            session_id,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let snapshot_work_items = work_items.as_ref().expect("checked WorkItems presence");
+    let snapshot_targets = snapshot_work_items
+        .work_items
+        .iter()
+        .filter(|item| failed_genesis_work_has_session_event(item, session_id))
+        .collect::<Vec<_>>();
+    if snapshot_targets.len() > 1 {
+        return Err("failed genesis Session has multiple exact Work event targets".to_string());
+    }
+    if snapshot_targets.is_empty() {
+        let snapshot_agent = projection
+            .as_ref()
+            .and_then(|projection| projection.latest_agent_for_session(session_id));
+        if let Some(agent) = snapshot_agent {
+            failed_genesis_agent_matches_container(agent, worktree_path, branch_hint)?;
+            if agent.affiliation_status
+                == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+            {
+                return Err(
+                    "failed genesis Workspace assignment has no exact Work event evidence"
+                        .to_string(),
+                );
+            }
+            gwt_core::workspace_projection::mark_workspace_agent_stopped(
+                project_root,
+                session_id,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    let snapshot_target = snapshot_targets[0];
+    let snapshot_agent = projection
+        .as_ref()
+        .and_then(|projection| projection.latest_agent_for_session(session_id));
+    if snapshot_agent.is_none() {
+        if expected_binding.is_none()
+            || !failed_genesis_work_container_matches(snapshot_target, worktree_path, branch_hint)
+        {
+            return Err(
+                "failed genesis compensated Work has no exact recovery identity".to_string(),
+            );
+        }
+        let another_assigned_agent = projection.as_ref().is_some_and(|projection| {
+            projection.agents.iter().any(|candidate| {
+                candidate.affiliation_status
+                    == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+                    && candidate.workspace_id.as_deref() == Some(snapshot_target.id.as_str())
+            })
+        });
+        let exact_discard = snapshot_target.discarded
+            && snapshot_target.events.iter().rev().any(|event| {
+                event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+                    && event.agent_session_id.as_deref() == Some(session_id)
+            });
+        if exact_discard
+            || failed_genesis_work_is_already_paused(snapshot_target, session_id)
+            || another_assigned_agent
+        {
+            return Ok(());
+        }
+        return Err(
+            "failed genesis Work is not durably compensated after agent cleanup".to_string(),
+        );
+    }
+
+    gwt_core::workspace_projection::transact_workspace_close_state_for_work_event_root(
+        project_root,
+        worktree_path,
+        |projection, work_items, _persisted| {
+            genesis_compensation_authority_matches(
+                worktree_path,
+                owner,
+                session_id,
+                expected_binding,
+                authority,
+            )
+            .map_err(gwt_core::GwtError::Other)?;
+            let matching_agents = projection
+                .agents
+                .iter()
+                .filter(|agent| agent.session_id == session_id)
+                .collect::<Vec<_>>();
+            if matching_agents.len() > 1 {
+                return Err(gwt_core::GwtError::Other(
+                    "failed genesis Workspace Session is duplicated in current state".to_string(),
+                ));
+            }
+            let agent = matching_agents.first().copied();
+            let mut matching_items = work_items.work_items.iter().filter(|item| {
+                item.is_incomplete() && failed_genesis_work_has_session_event(item, session_id)
+            });
+            let item = matching_items.next();
+            if matching_items.next().is_some() {
+                return Err(gwt_core::GwtError::Other(
+                    "failed genesis Session has multiple incomplete Work event targets".to_string(),
+                ));
+            }
+            let Some(item) = item else {
+                let mut terminal_items = work_items.work_items.iter().filter(|item| {
+                    item.discarded
+                        && failed_genesis_work_has_session_event(item, session_id)
+                        && item.events.iter().rev().any(|event| {
+                            event.kind == gwt_core::workspace_projection::WorkEventKind::Discard
+                                && event.agent_session_id.as_deref() == Some(session_id)
+                        })
+                });
+                let terminal_item = terminal_items.next();
+                if terminal_items.next().is_some() {
+                    return Err(gwt_core::GwtError::Other(
+                        "failed genesis Session has multiple terminal Work event targets"
+                            .to_string(),
+                    ));
+                }
+                if let Some(terminal_item) = terminal_item {
+                    if expected_binding.is_none() {
+                        return Err(gwt_core::GwtError::Other(
+                            "failed genesis terminal Work has no exact recovery binding"
+                                .to_string(),
+                        ));
+                    }
+                    let agent = agent.ok_or_else(|| {
+                        gwt_core::GwtError::Other(
+                            "failed genesis terminal Work has no exact current Session assignment"
+                                .to_string(),
+                        )
+                    })?;
+                    let branch =
+                        failed_genesis_agent_matches_container(agent, worktree_path, branch_hint)
+                            .map_err(gwt_core::GwtError::Other)?;
+                    if agent.affiliation_status
+                        != gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+                        || agent.workspace_id.as_deref() != Some(terminal_item.id.as_str())
+                        || terminal_item
+                            .execution_containers
+                            .iter()
+                            .filter(|container| {
+                                container.branch.as_deref() == Some(branch.as_str())
+                                    && container
+                                        .worktree_path
+                                        .as_deref()
+                                        .is_some_and(|path| path_matches(path, worktree_path))
+                            })
+                            .count()
+                            != 1
+                    {
+                        return Err(gwt_core::GwtError::Other(
+                            "failed genesis terminal Work assignment changed before cleanup"
+                                .to_string(),
+                        ));
+                    }
+                    return Ok(((), Vec::new()));
+                }
+                if agent.is_some_and(|agent| {
+                    agent.affiliation_status
+                        == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+                }) {
+                    return Err(gwt_core::GwtError::Other(
+                        "failed genesis Workspace assignment has no exact Work event evidence"
+                            .to_string(),
+                    ));
+                }
+                return Ok(((), Vec::new()));
+            };
+            if expected_binding.is_none() {
+                return Err(gwt_core::GwtError::Other(
+                    "failed genesis Work evidence has no exact recovery binding".to_string(),
+                ));
+            }
+            let agent = agent.ok_or_else(|| {
+                gwt_core::GwtError::Other(
+                    "failed genesis Work has no exact current Session assignment".to_string(),
+                )
+            })?;
+            let branch = failed_genesis_agent_matches_container(agent, worktree_path, branch_hint)
+                .map_err(gwt_core::GwtError::Other)?;
+            if agent.affiliation_status
+                != gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+                || agent.workspace_id.as_deref() != Some(item.id.as_str())
+            {
+                return Err(gwt_core::GwtError::Other(
+                    "failed genesis Workspace assignment changed before compensation".to_string(),
+                ));
+            }
+            let matching_containers = item
+                .execution_containers
+                .iter()
+                .filter(|container| {
+                    container.branch.as_deref() == Some(branch.as_str())
+                        && container
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(|path| path_matches(path, worktree_path))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if matching_containers.len() != 1 {
+                return Err(gwt_core::GwtError::Other(
+                    "failed genesis Work container changed or became ambiguous".to_string(),
+                ));
+            }
+            let another_assigned_agent = projection.agents.iter().any(|candidate| {
+                candidate.session_id != session_id
+                    && candidate.affiliation_status
+                        == gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned
+                    && candidate.workspace_id.as_deref() == Some(item.id.as_str())
+            });
+            let now = chrono::Utc::now();
+            let event = if failed_genesis_work_is_new(item, session_id) && !another_assigned_agent {
+                let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Discard,
+                    &item.id,
+                    now,
+                );
+                event.agent_session_id = Some(session_id.to_string());
+                Some(event)
+            } else if !another_assigned_agent
+                && !failed_genesis_work_is_already_paused(item, session_id)
+            {
+                let mut event = gwt_core::workspace_projection::WorkEvent::new(
+                    gwt_core::workspace_projection::WorkEventKind::Pause,
+                    &item.id,
+                    now,
+                );
+                event.title = Some(item.title.clone());
+                event.summary = item.summary.clone();
+                event.owner = item.owner.clone();
+                event.agent_session_id = Some(session_id.to_string());
+                event.execution_container = matching_containers.into_iter().next();
+                Some(event)
+            } else {
+                None
+            };
+            genesis_compensation_authority_matches(
+                worktree_path,
+                owner,
+                session_id,
+                expected_binding,
+                authority,
+            )
+            .map_err(gwt_core::GwtError::Other)?;
+            Ok(((), event.into_iter().collect()))
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    genesis_compensation_authority_matches(
+        worktree_path,
+        owner,
+        session_id,
+        expected_binding,
+        authority,
+    )?;
+    gwt_core::workspace_projection::mark_workspace_agent_stopped(project_root, session_id, None)
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub fn rollback_worker_genesis(
+    sessions_dir: &Path,
+    project_root: &Path,
+    active: &ActiveAgentSession,
+    genesis: &MaterializedGenesisLaunch,
+    reason: &str,
+    removed_session: &mut Option<gwt_agent::SessionExecutionIdentity>,
+) -> Result<(), String> {
+    let removed = crate::cli::execution_state::block_genesis_and_remove_exact_session(
+        &genesis.worktree_path,
+        genesis.owner,
+        &genesis.session_id,
+        &genesis.binding.identity,
+        reason,
+        sessions_dir,
+        &genesis.session_identity,
+        || {
+            compensate_terminalized_genesis_workspace_projection(
+                project_root,
+                &genesis.worktree_path,
+                genesis.owner,
+                &genesis.session_id,
+                Some(&genesis.binding),
+                Some(&active.branch_name),
+            )
+            .map_err(std::io::Error::other)
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !removed {
+        return Err("failed genesis Session changed before exact rollback".into());
+    }
+    // Preserve exact removal even if the durable receipt still needs cleanup.
+    *removed_session = Some(genesis.session_identity.clone());
+    clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
 }

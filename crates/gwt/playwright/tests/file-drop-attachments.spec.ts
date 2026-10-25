@@ -655,6 +655,7 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
           {
             id: "tab-1",
             title: "File Drop Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {
