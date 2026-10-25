@@ -235,6 +235,34 @@ test('report kind filter retains its selection on polling and hides with the exe
   assert.equal(root.querySelectorAll('article').length, 4);
 });
 
+test('Reports starts at the tail, follows new reports and preserves history across hidden updates (Issue #6235)', () => {
+  const { root, update } = fixture();
+  const body = root.querySelector('.pm-chat__body');
+  const height = () => 500 + 100 * root.querySelectorAll('article').length;
+  let top = 0;
+  Object.defineProperties(body, {
+    clientHeight: { get: () => body.hidden ? 0 : 100 },
+    scrollHeight: { get: () => body.hidden ? 0 : height() },
+    scrollTop: {
+      get: () => body.hidden ? 0 : top,
+      set: value => { top = Math.max(0, Math.min(value, body.hidden ? 0 : height() - 100)); },
+    },
+  });
+  const history = [report()];
+  update(history);
+  assert.equal(body.scrollTop, 500, 'initial reports open at the latest content');
+  update([...history, report('two')]);
+  assert.equal(body.scrollTop, 600, 'new reports follow the tail');
+  body.scrollTop = 100;
+  body.dispatchEvent(new root.ownerDocument.defaultView.Event('scroll'));
+  update([...history, report('two'), report('three')]);
+  assert.equal(body.scrollTop, 100, 'new reports do not move a reader in history');
+  root.querySelectorAll('.pm-chat__toolbar button')[1].click();
+  update([...history, report('four')]);
+  root.querySelectorAll('.pm-chat__toolbar button')[0].click();
+  assert.equal(body.scrollTop, 100, 'hidden zero-size updates must not overwrite the saved position');
+});
+
 test('report updates preserve nodes and scroll, append history, and retain history on read failure', () => {
   const { root, model, update } = fixture();
   update([report()]);

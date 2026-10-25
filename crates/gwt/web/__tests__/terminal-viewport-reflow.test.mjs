@@ -57,6 +57,9 @@ function asyncTerminalStub() {
   return {
     writes,
     resets,
+    buffer: { active: { viewportY: 0, baseY: 0 } },
+    scrollToBottom() { this.buffer.active.viewportY = this.buffer.active.baseY; },
+    scrollToLine(line) { this.buffer.active.viewportY = Math.min(line, this.buffer.active.baseY); },
     write(text, callback) {
       if (nextWriteFailure) {
         const { beforeThrow, error } = nextWriteFailure;
@@ -77,6 +80,7 @@ function asyncTerminalStub() {
         throw error;
       }
       resets.push(writes.length);
+      this.buffer.active = { viewportY: 0, baseY: 0 };
     },
     failNextReset(error, beforeThrow) {
       nextResetFailure = { beforeThrow, error };
@@ -331,6 +335,27 @@ test("snapshot coordinator serializes a newer snapshot and its live output after
   assert.deepEqual(harness.refreshes, ["refresh"]);
   assert.deepEqual(harness.runtime.deferredWrites, []);
   assert.deepEqual(harness.terminal.writes, ["", "decoded:A", "decoded:B", "live-after-B"]);
+});
+
+test("snapshot replacement follows the tail and preserves history through overlapping snapshots (Issue #6235)", () => {
+  const tail = snapshotWriteHarness();
+  tail.terminal.buffer.active = { viewportY: 100, baseY: 100 };
+  tail.receiveSnapshot("tail");
+  tail.terminal.completeNextWrite();
+  tail.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  tail.terminal.completeNextWrite();
+  assert.equal(tail.terminal.buffer.active.viewportY, 150, 'tail readers follow the replacement');
+
+  const history = snapshotWriteHarness();
+  history.terminal.buffer.active = { viewportY: 25, baseY: 100 };
+  history.receiveSnapshot("A");
+  history.terminal.completeNextWrite();
+  history.receiveSnapshot("B");
+  history.terminal.buffer.active = { viewportY: 0, baseY: 150 };
+  history.terminal.completeNextWrite();
+  history.terminal.buffer.active = { viewportY: 0, baseY: 200 };
+  history.terminal.completeNextWrite();
+  assert.equal(history.terminal.buffer.active.viewportY, 25, 'latest-wins snapshots retain the original reading position');
 });
 
 test("snapshot coordinator callbacks are no-ops after terminal runtime teardown", () => {
