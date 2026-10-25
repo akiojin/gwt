@@ -276,7 +276,14 @@ test.describe("Works and Agents approved baseline", () => {
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
-    await roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose').press("Enter");
+    const purpose = roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose');
+    await purpose.focus();
+    await purpose.evaluate(node => { (window as any).__focusedRosterPurpose = node; });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceTitle("Updated purpose before Enter"));
+    await expect(purpose).toHaveText("Updated purpose before Enter");
+    expect(await purpose.evaluate(node => node === (window as any).__focusedRosterPurpose)).toBe(true);
+    await expect(purpose).toBeFocused();
+    await purpose.press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
 

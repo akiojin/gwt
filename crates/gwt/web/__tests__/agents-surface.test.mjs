@@ -101,12 +101,33 @@ test("Agents current pill, row task and Now task open the exact assignment, whil
   const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
   assert.equal(task.tagName, "BUTTON"); task.click();
   assert.deepEqual(f.opened, [current, current, current]);
+  const row = task.closest(".roster-row"), pill = row.querySelector(".roster-current");
+  task.focus();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, name: "Updated member", tokens: 6000 } : member) }));
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2, appState: { ...state.catalog.appState,
+    tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", dynamic_title: "Updated purpose" }] } }] } } }));
+  f.flush();
+  assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row, "ordinary frames retain the same member row");
+  assert.ok(row.querySelector(".roster-purpose") === task);
+  assert.ok(row.querySelector(".roster-current") === pill);
+  assert.ok(task.isConnected && f.document.activeElement === task, "ordinary frames retain the native keyboard target");
+  assert.equal(task.textContent, "Updated purpose");
+  assert.equal(row.querySelector("h3").textContent, "Updated member");
+  assert.equal(row.querySelector(".roster-row-stats .roster-stat:last-child b").textContent, "6K");
+  f.surface.selectMember("m2"); assert.equal(row.getAttribute("aria-selected"), "false");
+  f.surface.selectMember("m1"); assert.equal(row.getAttribute("aria-selected"), "true");
+  const successor = { ...current, runtime_incarnation: 5 };
+  f.activityModel.update(() => ({ agents: [successor], count: 1 })); task.click(); pill.click();
+  assert.equal(f.opened.length, 3, "captured buttons never redirect to a successor runtime");
+  f.flush(); assert.equal(row.isConnected, false);
+  f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').click();
+  assert.deepEqual(f.opened[3], successor);
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-purpose').tagName, "SPAN");
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-current'), null);
   f.activityModel.update(() => ({ agents: [], count: 0 }));
   f.surface.element.querySelector(".roster-now button").click();
   task.click();
-  assert.equal(f.opened.length, 3, "links captured before the frame must recheck live membership");
+  assert.equal(f.opened.length, 4, "links captured before the frame must recheck live membership");
   f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
 });
 
