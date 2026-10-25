@@ -266,8 +266,12 @@ fn reconcile(
         };
         let minimum = members.iter().map(|member| load(member)).min().unwrap_or(0);
         let same_spec = same_spec.filter(|member| load(member) == minimum);
-        let member =
-            same_spec.or_else(|| members.iter().copied().min_by_key(|member| load(member)));
+        let member = same_spec.or_else(|| {
+            members
+                .iter()
+                .copied()
+                .min_by_key(|member| (load(member), member.assignment.is_some()))
+        });
         if let Some(member) = member {
             reservations.push(AgentIssueReservation {
                 host_id: host.into(),
@@ -928,5 +932,40 @@ mod tests {
         );
         let restored = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), adopted);
         assert!(restored.agent_schedule_launch_exclusion(41).is_none());
+    }
+    #[test]
+    fn agent_schedule_new_plan_uses_idle_member_when_future_load_is_equal() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs
+                .terminal_queues
+                .get_mut(&crate::process::current_hostname())
+                .unwrap()
+                .entries
+                .retain(|entry| entry.number == 41);
+            Ok(())
+        })
+        .unwrap();
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy-first",
+            Some(99),
+            None,
+            None,
+            Some(&roster.members[0].agent_member_id),
+        )
+        .unwrap();
+        let planned =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert!(planned.members[0].issues.is_empty(), "a new plan must not wait on the busy first member while an equally loaded member is idle");
+        assert_eq!(
+            planned.members[1].issues,
+            vec![AgentScheduledIssue {
+                issue_number: 41,
+                reason: AgentScheduleReason::QueueOrder
+            }]
+        );
     }
 }
