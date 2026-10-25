@@ -6,8 +6,7 @@
 //! coverage in `cli::daemon::server`; this test keeps the cross-crate subprocess
 //! pipeline (spawn → gh → parse → gate → proposal → arm) live and observable.
 //!
-//! Both scenarios live in ONE test: PATH + mock env are process-global, so a
-//! single sequential test avoids cross-thread env races.
+//! PATH + mock env are process-global; hold the shared environment lock.
 
 #![cfg(unix)]
 
@@ -40,6 +39,7 @@ case "$all" in
   *"pr view"*state,headRefOid,autoMergeRequest,mergeCommit*)
     echo '{"state":"OPEN","headRefOid":"abc123","autoMergeRequest":null,"mergeCommit":null}' ;;
   *"pr view"*headRefOid*)         echo '{"headRefOid":"abc123"}' ;;
+  *"pr view"*mergeStateStatus*)   echo '{"state":"OPEN","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}' ;;
   *"pr view"*statusCheckRollup*)  echo '{"statusCheckRollup":[{"name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]}' ;;
   *"pr view"*mergeCommit*)        echo '{"mergeCommit":{"oid":"squashcommit999"}}' ;;
   *"pr diff"*)                    echo 'diff --git a/x b/x' ;;
@@ -52,6 +52,7 @@ exit 0
 
 fn auto_issue() -> IssueMonitorIssue {
     IssueMonitorIssue {
+        author_login: None,
         number: 42,
         title: "Issue 42".to_string(),
         labels: vec!["auto-merge".to_string()],
@@ -64,7 +65,7 @@ fn auto_issue() -> IssueMonitorIssue {
 }
 
 fn reviewed_monitor() -> IssueMonitorState {
-    let mut monitor = IssueMonitorState::with_prefs(
+    let mut monitor = test_monitor_with_prefs(
         IssueMonitorConfig::default(),
         IssueMonitorPrefs {
             enabled: true,
@@ -72,6 +73,7 @@ fn reviewed_monitor() -> IssueMonitorState {
             ..IssueMonitorPrefs::default()
         },
     );
+    monitor.terminal_queue_push(&[42], "operator", "2026-06-29T00:00:00Z");
     gwt::scan_issue_monitor_candidates(&mut monitor, &[auto_issue()], "2026-06-29T00:00:00Z");
     monitor.capture_acceptance_snapshot(
         42,
@@ -111,6 +113,9 @@ fn init_repo_with_default_branch(repo: &Path) {
 
 #[test]
 fn autonomous_merge_pipeline_executes_through_mock_gh() {
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = std::env::temp_dir().join(format!("gwt-mockgh-{}", std::process::id()));
     let bin = tmp.join("bin");
     fs::create_dir_all(&bin).expect("mkdir mock bin");
@@ -122,11 +127,14 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
     init_repo_with_default_branch(&repo);
 
     let orig_path = std::env::var("PATH").unwrap_or_default();
-    std::env::set_var("PATH", format!("{}:{}", bin.display(), orig_path));
-    std::env::set_var("GWT_MOCK_GH_LOG", &merge_log);
+    let _path = gwt_core::test_support::ScopedEnvVar::set(
+        "PATH",
+        format!("{}:{}", bin.display(), orig_path),
+    );
+    let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_MOCK_GH_LOG", &merge_log);
     // Issue #3675: mark the mock as installed so the unsandboxed-gh spawn
     // guard lets the pipeline's gh spawns through.
-    std::env::set_var("GWT_TEST_GH_SANDBOX", "1");
+    let _sandbox = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH_SANDBOX", "1");
 
     let now = "2026-06-29T00:10:00Z";
     let issues = [auto_issue()];
@@ -224,12 +232,19 @@ fn autonomous_merge_pipeline_executes_through_mock_gh() {
         Some(&gwt::IssueMonitorLaunchSessionStrategy::FreshRequired),
     );
 
-    cleanup(&tmp, &orig_path);
+    cleanup(&tmp);
 }
 
-fn cleanup(tmp: &Path, orig_path: &str) {
-    std::env::set_var("PATH", orig_path);
-    std::env::remove_var("GWT_MOCK_GH_LOG");
-    std::env::remove_var("GWT_TEST_GH_SANDBOX");
+fn cleanup(tmp: &Path) {
     let _ = fs::remove_dir_all(tmp);
+}
+
+// These lifecycle fixtures model an ordinary repository with resolved provenance.
+fn test_monitor_with_prefs(
+    config: gwt::IssueMonitorConfig,
+    prefs: gwt::IssueMonitorPrefs,
+) -> gwt::IssueMonitorState {
+    let mut monitor = gwt::IssueMonitorState::with_prefs(config, prefs);
+    monitor.set_source_repository(Some(("example", "repo")));
+    monitor
 }

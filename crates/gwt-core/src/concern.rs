@@ -1,10 +1,9 @@
 //! Machine-local records for symptoms that must remain visible until verified.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{SecondsFormat, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -434,15 +433,14 @@ impl ConcernStore {
         if let Some(parent) = self.lock_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&self.lock_path)?;
-        crate::operation_deadline::lock_exclusive(&lock)?;
+        // Issue #4686 AC-5: the PM reads this store every supervision cycle, so
+        // a contended deadline here is a fail-closed path. The named lock names
+        // the holder's pid, operation, and acquisition time; the bare lock left
+        // only "operation deadline expired during file lock", which cannot tell
+        // a busy peer from a lock file a crashed process never released.
+        let lock = crate::operation_deadline::NamedFileLock::acquire(&self.lock_path, "concern")?;
         let result = operation();
-        if let Err(error) = FileExt::unlock(&lock) {
+        if let Err(error) = lock.unlock() {
             tracing::warn!(path = %self.lock_path.display(), %error, "concern lock unlock failed");
         }
         result

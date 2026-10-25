@@ -2,19 +2,17 @@
 //
 // Renders the bundled CHANGELOG payload returned by the backend as a
 // floating window: left sidebar lists every released version, right pane
-// renders the selected version's notes. Markdown rendering is a tiny
-// hand-rolled subset (### heading, - list, **bold**) matching exactly what
-// the gwt-core parser emits.
-//
-// All DOM is constructed with createElement / textContent. innerHTML is
-// not used so untrusted strings inside the bundled changelog (e.g. agent
-// commit messages) cannot produce HTML injection even though they cannot
-// reach this surface from network input today.
+// renders the selected version's notes through the shared content renderer.
+// Section body_html is Markdown rendered and sanitized by the backend; old
+// payloads without it retain a plain text list.
 //
 // Wired into app.js: `#app-version` click and the `#update-modal` "View
 // release notes" link both send `open_release_notes` over WebSocket. The
 // backend replies with `release_notes_payload` (or `release_notes_error`)
 // and `app.js` forwards it here.
+
+import { renderUiContent } from "./ui-content.js";
+import { createUiStateStore } from "./ui-state-store.js";
 
 const CHANGELOG_URL =
   "https://github.com/akiojin/gwt/blob/main/CHANGELOG.md";
@@ -30,22 +28,27 @@ export function createReleaseNotesWindow({
   // "applying"`). The host (app.js) wires this to
   // `updateCtaController.beginDownloadingFor`.
   beginUpdateDownloading = () => {},
+  scheduleFrame,
 } = {}) {
   if (!document) {
     throw new Error("createReleaseNotesWindow requires a document");
   }
 
+  const model = createUiStateStore({
+    entries: [],
+    selectedVersion: null,
+    currentVersion: null,
+    error: null,
+    visible: false,
+  }, { scheduleFrame });
   const state = {
     root: null,
     sidebar: null,
     content: null,
     focusReturn: null,
     keydownHandler: null,
-    entries: [],
-    selectedVersion: null,
     pendingFocusVersion: null,
     lastRequestId: null,
-    currentVersion: null,
     confirmModal: null,
     mode: "release_notes",
     titleEl: null,
@@ -87,10 +90,10 @@ export function createReleaseNotesWindow({
     return typeof value === "string" ? value.trim().replace(/^v/, "") : "";
   }
 
-  function isCurrentVersion(version) {
+  function isCurrentVersion(version, currentVersion) {
     return (
-      state.currentVersion &&
-      normalizeVersion(version) === normalizeVersion(state.currentVersion)
+      currentVersion &&
+      normalizeVersion(version) === normalizeVersion(currentVersion)
     );
   }
 
@@ -118,28 +121,7 @@ export function createReleaseNotesWindow({
     }
   }
 
-  function appendInlineMarkdown(target, text) {
-    // Splits on **bold** markers and appends alternating text / <strong>
-    // children. The bundled subset uses no other inline syntax.
-    const pattern = /\*\*([^*]+)\*\*/g;
-    let lastIndex = 0;
-    for (const match of text.matchAll(pattern)) {
-      if (match.index > lastIndex) {
-        target.appendChild(
-          document.createTextNode(text.slice(lastIndex, match.index)),
-        );
-      }
-      const strong = document.createElement("strong");
-      strong.textContent = match[1];
-      target.appendChild(strong);
-      lastIndex = match.index + match[0].length;
-    }
-    if (lastIndex < text.length) {
-      target.appendChild(document.createTextNode(text.slice(lastIndex)));
-    }
-  }
-
-  function buildEntryNode(entry) {
+  function buildEntryNode(entry, currentVersion) {
     const fragment = document.createDocumentFragment();
     if (!entry) {
       return fragment;
@@ -161,7 +143,7 @@ export function createReleaseNotesWindow({
     }
     header.appendChild(titleGroup);
 
-    const actionBtn = buildUpdateActionButton(entry.version);
+    const actionBtn = buildUpdateActionButton(entry.version, currentVersion);
     if (actionBtn) {
       header.appendChild(actionBtn);
     }
@@ -178,11 +160,13 @@ export function createReleaseNotesWindow({
         h3.textContent = section.heading;
         sectionEl.appendChild(h3);
       }
-      if (section.items && section.items.length > 0) {
+      if (section.content) {
+        sectionEl.appendChild(renderUiContent(document, section.content));
+      } else if (section.items && section.items.length > 0) {
         const ul = document.createElement("ul");
         for (const item of section.items) {
           const li = document.createElement("li");
-          appendInlineMarkdown(li, item);
+          li.textContent = item;
           ul.appendChild(li);
         }
         sectionEl.appendChild(ul);
@@ -197,15 +181,15 @@ export function createReleaseNotesWindow({
   // at the top-right of the content pane header. Returns `null` when the
   // backend payload did not provide `current_version` (older clients), so the
   // existing read-only Release Notes layout still renders.
-  function buildUpdateActionButton(version) {
-    if (!state.currentVersion) {
+  function buildUpdateActionButton(version, currentVersion) {
+    if (!currentVersion) {
       return null;
     }
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "release-notes-update-action";
 
-    const cmp = compareVersions(version, state.currentVersion);
+    const cmp = compareVersions(version, currentVersion);
     if (cmp === 0) {
       btn.classList.add("is-current");
       btn.disabled = true;
@@ -407,17 +391,17 @@ export function createReleaseNotesWindow({
     return root;
   }
 
-  function renderSidebar() {
+  function renderSidebar(snapshot) {
     if (!state.sidebar) {
       return;
     }
     clearChildren(state.sidebar);
-    if (!state.entries || state.entries.length === 0) {
+    if (snapshot.entries.length === 0) {
       return;
     }
-    for (const entry of state.entries) {
-      const selected = entry.version === state.selectedVersion;
-      const current = isCurrentVersion(entry.version);
+    for (const entry of snapshot.entries) {
+      const selected = entry.version === snapshot.selectedVersion;
+      const current = isCurrentVersion(entry.version, snapshot.currentVersion);
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = `release-notes-sidebar-item${selected ? " is-selected" : ""}${current ? " is-current-version" : ""}`;
@@ -450,35 +434,47 @@ export function createReleaseNotesWindow({
     }
   }
 
-  function renderContent() {
+  function renderContent(snapshot) {
     if (!state.content) {
       return;
     }
     clearChildren(state.content);
-    if (!state.entries || state.entries.length === 0) {
+    if (snapshot.entries.length === 0) {
       state.content.appendChild(
-        buildEmptyStateNode("Release notes could not be loaded."),
+        buildEmptyStateNode(snapshot.error || "Release notes could not be loaded."),
       );
       return;
     }
     const entry =
-      state.entries.find((e) => e.version === state.selectedVersion) ||
-      state.entries[0];
-    state.content.appendChild(buildEntryNode(entry));
+      snapshot.entries.find((e) => e.version === snapshot.selectedVersion) ||
+      snapshot.entries[0];
+    state.content.appendChild(buildEntryNode(entry, snapshot.currentVersion));
   }
+
+  // The controller lives for the app lifetime. Closed windows retain only data;
+  // their DOM and key listener are released by close().
+  model.subscribe(snapshot => snapshot.visible, visible => {
+    if (visible) ensureWindow();
+  });
+  model.subscribeFrame(snapshot => snapshot, snapshot => {
+    if (!snapshot.visible) return;
+    applyWindowChrome();
+    renderSidebar(snapshot);
+    renderContent(snapshot);
+  });
 
   function select(version) {
     if (!version) {
       return;
     }
-    const exists = state.entries.some((e) => e.version === version);
-    state.selectedVersion = exists
+    const snapshot = model.read();
+    const exists = snapshot.entries.some((e) => e.version === version);
+    const selectedVersion = exists
       ? version
-      : state.entries[0]
-        ? state.entries[0].version
+      : snapshot.entries[0]
+        ? snapshot.entries[0].version
         : null;
-    renderSidebar();
-    renderContent();
+    model.update(current => ({ ...current, selectedVersion }));
   }
 
   function open(focusVersion = null) {
@@ -507,10 +503,9 @@ export function createReleaseNotesWindow({
     if (!payload || !Array.isArray(payload.entries)) {
       return;
     }
-    state.entries = payload.entries;
     // SPEC #2780 v2 Amendment (FR-013): payload now carries the running
     // version so the Update action button can pick the right label.
-    state.currentVersion =
+    const currentVersion =
       typeof payload.current_version === "string"
         ? payload.current_version
         : null;
@@ -519,29 +514,32 @@ export function createReleaseNotesWindow({
       state.pendingFocusVersion ||
       (payload.entries[0] && payload.entries[0].version) ||
       null;
-    state.selectedVersion = requested;
-    ensureWindow();
-    applyWindowChrome();
-    renderSidebar();
-    renderContent();
+    model.update(() => ({
+      entries: payload.entries.map(entry => ({ ...entry,
+        sections: (entry.sections || []).map(section => ({ ...section,
+          content: typeof section.body_html === "string" && section.body_html.trim()
+            ? { type: "markdown", body: section.body || "", body_html: section.body_html }
+            : null })) })),
+      currentVersion,
+      selectedVersion: requested,
+      error: null,
+      visible: true,
+    }));
     state.pendingFocusVersion = null;
   }
 
   function handleError(message) {
-    state.entries = [];
-    state.selectedVersion = null;
-    ensureWindow();
-    applyWindowChrome();
-    renderSidebar();
-    if (state.content) {
-      clearChildren(state.content);
-      state.content.appendChild(
-        buildEmptyStateNode(message || "Release notes could not be loaded."),
-      );
-    }
+    model.update(current => ({
+      ...current,
+      entries: [],
+      selectedVersion: null,
+      error: message || "Release notes could not be loaded.",
+      visible: true,
+    }));
   }
 
   function close() {
+    model.update(current => ({ ...current, visible: false }));
     dismissDowngradeConfirm();
     if (state.keydownHandler) {
       document.removeEventListener("keydown", state.keydownHandler);
@@ -571,7 +569,7 @@ export function createReleaseNotesWindow({
   }
 
   function selectedVersion() {
-    return state.selectedVersion;
+    return model.read().selectedVersion;
   }
 
   return {

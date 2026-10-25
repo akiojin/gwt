@@ -31,27 +31,40 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
+pulldown-cmark = { workspace = true }
 base64 = { workspace = true }
 libc = { workspace = true }
+sysinfo = { workspace = true }
+tempfile = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-fsevent-sys = "4.1"
+fsevent-sys = "5.2"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     "Win32_System_Pipes",
     "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
 ] }
 
 [build-dependencies]
 serde_yaml = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+# Issue #4296: gwt-core's own integration tests live outside the lib, so
+# `cfg(test)` does not reach them. Depending on self with `test-support` makes
+# `gwt_core::test_support` (env lock, `ScopedEnvVar`, `ScopedGwtHome`)
+# available to `crates/gwt-core/tests/` without `--all-features`.
+gwt-core = { path = ".", features = ["test-support"] }
 tempfile = { workspace = true }
 fs2 = { workspace = true }
 serde_json = { workspace = true }
@@ -59,4 +72,8 @@ serde_json = { workspace = true }
 [features]
 # Exposes `gwt_core::test_support` (env lock + ScopedEnvVar) to dependent
 # crates' tests. Enable from dev-dependencies only (SPEC-3016 FR-003).
-test-support = []
+test-support = ["gwt-config/test-support", "dep:tempfile"]
+
+[package.metadata.cargo-machete]
+# build.rs parses skill YAML frontmatter with this build dependency.
+ignored = ["serde_yaml"]

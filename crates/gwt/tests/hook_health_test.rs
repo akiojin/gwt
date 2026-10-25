@@ -12,6 +12,338 @@ use gwt::cli::hook::{
 use gwt_agent::PendingDiscussionResume;
 use serde_json::json;
 
+#[test]
+fn issue_3713_plugin_external_skill_conflicts_are_advisory_and_enumerated_in_hook_health() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("external/commands");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        plugin.join("ship.md"),
+        "# Ship\nRun `gh pr create --title forbidden`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let input = ManagedHookHealthInput {
+        worktree_root: root.path().to_path_buf(),
+        // This advisory-only fixture must not inherit a live Session's runtime.
+        runtime_state_path: None,
+        profile_path: None,
+        expected_hook_bin: None,
+    };
+    let health = read_managed_hook_health(&input);
+    assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
+    let health = serde_json::to_value(health).unwrap();
+    let audit = &health["external_skill_conflicts"];
+    assert_eq!(audit["conflict_count"], 1);
+    assert_eq!(audit["files"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["findings"][0]["line"], 2);
+    assert!(audit["findings"][0]["alternative"]
+        .as_str()
+        .unwrap()
+        .contains("pr.create"));
+    assert!(Path::new(audit["findings"][0]["file"].as_str().unwrap()).ends_with("commands/ship.md"));
+    fs::write(plugin.join("ship.md"), "Run `gh pr view 17`.\n").unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
+    assert_eq!(
+        refreshed["external_skill_conflicts"]["conflict_count"], 0,
+        "changed external instructions must invalidate cached diagnosis"
+    );
+    fs::write(
+        plugin.join("new.md"),
+        "Run `gh issue comment 17 --body done`.\n",
+    )
+    .unwrap();
+    let refreshed = serde_json::to_value(read_managed_hook_health(&input)).unwrap();
+    assert_eq!(
+        refreshed["external_skill_conflicts"]["conflict_count"], 1,
+        "new command files must invalidate cached diagnosis"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_excludes_reads_prohibitions_and_search_strings() {
+    let root = tempfile::tempdir().unwrap();
+    let plugin = root.path().join("external/skills/review");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        plugin.join("SKILL.md"),
+        r#"# Review
+Run `gh pr view 17` and `gh api -X GET repos/o/r`.
+Never run `gh pr create --title bad`.
+Do not use `gh issue comment 17 --body bad`.
+Forbidden example: `gh pr merge 17`.
+Do not run the following command:
+```bash
+gh pr create --title example
+```
+```bash
+rg -n "gh pr create|gh issue close" .
+git push origin HEAD
+```
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 0);
+    assert_eq!(health["external_skill_conflicts"]["inspected_files"], 1);
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_reports_unavailable_explicit_roots() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("missing")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["status"], "unavailable");
+    assert!(!health["external_skill_conflicts"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn issue_3713_plugin_external_skill_scan_does_not_follow_symlinked_skills() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/skills")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(outside.path().join("SKILL.md"), "Run `gh pr create`.\n").unwrap();
+    std::os::unix::fs::symlink(outside.path(), root.path().join("external/skills/escape")).unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 0);
+    assert_eq!(health["external_skill_conflicts"]["status"], "partial");
+}
+
+#[test]
+fn issue_3713_plugin_external_skill_scan_file_limit_is_explicit_in_health() {
+    let root = tempfile::tempdir().unwrap();
+    let commands = root.path().join("external/commands");
+    fs::create_dir_all(&commands).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    for n in 0..70 {
+        fs::write(
+            commands.join(format!("{n:03}.md")),
+            "Run `gh pr view 17`.\n",
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["inspected_files"], 64);
+    assert_eq!(health["external_skill_conflicts"]["status"], "partial");
+}
+
+#[test]
+fn issue_3713_plugin_inventory_reads_only_enabled_effective_installation() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let current = home.path().join("current/commands");
+    let inactive = home.path().join("inactive/commands");
+    for path in [&current, &inactive] {
+        fs::create_dir_all(path).unwrap();
+    }
+    fs::create_dir_all(home.path().join(".claude/plugins")).unwrap();
+    fs::write(
+        home.path().join(".claude/settings.json"),
+        r#"{"enabledPlugins":{"ship@market":true,"inactive@market":false}}"#,
+    )
+    .unwrap();
+    fs::write(current.join("ship.md"), "Run `gh pr create`.\n").unwrap();
+    fs::write(inactive.join("inactive.md"), "Run `gh issue close 17`.\n").unwrap();
+    fs::write(home.path().join(".claude/plugins/installed_plugins.json"), serde_json::to_vec(&json!({"plugins": {
+        "ship@market": [{"scope":"project","projectPath":"/foreign","installPath":inactive.parent().unwrap()}, {"scope":"user","installPath":current.parent().unwrap()}],
+        "inactive@market": [{"scope":"user","installPath":inactive.parent().unwrap()}]
+    }})).unwrap()).unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let report = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(report["external_skill_conflicts"]["conflict_count"], 1);
+    assert_eq!(
+        report["external_skill_conflicts"]["findings"][0]["plugin"],
+        "ship@market"
+    );
+    assert!(report["external_skill_conflicts"]["findings"][0]["file"]
+        .as_str()
+        .unwrap()
+        .contains("current"));
+    fs::remove_file(current.join("ship.md")).unwrap();
+    fs::remove_dir(&current).unwrap();
+    let empty = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(empty["external_skill_conflicts"]["conflict_count"], 0);
+    fs::create_dir_all(&current).unwrap();
+    fs::write(current.join("ship.md"), "Run `gh pr create`.\n").unwrap();
+    let restored = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(
+        restored["external_skill_conflicts"]["conflict_count"], 1,
+        "new instruction directories must invalidate a previously empty inventory"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_pretool_advisory_targets_skill_and_keeps_authority_unchanged() {
+    use gwt::cli::hook::external_skill_conflicts::advisory_context;
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join("external/commands/ship.md"),
+        "Run `gh pr create`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("external/commands/merge.md"),
+        "Run `gh pr merge 17`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let context = advisory_context(
+        "PreToolUse",
+        r#"{"tool_name":"Skill","tool_input":{"skill":"external:ship"},"activePlugin":"external"}"#,
+        root.path(),
+    )
+    .unwrap();
+    assert!(context.contains("ship.md") && context.contains("pr.create"));
+    assert!(!context.contains("merge.md"));
+    assert!(advisory_context(
+        "PreToolUse",
+        r#"{"tool_name":"Read","active_skill":"external:ship"}"#,
+        root.path()
+    )
+    .is_none());
+    let session_start = advisory_context("SessionStart", "{}", root.path()).unwrap();
+    assert!(session_start.contains("ship.md") && session_start.contains("merge.md"));
+    assert!(
+        gwt::cli::hook::block_bash_policy::evaluate_bash_command("gh pr create", root.path())
+            .is_some(),
+        "advisory identity cannot authorize GitHub writes"
+    );
+}
+
+#[test]
+fn issue_3713_plugin_actual_dispatcher_delivers_context_without_overwriting_denial() {
+    use gwt::cli::hook::event_dispatcher::handle_with_input;
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let _home = ScopedEnvVar::set("HOME", root.path());
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+    let _session = ScopedEnvVar::remove("GWT_SESSION_ID");
+    let _runtime = ScopedEnvVar::remove("GWT_SESSION_RUNTIME_PATH");
+    let _url = ScopedEnvVar::remove("GWT_HOOK_FORWARD_URL");
+    let _token = ScopedEnvVar::remove("GWT_HOOK_FORWARD_TOKEN");
+    let _autonomous = ScopedEnvVar::remove("GWT_AUTONOMOUS_EXECUTION");
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(
+        root.path().join("external/commands/ship.md"),
+        "Run `gh pr create`.\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    for (event_name, payload) in [
+        ("SessionStart", "{}"),
+        (
+            "PreToolUse",
+            r#"{"tool_name":"Skill","tool_input":{"skill":"external:ship"}}"#,
+        ),
+    ] {
+        let output = handle_with_input(event_name, payload, root.path(), None).unwrap();
+        let mut bytes = Vec::new();
+        output.serialize_to(&mut bytes).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(wire["hookSpecificOutput"]["hookEventName"], event_name);
+        assert!(wire["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("ship.md"));
+        assert!(wire["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none());
+    }
+    let output = handle_with_input("PreToolUse", r#"{"tool_name":"Bash","tool_input":{"command":"gh pr create"},"active_skill":"external:ship"}"#, root.path(), None).unwrap();
+    let mut bytes = Vec::new();
+    output.serialize_to(&mut bytes).unwrap();
+    let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(wire["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
+fn issue_3713_plugin_shell_continuations_use_the_actual_mutation_policy() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir_all(root.path().join("external/commands")).unwrap();
+    fs::create_dir_all(root.path().join(".gwt")).unwrap();
+    fs::write(root.path().join("external/commands/api.md"), "# Publish\n```bash\ngh api \\\n  --method POST \\\n  repos/o/r/issues\ngh api graphql -f query='\nmutation { closeIssue(input: {issueId: \"id\"}) { clientMutationId } }\n'\n```\n").unwrap();
+    fs::write(
+        root.path().join(".gwt/external-skill-roots.json"),
+        serde_json::to_vec(&json!([root.path().join("external")])).unwrap(),
+    )
+    .unwrap();
+    let health = serde_json::to_value(read_managed_hook_health(&ManagedHookHealthInput::new(
+        root.path(),
+    )))
+    .unwrap();
+    assert_eq!(health["external_skill_conflicts"]["conflict_count"], 2);
+    assert_eq!(health["external_skill_conflicts"]["findings"][0]["line"], 3);
+    assert_eq!(health["external_skill_conflicts"]["findings"][1]["line"], 6);
+}
+
 struct ScopedEnvVar {
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -53,9 +385,8 @@ impl StableHookBinGuard {
     }
 }
 
-fn env_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_test_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn stable_hook_bin_guard() -> StableHookBinGuard {
@@ -80,7 +411,31 @@ fn stable_hook_bin_guard() -> StableHookBinGuard {
 }
 
 fn normalized_embedded_path_text(value: &str) -> String {
-    value.replace("\\\\", "/").replace('\\', "/")
+    hook_config_inspection_text(value)
+        .replace("\\\\", "/")
+        .replace('\\', "/")
+}
+
+fn hook_config_inspection_text(value: &str) -> String {
+    let mut inspected = value.to_string();
+    if let Ok(root) = serde_json::from_str::<serde_json::Value>(value) {
+        for command in root["hooks"]
+            .as_object()
+            .into_iter()
+            .flat_map(|hooks| hooks.values())
+            .filter_map(|groups| groups.as_array())
+            .flatten()
+            .filter_map(|group| group["hooks"].as_array())
+            .flatten()
+            .filter_map(|hook| hook["command"].as_str())
+        {
+            if let Some(decoded) = gwt_skills::decode_powershell_encoded_command(command) {
+                inspected.push('\n');
+                inspected.push_str(&decoded);
+            }
+        }
+    }
+    inspected
 }
 
 #[test]
@@ -484,7 +839,10 @@ fn managed_hook_repair_preserves_user_hooks_and_top_level_settings() {
     assert_eq!(repaired["customSetting"], true);
     let rendered = serde_json::to_string(&repaired).unwrap();
     assert!(rendered.contains("echo user hook"), "{rendered}");
-    assert!(rendered.contains("hook event Stop"), "{rendered}");
+    assert!(
+        hook_config_inspection_text(&rendered).contains("hook event Stop"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -542,7 +900,10 @@ fn managed_hook_health_understands_runtime_indirect_fallbacks() {
     for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
         let normalized_rendered = normalized_embedded_path_text(&rendered);
-        assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
+        assert!(
+            hook_config_inspection_text(&rendered).contains("GWT_BIN_PATH"),
+            "{artifact}: {rendered}"
+        );
         assert!(
             normalized_rendered.contains(&expected_hook_bin),
             "{artifact}: {rendered}"
@@ -755,7 +1116,10 @@ fn managed_hook_health_understands_all_provider_runtime_indirect_fallbacks() {
     ] {
         let rendered = fs::read_to_string(worktree.path().join(artifact)).unwrap();
         let normalized_rendered = normalized_embedded_path_text(&rendered);
-        assert!(rendered.contains("GWT_BIN_PATH"), "{artifact}: {rendered}");
+        assert!(
+            hook_config_inspection_text(&rendered).contains("GWT_BIN_PATH"),
+            "{artifact}: {rendered}"
+        );
         assert!(
             normalized_rendered.contains(&expected_hook_bin),
             "{artifact}: {rendered}"
@@ -927,6 +1291,72 @@ fn write_legacy_codex_hooks(path: &Path, fallback_bin: &str) {
     .expect("write legacy hooks");
 }
 
+/// Encoded transport must remain transparent to the managed-hook auditor.
+#[test]
+fn powershell_encoded_hook_health_preserves_fallback_audit_and_flags_unsafe_transport() {
+    use base64::Engine;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let worktree = tempfile::tempdir().expect("worktree");
+    let _home = gwt_core::test_support::ScopedGwtHome::set(worktree.path());
+    let hook_bin = stable_hook_bin_guard();
+    let path = worktree.path().join(".codex/hooks.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let write_hooks = |fallback: &Path, encoded: bool| {
+        let hooks = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+            .into_iter()
+            .map(|event| {
+                let script = format!(
+                    "& {{ $gwtBin = if ($env:GWT_BIN_PATH) {{ $env:GWT_BIN_PATH }} else {{ '{}' }}; try {{ & $gwtBin hook event {event} }} catch {{ exit 0 }} }}",
+                    fallback.display().to_string().replace('\'', "''")
+                );
+                let command = if encoded {
+                    let bytes: Vec<_> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+                    format!("powershell -NoProfile -EncodedCommand {}", base64::engine::general_purpose::STANDARD.encode(bytes))
+                } else {
+                    format!("powershell -NoProfile -Command \"{script}\"")
+                };
+                (event.to_string(), json!([{ "matcher": "*", "hooks": [{ "type": "command", "command": command }] }]))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+    };
+    let input = ManagedHookHealthInput::new(worktree.path())
+        .with_expected_hook_bin(hook_bin.path().display().to_string());
+
+    write_hooks(hook_bin.path(), true);
+    let healthy = read_managed_hook_health(&input);
+    assert!(healthy.issues.is_empty(), "{:?}", healthy.issues);
+
+    write_hooks(&worktree.path().join("missing-gwtd.exe"), true);
+    let missing = read_managed_hook_health(&input);
+    assert!(
+        missing
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook binary missing:")),
+        "{:?}",
+        missing.issues
+    );
+
+    write_hooks(hook_bin.path(), false);
+    let unsafe_wrapper = read_managed_hook_health(&input);
+    assert!(
+        unsafe_wrapper
+            .issues
+            .iter()
+            .any(|issue| issue.starts_with("managed hook PowerShell transport unsafe:")),
+        "{:?}",
+        unsafe_wrapper.issues
+    );
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
     let output = gwt_core::process::hidden_command("git")
         .arg("-C")
@@ -1022,7 +1452,7 @@ fn codex_hook_audit_and_repair_cover_worktree_local_and_workspace_home_copies() 
     for path in &paths {
         let rendered = fs::read_to_string(path).expect("read repaired hooks");
         assert!(
-            rendered.contains("GWT_BIN_PATH"),
+            hook_config_inspection_text(&rendered).contains("GWT_BIN_PATH"),
             "{} did not receive the host-native runtime selector: {rendered}",
             path.display()
         );
@@ -1123,60 +1553,45 @@ fn managed_hook_health_resolves_bare_fallback_without_the_process_path() {
     );
 }
 
-/// #3474 root cause 1: `.codex/hooks.json` is version-controlled in THIS repo
-/// (a repository decision gwt deliberately leaves to the project — see the
-/// README "Hook file ownership" contract), so the committed copy is the one a
-/// fresh clone and any gwt-external Codex run uses. It must stay on the guarded
-/// template and must never pin a machine-local build output.
+/// #3810 AC-6: this repository keeps host-specific Codex hooks local.
+/// Other projects remain free to track their own hook configuration.
 #[test]
-fn committed_codex_hooks_stay_guarded_and_portable() {
+fn repo_codex_hooks_are_untracked_and_ignored() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .expect("repo root")
         .to_path_buf();
-    let hooks_path = repo_root.join(".codex/hooks.json");
-    let rendered = fs::read_to_string(&hooks_path).expect("read committed codex hooks");
-    let root: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
-
-    let mut managed = 0usize;
-    for (event, groups) in root["hooks"].as_object().expect("hooks object") {
-        for command in groups
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|group| group.get("hooks").and_then(|hooks| hooks.as_array()))
-            .flatten()
-            .filter_map(|hook| hook.get("command").and_then(|command| command.as_str()))
-        {
-            if !command.contains(&format!("hook event {event}")) {
-                continue;
-            }
-            managed += 1;
-            assert!(
-                command.contains("command -v"),
-                "{event} still uses the unguarded legacy template: {command}"
-            );
-            // #4044 (AC-3): the committed fallback must be the canonical bare
-            // `gwtd`. Any absolute path — a worktree build output OR an
-            // installed `/Applications/GWT.app/...` (PR #4005) — exists on one
-            // machine only, and the generator rewrites a tracked config to the
-            // canonical form, so a committed absolute path leaves every other
-            // checkout permanently dirty after its first materialization.
-            assert!(
-                command.contains("gwt_bin='gwtd'"),
-                "{event} must commit the canonical `gwtd` fallback, not an absolute path: {command}"
-            );
-        }
-    }
-    assert_eq!(managed, 5, "every managed event must be committed");
+    let tracked = gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args(["ls-files", "--", ".codex/hooks.json"])
+        .output()
+        .expect("inspect tracked hook configuration");
+    assert!(tracked.status.success(), "{tracked:?}");
     assert!(
-        !rendered.contains("/target/debug/") && !rendered.contains("\\\\target\\\\debug\\\\"),
-        "a machine-local build output must never be committed: {rendered}"
+        tracked.stdout.is_empty(),
+        "host-specific .codex/hooks.json must not be tracked"
     );
+    let ignored = gwt_core::process::hidden_command("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .args([
+            "check-ignore",
+            "--no-index",
+            "-v",
+            "--",
+            ".codex/hooks.json",
+        ])
+        .output()
+        .expect("inspect repository hook exclusion");
+    assert!(ignored.status.success(), "{ignored:?}");
     assert!(
-        !rendered.contains("/Applications/") && !rendered.contains("gwt_bin='/"),
-        "an absolute install path must never be committed: {rendered}"
+        String::from_utf8_lossy(&ignored.stdout).starts_with(".gitignore:"),
+        "the repository must ignore generated hooks without machine-local exclusions: {ignored:?}"
     );
 }
 
@@ -1195,6 +1610,8 @@ fn git_porcelain(dir: &Path) -> String {
 fn repo_with_committed_canonical_codex_hooks() -> tempfile::TempDir {
     let repo = tempfile::tempdir().expect("repo");
     init_git_repo(repo.path());
+    // Keep generated bytes stable across linked checkouts, regardless of host Git settings.
+    run_git(repo.path(), &["config", "core.autocrlf", "false"]);
     {
         let _bare = ScopedEnvVar::set("GWT_HOOK_BIN", "gwtd");
         gwt_skills::generate_codex_hooks(repo.path()).expect("codex hooks");
@@ -1206,6 +1623,38 @@ fn repo_with_committed_canonical_codex_hooks() -> tempfile::TempDir {
         "fixture must start clean"
     );
     repo
+}
+
+fn contaminate_canonical_hook_fallback(rendered: &str, fallback: &str) -> String {
+    use base64::Engine;
+
+    let mut root: serde_json::Value = serde_json::from_str(rendered).unwrap();
+    for groups in root["hooks"].as_object_mut().unwrap().values_mut() {
+        for group in groups.as_array_mut().unwrap() {
+            for hook in group["hooks"].as_array_mut().unwrap() {
+                let command = hook["command"].as_str().unwrap();
+                let decoded = gwt_skills::decode_powershell_encoded_command(command);
+                let body = decoded.as_deref().unwrap_or(command);
+                let contaminated = body
+                    .replace("gwt_bin='gwtd'", &format!("gwt_bin='{fallback}'"))
+                    .replace("else { 'gwtd' }", &format!("else {{ '{fallback}' }}"));
+                assert_ne!(body, contaminated, "fixture must alter the fallback");
+                hook["command"] = json!(if decoded.is_some() {
+                    let bytes: Vec<_> = contaminated
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect();
+                    format!(
+                        "powershell -NoProfile -EncodedCommand {}",
+                        base64::engine::general_purpose::STANDARD.encode(bytes)
+                    )
+                } else {
+                    contaminated
+                });
+            }
+        }
+    }
+    serde_json::to_string_pretty(&root).unwrap()
 }
 
 /// #3567 AC-2 / AC-4: a git-TRACKED `.codex/hooks.json` must never receive the
@@ -1231,7 +1680,8 @@ fn tracked_codex_hooks_keep_canonical_binary_fallback() {
         "a tracked hook config must not embed the materializing machine's path: {rendered}"
     );
     assert!(
-        rendered.contains("gwt_bin='gwtd'") || rendered.contains("else { 'gwtd' }"),
+        hook_config_inspection_text(&rendered).contains("gwt_bin='gwtd'")
+            || hook_config_inspection_text(&rendered).contains("else { 'gwtd' }"),
         "a tracked hook config must keep the canonical bare fallback: {rendered}"
     );
     assert!(
@@ -1252,9 +1702,9 @@ fn contaminated_tracked_codex_hooks_converge_back_to_canonical() {
     let repo = repo_with_committed_canonical_codex_hooks();
     let hooks_path = repo.path().join(".codex/hooks.json");
     let committed = fs::read_to_string(&hooks_path).expect("read committed hooks");
-    let contaminated = committed.replace(
-        "gwt_bin='gwtd'",
-        "gwt_bin='/Users/someone/Workbench/gwt/work/issue-3547/target/debug/gwtd'",
+    let contaminated = contaminate_canonical_hook_fallback(
+        &committed,
+        "/Users/someone/Workbench/gwt/work/issue-3547/target/debug/gwtd",
     );
     assert_ne!(committed, contaminated, "fixture must actually contaminate");
     fs::write(&hooks_path, &contaminated).expect("write contaminated hooks");
@@ -1284,9 +1734,9 @@ fn committed_install_path_in_tracked_codex_hooks_is_normalized_on_repair() {
     let repo = repo_with_committed_canonical_codex_hooks();
     let hooks_path = repo.path().join(".codex/hooks.json");
     let canonical = fs::read_to_string(&hooks_path).expect("read canonical hooks");
-    let committed_install_path = canonical.replace(
-        "gwt_bin='gwtd'",
-        "gwt_bin='/Applications/GWT.app/Contents/MacOS/gwtd'",
+    let committed_install_path = contaminate_canonical_hook_fallback(
+        &canonical,
+        "/Applications/GWT.app/Contents/MacOS/gwtd",
     );
     assert_ne!(
         canonical, committed_install_path,
@@ -1311,7 +1761,7 @@ fn committed_install_path_in_tracked_codex_hooks_is_normalized_on_repair() {
         let rendered = fs::read_to_string(&hooks_path).expect("read repaired hooks");
         let installed_text = normalized_embedded_path_text(&installed.path().display().to_string());
         assert!(
-            !rendered.contains("/Applications/GWT.app"),
+            !hook_config_inspection_text(&rendered).contains("/Applications/GWT.app"),
             "repair must drop the committed install path: {rendered}"
         );
         assert!(
@@ -1637,6 +2087,265 @@ fn managed_hook_health_retains_failure_evidence_after_a_later_success() {
     );
 }
 
+// Issue #4370: the Active Work projection reads hook health once per Work row
+// and used to re-audit every worktree's managed hook surface on every build.
+// The surface audit is now reused across snapshots until the surface changes.
+mod surface_audit_cache {
+    use std::{fs, path::Path, time::Instant};
+
+    use gwt::cli::hook::health::{
+        ManagedHookFailureSnapshot, ManagedHookHealthInput, ManagedHookHealthStatus,
+    };
+
+    fn write_surface(worktree: &Path, hooks_json: &str) {
+        for artifact in [".claude/settings.local.json", ".codex/hooks.json"] {
+            let path = worktree.join(artifact);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, hooks_json).unwrap();
+        }
+    }
+
+    fn projection_input(worktree: &Path) -> ManagedHookHealthInput {
+        let mut input = ManagedHookHealthInput::new(worktree);
+        input.expected_hook_bin = None;
+        input.runtime_state_path = None;
+        input
+    }
+
+    #[test]
+    fn unchanged_surface_is_reused_across_snapshots_without_a_fresh_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+
+        let first = ManagedHookFailureSnapshot::read();
+        let first_health = first.read_health(&input);
+        assert_eq!(first.surface_audit_stats().refreshed, 1);
+        assert_eq!(first.surface_audit_stats().reused, 0);
+
+        let second = ManagedHookFailureSnapshot::read();
+        let second_health = second.read_health(&input);
+        assert_eq!(
+            second.surface_audit_stats().refreshed,
+            0,
+            "unchanged surface re-audited"
+        );
+        assert_eq!(second.surface_audit_stats().reused, 1);
+        assert_eq!(second_health, first_health);
+        assert!(second_health
+            .issues
+            .iter()
+            .any(|issue| issue.contains("managed hook event missing: SessionStart")));
+    }
+
+    #[test]
+    fn removed_and_rewritten_hook_surfaces_refresh_on_the_next_snapshot() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let input = projection_input(worktree.path());
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_health = warm.read_health(&input);
+        assert_eq!(warm_health.status, ManagedHookHealthStatus::NeedsAttention);
+
+        // Hook removal: the Codex config disappears.
+        let codex_hooks = worktree.path().join(".codex/hooks.json");
+        fs::remove_file(&codex_hooks).unwrap();
+        let after_removal = ManagedHookFailureSnapshot::read();
+        let health = after_removal.read_health(&input);
+        assert_eq!(after_removal.surface_audit_stats().refreshed, 1);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config missing")),
+            "{:?}",
+            health.issues
+        );
+
+        // Generated file update: the config comes back with different content.
+        fs::write(&codex_hooks, "{\"hooks\": 1").unwrap();
+        let after_rewrite = ManagedHookFailureSnapshot::read();
+        let health = after_rewrite.read_health(&input);
+        assert_eq!(after_rewrite.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Degraded);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("managed hook config is not valid JSON")),
+            "{:?}",
+            health.issues
+        );
+
+        // Surface removal: no gwt surface at all reports Inactive again.
+        fs::remove_dir_all(worktree.path().join(".claude")).unwrap();
+        fs::remove_dir_all(worktree.path().join(".codex")).unwrap();
+        let after_teardown = ManagedHookFailureSnapshot::read();
+        let health = after_teardown.read_health(&input);
+        assert_eq!(after_teardown.surface_audit_stats().refreshed, 1);
+        assert_eq!(health.status, ManagedHookHealthStatus::Inactive);
+        assert!(health.issues.is_empty(), "{:?}", health.issues);
+    }
+
+    #[test]
+    fn expected_binary_change_invalidates_the_cached_audit() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let worktree = tempfile::tempdir().expect("worktree");
+        write_surface(worktree.path(), "{}");
+        let mut input = projection_input(worktree.path());
+        ManagedHookFailureSnapshot::read().read_health(&input);
+
+        input.expected_hook_bin = Some("/opt/gwt/other-gwtd".to_string());
+        let snapshot = ManagedHookFailureSnapshot::read();
+        snapshot.read_health(&input);
+        assert_eq!(snapshot.surface_audit_stats().refreshed, 1);
+    }
+
+    /// AC-2: with 592 Work rows the cached build must finish inside 5 seconds
+    /// and must not re-audit a single unchanged row.
+    #[test]
+    fn five_hundred_ninety_two_rows_reuse_every_unchanged_surface_within_budget() {
+        let _env_lock = super::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("gwt home");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let root = tempfile::tempdir().expect("worktrees");
+        let rows = 592;
+        let worktrees = (0..rows)
+            .map(|index| {
+                let worktree = root.path().join(format!("work-{index}"));
+                write_surface(&worktree, "{}");
+                worktree
+            })
+            .collect::<Vec<_>>();
+        let inputs = worktrees
+            .iter()
+            .map(|worktree| projection_input(worktree))
+            .collect::<Vec<_>>();
+
+        let cold = ManagedHookFailureSnapshot::read();
+        let cold_started = Instant::now();
+        for input in &inputs {
+            cold.read_health(input);
+        }
+        let cold_elapsed = cold_started.elapsed();
+        assert_eq!(cold.surface_audit_stats().refreshed, rows);
+
+        let warm = ManagedHookFailureSnapshot::read();
+        let warm_started = Instant::now();
+        for input in &inputs {
+            warm.read_health(input);
+        }
+        let warm_elapsed = warm_started.elapsed();
+        eprintln!(
+            "hook health surface audit: rows={rows} cold={}ms warm={}ms",
+            cold_elapsed.as_millis(),
+            warm_elapsed.as_millis()
+        );
+        assert_eq!(warm.surface_audit_stats().refreshed, 0);
+        assert_eq!(warm.surface_audit_stats().reused, rows);
+        assert!(
+            warm_elapsed.as_secs() < 5,
+            "warm build took {}ms",
+            warm_elapsed.as_millis()
+        );
+    }
+}
+
+/// Issue #5120: selection and health must observe one runtime read per projection.
+#[test]
+fn runtime_state_is_shared_within_a_projection_and_refreshes_on_the_next() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = tempfile::tempdir().unwrap();
+    let runtime_path = worktree.path().join("runtime.json");
+    runtime_state::write_for_event(&runtime_path, "PreToolUse").unwrap();
+    let input = ManagedHookHealthInput::new(worktree.path()).with_runtime_state_path(&runtime_path);
+    let snapshot = ManagedHookFailureSnapshot::default();
+    assert_eq!(
+        snapshot.read_health(&input).last_event.as_deref(),
+        Some("PreToolUse")
+    );
+
+    runtime_state::write_for_event(&runtime_path, "UserPromptSubmit").unwrap();
+    assert_eq!(
+        snapshot.read_health(&input).last_event.as_deref(),
+        Some("PreToolUse")
+    );
+    assert_eq!(
+        ManagedHookFailureSnapshot::default()
+            .read_health(&input)
+            .last_event
+            .as_deref(),
+        Some("UserPromptSubmit")
+    );
+    fs::write(&runtime_path, "invalid runtime JSON").unwrap();
+    let invalid = ManagedHookFailureSnapshot::default().read_health(&input);
+    assert_eq!(invalid.status, ManagedHookHealthStatus::Degraded);
+    assert!(invalid
+        .issues
+        .iter()
+        .any(|issue| issue.contains("runtime state could not be read")));
+    fs::remove_file(&runtime_path).unwrap();
+    let missing = ManagedHookFailureSnapshot::default().read_health(&input);
+    assert_eq!(missing.last_event, None);
+    assert!(!missing
+        .issues
+        .iter()
+        .any(|issue| issue.contains("runtime state could not be read")));
+}
+
+/// Unchanged mtime/length must reuse the previous decoded result without rereading JSON.
+#[test]
+fn runtime_state_reuses_the_previous_projection_when_the_stamp_is_unchanged() {
+    use gwt::cli::hook::health::ManagedHookFailureSnapshot;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let worktree = tempfile::tempdir().unwrap();
+    let runtime_path = worktree.path().join("runtime.json");
+    runtime_state::write_for_event(&runtime_path, "PreToolUse").unwrap();
+    let original = fs::read(&runtime_path).unwrap();
+    let stamp = fs::metadata(&runtime_path).unwrap().modified().unwrap();
+    let input = ManagedHookHealthInput::new(worktree.path()).with_runtime_state_path(&runtime_path);
+    let first = ManagedHookFailureSnapshot::default().read_health(&input);
+    // Same-sized corrupt content proves the second projection does not read it.
+    fs::write(&runtime_path, vec![b'x'; original.len()]).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&runtime_path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(stamp))
+        .unwrap();
+    assert_eq!(
+        ManagedHookFailureSnapshot::default().read_health(&input),
+        first
+    );
+}
+
 /// Issue #4257: a bare fallback such as `gwtd` is resolved by walking the whole
 /// PATH (~11ms per lookup on a 59-entry Windows PATH), and the answer depends
 /// only on process-wide state. One projection shares one snapshot across every
@@ -1695,4 +2404,68 @@ fn shared_snapshot_resolves_each_bare_hook_binary_once() {
         1,
         "10 bare `gwtd` commands across two worktrees must resolve once"
     );
+}
+
+#[test]
+fn pm_runtime_hook_health_and_repair_follow_runtime_assets() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+    let _bin = stable_hook_bin_guard();
+    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&home.path().join("repo"));
+    fs::create_dir_all(worktree.join(".claude/skills/project")).unwrap();
+    gwt::managed_assets::refresh_managed_gwt_assets_for_pm_worktree(&worktree).unwrap();
+    let runtime = gwt::pm_registry::pm_runtime_dir_for_pm_worktree(&worktree).unwrap();
+    assert_eq!(
+        gwt::managed_assets::managed_codex_hook_paths(&worktree),
+        vec![runtime.join(".codex/hooks.json")],
+        "the Codex health reader must follow the PM materialization root"
+    );
+    let mut input = ManagedHookHealthInput::new(&worktree);
+    input.runtime_state_path = None;
+    let healthy = read_managed_hook_health(&input);
+    let false_missing = healthy
+        .issues
+        .iter()
+        .any(|issue| issue.contains("managed hook config missing"));
+    // Mutate only a runtime artifact: changing the project directory here
+    // would accidentally invalidate a cache that watches the wrong root.
+    let runtime_hooks = runtime.join(".claude/settings.local.json");
+    fs::write(&runtime_hooks, "{invalid-json").unwrap();
+    let damaged = read_managed_hook_health(&input);
+    let outcome = repair_managed_hook_configs(&worktree).unwrap();
+    let repaired_json =
+        serde_json::from_str::<serde_json::Value>(&fs::read_to_string(runtime_hooks).unwrap())
+            .is_ok();
+    assert_eq!(
+        (
+            false_missing,
+            damaged.issues.is_empty(),
+            outcome.repaired,
+            repaired_json
+        ),
+        (false, false, true, true),
+        "healthy={:?}; damaged={:?}",
+        healthy.issues,
+        damaged.issues
+    );
+    assert!(
+        !read_managed_hook_health(&input)
+            .issues
+            .iter()
+            .any(|issue| issue.contains("not valid JSON")),
+        "repair must also invalidate the cached runtime audit"
+    );
+    init_git_repo(&worktree);
+    run_git(&worktree, &["config", "core.hooksPath", ".husky/_"]);
+    fs::create_dir_all(worktree.join(".husky")).unwrap();
+    fs::write(worktree.join(".husky/commit-msg"), "#!/bin/sh\nexit 0\n").unwrap();
+    gwt::managed_assets::regenerate_existing_managed_hook_configs(&worktree).unwrap();
+    assert!(
+        worktree.join(".husky/_/commit-msg").is_file(),
+        "startup self-heal must restore Git hooks in the canonical checkout"
+    );
+    assert!(!runtime.join(".husky").exists());
 }

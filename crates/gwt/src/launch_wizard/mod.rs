@@ -6,6 +6,7 @@ use std::{
 use crate::BranchListEntry;
 
 mod launch_request;
+mod memory_cache;
 mod options;
 mod profiles;
 mod quick_start;
@@ -16,9 +17,11 @@ mod view_model;
 
 use options::*;
 
+pub use memory_cache::LaunchWizardMemoryCache;
+
 pub use options::{
-    agent_setup_affordance, build_agent_options, build_builtin_agent_options,
-    default_wizard_version_cache_path, load_agent_options, AgentSetupAffordance, AgentSetupKind,
+    agent_setup_affordance, build_agent_options, build_builtin_agent_options, load_agent_options,
+    AgentSetupAffordance, AgentSetupKind,
 };
 pub use profiles::{
     load_previous_launch_profile, load_previous_launch_profiles,
@@ -107,10 +110,7 @@ pub enum LaunchWizardStep {
     WindowsShell,
     DockerServiceSelect,
     DockerLifecycle,
-    VersionSelect,
     ExecutionMode,
-    SkipPermissions,
-    CodexFastMode,
 }
 
 /// SPEC-2014 FR-126/FR-128: progress rail クリックジャンプ（GotoStep）の対象フェーズ。
@@ -135,6 +135,40 @@ pub struct LaunchWizardOptionView {
     /// SPEC #2133 FR-009.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<gwt_agent::AgentColor>,
+}
+
+/// Read-only input assistance for the saved Issue Monitor candidate pool.
+/// These choices do not normalize or replace any saved profile fields.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorProfileChoices {
+    pub agents: Vec<IssueMonitorAgentChoices>,
+    pub docker_services: Vec<String>,
+    pub default_docker_service: Option<String>,
+    pub windows_shell_supported: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorAgentChoices {
+    pub id: String,
+    pub name: String,
+    pub is_custom: bool,
+    pub models: Vec<IssueMonitorModelChoices>,
+    pub model_suggestions: Vec<String>,
+    pub default_model: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
+    pub supports_model_input: bool,
+    pub supports_fast_mode: bool,
+    pub supports_skip_permissions: bool,
+    pub session_modes: Vec<gwt_agent::SessionMode>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IssueMonitorModelChoices {
+    pub value: String,
+    pub label: String,
+    pub reasoning_options: Vec<LaunchWizardOptionView>,
+    pub default_reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -290,12 +324,21 @@ pub struct LaunchWizardHolderDecisionView {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LaunchWizardAgentSetupView {
     pub agent_id: String,
-    /// `"install"` or `"configure"`.
+    /// `"install"`, `"update"` or `"configure"`.
     pub kind: String,
     pub title: String,
     pub detail: String,
     /// Button label; absent when gwt cannot run the setup itself.
     pub action_label: Option<String>,
+    pub pending: bool,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentUpdateState {
+    agent_id: String,
+    pending: bool,
+    status: String,
 }
 
 /// Issue #4079 AC-2: what an Issue Monitor Agent Settings save will do to the
@@ -313,6 +356,28 @@ pub struct LaunchWizardIssueMonitorPoolImpactView {
     pub detail: String,
     /// The `launch_profile_summary` the Monitor will report after the save.
     pub resulting_summary: String,
+}
+
+/// Issue #4911: the Agent Settings sets of the Issue Monitor settings form, in
+/// launch order. Absent for every other wizard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolView {
+    /// The set the form is editing.
+    pub active_index: usize,
+    pub sets: Vec<LaunchWizardIssueMonitorPoolSetView>,
+    /// Why no further set can be added; `None` while `＋` is available.
+    pub add_disabled_reason: Option<String>,
+    /// Why a set cannot be removed; `None` while `−` is available.
+    pub remove_disabled_reason: Option<String>,
+    /// The `launch_profile_summary` the Monitor will report after the save.
+    pub resulting_summary: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LaunchWizardIssueMonitorPoolSetView {
+    pub agent_id: String,
+    /// Read-only rows for a set the form is not editing.
+    pub summary: Vec<LaunchWizardSummaryView>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -362,8 +427,6 @@ pub struct LaunchWizardView {
     pub selected_docker_service: Option<String>,
     pub docker_lifecycle_options: Vec<LaunchWizardOptionView>,
     pub selected_docker_lifecycle: String,
-    pub version_options: Vec<LaunchWizardOptionView>,
-    pub selected_version: String,
     pub execution_mode_options: Vec<LaunchWizardOptionView>,
     pub selected_execution_mode: String,
     pub skip_permissions: bool,
@@ -373,12 +436,9 @@ pub struct LaunchWizardView {
     pub show_windows_shell: bool,
     pub show_docker_service: bool,
     pub show_docker_lifecycle: bool,
-    pub show_version: bool,
     pub show_execution_mode: bool,
     pub show_skip_permissions: bool,
     pub show_fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub show_codex_fast_mode: bool,
     /// SPEC-3152: render the Hermes launch-options section (provider / model /
     /// profile / advanced) in the Settings form.
     pub show_hermes_options: bool,
@@ -399,6 +459,10 @@ pub struct LaunchWizardView {
     /// the save writes before committing it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_monitor_pool_impact: Option<LaunchWizardIssueMonitorPoolImpactView>,
+    /// Issue #4911: filled by the app runtime when this wizard is the Issue
+    /// Monitor settings form, which edits every Agent Settings set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_monitor_pool: Option<LaunchWizardIssueMonitorPoolView>,
     pub hermes_provider: String,
     pub hermes_provider_options: Vec<String>,
     /// Issue #3863: model candidates for the selected provider (blank
@@ -434,8 +498,6 @@ pub struct LaunchWizardView {
     pub primary_action_enabled: bool,
     pub progress_steps: Vec<LaunchWizardProgressStepView>,
     pub fast_mode: bool,
-    /// Legacy Codex-only compatibility field for older frontend payloads.
-    pub codex_fast_mode: bool,
     pub launch_summary: Vec<LaunchWizardSummaryView>,
     /// SPEC-2014 FR-126/FR-128: 現在のウィザードフェーズ（rail 表示・クリック判定用）。
     pub phase: WizardPhase,
@@ -451,7 +513,6 @@ pub struct AgentOption {
     pub name: String,
     pub available: bool,
     pub installed_version: Option<String>,
-    pub versions: Vec<String>,
     pub custom_agent: Option<gwt_agent::CustomCodingAgent>,
 }
 
@@ -465,7 +526,6 @@ pub struct QuickStartEntry {
     pub tool_label: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub version: Option<String>,
     pub resume_session_id: Option<String>,
     pub live_window_id: Option<String>,
     pub skip_permissions: bool,
@@ -480,7 +540,6 @@ pub struct LaunchWizardPreviousProfile {
     pub agent_id: String,
     pub model: Option<String>,
     pub reasoning: Option<String>,
-    pub version: Option<String>,
     pub session_mode: gwt_agent::SessionMode,
     pub skip_permissions: bool,
     /// Issue #4228: Fast Mode for `agent_id`. The wizard restores it only onto
@@ -567,7 +626,6 @@ struct AgentLaunchDraft {
     /// restored selection (preserve/clamp on model change) rather than an
     /// untouched model default (follow the target model's default).
     reasoning_explicit: bool,
-    version: String,
     mode: String,
     resume_session_id: Option<String>,
     skip_permissions: bool,
@@ -643,13 +701,10 @@ pub struct LaunchWizardContext {
     /// `None` for Branches-window callers, preserving non-breaking behavior.
     pub linked_issue_kind: Option<LinkedIssueKind>,
     /// Whether the locally installed Claude Code can offer the opt-in
-    /// `ultracode` reasoning option. Used only when selected version is
-    /// `installed`; npm-backed `latest` and pinned versions are evaluated from
-    /// the selected version string at render time. Defaults to `false`.
+    /// `ultracode` reasoning option. Defaults to `false`.
     pub ultracode_supported: bool,
     /// Whether Claude Code dynamic workflows are enabled in the current
-    /// environment. This gate applies to installed, `latest`, and pinned
-    /// versions.
+    /// environment.
     pub claude_workflows_enabled: bool,
 }
 
@@ -699,6 +754,29 @@ impl LaunchWizardLaunchRequest {
             if let LaunchWizardLaunchRequest::Agent(config) = self {
                 config.skip_permissions = true;
             }
+        }
+    }
+
+    /// Issue #4543 AC-6: record which launch surface this request came from,
+    /// and re-run the shared validator against the argv and environment the
+    /// request actually carries.
+    ///
+    /// The Issue Monitor identifies itself — and may force skip-permissions —
+    /// only after the wizard has already built the config. Without this the
+    /// recorded decision would describe the wizard's guess rather than the
+    /// launch that ships, and a post-build `skip_permissions = true` on a
+    /// provider with no mapping would go back to being invisible.
+    ///
+    /// A no-op for non-agent (shell) launches.
+    pub fn record_permission_launch_source(&mut self, source: gwt_agent::PermissionLaunchSource) {
+        if let LaunchWizardLaunchRequest::Agent(config) = self {
+            config.permission_decision = gwt_agent::redecide_for_materialized_launch(
+                &config.permission_decision,
+                source,
+                config.skip_permissions,
+                &config.args,
+                &config.env_vars,
+            );
         }
     }
 
@@ -753,9 +831,20 @@ impl LaunchWizardLaunchRequest {
     /// leaves the window.
     ///
     /// A no-op for non-agent (shell) launches.
-    pub fn set_review_dispatch_context(&mut self) {
+    pub fn set_review_dispatch_context(&mut self, reviewed_sha: &str) {
         if let LaunchWizardLaunchRequest::Agent(config) = self {
             config.suppress_execution_control = true;
+            config.is_ephemeral = true;
+            config.ephemeral_base_ref = Some(reviewed_sha.to_string());
+            // Hydration selected the implementation worktree. The existing
+            // ephemeral resolver must materialize the review's detached cwd.
+            config.working_dir = None;
+            config.branch = None;
+            config.base_branch = None;
+            config.display_name = format!(
+                "Review · Issue #{}",
+                config.linked_issue_number.unwrap_or_default()
+            );
             config.env_vars.insert(
                 crate::issue_monitor_review::GWT_REVIEW_DISPATCH_ENV.to_string(),
                 "1".to_string(),
@@ -860,7 +949,13 @@ mod autonomous_launch_tests {
     #[test]
     fn review_dispatch_launch_marks_the_review_contract() {
         let mut request = agent_request(false);
-        request.set_review_dispatch_context();
+        if let LaunchWizardLaunchRequest::Agent(config) = &mut request {
+            config.working_dir = Some(std::path::PathBuf::from("implementation"));
+            config.branch = Some("work/issue-42".to_string());
+            config.base_branch = Some("develop".to_string());
+            config.linked_issue_number = Some(42);
+        }
+        request.set_review_dispatch_context("reviewed-commit");
         match request {
             LaunchWizardLaunchRequest::Agent(config) => {
                 assert!(
@@ -874,6 +969,18 @@ mod autonomous_launch_tests {
                         .map(String::as_str),
                     Some("1")
                 );
+                assert!(config.is_ephemeral, "review must leave the owner worktree");
+                assert_eq!(
+                    config.ephemeral_base_ref.as_deref(),
+                    Some("reviewed-commit")
+                );
+                assert!(config.working_dir.is_none());
+                assert!(config.branch.is_none());
+                assert!(
+                    config.base_branch.is_none(),
+                    "review must not start owner Work"
+                );
+                assert!(config.display_name.contains("Review"));
             }
             LaunchWizardLaunchRequest::Shell(_) => panic!("expected agent request"),
         }
@@ -930,8 +1037,14 @@ mod autonomous_launch_tests {
 #[derive(Debug, Clone)]
 pub enum LaunchWizardCompletion {
     Launch(Box<LaunchWizardLaunchRequest>),
+    UpdateAgent {
+        agent_id: String,
+        config: Box<ShellLaunchConfig>,
+    },
     ResolveRuntime(Box<LaunchWizardLaunchRequest>),
-    FocusWindow { window_id: String },
+    FocusWindow {
+        window_id: String,
+    },
     Cancelled,
 }
 
@@ -1019,9 +1132,6 @@ pub enum LaunchWizardAction {
     SetDockerLifecycle {
         intent: gwt_agent::DockerLifecycleIntent,
     },
-    SetVersion {
-        version: String,
-    },
     SetExecutionMode {
         mode: String,
     },
@@ -1062,6 +1172,22 @@ pub enum LaunchWizardAction {
     GotoStep {
         phase: WizardPhase,
     },
+    /// Issue #4911: the Issue Monitor Agent Settings form holds an ordered
+    /// list of sets, one per launch candidate. The list lives in the app
+    /// runtime next to the saved pool, so the runtime handles these four and
+    /// the wizard state ignores them.
+    AddAgentSettingsSet,
+    RemoveAgentSettingsSet {
+        index: usize,
+    },
+    MoveAgentSettingsSet {
+        index: usize,
+        to: usize,
+    },
+    /// Open another set in the form; the open one is kept as edited.
+    SelectAgentSettingsSet {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1088,7 +1214,6 @@ pub struct LaunchWizardState {
     /// reasoning stop from an explicit user or restored selection so model
     /// changes can pick the target default vs. preserve/clamp respectively.
     reasoning_explicit: bool,
-    pub version: String,
     pub mode: String,
     pub resume_session_id: Option<String>,
     pub runtime_target: gwt_agent::LaunchRuntimeTarget,
@@ -1118,6 +1243,7 @@ pub struct LaunchWizardState {
     /// (Hermes credentials, OpenCode provider auth, ...). Drives the
     /// `configure` setup affordance; never blocks launch.
     pub needs_configuration: std::collections::BTreeSet<String>,
+    agent_update: Option<AgentUpdateState>,
     pub branch_name: String,
     /// SPEC-2359 US-80: optional Start Work intake prompt (always skippable).
     /// Empty string means the step was skipped or left blank.
@@ -1137,6 +1263,13 @@ pub struct LaunchWizardState {
     pub hydration_error: Option<String>,
     pub linked_issue_number: Option<u64>,
     start_method_selected: bool,
+    /// Issue #4543 AC-3: which stored preference this wizard's permission
+    /// setting came from. Recorded on the launch so a forced skip names the
+    /// setting it overrode instead of appearing out of nowhere.
+    permission_launch_source: gwt_agent::PermissionLaunchSource,
+    /// Monitor profile editing and silent launches retain their own preferences.
+    /// Ordinary wizard launches interpret legacy inputs as skip on / Fast off.
+    preserve_profile_launch_preferences: bool,
     manual_setup_initialized: bool,
     /// SPEC-2014 FR-126/FR-127: ManualSetup で Runtime ステップから Confirm へ
     /// 進んだか。Runtime(編集) と Confirm(サマリ+Launch) を区別する。QuickStart /

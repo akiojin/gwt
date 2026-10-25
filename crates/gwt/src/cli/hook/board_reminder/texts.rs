@@ -129,6 +129,15 @@ pub(super) const STOP_REMINDER_SHORT: &str = "Board Post Reminder (Stop): the ag
 Board recently; no additional completed-status post is required before stopping. If Work \
 current state changed, update it with a `workspace.update` JSON envelope and `params.purpose` for Agent/window title bars.";
 
+pub(super) const AUTONOMOUS_STOP_REMINDER: &str = "Board Post Reminder (Stop, autonomous): \
+Do not stop to wait for a PM reply on a reversible, in-scope decision. Record \
+`PM default ruling (override available): <choice and rationale>` on the Board and continue. \
+After receiving a Board ruling, resume implementation, verification, PR, or settlement \
+without another `pm.message.send`; do not say ready for the next instruction. \
+Stop for a decision only at irreversible decisions or `needs_human` boundaries. \
+Keep permission and delivery gates; declare temporary admission or CI waits with \
+`issue.monitor.wait` and resume when the condition clears.";
+
 pub(super) const TERMINAL_SETTLEMENT_REMINDER: &str = "# Board Post Reminder\n\
 \n\
 The Work lifecycle is in terminal delivery settlement. Keep coordination and blocker handoff on the Board, but do not append another tracked Work-state event. Finish in this order: final Work update -> commit/push -> fresh verification -> PR mutation -> execution/build completion. When the final event is the only bookkeeping change, use a scoped Conventional Commit with the exact `chore(work):` prefix.";
@@ -250,9 +259,9 @@ pub(super) fn narrative_language_tag(lang: &str) -> &'static str {
 
 pub(super) const TITLE_SUMMARY_REQUIRED_REMINDER: &str = "# Agent Title — set it before you respond\n\
 \n\
-This Agent window has no `title-summary` yet. Before you start responding to the user, your **first action** must set this window's work purpose as its title-summary. This is not optional.\n\
+This Agent window has no `title-summary` yet. After your first action (`pane.name`), set this window's work purpose as its title-summary before responding to the user. This is not optional.\n\
 \n\
-Run this first:\n\
+Run this immediately after `pane.name`:\n\
   gwtd <<'JSON'\n\
   {\"schema_version\":1,\"operation\":\"workspace.update\",\"params\":{\"purpose\":\"<short work purpose>\",\"current_focus\":\"<current work focus>\"}}\n\
   JSON\n\

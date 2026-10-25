@@ -11,6 +11,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// A usage pool owner. Each variant maps to one CLI account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +48,8 @@ pub enum WindowKind {
     OpusWeekly,
     /// Claude Sonnet-specific weekly sub-limit (`seven_day_sonnet`).
     SonnetWeekly,
+    /// Claude Fable-specific weekly sub-limit.
+    FableWeekly,
     /// Codex code-review weekly sub-limit.
     CodeReviewWeekly,
     /// A window whose length is missing or matches no known kind. The value is
@@ -66,6 +69,7 @@ impl WindowKind {
             WindowKind::Weekly => "weekly",
             WindowKind::OpusWeekly => "opus_weekly",
             WindowKind::SonnetWeekly => "sonnet_weekly",
+            WindowKind::FableWeekly => "fable_weekly",
             WindowKind::CodeReviewWeekly => "code_review_weekly",
             WindowKind::Unknown => "unknown",
         }
@@ -146,6 +150,18 @@ pub enum UsageState {
     Stale { age_secs: u64 },
 }
 
+/// Optional Claude usage credits, in the units reported by the provider.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtraUsage {
+    pub is_enabled: bool,
+    pub monthly_limit: Option<f64>,
+    pub used_credits: Option<f64>,
+    pub utilization: Option<f32>,
+    pub currency: Option<String>,
+    pub disabled_reason: Option<String>,
+}
+
 /// Account-level usage for one provider (shared pool).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderUsage {
@@ -157,6 +173,8 @@ pub struct ProviderUsage {
     pub account_label: Option<String>,
     pub plan: Option<String>,
     pub windows: Vec<UsageWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<ExtraUsage>,
     pub limit_reached: bool,
     pub state: UsageState,
     pub fetched_at: Option<DateTime<Utc>>,
@@ -171,11 +189,40 @@ impl ProviderUsage {
             account_label: None,
             plan: None,
             windows: Vec::new(),
+            extra_usage: None,
             limit_reached: false,
             state,
             fetched_at: None,
         }
     }
+}
+
+/// One timestamped minute of a conversation's token activity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MinuteTokenBucket {
+    pub started_at: DateTime<Utc>,
+    /// Unknown coverage is null; an observed minute without tokens is zero.
+    pub tokens: Option<u64>,
+}
+
+/// Measurements from one provider conversation, never from its account quota.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionTelemetry {
+    pub source: String,
+    pub quality: String,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub today_tokens: Option<u64>,
+    /// Includes cached input for both providers. Total is input plus output.
+    pub today_input_tokens: Option<u64>,
+    pub today_cache_read_tokens: Option<u64>,
+    pub today_cache_creation_tokens: Option<u64>,
+    pub today_output_tokens: Option<u64>,
+    /// Thirty one-minute buckets, oldest first, including the current minute.
+    pub minute_buckets: Vec<MinuteTokenBucket>,
+}
+
+fn active_by_default() -> bool {
+    true
 }
 
 /// Per-session usage for a single agent session.
@@ -187,6 +234,23 @@ pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    /// Direct provider report only; never derived from prompt size/model limits.
+    #[serde(default)]
+    pub reported_context_left_pct: Option<f32>,
+    #[serde(default)]
+    pub provider_session_id: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<PathBuf>,
+    #[serde(default)]
+    pub agent_member_id: Option<String>,
+    #[serde(default = "active_by_default")]
+    pub active: bool,
+    #[serde(default)]
+    pub telemetry: Option<SessionTelemetry>,
     /// Tokens currently occupying the context window, when derivable.
     pub context_used_tokens: Option<u64>,
     /// Model context window size, when known.
@@ -313,6 +377,27 @@ mod tests {
     }
 
     #[test]
+    fn extra_usage_survives_serde_and_old_snapshots_still_load() {
+        let mut account = serde_json::json!({
+            "provider":"claude_code", "plan":null, "windows":[],
+            "limit_reached":false, "state":{"kind":"ok"}, "fetched_at":null
+        });
+        let legacy: ProviderUsage = serde_json::from_value(account.clone()).unwrap();
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("extra_usage")
+            .is_none());
+        let credits = serde_json::json!({"is_enabled":true,"monthly_limit":100.0,
+            "used_credits":25.0,"utilization":25.0,"currency":"USD","disabled_reason":null});
+        account["extra_usage"] = credits.clone();
+        let parsed: ProviderUsage = serde_json::from_value(account).unwrap();
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["extra_usage"],
+            credits
+        );
+    }
+
+    #[test]
     fn snapshot_roundtrips() {
         let snap = UsageSnapshot {
             accounts: vec![ProviderUsage {
@@ -320,6 +405,7 @@ mod tests {
                 account_id: None,
                 account_label: Some("codex@example.com".into()),
                 plan: Some("pro".into()),
+                extra_usage: None,
                 windows: vec![UsageWindow::new(WindowKind::FiveHour, 12.0, None)],
                 limit_reached: false,
                 state: UsageState::Ok,
@@ -332,6 +418,14 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 total_tokens: 15,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                reported_context_left_pct: None,
+                provider_session_id: None,
+                project_path: None,
+                agent_member_id: None,
+                active: true,
+                telemetry: None,
                 context_used_tokens: Some(50),
                 context_limit_tokens: Some(200),
                 context_left_pct: Some(75.0),
@@ -344,5 +438,23 @@ mod tests {
         let json = serde_json::to_string(&snap).unwrap();
         let round: UsageSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(snap, round);
+        let mut legacy = serde_json::to_value(&snap).unwrap();
+        let session = legacy["sessions"][0].as_object_mut().unwrap();
+        for key in [
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "reported_context_left_pct",
+            "provider_session_id",
+            "project_path",
+            "agent_member_id",
+            "active",
+            "telemetry",
+        ] {
+            session.remove(key);
+        }
+        assert_eq!(
+            serde_json::from_value::<UsageSnapshot>(legacy).unwrap(),
+            snap
+        );
     }
 }

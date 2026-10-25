@@ -44,7 +44,7 @@ pub use runner_probe_guard::{
     REAL_RUNNER_PROBE_BLOCKED_ERROR_CODE, RUNNER_PROBE_SANDBOX_MARKER,
 };
 pub use spawn::{
-    spawn_logged, spawn_logged_blocking, spawn_logged_blocking_with_deadline,
+    capture_gh_blocking, spawn_logged, spawn_logged_blocking, spawn_logged_blocking_with_deadline,
     spawn_logged_with_deadline, SpawnOptions, SpawnOutput,
 };
 pub use strip_ansi::strip_ansi;

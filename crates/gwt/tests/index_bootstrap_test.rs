@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::Path,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -55,9 +55,8 @@ impl RunnerSpawner for RecordingSpawner {
 #[cfg(unix)]
 use gwt_core::test_support::ScopedEnvVar;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 #[test]
@@ -131,6 +130,7 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
     let cache_root = gwt_cache_dir().join("issues").join(repo_hash.as_str());
     gwt_github::Cache::new(cache_root)
         .write_snapshot(&gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(3772),
             title: "Refresh Broker admission storm".to_string(),
             body: "Startup submits one canonical base intent.".to_string(),
@@ -214,15 +214,25 @@ fn startup_and_frontend_ready_coalesce_one_canonical_base_without_direct_runner_
         .iter()
         .map(|state| state.target())
         .collect::<Vec<_>>();
+    assert!(targets.contains(&&expected_base));
+    for scope in [
+        RefreshScope::Issues,
+        RefreshScope::Memory,
+        RefreshScope::Discussions,
+        RefreshScope::Board,
+        RefreshScope::Works,
+        RefreshScope::Reports,
+    ] {
+        assert!(targets.contains(&&RefreshTarget::base(repo_hash.as_str(), [scope])));
+    }
     assert_eq!(
-        targets,
-        vec![&expected_base],
-        "main plus N linked worktrees must coalesce to one canonical base target and no overlays"
+        snapshot.target_count(),
+        7,
+        "one Files pair and six repo scopes, no overlays"
     );
-    assert_eq!(snapshot.target_count(), 1, "distinct target count");
     assert!(
-        snapshot.queue_depth() <= 1,
-        "startup queue must remain bounded by the one distinct base target"
+        snapshot.queue_depth() <= 7,
+        "startup queue must remain bounded by the distinct scope targets"
     );
     assert_eq!(
         snapshot.running_count(),

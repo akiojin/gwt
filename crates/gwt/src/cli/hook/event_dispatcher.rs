@@ -14,7 +14,12 @@ use super::{
     work_event_settlement_stop_check, workflow_policy, workspace_identity, GwtSessionId,
     HookAgentSessionId, HookError, HookOutput, IntentBoundaryEvent, RawHookEvent,
 };
-use crate::discussion_resume::{load_pending_goal, PendingDiscussionGoal};
+use crate::discussion_resume::{
+    load_pending_goal, load_pending_goal_from_worktree_files, PendingDiscussionGoal,
+};
+
+pub(super) const USER_PROMPT_SUBMIT_HOOK_DEADLINE: std::time::Duration =
+    std::time::Duration::from_millis(200);
 
 pub fn handle_with_input(
     event: &str,
@@ -22,14 +27,86 @@ pub fn handle_with_input(
     worktree_root: &Path,
     current_session: Option<&str>,
 ) -> Result<HookOutput, HookError> {
-    match event {
+    let started = Instant::now();
+    #[cfg(debug_assertions)]
+    mark_playwright_hook_dispatcher_entry();
+    diagnostics::begin_event();
+    let _deadline = enter_event_deadline(event, started);
+    let result = match event {
         "SessionStart" => handle_session_start(event, input, worktree_root),
         "UserPromptSubmit" => handle_user_prompt_submit(event, input, worktree_root),
         "PreToolUse" => handle_pre_tool_use(event, input),
         "PostToolUse" => handle_post_tool_use(event, input),
         "Stop" => handle_stop(event, input, worktree_root, current_session),
         other => Err(HookError::InvalidEvent(other.to_string())),
+    };
+    let result = result.map(|output| match IntentBoundaryEvent::from_name(event) {
+        Some(intent_event) => append_pm_standing_context(
+            output,
+            intent_event,
+            worktree_root,
+            super::is_resident_pm_worktree(worktree_root),
+        ),
+        None => output,
+    });
+    let result = result.map(|output| {
+        if event == "PreToolUse"
+            && matches!(
+                &output,
+                HookOutput::Silent | HookOutput::PreToolUseAdditionalContext(_)
+            )
+        {
+            append_boundary_advisory(output, event, gate_remediation_context(worktree_root))
+        } else {
+            output
+        }
+    });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "external-skill-advisory", || {
+            super::external_skill_conflicts::advisory_context(event, input, worktree_root)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
+    let result = result.map(|output| {
+        let advisory = run_value(event, "branch-freshness-advisory", || {
+            super::branch_freshness::handle_with_input(event, input, worktree_root, current_session)
+        });
+        append_boundary_advisory(output, event, advisory)
+    });
+    let additional_context_bytes = result
+        .as_ref()
+        .ok()
+        .map(additional_context_bytes)
+        .unwrap_or_default();
+    diagnostics::record_event_total(
+        event,
+        started.elapsed(),
+        if result.is_ok() { "ok" } else { "error" },
+        diagnostics::event_metrics(additional_context_bytes),
+    );
+    result
+}
+
+#[cfg(debug_assertions)]
+fn mark_playwright_hook_dispatcher_entry() {
+    let Ok(path) = std::env::var("GWT_PLAYWRIGHT_HOOK_DISPATCHER_RENDEZVOUS") else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
     }
+    let _ = std::fs::write(path, b"dispatcher-entered\n");
+}
+
+fn enter_event_deadline(
+    event: &str,
+    started: Instant,
+) -> Option<gwt_core::operation_deadline::ScopedOperationDeadline> {
+    (event == "UserPromptSubmit").then(|| {
+        gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            started + USER_PROMPT_SUBMIT_HOOK_DEADLINE,
+        )
+    })
 }
 
 fn handle_session_start(
@@ -99,56 +176,169 @@ fn handle_user_prompt_submit(
     input: &str,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
-    let pm_refresh_context = pm_loop_stop_check::handle_user_prompt_submit(worktree_root)?;
-    run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
-    })?;
-    run_value(event, "autonomous-answer-receipt", || {
-        if let Err(error) = handle_autonomous_answer_receipt(worktree_root, input) {
-            tracing::warn!(%error, "autonomous answer receipt was rejected");
+    // PM reporting has its own settlement path; ordinary producing obligations
+    // deliberately remain unarmed in this window.
+    super::pm_reporting::handle_user_prompt_submit(worktree_root, input)?;
+    // The three bookkeeping writes below are independent of RuntimeState and
+    // Board reminder planning. Start them together so a contended Work refresh
+    // contributes its slowest substage to the prompt wall clock, not the sum of
+    // every lock/write. Their timing records are emitted after join in the
+    // historical handler order, keeping the exact profile contract stable.
+    let event_deadline = gwt_core::operation_deadline::current();
+    #[cfg(test)]
+    let operation_clock = gwt_core::operation_deadline::ScopedOperationClock::current();
+    std::thread::scope(|scope| {
+        let pm_delivery_ack = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
+            let _deadline =
+                event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+            let started = Instant::now();
+            pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
+            started.elapsed()
+        });
+        let action_obligation = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
+            let _deadline =
+                event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+            let started = Instant::now();
+            action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
+            started.elapsed()
+        });
+        let pm_loop_reset = scope.spawn(|| {
+            #[cfg(test)]
+            let _clock =
+                operation_clock.map(gwt_core::operation_deadline::ScopedOperationClock::set);
+            let _deadline =
+                event_deadline.map(gwt_core::operation_deadline::ScopedOperationDeadline::enter);
+            let started = Instant::now();
+            let result = pm_loop_stop_check::handle_user_prompt_submit(worktree_root);
+            (started.elapsed(), result)
+        });
+
+        let prepared_session = run_step(event, "runtime-state", || {
+            crate::daemon_runtime::handle_runtime_state_prepared(event, input)
+        });
+        let pm_delivery_ack_duration = pm_delivery_ack
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        diagnostics::record_handler_duration(
+            event,
+            "pm-delivery-ack",
+            pm_delivery_ack_duration,
+            "ok",
+        );
+
+        match prepared_session {
+            Ok(prepared_session) => {
+                run_value(event, "autonomous-answer-receipt", || {
+                    if let Err(error) = handle_autonomous_answer_receipt(worktree_root, input) {
+                        tracing::warn!(%error, "autonomous answer receipt was rejected");
+                    }
+                });
+                // SPEC-2359 Phase W-11 (US-58): the workspace-identity step no
+                // longer derives a title from the prompt; it only performs the
+                // Phase W-10 canonical Project State split repair. Keep it
+                // before Board planning so the reminder consumes the repaired
+                // authority.
+                run_value(event, "workspace-identity", || {
+                    let result = prepared_session
+                        .as_ref()
+                        .map(workspace_identity::handle_user_prompt_submit_for_session)
+                        .unwrap_or_else(|| workspace_identity::handle_user_prompt_submit(input));
+                    if let Err(error) = result {
+                        tracing::warn!(?error, "workspace-identity hook step failed");
+                    }
+                });
+
+                let board_started = Instant::now();
+                let output = if let Some(session) = prepared_session.as_ref() {
+                    board_reminder::handle_with_input_for_session(event, input, session)
+                } else {
+                    board_reminder::handle_with_input(event, input)
+                };
+                let board_duration = board_started.elapsed();
+
+                let action_obligation_duration = action_obligation
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                let (pm_loop_reset_duration, pm_refresh_context) = pm_loop_reset
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                diagnostics::record_handler_duration(
+                    event,
+                    "action-obligation-record",
+                    action_obligation_duration,
+                    "ok",
+                );
+                diagnostics::record_handler_duration(
+                    event,
+                    "pm-loop-reset",
+                    pm_loop_reset_duration,
+                    "ok",
+                );
+                diagnostics::record_handler_duration(
+                    event,
+                    "board-reminder",
+                    board_duration,
+                    if output.is_ok() { "ok" } else { "error" },
+                );
+
+                let output = append_additional_context(
+                    output?,
+                    IntentBoundaryEvent::UserPromptSubmit,
+                    pm_refresh_context?,
+                );
+                let output = append_additional_context(
+                    output,
+                    IntentBoundaryEvent::UserPromptSubmit,
+                    super::pm_reporting::monitor_reminder(worktree_root),
+                );
+                let output = append_additional_context(
+                    output,
+                    IntentBoundaryEvent::UserPromptSubmit,
+                    autonomous_decision_policy_context(),
+                );
+                let pending_goal = run_value(event, "discussion-goal-start", || {
+                    load_pending_goal_for_hook_worktree_with_session(
+                        worktree_root,
+                        prepared_session.as_ref(),
+                    )
+                });
+                Ok(append_pending_discussion_goal_context(
+                    output,
+                    IntentBoundaryEvent::UserPromptSubmit,
+                    pending_goal,
+                ))
+            }
+            Err(error) => {
+                // RuntimeState failures still join every scoped writer before
+                // returning and keep the allowlisted diagnostic order valid.
+                let action_obligation_duration = action_obligation
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                let (pm_loop_reset_duration, _pm_refresh_context) = pm_loop_reset
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                diagnostics::record_handler_duration(
+                    event,
+                    "action-obligation-record",
+                    action_obligation_duration,
+                    "ok",
+                );
+                diagnostics::record_handler_duration(
+                    event,
+                    "pm-loop-reset",
+                    pm_loop_reset_duration,
+                    "ok",
+                );
+                Err(error)
+            }
         }
-    });
-    run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward_for_event(event, input)
-    })?;
-    run_value(event, "pm-delivery-ack", || {
-        pm_loop_stop_check::handle_delivery_acknowledgement(worktree_root, input);
-    });
-    // SPEC-2359 Phase W-11 (US-58): the workspace-identity step no longer
-    // derives a title from the prompt; it only performs the Phase W-10
-    // canonical Project State split repair. Fail-open so a repair error does
-    // not abort prompt handling.
-    run_value(event, "workspace-identity", || {
-        if let Err(error) = workspace_identity::handle_user_prompt_submit(input) {
-            tracing::warn!(?error, "workspace-identity hook step failed");
-        }
-    });
-    // SPEC-3248 P11 (T-240 core): producing prompts in execution lanes arm
-    // typed action obligations. Fail-open state writer.
-    run_value(event, "action-obligation-record", || {
-        action_obligation_stop_check::handle_user_prompt_submit(worktree_root, input);
-    });
-    let output = run_step(event, "board-reminder", || {
-        board_reminder::handle_with_input(event, input)
-    })?;
-    let output = append_additional_context(
-        output,
-        IntentBoundaryEvent::UserPromptSubmit,
-        pm_refresh_context,
-    );
-    let output = append_additional_context(
-        output,
-        IntentBoundaryEvent::UserPromptSubmit,
-        autonomous_decision_policy_context(),
-    );
-    let pending_goal = run_value(event, "discussion-goal-start", || {
-        load_pending_goal_for_hook_worktree(worktree_root)
-    });
-    Ok(append_pending_discussion_goal_context(
-        output,
-        IntentBoundaryEvent::UserPromptSubmit,
-        pending_goal,
-    ))
+    })
 }
 
 /// Finalize one autonomous answer only when the exact managed Session and
@@ -267,13 +457,95 @@ fn same_receipt_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+fn gate_remediation_context(worktree_root: &Path) -> Option<String> {
+    use crate::cli::execution_state::{
+        execution_binding_authorizes_current_generation, ExecutionOwnerKey, ExecutionOwnerKind,
+    };
+    use sha2::{Digest, Sha256};
+    let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).ok()?;
+    gwt_agent::validate_session_id_path_component(&session_id).ok()?;
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+    )
+    .ok()?;
+    if session.id != session_id
+        || session.review_dispatch
+        || !same_receipt_path(&session.worktree_path, worktree_root)
+    {
+        return None;
+    }
+    let issue = session.linked_issue_number?;
+    let prefs = crate::issue_monitor::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(worktree_root),
+    )
+    .ok()?;
+    let record = prefs
+        .autonomous_records
+        .iter()
+        .find(|record| record.issue_number == issue)?;
+    let reason = record.gate_remediation_reason()?;
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session).ok()??;
+    let kind = match identity.execution_binding.owner_kind.as_str() {
+        "issue" => ExecutionOwnerKind::Issue,
+        "spec" => ExecutionOwnerKind::Spec,
+        _ => return None,
+    };
+    if !execution_binding_authorizes_current_generation(
+        worktree_root,
+        ExecutionOwnerKey {
+            kind,
+            number: issue,
+        },
+        &session.id,
+        &identity.execution_binding.identity,
+    )
+    .unwrap_or(false)
+    {
+        return None;
+    }
+    // A gate failure remains pending until the corrected head starts review.
+    // Track notification separately so every hook process sees the same receipt
+    // without clearing the Monitor's failure or touching its review authority.
+    let mut snapshot = record.acceptance_snapshot.clone();
+    if let Some(snapshot) = &mut snapshot {
+        snapshot.ids.sort();
+        if let Some(texts) = &mut snapshot.criterion_texts {
+            texts.sort();
+        }
+    }
+    let notice = serde_json::to_vec(&(
+        &identity.execution_binding.identity,
+        issue,
+        &record.reviewed_sha,
+        reason,
+        record.attempts,
+        snapshot,
+    ))
+    .ok()?;
+    let receipt_dir = gwt_core::paths::gwt_sessions_dir()
+        .join("gate-remediation")
+        .join(&session_id);
+    let receipt = receipt_dir.join(format!("{:x}.notice", Sha256::digest(&notice)));
+    let claimed = std::fs::create_dir_all(&receipt_dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(receipt)
+    });
+    match claimed {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return None,
+        Err(error) => tracing::warn!(%error, issue, "remediation notification receipt unavailable"),
+    }
+    let ids = record
+        .acceptance_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.ids.join(", "))
+        .unwrap_or_default();
+    Some(format!("Issue Monitor requests remediation for Issue #{issue}. Continue in this same window.\nReason: {reason}\nCurrent acceptance criteria: {ids}\nRead the current owner Issue through issue.view before continuing. Address its current criteria and the failure, then verify and push the corrected head for fresh independent review. This is an automated Monitor notice, not human approval."))
+}
+
 fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
-    run_step(event, "runtime-state", || {
-        crate::daemon_runtime::handle_runtime_state(event, input)
-    })?;
-    run_step(event, "forward", || {
-        crate::daemon_runtime::handle_forward_for_event(event, input)
-    })?;
     // Issue #3478 (FR-025): the question guard runs before every other policy.
     // A question tool call must be converted while it is still refusable — any
     // later check that returns first would let the provider open the question
@@ -284,9 +556,20 @@ fn handle_pre_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError
     if question_guard != HookOutput::Silent {
         return Ok(question_guard);
     }
-    run_step(event, "workflow-policy", || {
+    let output = run_step(event, "workflow-policy", || {
         workflow_policy::handle_with_input(input)
-    })
+    })?;
+    // A refused call never starts. Publish its lifetime only after the gwt
+    // policies accept it, otherwise no matching completion will arrive.
+    if !matches!(output, HookOutput::PreToolUsePermission { .. }) {
+        run_step(event, "runtime-state", || {
+            crate::daemon_runtime::handle_runtime_state(event, input)
+        })?;
+        run_step(event, "forward", || {
+            crate::daemon_runtime::handle_forward_for_event(event, input)
+        })?;
+    }
+    Ok(output)
 }
 
 fn handle_post_tool_use(event: &str, input: &str) -> Result<HookOutput, HookError> {
@@ -323,8 +606,16 @@ fn handle_stop(
     })?;
     // Evaluate the stop-checks lazily, one at a time: the first StopBlock
     // wins and the remaining checks must NOT run.
-    let stop_checks: [(&str, StopCheck<'_>); 8] = [
-        // SPEC-3431 FR-012: the resident PM's loop driver runs first — for the
+    let stop_checks: [(&str, StopCheck<'_>); 10] = [
+        (
+            "pm-reporting-stop-check",
+            Box::new(|| super::pm_reporting::handle_stop(worktree_root, current_session)),
+        ),
+        (
+            "board-read-stop-check",
+            Box::new(|| crate::board_read_receipts::pm_stop_check(worktree_root, current_session)),
+        ),
+        // SPEC-3431 FR-012: after the reporting obligation, the PM loop runs — for the
         // PM every other stop gate is either exempt (FR-029) or fail-open, and
         // the loop continuation must not be shadowed by one of them.
         (
@@ -406,20 +697,41 @@ fn handle_stop(
             }),
         ),
     ];
+    let mut stop_warnings = Vec::new();
     for (handler, check) in stop_checks {
         let output = run_value(event, handler, check);
+        if let HookOutput::SystemMessage(warning) = &output {
+            stop_warnings.push(warning.clone());
+        }
         if matches!(output, HookOutput::StopBlock { .. }) {
             run_step(event, "blocked-stop-runtime-state", || {
                 crate::daemon_runtime::handle_blocked_stop_runtime_state(input)
             })?;
-            return Ok(output);
+            return Ok(append_stop_warning(output, stop_warnings));
         }
     }
     run_step(event, "completed-stop", || {
         super::runtime_state::record_completed_stop_from_env()
     })?;
 
-    Ok(reminder)
+    Ok(append_stop_warning(reminder, stop_warnings))
+}
+
+fn append_stop_warning(output: HookOutput, warnings: Vec<String>) -> HookOutput {
+    if warnings.is_empty() {
+        return output;
+    }
+    let warning = warnings.join("\n\n");
+    match output {
+        HookOutput::SystemMessage(text) => {
+            HookOutput::system_message(format!("{text}\n\n{warning}"))
+        }
+        HookOutput::StopBlock { reason } => {
+            HookOutput::stop_block(format!("{reason}\n\n{warning}"))
+        }
+        HookOutput::Silent => HookOutput::system_message(warning),
+        other => other,
+    }
 }
 
 fn run_step<T>(
@@ -452,6 +764,46 @@ fn load_pending_goal_for_hook_worktree(worktree_root: &Path) -> Option<PendingDi
     load_pending_goal(&resolved_worktree_root).ok().flatten()
 }
 
+fn load_pending_goal_for_hook_worktree_with_session(
+    worktree_root: &Path,
+    prepared_session: Option<&gwt_agent::Session>,
+) -> Option<PendingDiscussionGoal> {
+    if let Some(session) = prepared_session {
+        return load_pending_goal_from_worktree_files(&session.worktree_path)
+            .ok()
+            .flatten();
+    }
+    load_pending_goal_for_hook_worktree(worktree_root)
+}
+
+fn additional_context_bytes(output: &HookOutput) -> usize {
+    match output {
+        HookOutput::HookSpecificAdditionalContext { text, .. }
+        | HookOutput::PreToolUseAdditionalContext(text) => text.len(),
+        HookOutput::PreToolUsePermission { .. }
+        | HookOutput::SystemMessage(_)
+        | HookOutput::Silent
+        | HookOutput::StopBlock { .. } => 0,
+    }
+}
+
+fn append_boundary_advisory(output: HookOutput, event: &str, text: Option<String>) -> HookOutput {
+    let Some(text) = text else {
+        return output;
+    };
+    if let Some(boundary) = IntentBoundaryEvent::from_name(event) {
+        return append_additional_context(output, boundary, Some(text));
+    }
+    match (event, output) {
+        ("PreToolUse", HookOutput::Silent) => HookOutput::pre_tool_use_context(text),
+        ("PreToolUse", HookOutput::PreToolUseAdditionalContext(existing)) => {
+            HookOutput::pre_tool_use_context(format!("{existing}\n\n{text}"))
+        }
+        ("PostToolUse", HookOutput::Silent) => HookOutput::system_message(text),
+        (_, other) => other,
+    }
+}
+
 fn append_pending_discussion_goal_context(
     output: HookOutput,
     event: IntentBoundaryEvent,
@@ -461,6 +813,29 @@ fn append_pending_discussion_goal_context(
         return output;
     };
     append_additional_context(output, event, Some(pending_discussion_goal_context(&goal)))
+}
+
+fn append_pm_standing_context(
+    output: HookOutput,
+    event: IntentBoundaryEvent,
+    worktree_root: &Path,
+    is_pm: bool,
+) -> HookOutput {
+    if !is_pm || event == IntentBoundaryEvent::Stop {
+        return output;
+    }
+    // Reload the machine-local source at every PM intent boundary; Board
+    // reminder throttling must never hide a newly recorded user instruction.
+    let text = gwt_core::user_instruction::standing_context(worktree_root).unwrap_or_else(|_| {
+        "Standing user instructions unavailable: the machine-local store could not be read. \
+         Do not assume there are no standing instructions."
+            .into()
+    });
+    let output = append_additional_context(output, event, (!text.is_empty()).then_some(text));
+    let peer = crate::cli::pm::peer_context(worktree_root).unwrap_or_else(|_| {
+        "Peer PM messages unavailable: the machine-local store could not be read. Do not assume there are no pending requests.".into()
+    });
+    append_additional_context(output, event, (!peer.is_empty()).then_some(peer))
 }
 
 fn append_additional_context(
@@ -505,9 +880,110 @@ After a successful start, run JSON operation `discuss.goal_started` with `params
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board_remote::{http::ReqwestHttpClient, slack::SlackProvider};
     use crate::discussion_resume::PendingDiscussionGoal;
+    use axum::{extract::State, routing::get, Json, Router};
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV, GWT_SESSION_RUNTIME_PATH_ENV};
+    use gwt_core::coordination::{BoardEntry, BoardEntryKind, BoardProvider};
     use gwt_core::test_support::ScopedEnvVar;
+    use serde_json::Value;
+    use std::{collections::BTreeMap, rc::Rc, sync::mpsc, time::Duration};
+    use tokio::{net::TcpListener, runtime::Runtime, sync::oneshot};
+
+    #[derive(Debug)]
+    enum DegradedEndpointCall {
+        BoardHistory,
+    }
+
+    #[derive(Clone)]
+    struct DegradedEndpointState {
+        calls: mpsc::Sender<DegradedEndpointCall>,
+    }
+
+    struct DegradedEndpointServer {
+        runtime: Runtime,
+        shutdown: Option<oneshot::Sender<()>>,
+        calls: mpsc::Receiver<DegradedEndpointCall>,
+        base_url: String,
+    }
+
+    #[test]
+    fn issue_3777_playwright_rendezvous_marks_actual_dispatcher_entry() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("dispatcher-entered");
+        let _rendezvous = ScopedEnvVar::set("GWT_PLAYWRIGHT_HOOK_DISPATCHER_RENDEZVOUS", &marker);
+
+        let result = handle_with_input("UnsupportedEvent", "{}", temp.path(), None);
+
+        assert!(matches!(result, Err(HookError::InvalidEvent(_))));
+        assert_eq!(
+            std::fs::read_to_string(marker).expect("dispatcher rendezvous marker"),
+            "dispatcher-entered\n"
+        );
+    }
+
+    impl DegradedEndpointServer {
+        fn start() -> Self {
+            let runtime = Runtime::new().expect("degraded endpoint runtime");
+            let listener = runtime
+                .block_on(TcpListener::bind(("127.0.0.1", 0)))
+                .expect("bind degraded endpoint");
+            let address = listener.local_addr().expect("degraded endpoint address");
+            let (calls_tx, calls) = mpsc::channel();
+            let (shutdown, shutdown_rx) = oneshot::channel();
+            let app = Router::new()
+                .route("/api/conversations.history", get(delayed_board_history))
+                .with_state(DegradedEndpointState { calls: calls_tx });
+            runtime.spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .expect("serve degraded endpoints");
+            });
+            Self {
+                runtime,
+                shutdown: Some(shutdown),
+                calls,
+                base_url: format!("http://127.0.0.1:{}", address.port()),
+            }
+        }
+
+        fn slack_api_base(&self) -> String {
+            format!("{}/api", self.base_url)
+        }
+
+        fn collected_calls(&self) -> Vec<DegradedEndpointCall> {
+            self.calls.try_iter().collect()
+        }
+    }
+
+    impl Drop for DegradedEndpointServer {
+        fn drop(&mut self) {
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            self.runtime
+                .block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        }
+    }
+
+    async fn delayed_board_history(State(state): State<DegradedEndpointState>) -> Json<Value> {
+        state
+            .calls
+            .send(DegradedEndpointCall::BoardHistory)
+            .expect("record Board history request");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Json(serde_json::json!({
+            "ok": true,
+            "messages": [],
+            "response_metadata": {"next_cursor": ""}
+        }))
+    }
 
     fn write_pending_goal(worktree: &Path) {
         let discussion_path = worktree.join(".gwt/discussion.md");
@@ -531,6 +1007,705 @@ mod tests {
             .status()
             .expect("git init");
         assert!(status.success(), "git init failed");
+    }
+
+    #[test]
+    fn only_user_prompt_submit_enters_the_aggregate_deadline() {
+        assert!(gwt_core::operation_deadline::current().is_none());
+        let started = Instant::now();
+        let guard = enter_event_deadline("UserPromptSubmit", started)
+            .expect("UserPromptSubmit deadline guard");
+        let deadline = gwt_core::operation_deadline::current().expect("aggregate deadline");
+        assert!(deadline > started);
+        assert!(deadline <= started + USER_PROMPT_SUBMIT_HOOK_DEADLINE);
+        drop(guard);
+        assert!(gwt_core::operation_deadline::current().is_none());
+        for event in ["SessionStart", "PreToolUse", "PostToolUse", "Stop"] {
+            assert!(enter_event_deadline(event, started).is_none(), "{event}");
+        }
+    }
+
+    #[test]
+    fn issue_5248_hook_delivers_gate_reason_and_current_criteria_only_to_its_owner() {
+        use crate::cli::execution_state::{self, ExecutionOwnerKey, ExecutionOwnerKind};
+        use crate::issue_monitor::{AutonomousIssueRecord, AutonomousPhase, IssueMonitorPrefs};
+        use crate::issue_monitor_gate::AcceptanceSnapshot;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        assert!(gwt_core::process::hidden_command("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/issue-5248.git"
+            ])
+            .current_dir(&worktree)
+            .status()
+            .unwrap()
+            .success());
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward = ScopedEnvVar::unset("GWT_HOOK_FORWARD_URL");
+        let mut session = Session::new(&worktree, "work/issue-5248", AgentId::Codex);
+        session.linked_issue_number = Some(5248);
+        let owner = ExecutionOwnerKey {
+            kind: ExecutionOwnerKind::Issue,
+            number: 5248,
+        };
+        execution_state::materialize_at_launch(
+            &worktree,
+            owner.kind,
+            owner.number,
+            &session.id,
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution_state::ensure_generation_ledger(
+            &worktree,
+            owner,
+            execution_state::LegacyActiveDisposition::Live,
+        )
+        .unwrap();
+        session
+            .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
+                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
+                session_id: session.id.clone(),
+                repo_hash: session.repo_hash.clone().unwrap(),
+                owner_kind: "issue".into(),
+                owner_number: 5248,
+                identity: execution_state::current_execution_binding(&worktree, owner)
+                    .unwrap()
+                    .unwrap(),
+                capability_generation: 1,
+            }))
+            .unwrap();
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut record = AutonomousIssueRecord::new(5248);
+        record.phase = AutonomousPhase::Implementing;
+        record.active_launch_id = Some("tab::agent-1".into());
+        record.reviewed_sha = Some("old-head".into());
+        record.review_passed = Some(true);
+        record.last_failure_message = Some("acceptance criteria changed after launch".into());
+        record.acceptance_snapshot = Some(AcceptanceSnapshot {
+            ids: vec!["AC-1".into(), "AC-R2".into()],
+            visual_surface: false,
+            criterion_texts: Some(vec![
+                ("AC-1".into(), "original".into()),
+                ("AC-R2".into(), "requirement".into()),
+            ]),
+        });
+        let prefs = IssueMonitorPrefs {
+            autonomous_records: vec![record],
+            ..IssueMonitorPrefs::default()
+        };
+        crate::issue_monitor::save_issue_monitor_prefs(
+            &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree),
+            &prefs,
+        )
+        .unwrap();
+        let output = handle_with_input(
+            "PreToolUse",
+            r#"{"tool_name":"Read","tool_input":{"file_path":"README.md"}}"#,
+            &worktree,
+            Some(&session.id),
+        )
+        .unwrap();
+        let HookOutput::PreToolUseAdditionalContext(context) = output else {
+            panic!("missing remediation context: {output:?}")
+        };
+        assert!(
+            context.contains("acceptance criteria changed after launch"),
+            "{context}"
+        );
+        assert!(context.contains("AC-R2"), "{context}");
+        assert!(context.contains("same window"), "{context}");
+
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "Issue #6061: unchanged remediation is injected only once"
+        );
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&worktree);
+        let mut reordered = prefs.clone();
+        let snapshot = reordered.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap();
+        snapshot.ids.reverse();
+        snapshot.criterion_texts.as_mut().unwrap().reverse();
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &reordered).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "order is not AC drift"
+        );
+        let mut changed = prefs.clone();
+        changed.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap()
+            .criterion_texts
+            .as_mut()
+            .unwrap()[0]
+            .1 = "updated requirement".into();
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_some(),
+            "a text edit is delivered"
+        );
+        assert!(gate_remediation_context(&worktree).is_none());
+        changed.autonomous_records[0]
+            .acceptance_snapshot
+            .as_mut()
+            .unwrap()
+            .ids
+            .push("AC-3".into());
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(gate_remediation_context(&worktree)
+            .unwrap()
+            .contains("AC-3"));
+        assert!(gate_remediation_context(&worktree).is_none());
+        changed.autonomous_records[0].last_failure_message = None;
+        crate::issue_monitor::save_issue_monitor_prefs(&prefs_path, &changed).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "delivered remediation has no notice"
+        );
+
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        std::fs::copy(
+            sessions.join(format!("{}.toml", session.id)),
+            sessions.join("alias-session.toml"),
+        )
+        .unwrap();
+        {
+            let _alias = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "alias-session");
+            assert!(
+                gate_remediation_context(&worktree).is_none(),
+                "the file name must match the owning Session"
+            );
+        }
+
+        session.linked_issue_number = Some(9999);
+        session.execution_binding = None;
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        assert!(
+            gate_remediation_context(&worktree).is_none(),
+            "another owner gets no remediation"
+        );
+    }
+
+    #[test]
+    fn issue_4975_user_prompt_reads_snapshot_while_pm_refresh_is_contended() {
+        use fs2::FileExt;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let project = gwt_core::paths::gwt_projects_dir().join("prompt-contention");
+        let worktree = project.join("pm/worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(project.join("project-state")).unwrap();
+        let lock_path = project.join("project-state/pm-refresh.lock");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = std::fs::File::create(lock_path).unwrap();
+            FileExt::lock_exclusive(&lock).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv().unwrap();
+        let result = handle_with_input("UserPromptSubmit", "{}", &worktree, None);
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        let output = result.expect("refresh contention must not fail the prompt");
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+            panic!("unobserved freshness must be visible: {output:?}");
+        };
+        assert!(text.contains("last recorded freshness"), "{text}");
+        assert!(text.contains("state=Unknown"), "{text}");
+        // Prompt reads a snapshot; launch and completed Stop validate Git.
+        assert!(handle_with_input("UserPromptSubmit", "{}", &worktree, None).is_ok());
+    }
+
+    #[test]
+    fn issue_4686_prompt_reads_board_while_the_writer_lock_is_held() {
+        use fs2::FileExt;
+        use gwt_core::coordination::{coordination_dir, post_entry, AuthorKind, LocalProvider};
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        init_git_repo(&worktree);
+        let session = Session::new(&worktree, "work/board-lock", AgentId::Codex);
+        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _provider = crate::board_provider::test_provider_override::force_prompt_provider(
+            Rc::new(LocalProvider),
+        );
+        post_entry(
+            &worktree,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "Fixture",
+                BoardEntryKind::Status,
+                "board-content-under-writer-lock",
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        let lock_path = coordination_dir(&worktree).join(".lock");
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let lock = std::fs::File::options()
+                .read(true)
+                .write(true)
+                .open(lock_path)
+                .unwrap();
+            FileExt::lock_exclusive(&lock).unwrap();
+            ready_tx.send(()).unwrap();
+            // A regressed reader must fail instead of hanging with a fixed clock.
+            release_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("prompt must finish while the Board writer lock is held");
+        });
+        ready_rx.recv().unwrap();
+        let result = {
+            // Exercise lock independence, not the host's ability to read within
+            // the production 25 ms Board budget on a loaded runner.
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+            handle_with_input("UserPromptSubmit", "{}", &worktree, Some(&session.id))
+        };
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = result.unwrap() else {
+            panic!("expected Board context");
+        };
+        assert!(text.contains("board-content-under-writer-lock"), "{text}");
+    }
+
+    #[test]
+    fn degraded_remote_board_and_hook_live_fail_open_within_prompt_budget() {
+        degraded_remote_prompt_budget(Duration::ZERO);
+    }
+
+    #[test]
+    fn degraded_remote_prompt_budget_excludes_scheduler_pauses() {
+        degraded_remote_prompt_budget(Duration::from_millis(300));
+    }
+
+    fn degraded_remote_prompt_budget(scheduler_pause: Duration) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated HOME");
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        init_git_repo(&worktree);
+        let sessions_dir = home.path().join(".gwt/sessions");
+        let mut session = Session::new(&worktree, "work/degraded-prompt", AgentId::Codex);
+        session.agent_session_id = Some("agent-degraded-prompt".to_string());
+        session.save(&sessions_dir).expect("save Session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        let profile_path = home.path().join("hook-profile.jsonl");
+        let server = DegradedEndpointServer::start();
+        let unavailable_hook =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve unavailable hook port");
+        let unavailable_hook_port = unavailable_hook.local_addr().unwrap().port();
+        drop(unavailable_hook);
+
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            format!("http://127.0.0.1:{unavailable_hook_port}/internal/hook-live"),
+        );
+        let _forward_token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let input = serde_json::json!({
+            "prompt": "進めて",
+            "session_id": "agent-degraded-prompt",
+            "cwd": worktree,
+        })
+        .to_string();
+
+        // Isolate remote degradation from one-time Session/project state
+        // materialization. The measured call still performs the real remote
+        // Board request and unreachable hook-live notification.
+        {
+            let _profile_disabled = ScopedEnvVar::unset("GWT_HOOK_PROFILE_PATH");
+            handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+                .expect("warm local prompt state");
+        }
+        let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
+        let provider: Rc<dyn BoardProvider> = Rc::new(SlackProvider::new_with_base(
+            server.slack_api_base(),
+            "board-token",
+            "channel-1",
+            BTreeMap::new(),
+            Box::new(ReqwestHttpClient::new()),
+            0,
+        ));
+        let _provider =
+            crate::board_provider::test_provider_override::force_prompt_provider(provider);
+
+        let mut result = None;
+        let (cpu, wall) = measure_hook_work(|| {
+            std::thread::sleep(scheduler_pause);
+            result = Some(handle_with_input(
+                "UserPromptSubmit",
+                &input,
+                &worktree,
+                Some(&session.id),
+            ));
+        });
+        let result = result.expect("measured prompt result");
+        let records: Vec<Value> = std::fs::read_to_string(&profile_path)
+            .expect("read hook profile")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("profile JSON"))
+            .collect();
+        let timing_summary = records
+            .iter()
+            .map(|record| {
+                (
+                    record["handler"].as_str().unwrap_or("<missing>"),
+                    record["duration_ms"].as_f64().unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            result.is_ok(),
+            "degraded endpoints must fail open: {result:?}"
+        );
+        // Match the warm prompt CPU gate: scheduler pauses and I/O waits
+        // stay diagnostic; the transport deadline tests guard remote waits.
+        eprintln!("degraded prompt: hook thread CPU={cpu:?}; wall-clock={wall:?}; stages={timing_summary:?}");
+        assert!(
+            cpu < Duration::from_millis(250),
+            "degraded prompt hook thread CPU must stay below 250ms: cpu={cpu:?}, wall={wall:?}: {timing_summary:?}"
+        );
+        assert!(
+            server
+                .collected_calls()
+                .iter()
+                .filter(|call| matches!(call, DegradedEndpointCall::BoardHistory))
+                .count()
+                <= 1
+        );
+        let total = records
+            .iter()
+            .find(|record| {
+                record["event"] == "UserPromptSubmit" && record["handler"] == "event-total"
+            })
+            .expect("UserPromptSubmit event-total");
+        assert_eq!(total["provider_read_count"], 1);
+        assert_eq!(total["history_materialization_count"], 1);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["handler"] == "runtime-state")
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["handler"] == "forward")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn hook_cpu_measurement_excludes_scheduler_pauses() {
+        let (cpu, wall) = measure_hook_work(|| {
+            // Sleeping models a descheduled hook thread without adding work.
+            std::thread::sleep(Duration::from_millis(300));
+        });
+        assert!(wall >= Duration::from_millis(300));
+        assert!(
+            cpu < Duration::from_millis(250),
+            "a scheduler pause must not consume the hook CPU budget: cpu={cpu:?}, wall={wall:?}"
+        );
+    }
+
+    fn measure_hook_work(work: impl FnOnce()) -> (Duration, Duration) {
+        let started = Instant::now();
+        let cpu_started = hook_thread_cpu_time();
+        work();
+        (hook_thread_cpu_time() - cpu_started, started.elapsed())
+    }
+
+    #[cfg(windows)]
+    fn hook_thread_cpu_time() -> Duration {
+        use windows::Win32::{
+            Foundation::FILETIME,
+            System::Threading::{GetCurrentThread, GetThreadTimes},
+        };
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        // SAFETY: the output pointers are valid and the pseudo handle refers
+        // to this calling thread; it must not be closed.
+        unsafe {
+            GetThreadTimes(
+                GetCurrentThread(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+            .expect("read hook thread CPU time");
+        }
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        // test-hygiene: allow-short-duration converts measured CPU ticks, not a wall-clock wait
+        Duration::from_nanos((ticks(kernel) + ticks(user)) * 100)
+    }
+
+    #[cfg(unix)]
+    fn hook_thread_cpu_time() -> Duration {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: time is a valid output pointer and the clock measures only
+        // this calling thread, excluding unrelated concurrent tests.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+        assert_eq!(result, 0, "read hook thread CPU time");
+        Duration::new(
+            u64::try_from(time.tv_sec).expect("nonnegative CPU seconds"),
+            u32::try_from(time.tv_nsec).expect("nonnegative CPU nanoseconds"),
+        )
+    }
+
+    fn consume_hook_thread_cpu(duration: Duration) {
+        let started = hook_thread_cpu_time();
+        while hook_thread_cpu_time() - started < duration {
+            for value in 0u64..10_000 {
+                std::hint::black_box(value.wrapping_mul(value));
+            }
+        }
+    }
+
+    #[test]
+    fn warm_four_megabyte_history_user_prompt_submit_p95_stays_within_budget() {
+        warm_hook_p95(Duration::ZERO);
+    }
+
+    #[test]
+    #[ignore = "explicit Issue #5087 ten-run acceptance check"]
+    fn warm_four_megabyte_history_user_prompt_submit_p95_ten_consecutive_runs() {
+        for run in 1..=10 {
+            eprintln!("Issue #5087 normal acceptance run {run}/10");
+            warm_hook_p95(Duration::ZERO);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "hook thread CPU p95 must stay below 250ms")]
+    fn warm_four_megabyte_history_user_prompt_submit_rejects_cpu_regression() {
+        warm_hook_p95(Duration::from_millis(300));
+    }
+
+    #[test]
+    #[ignore = "explicit Issue #5087 CPU saturation acceptance run"]
+    fn warm_four_megabyte_history_user_prompt_submit_p95_under_cpu_saturation() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Barrier,
+        };
+
+        let workers = std::thread::available_parallelism()
+            .expect("CPU count")
+            .get()
+            + 8;
+        let running = AtomicBool::new(true);
+        let ready = Barrier::new(workers + 1);
+        let result = std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    ready.wait();
+                    while running.load(Ordering::Relaxed) {
+                        for value in 0u64..10_000 {
+                            std::hint::black_box(value.wrapping_mul(value));
+                        }
+                    }
+                });
+            }
+            ready.wait();
+            eprintln!("Issue #5087 CPU saturation: {workers} busy worker threads");
+            let result = std::panic::catch_unwind(|| warm_hook_p95(Duration::ZERO));
+            running.store(false, Ordering::Relaxed);
+            result
+        });
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn warm_hook_p95(extra_cpu_work: Duration) {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("isolated HOME");
+        let worktree = home.path().join("repo");
+        std::fs::create_dir_all(&worktree).expect("create worktree");
+        init_git_repo(&worktree);
+        let sessions_dir = home.path().join(".gwt/sessions");
+        let mut session = Session::new(&worktree, "work/large-history", AgentId::Codex);
+        session.agent_session_id = Some("agent-large-history".to_string());
+        session.save(&sessions_dir).expect("save Session");
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _session_id = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _profile = ScopedEnvVar::unset("GWT_HOOK_PROFILE_PATH");
+        let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+
+        let mut entry = BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Fixture",
+            BoardEntryKind::Status,
+            "x".repeat(4 * 1024 * 1024),
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        entry.updated_at = entry.created_at;
+        gwt_core::coordination::post_entry(&worktree, entry).expect("seed 4 MiB Board history");
+
+        let input = serde_json::json!({
+            "prompt": "進めて",
+            "session_id": "agent-large-history",
+            "cwd": worktree,
+        })
+        .to_string();
+        // This fixture gates CPU work. Keep scheduler/coverage pauses from
+        // expiring a separate wall deadline before the CPU assertion. The
+        // scoped prompt workers inherit this explicit test clock as well.
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+        handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+            .expect("warm prompt read");
+        assert_eq!(
+            crate::cli::action_obligation::open_kinds(&worktree, &session.id),
+            vec![crate::cli::action_obligation::ObligationKind::Implementation],
+            "the measured warm path must include action-producing prompt bookkeeping"
+        );
+        assert!(
+            Session::load(&sessions_dir.join(format!("{}.toml", session.id)))
+                .expect("reload warmed Session")
+                .project_state_root
+                .is_some(),
+            "the warm call must persist the legacy canonical root for later prompt reuse"
+        );
+
+        let (mut samples, mut wall_samples): (Vec<_>, Vec<_>) = (0..30)
+            .map(|_| {
+                measure_hook_work(|| {
+                    consume_hook_thread_cpu(extra_cpu_work);
+                    handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+                        .expect("warm UserPromptSubmit");
+                })
+            })
+            .unzip();
+        samples.sort_unstable();
+        wall_samples.sort_unstable();
+        let p95 = samples[28];
+        let wall_p95 = wall_samples[28];
+        eprintln!("warm 4 MiB UserPromptSubmit: hook thread CPU p95={p95:?}; wall-clock p95={wall_p95:?}; samples=30; budget=250ms");
+        // Gate the calling thread's CPU work, not scheduler pauses. Worker CPU
+        // and I/O waits remain visible in wall-clock diagnostics. Never drop
+        // slow samples or skip the actual dispatcher/bookkeeping calls.
+        // A single profiled replay usually lands in the fast mode and hides the
+        // stage that blew the budget (Issue #3777: the slow mode reproduces on
+        // roughly a quarter of the Windows samples). Replay several and report
+        // the slowest, so the failure message names the responsible substage.
+        let timing_summary = if p95 >= Duration::from_millis(250)
+            || wall_p95 >= Duration::from_millis(250)
+        {
+            (0..8)
+                .map(|attempt| {
+                    let profile_path = home.path().join(format!("warm-hook-{attempt}.jsonl"));
+                    {
+                        let _profile = ScopedEnvVar::set("GWT_HOOK_PROFILE_PATH", &profile_path);
+                        handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
+                            .expect("profile slow warm UserPromptSubmit");
+                    }
+                    std::fs::read_to_string(profile_path)
+                        .expect("read slow warm hook profile")
+                        .lines()
+                        .map(|line| {
+                            let record: Value = serde_json::from_str(line).expect("profile JSON");
+                            (
+                                record["handler"]
+                                    .as_str()
+                                    .unwrap_or("<missing>")
+                                    .to_string(),
+                                record["duration_ms"].as_f64().unwrap_or_default(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .max_by(|left, right| {
+                    event_total_ms(left)
+                        .partial_cmp(&event_total_ms(right))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if !timing_summary.is_empty() {
+            eprintln!("warm 4 MiB UserPromptSubmit wall-clock stages={timing_summary:?}");
+        }
+        assert!(
+            p95 < Duration::from_millis(250),
+            "warm 4 MiB UserPromptSubmit hook thread CPU p95 must stay below 250ms, got {p95:?}: {samples:?}; wall-clock p95={wall_p95:?}: {wall_samples:?}; stages={timing_summary:?}"
+        );
+    }
+
+    /// The `event-total` duration of one profiled hook replay, or 0 when the
+    /// replay produced no total record.
+    fn event_total_ms(stages: &[(String, f64)]) -> f64 {
+        stages
+            .iter()
+            .find(|(handler, _)| handler == "event-total")
+            .map_or(0.0, |(_, duration_ms)| *duration_ms)
     }
 
     /// Issue #3716: a physical launch/write is not an answer receipt. Only a
@@ -691,7 +1866,10 @@ mod tests {
         let _userprofile = ScopedEnvVar::set("USERPROFILE", worktree.path());
         let session_id = "session-question-guard";
         let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, session_id);
-        let _runtime_path = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let runtime_path = worktree.path().join("runtime.json");
+        let before = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Idle);
+        before.save(&runtime_path).unwrap();
+        let _runtime_path = ScopedEnvVar::set(GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
         let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
         let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
         let _codex_thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
@@ -702,10 +1880,17 @@ mod tests {
 
         let input = serde_json::json!({
             "tool_name": "AskUserQuestion",
+            "tool_use_id": "rejected-question",
             "tool_input": {"questions": [{"question": "Delete the release tag?"}]}
         });
         let output = handle_with_input("PreToolUse", &input.to_string(), worktree.path(), None)
             .expect("PreToolUse output");
+
+        assert_eq!(
+            gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap(),
+            before,
+            "a rejected tool must not publish an accepted tool start"
+        );
 
         let HookOutput::PreToolUsePermission { summary, .. } = output else {
             panic!("expected the autonomous question to be denied");
@@ -745,6 +1930,204 @@ mod tests {
             .expect("PreToolUse output");
 
         assert_eq!(output, HookOutput::Silent);
+    }
+
+    #[test]
+    fn session_start_injects_standing_user_instructions_for_the_pm() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let _runtime = ScopedEnvVar::unset(GWT_SESSION_RUNTIME_PATH_ENV);
+        let _forward_url = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        let _forward_token = ScopedEnvVar::unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let _codex_thread = ScopedEnvVar::unset("CODEX_THREAD_ID");
+        let worktree = crate::pm_registry::pm_worktree_path_for_repo_path(home.path());
+        std::fs::create_dir_all(&worktree).unwrap();
+        let saved = gwt_core::user_instruction::record(
+            &worktree,
+            gwt_core::user_instruction::UserInstructionInput {
+                original: "報告には判断理由も記載してください。".into(),
+                summary: "判断理由を報告する".into(),
+                answer: "理由を報告します。".into(),
+                actions: vec![],
+                issue_numbers: vec![5342],
+                kind: gwt_core::user_instruction::UserInstructionKind::Standing,
+                supersedes: vec![],
+                authorizations: vec![],
+            },
+        )
+        .unwrap();
+
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let HookOutput::HookSpecificAdditionalContext { event, text } = output else {
+            panic!("PM startup must inject its standing instructions: {output:?}");
+        };
+        assert_eq!(event, IntentBoundaryEvent::SessionStart);
+        assert!(text.contains(&saved.id), "{text}");
+        assert!(text.contains(&saved.summary), "{text}");
+        assert!(!text.contains(&saved.original), "inject only the summary");
+
+        let store_path = gwt_core::user_instruction::instructions_path(&worktree);
+        std::fs::write(store_path, b"invalid instruction snapshot").unwrap();
+        let output = handle_with_input("SessionStart", "{}", &worktree, None).unwrap();
+        let mut stdout = Vec::new();
+        output.serialize_to(&mut stdout).unwrap();
+        let envelope: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(
+            envelope["hookSpecificOutput"]["hookEventName"],
+            "SessionStart"
+        );
+        assert!(envelope["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .contains("Standing user instructions unavailable"));
+    }
+
+    #[test]
+    fn peer_messages_reach_only_registered_pm_prompts_without_consumption() {
+        use gwt_core::{
+            pm_peer::{self, PeerKind, PeerProject, PeerSend},
+            test_support::{ScopedEnvVar, ScopedGwtHome},
+        };
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "peer-recipient");
+        let a = home.path().join("a");
+        let b = home.path().join("b");
+        let pm = crate::pm_registry::pm_worktree_path_for_repo_path(&b);
+        std::fs::create_dir_all(&pm).unwrap();
+        assert!(super::super::is_resident_pm_worktree(&pm));
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&b),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: "peer-recipient".into(),
+                    agent_id: "codex".into(),
+                    worktree_path: b.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let message = pm_peer::send(
+            PeerSend {
+                from: PeerProject {
+                    project: a.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&a),
+                },
+                to: PeerProject {
+                    project: b.display().to_string(),
+                    project_dir: gwt_core::paths::gwt_project_dir_for_repo_path(&b),
+                },
+                kind: PeerKind::Request,
+                text: "Please checkpoint peer request".into(),
+                reply_to: None,
+                timeout_seconds: 900,
+                unavailable: None,
+            },
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let event = IntentBoundaryEvent::UserPromptSubmit;
+        for _ in 0..2 {
+            let output = append_pm_standing_context(HookOutput::Silent, event, &pm, true);
+            let HookOutput::HookSpecificAdditionalContext { text, .. } = output else {
+                panic!("missing peer prompt context")
+            };
+            assert!(text.contains(&message.id) && text.contains("Please checkpoint peer request"));
+            assert!(text.contains("not owner authorization"));
+        }
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, false),
+            HookOutput::Silent
+        );
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, IntentBoundaryEvent::Stop, &pm, true),
+            HookOutput::Silent
+        );
+        let _foreign = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "foreign");
+        assert_eq!(
+            append_pm_standing_context(HookOutput::Silent, event, &pm, true),
+            HookOutput::Silent
+        );
+    }
+
+    #[test]
+    fn standing_user_instructions_reload_at_each_pm_prompt() {
+        use gwt_core::user_instruction::{record, UserInstructionInput, UserInstructionKind};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = home.path().join("repo");
+        let input = UserInstructionInput {
+            original: "報告には判断理由も記載してください。".into(),
+            summary: "判断理由を報告する".into(),
+            answer: "理由を報告します。".into(),
+            actions: vec![],
+            issue_numbers: vec![5342],
+            kind: UserInstructionKind::Standing,
+            supersedes: vec![],
+            authorizations: vec![],
+        };
+        let first = record(&repo, input.clone()).unwrap();
+        let initial = append_pm_standing_context(
+            HookOutput::Silent,
+            IntentBoundaryEvent::SessionStart,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { text, .. } = initial else {
+            panic!("standing instructions must reach PM startup");
+        };
+        assert!(text.contains(&first.id), "{text}");
+
+        let latest = record(
+            &repo,
+            UserInstructionInput {
+                summary: "報告には根拠リンクを記載する".into(),
+                supersedes: vec![first.id.clone()],
+                ..input
+            },
+        )
+        .unwrap();
+        let base = HookOutput::hook_specific_additional_context(
+            IntentBoundaryEvent::UserPromptSubmit,
+            "Board reminder",
+        );
+        let next = append_pm_standing_context(
+            base.clone(),
+            IntentBoundaryEvent::UserPromptSubmit,
+            &repo,
+            true,
+        );
+        let HookOutput::HookSpecificAdditionalContext { event, text } = next else {
+            panic!("standing instructions must reach each PM prompt");
+        };
+        assert_eq!(event, IntentBoundaryEvent::UserPromptSubmit);
+        assert!(text.contains("Board reminder"), "{text}");
+        assert!(
+            text.contains(&latest.id) && text.contains(&latest.summary),
+            "{text}"
+        );
+        assert!(!text.contains(&first.id), "superseded instruction: {text}");
+        assert_eq!(
+            append_pm_standing_context(base.clone(), event, &repo, false),
+            base
+        );
+        let stop = HookOutput::system_message("Stop reminder");
+        assert_eq!(
+            append_pm_standing_context(stop.clone(), IntentBoundaryEvent::Stop, &repo, true),
+            stop
+        );
     }
 
     /// AC-1/AC-2: the decision policy reaches the agent at every intent

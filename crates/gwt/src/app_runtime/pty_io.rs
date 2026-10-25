@@ -10,23 +10,24 @@
 //!   [`AppRuntime::deregister_pty_writer`])
 //! - Runtime stop orchestration ([`AppRuntime::stop_window_runtime`],
 //!   [`AppRuntime::stop_all_runtimes`], the `RuntimeStopThreads` join
-//!   helpers) and the PTY output / status watcher threads
+//!   helpers) and GUI adapters for the PTY output / status workers
 //!   ([`AppRuntime::spawn_output_thread`],
 //!   [`AppRuntime::spawn_status_thread`])
 //!
 //! Behavior-preserving move: `WindowRuntime` / `RuntimeStopThreads` stay in
-//! `mod.rs` and are reached via `super`.
+//! `mod.rs` and are reached via `super`. Worker loops live in `gwt::pane_runtime`.
 
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use super::window::PeerPaneCloseReply;
 use base64::Engine as _;
+use gwt::session_finalizer::CloseHandoffReservation;
 
 use super::{
-    combined_window_id, AgentCapabilityIssuer, AppRuntime, BackendEvent, ClientId, OutboundEvent,
-    Pane, PaneStatus, Read as _, RuntimeStopThreads, UserEvent, WindowCloseMonitorResult,
-    WindowProcessStatus,
+    combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, Pane,
+    RuntimeStopThreads, UserEvent, WindowCloseMonitorResult, WindowProcessStatus,
 };
 
 fn window_lifecycle_generation_is_current(
@@ -57,97 +58,6 @@ fn settle_window_lifecycle_generation(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if generations.get(window_id).copied() == Some(expected) {
         generations.remove(window_id);
-    }
-}
-
-struct CloseHandoffReservation {
-    issuer: AgentCapabilityIssuer,
-    reservation: crate::embedded_server::ManualExecutionHandoffReservation,
-    state: CloseHandoffState,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CloseHandoffState {
-    Pending,
-    Committed,
-    Settled,
-}
-
-impl CloseHandoffReservation {
-    fn new(
-        issuer: AgentCapabilityIssuer,
-        reservation: crate::embedded_server::ManualExecutionHandoffReservation,
-    ) -> Self {
-        Self {
-            issuer,
-            reservation,
-            state: CloseHandoffState::Pending,
-        }
-    }
-
-    fn commit_and_hold(&mut self) -> bool {
-        // Child exit is the irreversible point. Even if the registry reports
-        // that the reservation vanished, Drop must never restore its bearer.
-        self.state = CloseHandoffState::Committed;
-        self.issuer
-            .commit_manual_execution_handoff(&self.reservation)
-    }
-
-    fn release_committed(&mut self) -> bool {
-        if self.state != CloseHandoffState::Committed {
-            return false;
-        }
-        let released = self
-            .issuer
-            .release_manual_execution_handoff(&self.reservation);
-        if released {
-            self.state = CloseHandoffState::Settled;
-        }
-        released
-    }
-
-    fn is_committed(&self) -> bool {
-        self.state == CloseHandoffState::Committed
-    }
-
-    fn rollback(&mut self) -> bool {
-        let rolled_back = self
-            .issuer
-            .rollback_manual_execution_handoff(&self.reservation);
-        if rolled_back {
-            self.state = CloseHandoffState::Settled;
-        }
-        rolled_back
-    }
-}
-
-impl Drop for CloseHandoffReservation {
-    fn drop(&mut self) {
-        match self.state {
-            CloseHandoffState::Pending => {
-                if !self
-                    .issuer
-                    .rollback_manual_execution_handoff(&self.reservation)
-                {
-                    tracing::warn!(
-                        target: "gwt.pane.teardown",
-                        "dropped pane-close handoff reservation could not be rolled back"
-                    );
-                }
-            }
-            CloseHandoffState::Committed => {
-                if !self
-                    .issuer
-                    .release_manual_execution_handoff(&self.reservation)
-                {
-                    tracing::warn!(
-                        target: "gwt.pane.teardown",
-                        "dropped committed pane-close handoff reservation could not be released"
-                    );
-                }
-            }
-            CloseHandoffState::Settled => {}
-        }
     }
 }
 
@@ -319,6 +229,40 @@ fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
     (text, None)
 }
 
+/// Issue #4909: the body of one injected prompt as the PTY must receive it.
+///
+/// With bracketed-paste mode on (Claude Code and Codex both enable it), the
+/// body is delivered as one paste, `ESC [ 200 ~ … ESC [ 201 ~`, so the
+/// composer takes `@`, a leading `/`, `?`, and embedded newlines as pasted
+/// text instead of as the keys that open its file / slash-command pickers.
+/// The submit terminator is deliberately not part of the paste: it is still
+/// written on its own after the TUI has settled (SPEC-3431 FR-108c), so the
+/// provider's UserPromptSubmit hook sees exactly one prompt. With the mode
+/// off, the body is written raw, exactly as before.
+fn pane_input_body_bytes(body: &str, bracketed_paste: bool) -> Result<Vec<u8>, String> {
+    // Issue #5839: Windows Codex receives console key events even inside a
+    // bracketed paste. Ctrl+T / F3 (ESC O R) can therefore open Transcript/Find.
+    if let Some(byte) = body
+        .bytes()
+        .find(|byte| byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n'))
+    {
+        return Err(format!(
+            "prompt body contains terminal control byte 0x{byte:02x}; remove it before sending"
+        ));
+    }
+    if !bracketed_paste {
+        return Ok(body.as_bytes().to_vec());
+    }
+    let mut bytes = Vec::with_capacity(body.len() + 12);
+    bytes.extend_from_slice(BRACKETED_PASTE_START);
+    bytes.extend_from_slice(body.as_bytes());
+    bytes.extend_from_slice(BRACKETED_PASTE_END);
+    Ok(bytes)
+}
+
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Result of a body-once, submit-until-verified delivery. Verification is a
 /// semantic target acknowledgement, never merely a successful PTY write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +275,7 @@ pub(super) enum VerifiedPaneSubmitOutcome {
 /// injected semantic acknowledgement says the exact target turn started.
 pub(super) fn drive_verified_pane_submit(
     text: &str,
+    bracketed_paste: bool,
     max_submit_attempts: usize,
     mut write: impl FnMut(&[u8]) -> Result<(), String>,
     mut settle: impl FnMut(Duration),
@@ -338,7 +283,7 @@ pub(super) fn drive_verified_pane_submit(
 ) -> Result<VerifiedPaneSubmitOutcome, String> {
     let (body, submit) = split_pane_submit(text);
     if !body.is_empty() {
-        write(body.as_bytes())?;
+        write(&pane_input_body_bytes(body, bracketed_paste)?)?;
     }
     let Some(submit) = submit else {
         return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
@@ -346,6 +291,9 @@ pub(super) fn drive_verified_pane_submit(
 
     // Give the TUI composer time to consume the body before the first submit.
     settle(PANE_SUBMIT_SETTLE);
+    if body.is_empty() && is_verified()? {
+        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
+    }
     for submit_attempts in 1..=max_submit_attempts {
         if submit_attempts > 1 && is_verified()? {
             return Ok(VerifiedPaneSubmitOutcome::Verified {
@@ -389,8 +337,13 @@ pub(super) fn write_pane_input_then_submit(
         .reserve_input_transaction()
         .map_err(|error| error.to_string())?;
     if !body.is_empty() {
+        // Issue #4909: a submit-bearing body is a prompt, so it is pasted
+        // when the composer accepts pastes.
         reservation
-            .write_input(body.as_bytes())
+            .write_input(&pane_input_body_bytes(
+                body,
+                reservation.bracketed_paste_enabled(),
+            )?)
             .map_err(|error| error.to_string())?;
     }
     let submit = submit.to_string();
@@ -427,8 +380,12 @@ pub(super) fn write_pane_input_and_submit_blocking(
         .reserve_input_transaction()
         .map_err(|error| error.to_string())?;
     if !body.is_empty() {
+        // Issue #4909: see `write_pane_input_then_submit`.
         reservation
-            .write_input(body.as_bytes())
+            .write_input(&pane_input_body_bytes(
+                body,
+                reservation.bracketed_paste_enabled(),
+            )?)
             .map_err(|error| error.to_string())?;
     }
     thread::sleep(PANE_SUBMIT_SETTLE);
@@ -437,11 +394,7 @@ pub(super) fn write_pane_input_and_submit_blocking(
         .map_err(|error| error.to_string())
 }
 
-/// Issue #3705 AC-3: name the pane whose teardown stalled so a hung
-/// `pane.*` channel can be diagnosed from `~/.gwt/logs/` without guessing.
-pub(crate) fn pane_teardown_stall_message(window_id: &str, stage: &str, elapsed_ms: u64) -> String {
-    format!("PTY teardown stalled: window_id={window_id} stage={stage} elapsed_ms={elapsed_ms}")
-}
+pub(crate) use gwt::session_finalizer::pane_teardown_stall_message;
 
 /// Complete the stop phase for every runtime before any join can block.
 fn stop_all_before_joining<I, T>(
@@ -519,6 +472,40 @@ impl AppRuntime {
             )];
         };
 
+        self.pane_send_input_to_window_events(client_id, &window_id, text)
+    }
+
+    /// Browser sessions can resolve a pane only inside their immutable project.
+    pub(crate) fn pane_send_input_for_project_events(
+        &mut self,
+        client_id: ClientId,
+        project_key: &gwt_core::repo_hash::ProjectKey,
+        session_id: &str,
+        text: &str,
+    ) -> Vec<OutboundEvent> {
+        let target = self.tabs.iter().find_map(|tab| {
+            if self.project_key_for_tab(&tab.id) != Some(project_key) {
+                return None;
+            }
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .find(|window| window.session_id.as_deref() == Some(session_id))
+                .map(|window| combined_window_id(&tab.id, &window.id))
+        });
+        let Some(window_id) = target else {
+            return vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: None,
+                    error: Some(
+                        "no pane bound to this session in the connected project".to_string(),
+                    ),
+                },
+            )];
+        };
         self.pane_send_input_to_window_events(client_id, &window_id, text)
     }
 
@@ -635,24 +622,66 @@ impl AppRuntime {
         }
     }
 
-    pub(crate) fn register_pty_writer(&self, id: &str, pane: &Arc<Mutex<Pane>>) {
-        let Ok(pane_guard) = pane.lock() else {
-            tracing::warn!(
-                target: "gwt_input_trace",
-                stage = "registry_lock_poisoned",
-                window_id = %id,
-                "failed to register PTY writer: pane mutex poisoned"
-            );
+    pub(crate) fn register_pty_writer(
+        &self,
+        id: &str,
+        session_snapshot: Option<&gwt_agent::Session>,
+    ) {
+        let Some(project_key) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_tab_incarnations.get(&address.tab_id))
+            .map(|incarnation| incarnation.project_key.clone())
+        else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
             return;
         };
-        let pty = pane_guard.shared_pty();
-        drop(pane_guard);
+        let Some(runtime) = self.runtimes.get(id) else {
+            tracing::warn!(window_id = %id, "refusing PTY writer without an installed runtime");
+            return;
+        };
+        let pty = Arc::clone(&runtime.pty);
+        let monitor_runtime = self
+            .active_agent_sessions
+            .get(id)
+            .zip(session_snapshot)
+            .and_then(|(active, session)| {
+                if session.id != active.session_id
+                    || !(session.launch_route == gwt_agent::LaunchRoute::Autonomous
+                        || session.launch_args.iter().any(|arg| {
+                            arg.contains(gwt::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE)
+                        }))
+                {
+                    return None;
+                }
+                Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
+                    window_id: id.to_string(),
+                    session_id: active.session_id.clone(),
+                    issue_number: session.linked_issue_number?,
+                    worktree_path: active.worktree_path.clone(),
+                    project_root: self.tab(&active.tab_id)?.project_root.clone(),
+                    sessions_dir: self.sessions_dir.clone(),
+                    incarnation: runtime.incarnation,
+                    review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
+                })
+            });
         match self.pty_writers.write() {
             Ok(mut guard) => {
-                let previous = guard.insert(id.to_string(), Arc::clone(&pty));
+                let previous = guard.insert(
+                    id.to_string(),
+                    Arc::new(crate::PtyWriterEntry {
+                        project_key,
+                        handle: Arc::clone(&pty),
+                        monitor_runtime,
+                        pm_delivery_replay: Mutex::new(None),
+                    }),
+                );
                 drop(guard);
                 gwt::perf::startup::pty_ready(id);
-                if let Some(previous) = previous.filter(|previous| !Arc::ptr_eq(previous, &pty)) {
+                if let Some(previous) = previous
+                    .map(|entry| Arc::clone(&entry.handle))
+                    .filter(|previous| !Arc::ptr_eq(previous, &pty))
+                {
                     previous.revoke_input_generation();
                     let window_id = id.to_string();
                     if let Err(_error) = thread::Builder::new()
@@ -688,7 +717,7 @@ impl AppRuntime {
                 let previous = guard.remove(id);
                 drop(guard);
                 if let Some(previous) = previous {
-                    previous.invalidate_input_generation();
+                    previous.handle.invalidate_input_generation();
                 }
             }
             Err(_error) => {
@@ -707,7 +736,8 @@ impl AppRuntime {
     /// ownership first, then run every potentially blocking lifecycle step on
     /// one background finalizer. In particular, the GUI event loop must never
     /// wait for the PTY writer barrier, durable execution leases, child reap,
-    /// or the repo-global WorkItems lock before returning `PaneCloseResult`.
+    /// or the repo-global WorkItems lock. A peer completion reply is dispatched
+    /// separately after process exit has been confirmed.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn queue_window_close_finalizer(
         &mut self,
@@ -718,6 +748,7 @@ impl AppRuntime {
         notify_issue_monitor: bool,
         self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
+        peer_reply: Option<PeerPaneCloseReply>,
     ) {
         if let Err(error) = initialize_process_window_close_finalizer() {
             tracing::error!(
@@ -735,7 +766,25 @@ impl AppRuntime {
             Legacy(Box<gwt_agent::Session>),
             Unavailable(String),
         }
+        // Closing the pane forgets its pending maps immediately. Carry the
+        // exact Prepared request into the same finalizer that owns its PTY.
+        let pending_fresh_execution = self
+            .pending_fresh_execution_launches
+            .get(window_id)
+            .cloned();
 
+        // Capture only immediately available evidence at the close ACK
+        // boundary: a busy pane is Unknown, never a reason to delay close.
+        // Durable diagnosis stays on the background finalizer and does not
+        // grant or replace its independent terminalization authority.
+        let termination_receipt = self
+            .active_agent_sessions
+            .get(window_id)
+            .zip(self.runtimes.get(window_id))
+            .and_then(|(active, runtime)| {
+                let has_exit = runtime.pane.try_lock().ok()?.last_exit().is_some();
+                Some((active.session_id.clone(), runtime.incarnation, has_exit))
+            });
         let mut runtime = self.runtimes.remove(window_id);
         let closing_pty = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty));
         if let Some(runtime) = runtime.as_ref() {
@@ -748,6 +797,39 @@ impl AppRuntime {
                     .map(|tab| tab.project_root.clone())
             })
         });
+        // Issue #5248: Stop may already have revoked every Monitor binding.
+        // Capture the complete canvas after removal, independently of the
+        // exact WindowClosed target. Whole-project teardown captures here
+        // before removal and remains on its existing reconciliation path.
+        let post_close_snapshot = (!self.tracked_window_exists(window_id))
+            .then(|| {
+                let tab_id =
+                    self.issue_monitor_tab_id_for_project_root(project_root.as_deref()?)?;
+                let now = chrono::Utc::now().to_rfc3339();
+                // Resolve survivor Session metadata off Tao along with transport.
+                let snapshot = self.issue_monitor_window_snapshot_with_session_metadata(
+                    &tab_id,
+                    &now,
+                    |_| (None, false),
+                )?;
+                let sessions = snapshot
+                    .windows
+                    .iter()
+                    .filter_map(|window| {
+                        let address = self.window_lookup.get(&window.window_id)?;
+                        let tab = self.tab(&address.tab_id)?;
+                        let session_id =
+                            tab.workspace.window(&address.raw_id)?.session_id.as_ref()?;
+                        Some((window.window_id.clone(), session_id.clone()))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>();
+                Some((
+                    snapshot,
+                    self.issue_monitor_project_tab_ids(&tab_id),
+                    sessions,
+                ))
+            })
+            .flatten();
         // The close ACK boundary is process-local only. The Launch Wizard
         // cache is the in-memory Session snapshot populated off-thread; all
         // durable Session reads and CAS persistence remain in the finalizer.
@@ -758,6 +840,20 @@ impl AppRuntime {
         });
         let capability_token = self.agent_capability_tokens.remove(window_id);
         let capability_issuer = self.agent_capability_issuer.clone();
+        let closing_prepared_candidate = pending_fresh_execution.as_ref().is_some_and(|pending| {
+            cached_session
+                .as_ref()
+                .and_then(|cached| gwt_agent::SessionExecutionIdentity::from_session(cached).ok())
+                .flatten()
+                .as_ref()
+                == Some(&pending.session_identity)
+                && capability_issuer
+                    .as_ref()
+                    .zip(capability_token.as_deref())
+                    .is_some_and(|(issuer, token)| {
+                        issuer.prepared_token_is_current(token, &pending.binding)
+                    })
+        });
         let capability_binding = match (
             capability_issuer.as_ref(),
             self_close_ticket.as_ref(),
@@ -838,7 +934,11 @@ impl AppRuntime {
             }
         }
         if let Some(session) = session.as_ref() {
-            self.launch_wizard_cache.mark_stopped(&session.session_id);
+            if closing_prepared_candidate {
+                self.launch_wizard_cache.forget_session(&session.session_id);
+            } else {
+                self.launch_wizard_cache.mark_stopped(&session.session_id);
+            }
             self.mark_cached_active_work_session_stopped(
                 &session.tab_id,
                 &session.session_id,
@@ -856,13 +956,50 @@ impl AppRuntime {
         });
         let pty_writers = Arc::clone(&self.pty_writers);
         let sessions_dir = self.sessions_dir.clone();
-        let proxy = self.proxy.clone();
+        // Durable cleanup belongs to the captured pane even after its project
+        // closes. Its in-memory completion, however, must not mutate a reopened
+        // project's PM close fence or monitor snapshot.
+        let proxy = project_root
+            .as_deref()
+            .and_then(|root| self.project_context_for_root(root))
+            .map(|context| self.proxy.for_project(context))
+            .unwrap_or_else(|| self.proxy.clone());
         let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
         let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
         let window_id = window_id.to_string();
         let scheduler_window_id = window_id.clone();
         let task: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
             let started = Instant::now();
+            // Transport belongs off Tao, but before PTY reap or durable
+            // cleanup can delay it. Snapshot timestamps fence late delivery
+            // against a newer observation of a same-ID successor.
+            if let (Some(root), Some((mut snapshot, tabs, sessions))) =
+                (project_root.as_deref(), post_close_snapshot)
+            {
+                for window in &mut snapshot.windows {
+                    let Some(session) = sessions.get(&window.window_id).and_then(|id| {
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                    }) else {
+                        continue;
+                    };
+                    window.issue_number = window.issue_number.or(session.linked_issue_number);
+                    window.monitor_owned |=
+                        gwt::cli::execution_state::session_launch_route_from_session(&session)
+                            == gwt_agent::LaunchRoute::Autonomous;
+                }
+                super::publish_issue_monitor_window_snapshot(root, &snapshot, &tabs);
+            }
+            let termination_classification = termination_receipt
+                .as_ref()
+                .map(|(session_id, incarnation, has_exit)| {
+                    Self::classify_issue_monitor_termination(
+                        &sessions_dir,
+                        session_id,
+                        *incarnation,
+                        *has_exit,
+                    )
+                })
+                .unwrap_or(gwt::IssueMonitorFailureClass::Unknown);
             let mut finalizer_ok = true;
             tracing::info!(
                 target: "gwt.pane.teardown",
@@ -899,8 +1036,8 @@ impl AppRuntime {
                     let writer = closing_pty.as_ref().and_then(|closing_pty| {
                         writers
                             .get(&window_id)
-                            .filter(|current| Arc::ptr_eq(current, closing_pty))
-                            .cloned()
+                            .filter(|current| Arc::ptr_eq(&current.handle, closing_pty))
+                            .map(|entry| Arc::clone(&entry.handle))
                     });
                     if writer.is_some() {
                         writers.remove(&window_id);
@@ -921,104 +1058,56 @@ impl AppRuntime {
                 }
             };
 
-            let mut local_process_exited = runtime.is_none();
+            // A view-only result never becomes exit proof for Session/Work
+            // terminalization or a capability handoff.
+            let peer_exit_unconfirmed = runtime.is_none()
+                && peer_reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.session_id.is_some());
+            let husk_session = cached_session.or_else(|| {
+                peer_reply
+                    .as_ref()
+                    .filter(|reply| reply.stopped_husk)
+                    .and_then(|reply| reply.session_id.as_ref())
+                    .and_then(|id| {
+                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                    })
+            });
+            let husk_removed = peer_exit_unconfirmed
+                && peer_reply.as_ref().is_some_and(|reply| reply.stopped_husk)
+                && window_lifecycle_generation_is_current(
+                    &window_lifecycle_generations,
+                    &window_id,
+                    closing_window_generation,
+                )
+                && husk_session.as_ref().is_some_and(|expected| {
+                    gwt::session_finalizer::remove_restored_stopped_view(&sessions_dir, expected)
+                        .unwrap_or(false)
+                })
+                && window_lifecycle_generation_is_current(
+                    &window_lifecycle_generations,
+                    &window_id,
+                    closing_window_generation,
+                );
+            let mut local_process_exited = runtime.is_none() && !peer_exit_unconfirmed;
             let mut terminal_persisted = session.is_none();
             if let Some(pty) = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty)) {
-                let kill_and_reap = || -> std::io::Result<bool> {
-                    if pty
-                        .try_wait()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?
-                        .is_some()
-                    {
-                        return Ok(true);
-                    }
-                    tracing::info!(
-                        target: "gwt.pane.teardown",
-                        window_id = %window_id,
-                        stage = "pty_kill",
-                        outcome = "starting",
-                        "starting detached PTY teardown stage"
-                    );
-                    let kill_started = Instant::now();
-                    let kill_result = pty.kill();
-                    let kill_elapsed_ms =
-                        u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    tracing::info!(
-                        target: "gwt.pane.teardown",
-                        window_id = %window_id,
-                        stage = "pty_kill",
-                        elapsed_ms = kill_elapsed_ms,
-                        ok = kill_result.is_ok(),
-                        outcome = if kill_result.is_ok() { "completed" } else { "failed" },
-                        "detached PTY teardown stage completed"
-                    );
-                    kill_result.map_err(|error| std::io::Error::other(error.to_string()))?;
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    loop {
-                        if pty
-                            .try_wait()
-                            .map_err(|error| std::io::Error::other(error.to_string()))?
-                            .is_some()
-                        {
-                            return Ok(true);
-                        }
-                        if Instant::now() >= deadline {
-                            return Ok(false);
-                        }
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                };
+                let kill_and_reap = || gwt::session_finalizer::kill_and_reap(&pty, &window_id);
 
                 match (exact_terminal.as_ref(), exact_handoff.as_mut()) {
                     (Some((identity, Some(incarnation))), Some(Ok(_handoff))) => {
-                        let proof = gwt_agent::ManualLaunchRuntimeProof {
-                            host_pid: std::process::id(),
-                            runtime_incarnation: *incarnation,
-                        };
-                        let stopped =
-                            gwt::cli::execution_state::with_exact_active_manual_runtime_lease(
-                                &sessions_dir,
-                                identity,
-                                proof,
-                                false,
-                                || {
-                                    if !kill_and_reap()? {
-                                        return Err(std::io::Error::other(
-                                        "detached PTY did not exit before the finalizer deadline",
-                                    ));
-                                    }
-                                    if !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
-                                    &sessions_dir,
-                                    identity,
-                                    *incarnation,
-                                    gwt_agent::AgentStatus::Stopped,
-                                )? {
-                                    return Err(std::io::Error::other(
-                                        "holder Session changed before terminal proof persistence",
-                                    ));
-                                }
-                                    if !gwt_agent::persist_session_restore_window_on_startup_if_execution_identity_matches_under_lease(
-                                        &sessions_dir,
-                                        identity,
-                                        false,
-                                    )? {
-                                        return Err(std::io::Error::other(
-                                            "holder Session changed before startup-restore persistence",
-                                        ));
-                                    }
-                                    Ok(())
-                                },
-                            );
+                        let stopped = gwt::session_finalizer::finalize_exact_close(
+                            &sessions_dir,
+                            identity,
+                            *incarnation,
+                            &pty,
+                            &window_id,
+                        );
                         terminal_persisted = matches!(&stopped, Ok(Some(())));
-                        local_process_exited = if terminal_persisted {
-                            true
-                        } else {
-                            match pty.try_wait() {
-                                Ok(Some(_)) => true,
-                                Ok(None) => kill_and_reap().unwrap_or(false),
-                                Err(_) => false,
-                            }
-                        };
+                        // Even a reaped leader can leave a live captured group.
+                        // A failed durable finalizer never substitutes for kill.
+                        local_process_exited =
+                            terminal_persisted || kill_and_reap().unwrap_or(false);
                         finalizer_ok &= terminal_persisted;
                         if let Err(error) = stopped {
                             tracing::warn!(
@@ -1057,7 +1146,26 @@ impl AppRuntime {
                 }
             }
 
-            if runtime.is_none() {
+            if let Some(reply) = peer_reply {
+                let process_tree_exited = local_process_exited && !peer_exit_unconfirmed;
+                proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
+                    reply.client_id,
+                    if husk_removed {
+                        BackendEvent::PaneHuskRemoved {
+                            window_id: window_id.clone(),
+                        }
+                    } else {
+                        BackendEvent::PaneCloseResult {
+                            ok: process_tree_exited,
+                            window_id: window_id.clone(),
+                            reason: (!process_tree_exited)
+                                .then(|| "process-tree exit was not confirmed".to_string()),
+                        }
+                    },
+                )]));
+            }
+
+            if runtime.is_none() && local_process_exited {
                 if let Some((identity, None)) = exact_terminal.as_ref() {
                     if let Some(Ok(_handoff)) = exact_handoff.as_mut() {
                         terminal_persisted =
@@ -1107,15 +1215,58 @@ impl AppRuntime {
                 writer.invalidate_input_generation();
             }
 
+            let mut fresh_candidate_removed = false;
+            if let Some(pending) = pending_fresh_execution
+                .as_ref()
+                .filter(|_| local_process_exited)
+            {
+                if super::continuation::pending_fresh_execution_attempt_status(pending)
+                    == Some(gwt::cli::execution_state::ContinuationAttemptStatus::Prepared)
+                {
+                    let cleanup =
+                        gwt::cli::execution_state::abort_successor_and_remove_exact_session(
+                            &pending.worktree_path,
+                            pending.owner,
+                            &pending.request,
+                            "fresh linked-owner pane closed before SessionStart",
+                            &sessions_dir,
+                            &pending.session_identity,
+                            || {
+                                super::continuation::reject_continue_work_workspace_commit(
+                                    &pending.project_root,
+                                    &pending.worktree_path,
+                                    &pending.operation_id,
+                                )
+                            },
+                        );
+                    match cleanup {
+                        Ok(true) => {
+                            fresh_candidate_removed = true;
+                            terminal_persisted = true;
+                            if let Err(error) = super::continuation::clear_durable_launch_recovery(
+                                &sessions_dir,
+                                &pending.binding.session_id,
+                            ) {
+                                finalizer_ok = false;
+                                tracing::warn!(%window_id, %error, "closed fresh-launch recovery receipt cleanup remains pending");
+                            }
+                        }
+                        result => {
+                            finalizer_ok = false;
+                            tracing::warn!(%window_id, ?result, "closed fresh-launch candidate retained exact recovery evidence");
+                        }
+                    }
+                }
+            }
+
             if local_process_exited && !terminal_persisted {
                 match session_authority.as_ref() {
                     Some(CloseSessionAuthority::Legacy(expected)) => {
-                        let mut stopped = expected.clone();
-                        stopped.update_status(gwt_agent::AgentStatus::Stopped);
-                        stopped.restore_window_on_startup = false;
-                        terminal_persisted = stopped
-                            .save_if_unchanged(&sessions_dir, expected)
-                            .unwrap_or(false);
+                        terminal_persisted = gwt::session_finalizer::finalize_legacy_session(
+                            &sessions_dir,
+                            expected,
+                        )
+                        .unwrap_or(false);
                         finalizer_ok &= terminal_persisted;
                     }
                     Some(CloseSessionAuthority::Unavailable(error)) => {
@@ -1138,10 +1289,9 @@ impl AppRuntime {
                 &window_id,
                 closing_window_generation,
             );
-            if let Some(session) = session
-                .as_ref()
-                .filter(|_| terminal_persisted && cleanup_generation_is_current)
-            {
+            if let Some(session) = session.as_ref().filter(|_| {
+                !fresh_candidate_removed && terminal_persisted && cleanup_generation_is_current
+            }) {
                 let ephemeral = Self::session_uses_ephemeral_worktree_for_project(
                     project_root.as_deref(),
                     session,
@@ -1185,6 +1335,15 @@ impl AppRuntime {
             }
 
             if let Some(runtime) = runtime.as_mut() {
+                // Issue #4014: the reader thread stays in `read` until the PTY
+                // signals EOF. On Windows the ConPTY output pipe only does so
+                // once the pseudoconsole is closed, and the reader itself pins
+                // the pane - and with it the master - alive, so joining first
+                // would never return. The child was killed and reaped above, so
+                // releasing the descriptors here (Issue #4142 already drops the
+                // master and writer together) closes the pseudoconsole and lets
+                // the join below complete.
+                runtime.pty.release_descriptors();
                 if let Some(handle) = runtime.output_thread.take() {
                     finalizer_ok &= handle.join().is_ok();
                 }
@@ -1193,17 +1352,16 @@ impl AppRuntime {
                 }
             }
 
-            let (pm_deregistered, pm_status) =
-                match (project_root.as_deref(), closing_session_id.as_deref()) {
-                    (Some(project_root), Some(session_id)) => {
-                        Self::deregister_pm_for_closed_window_in_background(
-                            project_root,
-                            session_id,
-                        )
-                    }
-                    _ => (false, None),
-                };
-            let monitor_result = if notify_issue_monitor {
+            let (pm_deregistered, pm_status) = match (
+                project_root.as_deref(),
+                closing_session_id.as_deref().filter(|_| !husk_removed),
+            ) {
+                (Some(project_root), Some(session_id)) => {
+                    Self::deregister_pm_for_closed_window_in_background(project_root, session_id)
+                }
+                _ => (false, None),
+            };
+            let monitor_result = if notify_issue_monitor && !husk_removed {
                 match (project_root.as_deref(), monitor_close_target) {
                     (Some(project_root), Ok(Some(target)))
                         if window_lifecycle_generation_is_current(
@@ -1212,10 +1370,11 @@ impl AppRuntime {
                             closing_window_generation,
                         ) =>
                     {
-                        Self::finalize_issue_monitor_window_close_in_background(
+                        Self::finalize_issue_monitor_window_close_classified_in_background(
                             project_root,
                             &target,
                             fallback_commit_timeout,
+                            termination_classification,
                         )
                     }
                     (_, Ok(_)) => WindowCloseMonitorResult::Noop,
@@ -1373,108 +1532,15 @@ impl AppRuntime {
             return Err("The exact holder capability is unavailable".to_string());
         }
         let sessions_dir = self.sessions_dir.clone();
-        let proof = gwt_agent::ManualLaunchRuntimeProof {
-            host_pid: std::process::id(),
-            runtime_incarnation: expected_incarnation,
-        };
-        let stopped = gwt::cli::execution_state::with_exact_active_manual_runtime_lease(
+        gwt::session_finalizer::stop_exact_runtime(
             &sessions_dir,
             expected_session,
-            proof,
+            expected_incarnation,
+            &pty,
+            window_id,
+            capability,
             retain_successor_handoff,
-            || {
-                let reservation = capability
-                    .as_ref()
-                    .map(|(issuer, token)| {
-                        issuer
-                            .begin_manual_execution_handoff(
-                                token,
-                                &expected_session.execution_binding,
-                            )
-                            .map(|reservation| (issuer, reservation))
-                    })
-                    .transpose()
-                    .map_err(std::io::Error::other)?;
-                let stop_result = (|| {
-                    tracing::info!(
-                        target: "gwt.pane.teardown",
-                        window_id,
-                        stage = "exact_pty_kill",
-                        outcome = "starting",
-                        "starting exact-holder PTY teardown stage"
-                    );
-                    let kill_started = Instant::now();
-                    let kill_result = pty.kill();
-                    let kill_elapsed_ms =
-                        u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                    tracing::info!(
-                        target: "gwt.pane.teardown",
-                        window_id,
-                        stage = "exact_pty_kill",
-                        elapsed_ms = kill_elapsed_ms,
-                        ok = kill_result.is_ok(),
-                        outcome = if kill_result.is_ok() { "completed" } else { "failed" },
-                        "exact-holder PTY teardown stage completed"
-                    );
-                    kill_result.map_err(|error| std::io::Error::other(error.to_string()))?;
-                    // Issue #3705: never sleep on the GUI event loop waiting
-                    // for reap. Persist under lease only when the child is
-                    // already gone; otherwise `start_window_runtime_stop`
-                    // finishes the proof on a background thread.
-                    let exited = pty
-                        .try_wait()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    if exited.is_some()
-                        && !gwt_agent::persist_session_terminal_status_if_execution_identity_matches_under_lease(
-                            &sessions_dir,
-                            expected_session,
-                            expected_incarnation,
-                            gwt_agent::AgentStatus::Stopped,
-                        )?
-                    {
-                        return Err(std::io::Error::other(
-                            "The holder Session changed before terminal proof persistence",
-                        ));
-                    }
-                    Ok(())
-                })();
-                match stop_result {
-                    Ok(()) => {
-                        if let Some((issuer, reservation)) = reservation.as_ref() {
-                            if !issuer.commit_manual_execution_handoff(reservation) {
-                                return Err(std::io::Error::other(
-                                    "The exact holder handoff reservation was lost",
-                                ));
-                            }
-                            if !retain_successor_handoff
-                                && !issuer.release_manual_execution_handoff(reservation)
-                            {
-                                return Err(std::io::Error::other(
-                                    "The completed holder capability fence could not be released",
-                                ));
-                            }
-                        }
-                        Ok(())
-                    }
-                    Err(error) => {
-                        if let Some((issuer, reservation)) = reservation.as_ref() {
-                            if !issuer.rollback_manual_execution_handoff(reservation) {
-                                return Err(std::io::Error::other(format!(
-                                    "{error}; exact holder capability rollback failed"
-                                )));
-                            }
-                        }
-                        Err(error)
-                    }
-                }
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        if stopped.is_none() {
-            return Err(
-                "The exact durable holder authority changed before termination".to_string(),
-            );
-        }
+        )?;
         if self
             .runtimes
             .get(window_id)
@@ -1524,7 +1590,9 @@ impl AppRuntime {
                 Some((identity, runtime.incarnation))
             });
         self.remove_window_state_tracking(window_id);
-        self.pending_pm_wakes.remove(window_id);
+        for state in self.project_states.values_mut() {
+            state.pending_pm_wakes.remove(window_id);
+        }
         self.deregister_pty_writer(window_id);
         let mut threads = RuntimeStopThreads {
             output_thread: None,
@@ -1574,50 +1642,13 @@ impl AppRuntime {
                 );
             }
             if let Some((identity, incarnation)) = exact_terminal.clone() {
-                let exited = pty.try_wait().ok().flatten().is_some();
-                if exited {
-                    exact_terminal_persisted =
-                        gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
-                            &self.sessions_dir,
-                            &identity,
-                            incarnation,
-                            gwt_agent::AgentStatus::Stopped,
-                        )
-                        .unwrap_or(false);
-                } else {
-                    let sessions_dir = self.sessions_dir.clone();
-                    let window_id = window_id.to_string();
-                    thread::spawn(move || {
-                        let started = Instant::now();
-                        let deadline = Instant::now() + Duration::from_secs(2);
-                        let mut exited = false;
-                        while Instant::now() < deadline {
-                            if pty.try_wait().ok().flatten().is_some() {
-                                exited = true;
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        let elapsed_ms =
-                            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        if exited {
-                            let _ = gwt_agent::persist_session_terminal_status_if_execution_identity_matches(
-                                &sessions_dir,
-                                &identity,
-                                incarnation,
-                                gwt_agent::AgentStatus::Stopped,
-                            );
-                        } else {
-                            tracing::warn!(
-                                target: "gwt.pane.teardown",
-                                window_id = %window_id,
-                                elapsed_ms,
-                                "{}",
-                                pane_teardown_stall_message(&window_id, "process_exit", elapsed_ms)
-                            );
-                        }
-                    });
-                }
+                exact_terminal_persisted = gwt::session_finalizer::persist_terminal_after_exit(
+                    pty,
+                    self.sessions_dir.clone(),
+                    identity,
+                    incarnation,
+                    window_id.to_string(),
+                );
             }
             threads.output_thread = runtime.output_thread.take();
             threads.status_thread = runtime.status_thread.take();
@@ -1703,123 +1734,10 @@ impl AppRuntime {
         pane: Arc<Mutex<Pane>>,
         _console_kind: Option<gwt_core::process_console::ProcessKind>,
     ) -> JoinHandle<()> {
-        // SPEC-2809 (revised) — the Console window is the gwt-side
-        // equivalent of VS Code's Output panel. It surfaces what gwt
-        // itself spawns in the background (gh / git / docker / agent
-        // bootstrap stages / Python index runner) per kind. The agent
-        // tab is for the **Launch Wizard pipeline** that culminates in
-        // the PTY spawn — not the agent's own runtime stdout. That
-        // runtime stdout already lives in the workspace terminal pane
-        // (xterm.js) and would only duplicate noise here. `_console_kind`
-        // is retained on the API for forward compatibility with future
-        // kind-aware hooks (e.g. recording the PTY exit code as a
-        // summary at thread end).
+        // Agent runtime output belongs to its terminal, not the launch Console.
         let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            let reader = match pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|pane| pane.reader().map_err(|error| error.to_string()))
-            {
-                Ok(reader) => reader,
-                Err(error) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        incarnation,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error),
-                        exit_confirmed: false,
-                    });
-                    return;
-                }
-            };
-
-            let mut reader = reader;
-            let mut buffer = [0u8; 4096];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => break,
-                    Ok(read) => {
-                        let chunk = buffer[..read].to_vec();
-                        let lock_started = Instant::now();
-                        let mut seq = 0;
-                        if let Ok(mut pane) = pane.lock() {
-                            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
-                            let parse_started = Instant::now();
-                            pane.process_bytes(&chunk);
-                            seq = pane.output_seq();
-                            let parse_us = parse_started.elapsed().as_micros() as u64;
-                            // Log only when the contention window is large enough
-                            // to plausibly starve a concurrent `write_input`. The
-                            // threshold keeps the log volume bounded during
-                            // normal output bursts while still surfacing the
-                            // lock-hold windows that matter for drop triage.
-                            if lock_wait_us > 500 || parse_us > 500 {
-                                tracing::debug!(
-                                    target: "gwt_input_trace",
-                                    stage = "reader_pane_lock",
-                                    window_id = %id,
-                                    lock_wait_us,
-                                    parse_us,
-                                    "reader thread held pane mutex (output parsing)"
-                                );
-                            }
-                        }
-                        proxy.send(UserEvent::RuntimeOutput {
-                            id: id.clone(),
-                            incarnation,
-                            data: chunk,
-                            seq,
-                        });
-                    }
-                    Err(error) => {
-                        proxy.send(UserEvent::RuntimeStatus {
-                            id: id.clone(),
-                            incarnation,
-                            status: WindowProcessStatus::Error,
-                            detail: Some(error.to_string()),
-                            exit_confirmed: false,
-                        });
-                        return;
-                    }
-                }
-            }
-
-            let status = pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|mut pane| {
-                    pane.check_status()
-                        .cloned()
-                        .map_err(|error| error.to_string())
-                });
-
-            match status {
-                Ok(status) => {
-                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    let exit_confirmed = pane
-                        .lock()
-                        .ok()
-                        .and_then(|pane| pane.process_has_exited().ok())
-                        .unwrap_or(false);
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        incarnation,
-                        status,
-                        detail,
-                        exit_confirmed,
-                    });
-                }
-                Err(error) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        incarnation,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error),
-                        exit_confirmed: false,
-                    });
-                }
-            }
+        gwt::pane_runtime::spawn_output_thread(id, incarnation, pane, move |event| {
+            proxy.send(pane_runtime_user_event(event));
         })
     }
 
@@ -1830,80 +1748,122 @@ impl AppRuntime {
         pane: Arc<Mutex<Pane>>,
     ) -> JoinHandle<()> {
         let proxy = self.proxy.clone();
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_millis(100));
-            let status = pane
-                .lock()
-                .map_err(|error| error.to_string())
-                .and_then(|mut pane| {
-                    pane.check_status()
-                        .cloned()
-                        .map_err(|error| error.to_string())
-                });
-
-            match status {
-                Ok(PaneStatus::Running) => continue,
-                Ok(status) => {
-                    if matches!(status, PaneStatus::Completed(_)) {
-                        if let Ok(pane) = pane.lock() {
-                            let _ = pane.kill();
-                        }
-                    }
-                    let (status, detail) = Self::runtime_status_from_pane_status(&status);
-                    let exit_confirmed = pane
-                        .lock()
-                        .ok()
-                        .and_then(|pane| pane.process_has_exited().ok())
-                        .unwrap_or(false);
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id: id.clone(),
-                        incarnation,
-                        status,
-                        detail,
-                        exit_confirmed,
-                    });
-                    if exit_confirmed {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    proxy.send(UserEvent::RuntimeStatus {
-                        id,
-                        incarnation,
-                        status: WindowProcessStatus::Error,
-                        detail: Some(error),
-                        exit_confirmed: false,
-                    });
-                    break;
-                }
-            }
+        gwt::pane_runtime::spawn_status_thread(id, incarnation, pane, move |event| {
+            proxy.send(pane_runtime_user_event(event));
         })
     }
+}
 
-    fn runtime_status_from_pane_status(
-        status: &PaneStatus,
-    ) -> (WindowProcessStatus, Option<String>) {
-        match status {
-            PaneStatus::Running => (WindowProcessStatus::Running, None),
-            PaneStatus::Completed(0) => (
-                gwt::window_state::window_state_from_pane_status(status),
-                Some("Process exited".to_string()),
-            ),
-            PaneStatus::Completed(code) => (
-                gwt::window_state::window_state_from_pane_status(status),
-                Some(format!("Process exited with status {code}")),
-            ),
-            PaneStatus::Error(message) => (
-                gwt::window_state::window_state_from_pane_status(status),
-                Some(message.clone()),
-            ),
-        }
+fn pane_runtime_user_event(event: gwt::pane_runtime::PaneRuntimeEvent) -> UserEvent {
+    match event {
+        gwt::pane_runtime::PaneRuntimeEvent::Output {
+            id,
+            incarnation,
+            data,
+            seq,
+            screen,
+        } => UserEvent::RuntimeOutput {
+            id,
+            incarnation,
+            data,
+            seq,
+            screen,
+        },
+        gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id,
+            incarnation,
+            status,
+            detail,
+            exit_confirmed,
+        } => UserEvent::RuntimeStatus {
+            id,
+            incarnation,
+            status,
+            detail,
+            exit_confirmed,
+        },
     }
 }
 
 #[cfg(test)]
 mod submit_split_tests {
-    use super::{drive_verified_pane_submit, split_pane_submit, VerifiedPaneSubmitOutcome};
+    use super::{
+        drive_verified_pane_submit, pane_input_body_bytes, split_pane_submit,
+        VerifiedPaneSubmitOutcome,
+    };
+
+    /// Issue #4909 AC-2 / AC-3: the exact bytes the injection layer writes for
+    /// a prompt that carries an `@` mention, a leading `/`, and two lines.
+    /// With bracketed paste on, the body is one paste and the submit byte is
+    /// still a separate write; with it off, the raw path is byte-identical to
+    /// before.
+    #[test]
+    fn injected_body_is_wrapped_as_a_paste_only_when_the_composer_accepts_pastes() {
+        let prompt = "/mnt/work/notes.md\n@agent-1 please review\r";
+        let body = "/mnt/work/notes.md\n@agent-1 please review";
+        assert_eq!(
+            pane_input_body_bytes(body, true).expect("safe pasted body"),
+            [b"\x1b[200~".as_slice(), body.as_bytes(), b"\x1b[201~"].concat()
+        );
+        assert_eq!(
+            pane_input_body_bytes(body, false).expect("safe raw body"),
+            body.as_bytes()
+        );
+
+        for bracketed_paste in [true, false] {
+            let writes = std::cell::RefCell::new(Vec::<Vec<u8>>::new());
+            let outcome = drive_verified_pane_submit(
+                prompt,
+                bracketed_paste,
+                1,
+                |bytes| {
+                    writes.borrow_mut().push(bytes.to_vec());
+                    Ok(())
+                },
+                |_| {},
+                || Ok(true),
+            )
+            .expect("delivered");
+            assert_eq!(
+                outcome,
+                VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+            );
+            let expected_body = if bracketed_paste {
+                format!("\x1b[200~{body}\x1b[201~").into_bytes()
+            } else {
+                body.as_bytes().to_vec()
+            };
+            assert_eq!(
+                *writes.borrow(),
+                vec![expected_body, b"\r".to_vec()],
+                "bracketed_paste={bracketed_paste}: body in one write, submit byte on its own"
+            );
+        }
+    }
+
+    /// Issue #5839: Windows Codex interprets these as keys even inside a
+    /// bracketed paste. Refuse the entire body before staging any bytes.
+    #[test]
+    fn notification_control_keys_are_refused_before_any_write() {
+        for body in ["notice \x14suffix", "notice \x1bORsuffix"] {
+            for bracketed_paste in [false, true] {
+                let mut writes = Vec::new();
+                let result = drive_verified_pane_submit(
+                    &format!("{body}\r"),
+                    bracketed_paste,
+                    1,
+                    |bytes| {
+                        writes.push(bytes.to_vec());
+                        Ok(())
+                    },
+                    |_| {},
+                    || Ok(true),
+                );
+                assert!(result.is_err(), "control keys must not reach the TUI");
+                assert!(writes.is_empty(), "refuse before staging the body");
+            }
+        }
+    }
 
     /// SPEC-3431 FR-108c: the body and the submit byte must be separable, so
     /// the writer can put the carriage return in its own PTY write. A single
@@ -1953,11 +1913,67 @@ mod submit_split_tests {
     }
 
     #[test]
+    fn same_operation_recovery_writes_only_submit_and_honors_a_late_ack() {
+        let writes = std::cell::RefCell::new(Vec::new());
+        let first = drive_verified_pane_submit(
+            "protected body\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(false),
+        )
+        .unwrap();
+        assert!(matches!(
+            first,
+            VerifiedPaneSubmitOutcome::Unverified { .. }
+        ));
+        let recovered = drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |bytes| {
+                writes.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            },
+            |_| {},
+            || Ok(writes.borrow().len() == 4),
+        )
+        .unwrap();
+        assert_eq!(
+            recovered,
+            VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
+        );
+        assert_eq!(
+            *writes.borrow(),
+            [
+                b"protected body".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec(),
+                b"\r".to_vec()
+            ]
+        );
+        drive_verified_pane_submit(
+            "\r",
+            false,
+            2,
+            |_| panic!("late acknowledged replay must not write"),
+            |_| {},
+            || Ok(true),
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn unverified_submit_retries_only_the_carriage_return() {
         let writes = std::cell::RefCell::new(Vec::new());
 
         let outcome = drive_verified_pane_submit(
             "protected body\r",
+            false,
             2,
             |bytes| {
                 writes
@@ -1985,6 +2001,7 @@ mod submit_split_tests {
 
         let outcome = drive_verified_pane_submit(
             "protected body\r",
+            false,
             2,
             |bytes| {
                 writes
@@ -2018,6 +2035,7 @@ mod submit_split_tests {
 
         let outcome = drive_verified_pane_submit(
             "protected body\r",
+            false,
             1,
             |bytes| {
                 writes

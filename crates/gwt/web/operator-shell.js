@@ -26,7 +26,7 @@ export function initOperatorShell(deps = {}) {
   safeWire("theme toggle", () => wireThemeToggle({ doc, themeManager }), markDegraded);
   safeWire("legacy chrome keys", () => removeLegacyChromeKeys(win), markDegraded);
   safeWire("rail commands", () => wireRailCommands({ doc }), markDegraded);
-  safeWire("status strip clock", () => wireStatusStripClock({ doc }), markDegraded);
+  safeWire("status strip clock", () => wireStatusStripClock({ doc, win }), markDegraded);
   if (shellDegraded) hideMissionBriefingImmediately(doc);
   else safeWire("mission briefing", () => wireMissionBriefing({ doc, win }), markDegraded);
   safeWire("hotkey overlay", () => wireHotkeyOverlay({ doc, hotkey }), markDegraded);
@@ -131,7 +131,7 @@ function wireRailCommands({ doc }) {
 // Status Strip — live clock + counters
 // ------------------------------------------------------------
 
-function wireStatusStripClock({ doc }) {
+export function wireStatusStripClock({ doc, win = doc.defaultView }) {
   const clock = doc.getElementById("op-strip-clock");
   if (!clock) return;
 
@@ -139,7 +139,6 @@ function wireStatusStripClock({ doc }) {
   // mission-control "blink" effect can target only the separators while the
   // numbers stay rock-steady. Clears + rebuilds via DOM nodes (no innerHTML
   // because the security hook flags textContent-as-template-string).
-  const reduced = matchReduced(doc);
   const setClock = (h, m, s) => {
     while (clock.firstChild) clock.removeChild(clock.firstChild);
     const append = (text, isColon) => {
@@ -154,25 +153,18 @@ function wireStatusStripClock({ doc }) {
     append(":", true);
     append(pad2(s), false);
   };
+  let timer = null;
   const tick = () => {
-    const now = new Date();
+    if (timer !== null) win.clearTimeout(timer);
+    timer = null;
+    if (doc.hidden) return;
+    const now = new win.Date();
     setClock(now.getHours(), now.getMinutes(), now.getSeconds());
+    // Re-align on every tick, including callbacks delayed by a busy renderer.
+    timer = win.setTimeout(tick, 1000 - now.getMilliseconds());
   };
+  doc.addEventListener("visibilitychange", tick);
   tick();
-
-  if (reduced.matches) {
-    setInterval(tick, 1000);
-  } else {
-    let last = 0;
-    const loop = (t) => {
-      if (t - last >= 1000) {
-        last = t;
-        tick();
-      }
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  }
 }
 
 export function applyTelemetryCounts(doc, counts = {}) {
@@ -213,8 +205,8 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-running", counts.running ?? 0);
   // Issue #3884 AC-3: break out the running agents that live as inline
   // terminals in the Issue window (SPEC-3671 `issue_preview` placement), so
-  // "RUNNING 6" next to an empty canvas explains itself. Hidden when every
-  // running agent is on the canvas, and for callers that omit the breakdown.
+  // "RUNNING 6" next to an empty Agents view explains itself. Hidden when every
+  // running agent is in Agents, and for callers that omit the breakdown.
   const runningInline = Number(counts.running_inline ?? 0);
   const inlineSlot = doc.getElementById("op-strip-running-inline");
   if (inlineSlot) {
@@ -242,6 +234,10 @@ export function applyTelemetryCounts(doc, counts = {}) {
       badge.hidden = value <= 0;
     }
   }
+}
+
+export function subscribeIssueMonitorStatus(doc, model) {
+  return model.subscribeFrame(state => state.status, status => applyIssueMonitorStatus(doc, status));
 }
 
 export function applyIssueMonitorStatus(doc, status = {}) {
@@ -301,7 +297,7 @@ function issueMonitorStatusStripView(status = {}) {
   }
   const queue = Math.max(0, Number(status.queue_len || 0));
   const active = Math.max(0, Number(status.active_count || 0));
-  const maxActive = Math.max(1, Number(status.max_active_agents || 1));
+  const maxActive = Math.max(0, Number(status.max_active_agents ?? 1));
 
   if (state === "disabled") {
     return {
@@ -517,7 +513,15 @@ const RUNTIME_HEALTH_SORT_MODES = [
 ];
 const RUNTIME_HEALTH_LOAD_CPU_UNIT = 20;
 const RUNTIME_HEALTH_LOAD_MEMORY_UNIT = 512 * 1024 * 1024;
+const RUNTIME_HEALTH_CPU_UNITS =
+  "Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%.";
 let runtimeHealthHideTimer = null;
+
+export function subscribeRuntimeHealth(doc, model, options = {}) {
+  return model.subscribeFrame(snapshot => snapshot, snapshot => {
+    if (snapshot) applyRuntimeHealth(doc, snapshot, options);
+  });
+}
 
 export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
   const cell = doc.getElementById("op-strip-runtime-health");
@@ -526,13 +530,15 @@ export function applyRuntimeHealth(doc, snapshot = {}, options = {}) {
 
   const queue = snapshot.queue || {};
   const state = runtimeHealthState(snapshot.state);
+  const stateLabel = runtimeHealthStateLabel(state);
+  const cpuLabel = formatRuntimeAggregateCpu(snapshot.cpu_percent);
+  const memoryLabel = formatRuntimeMemory(snapshot.memory_bytes);
   cell.dataset.state = state;
   cell.hidden = false;
-  value.textContent = `${runtimeHealthStateLabel(state)} ${formatRuntimeCpu(
-    snapshot.cpu_percent,
-  )} ${formatRuntimeMemory(
-    snapshot.memory_bytes,
-  )}`;
+  value.textContent = `${stateLabel} ${cpuLabel} ${memoryLabel}`;
+  const accessibleLabel = `Runtime performance ${stateLabel} ${cpuLabel} ${memoryLabel}. ${RUNTIME_HEALTH_CPU_UNITS}`;
+  cell.setAttribute("aria-label", accessibleLabel);
+  value.setAttribute("aria-label", accessibleLabel);
   cell.setAttribute("title", runtimeHealthTitle(snapshot, queue));
   cell.dataset.runtimeHealthSort = runtimeHealthSortMode(cell.dataset.runtimeHealthSort);
   wireRuntimeHealthDetail(doc, cell);
@@ -561,6 +567,11 @@ function formatRuntimeCpu(cpu) {
   return `${Math.round(cpu)}%`;
 }
 
+function formatRuntimeAggregateCpu(cpu) {
+  if (typeof cpu !== "number" || !Number.isFinite(cpu)) return "--";
+  return formatRuntimeCpu(Math.min(100, Math.max(0, cpu)));
+}
+
 function formatRuntimeMemory(bytes) {
   const value = Number(bytes) || 0;
   if (value <= 0) return "--";
@@ -576,6 +587,7 @@ function signedDelta(value) {
 
 function runtimeHealthTitle(snapshot, queue) {
   return [
+    RUNTIME_HEALTH_CPU_UNITS,
     `state: ${runtimeHealthState(snapshot.state)}`,
     `processes: ${Number(snapshot.process_count) || 0}`,
     `runners: ${Number(snapshot.runner_count) || 0}`,
@@ -664,7 +676,7 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
   const summary = doc.createElement("div");
   summary.className = "op-runtime-health-detail__summary";
   appendRuntimeHealthChip(doc, summary, "STATE", runtimeHealthStateLabel(snapshot.state));
-  appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeCpu(snapshot.cpu_percent));
+  appendRuntimeHealthChip(doc, summary, "CPU", formatRuntimeAggregateCpu(snapshot.cpu_percent));
   appendRuntimeHealthChip(doc, summary, "MEM", formatRuntimeMemory(snapshot.memory_bytes));
   appendRuntimeHealthChip(
     doc,
@@ -673,6 +685,11 @@ function renderRuntimeHealthDetail(doc, snapshot, queue, options) {
     `${Number(snapshot.process_count) || 0}/${Number(snapshot.runner_count) || 0}`,
   );
   detail.appendChild(summary);
+
+  const units = doc.createElement("p");
+  units.className = "op-runtime-health-detail__units";
+  units.textContent = RUNTIME_HEALTH_CPU_UNITS;
+  detail.appendChild(units);
 
   const queueBlock = doc.createElement("div");
   queueBlock.className = "op-runtime-health-detail__queue";
@@ -1074,7 +1091,7 @@ function wireMissionBriefing({ doc, win }) {
 
   // SPEC-2356 — let the user dismiss the splash early by pressing any
   // key or clicking through it. The splash is purely decorative and
-  // shouldn't block users who want to get into the canvas immediately.
+  // shouldn't block users who want to get into the workspace immediately.
   let exited = false;
   const exitNow = () => {
     if (exited) return;
@@ -1309,13 +1326,13 @@ function createActionRegistry(doc) {
     { id: "open-board", label: "Focus Board surface", hint: "⌘B", group: "Navigate", handler: dispatch("open-board") },
     { id: "open-git", label: "Focus Work", hint: "⌘G", group: "Navigate", handler: dispatch("open-git") },
     { id: "open-logs", label: "Focus Logs surface", hint: "⌘L", group: "Navigate", handler: dispatch("open-logs") },
+    { id: "open-recovery-center", label: "Open Recovery Center", hint: "Durable delivery", group: "Navigate", handler: dispatch("open-recovery-center") },
     { id: "open-help", label: "Show hotkey reference", hint: "⌘?", group: "Navigate", handler: dispatch("open-help") },
     // SPEC-3431 FR-026: the rail gear only appears on hover, so the palette is
     // the keyboard-reachable entry to PM settings.
     { id: "pm-settings", label: "Project Manager settings", hint: "Agent · auto start", group: "Navigate", handler: dispatch("pm-settings") },
     { id: "spawn-shell", label: "Spawn shell window", group: "Spawn", handler: dispatch("spawn-shell") },
-    { id: "open-branches", label: "Open Workspace", hint: "Execute · existing branch", group: "Spawn", handler: dispatch("open-branches") },
-    { id: "open-files", label: "Open File Tree", group: "Spawn", handler: dispatch("open-files") },
+    { id: "open-branches", label: "Open Issues", hint: "Issues and other work", group: "Spawn", handler: dispatch("open-branches") },
     { id: "open-index", label: "Open Index search", group: "Spawn", handler: dispatch("open-index") },
     { id: "theme-cycle", label: "Cycle theme (auto → dark → light)", group: "View", handler: dispatch("theme-cycle") },
   ];

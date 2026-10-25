@@ -1,6 +1,7 @@
 //! GitHub Issue tracking with file-based cache
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -16,6 +17,8 @@ pub const GITHUB_ISSUE_LIST_LIMIT: &str = "1000";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub number: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_login: Option<String>,
     pub title: String,
     /// "OPEN" | "CLOSED"
     pub state: String,
@@ -118,25 +121,68 @@ pub fn fetch_issues(owner: &str, repo: &str) -> Result<Vec<Issue>> {
 
 /// Fetch open Issues while retaining the REST page-cap signal.
 pub fn fetch_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
-    fetch_issue_listing_with(owner, repo, |path| {
-        let hub = gwt_core::process_console::global();
-        let output = gwt_core::process_console::spawn_logged_blocking(
-            &hub,
-            gwt_core::process_console::ProcessKind::Gh,
-            "gh",
-            &["api", path],
-            gwt_core::process_console::SpawnOptions::new("gh api issues"),
-        )
-        .map_err(|e| e.to_string())?;
-        if output.success() {
-            Ok(output.stdout)
-        } else {
-            Err(output.stderr.trim().to_string())
-        }
-    })
+    fetch_issue_listing_with(owner, repo, fetch_issue_page)
 }
 
-/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path>`.
+/// Fetch every open queue-labelled Issue from the REST label list, without
+/// the ordinary list's page cap or GitHub Search's indexing delay (#5080 AC-1).
+pub fn fetch_queued_issue_listing(owner: &str, repo: &str) -> Result<IssueListing> {
+    fetch_queued_issue_listing_with(owner, repo, fetch_issue_page)
+}
+
+/// Fetch the ordinary open listing and the complete queue label collection.
+/// Queue labels and payloads come from the latter; the former retains its cap
+/// signal so queue completeness never authorizes whole-repository absence.
+pub fn fetch_issue_monitor_listing(owner: &str, repo: &str) -> Result<IssueListing> {
+    fetch_issue_monitor_listing_with(owner, repo, fetch_issue_page)
+}
+
+fn fetch_issue_page(path: &str) -> std::result::Result<String, String> {
+    fetch_issue_page_with_cache(
+        &gwt_core::paths::gwt_cache_dir().join("rest-list-pages"),
+        path,
+        chrono::Utc::now(),
+        || fetch_issue_page_uncached(path),
+    )
+}
+
+fn fetch_issue_page_with_cache(
+    cache_dir: &Path,
+    path: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    fetch: impl FnOnce() -> std::result::Result<String, String>,
+) -> std::result::Result<String, String> {
+    // Queue membership and payloads remain authoritative on every scan.
+    if path.contains("labels=gwt-queued") {
+        return fetch();
+    }
+    crate::gh_rest::cached_list_response_with(cache_dir, path, now, fetch)
+}
+
+fn fetch_issue_page_uncached(path: &str) -> std::result::Result<String, String> {
+    let hub = gwt_core::process_console::global();
+    let output = gwt_core::process_console::spawn_logged_blocking(
+        &hub,
+        gwt_core::process_console::ProcessKind::Gh,
+        "gh",
+        &["api", path, "--include"],
+        gwt_core::process_console::SpawnOptions::new("gh api issues").github_caller(
+            if path.contains("labels=gwt-queued") {
+                "issue-monitor.queued-issues"
+            } else {
+                "issue-monitor.open-issues"
+            },
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    if output.success() {
+        Ok(output.stdout)
+    } else {
+        Err(output.stderr.trim().to_string())
+    }
+}
+
+/// Injectable core of [`fetch_issues`]: `fetch` runs one `gh api <path> --include`.
 pub fn fetch_issues_with<F>(owner: &str, repo: &str, fetch: F) -> Result<Vec<Issue>>
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
@@ -144,7 +190,7 @@ where
     fetch_issue_listing_with(owner, repo, fetch).map(|listing| listing.issues)
 }
 
-/// Injectable core of [`fetch_issue_listing`]: `fetch` runs one `gh api <path>`.
+/// Injectable core of [`fetch_issue_listing`]: `fetch` runs one `gh api <path> --include`.
 pub fn fetch_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<IssueListing>
 where
     F: FnMut(&str) -> std::result::Result<String, String>,
@@ -164,10 +210,84 @@ where
     })
 }
 
+/// Injectable core of [`fetch_queued_issue_listing`]. Any failed continuation
+/// fails the collection. Pull requests and duplicate issue numbers cannot
+/// inflate the queue label membership.
+pub fn fetch_queued_issue_listing_with<F>(owner: &str, repo: &str, fetch: F) -> Result<IssueListing>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    let endpoint = format!(
+        "repos/{owner}/{repo}/issues?state=open&labels=gwt-queued&sort=created&direction=desc"
+    );
+    let pages = crate::gh_rest::read_complete_pages_with(&endpoint, fetch)
+        .map_err(|e| GwtError::Git(format!("gh api queued issues: {e}")))?;
+    let mut issues = Vec::new();
+    let mut positions = BTreeMap::new();
+    for row in crate::gh_rest::parse_issue_rows(&pages.rows)
+        .into_iter()
+        .filter(|row| {
+            row.state == "OPEN"
+                && row
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+        })
+    {
+        let issue = Issue::from(row);
+        if let Some(&index) = positions.get(&issue.number) {
+            issues[index] = issue;
+        } else {
+            positions.insert(issue.number, issues.len());
+            issues.push(issue);
+        }
+    }
+    Ok(IssueListing {
+        issues,
+        capped: false,
+    })
+}
+
+/// Injectable core of [`fetch_issue_monitor_listing`].
+pub fn fetch_issue_monitor_listing_with<F>(
+    owner: &str,
+    repo: &str,
+    mut fetch: F,
+) -> Result<IssueListing>
+where
+    F: FnMut(&str) -> std::result::Result<String, String>,
+{
+    let listing = fetch_issue_listing_with(owner, repo, &mut fetch)?;
+    let queued = fetch_queued_issue_listing_with(owner, repo, fetch)?;
+    let general = listing.issues.into_iter().map(|mut issue| {
+        // Removing only the label preserves open rows whose queue membership
+        // changed between the two reads; they are not evidence of closure.
+        issue
+            .labels
+            .retain(|label| !label.eq_ignore_ascii_case("gwt-queued"));
+        issue
+    });
+    let mut issues = Vec::new();
+    let mut positions = BTreeMap::new();
+    for issue in general.chain(queued.issues) {
+        if let Some(&index) = positions.get(&issue.number) {
+            issues[index] = issue;
+        } else {
+            positions.insert(issue.number, issues.len());
+            issues.push(issue);
+        }
+    }
+    Ok(IssueListing {
+        issues,
+        capped: listing.capped,
+    })
+}
+
 impl From<crate::gh_rest::RestIssueRow> for Issue {
     fn from(row: crate::gh_rest::RestIssueRow) -> Self {
         Self {
             number: row.number,
+            author_login: row.author_login,
             title: row.title,
             state: row.state,
             labels: row.labels,
@@ -280,6 +400,11 @@ pub fn parse_gh_issues_json(json: &str) -> Result<Vec<Issue>> {
 
         issues.push(Issue {
             number,
+            author_login: v
+                .pointer("/author/login")
+                .and_then(serde_json::Value::as_str)
+                .filter(|login| !login.is_empty())
+                .map(str::to_string),
             title,
             state,
             labels,
@@ -298,6 +423,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn issue_5603_cached_general_listing_keeps_queue_payload_live() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = chrono::Utc::now();
+        let mut general_calls = 0;
+        let mut queued_calls = 0;
+        for tick in 0..2 {
+            let listing = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+                fetch_issue_page_with_cache(
+                    cache.path(),
+                    path,
+                    start + chrono::Duration::seconds(tick * 30),
+                    || {
+                        let body = if path.contains("labels=gwt-queued") {
+                            queued_calls += 1;
+                            format!("queue revision {tick}")
+                        } else {
+                            general_calls += 1;
+                            "general revision".to_string()
+                        };
+                        Ok(format!(
+                            "HTTP/2.0 200 OK\n\r\n{}",
+                            serde_json::json!([{
+                                "number": 42, "title": "queued", "state": "open", "body": body,
+                                "labels": [{"name": "gwt-queued"}]
+                            }])
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                listing.issues[0].body.as_deref(),
+                Some(format!("queue revision {tick}").as_str())
+            );
+        }
+        assert_eq!(general_calls, 1);
+        assert_eq!(
+            queued_calls, 2,
+            "queue payloads bypass the general-list cache"
+        );
+    }
+
+    #[test]
     fn parse_gh_issues_json_valid() {
         let json = r#"[
             {
@@ -306,6 +474,7 @@ mod tests {
                 "state": "OPEN",
                 "labels": [{"name": "bug"}],
                 "assignees": [{"login": "alice"}],
+                "author": {"login": "akiojin"},
                 "body": "Description",
                 "url": "https://github.com/owner/repo/issues/42",
                 "updatedAt": "2026-08-05T10:00:00Z"
@@ -329,10 +498,16 @@ mod tests {
         assert_eq!(issues[0].labels, vec!["bug"]);
         assert_eq!(issues[0].assignee.as_deref(), Some("alice"));
         assert_eq!(
+            serde_json::to_value(&issues[0]).unwrap()["author_login"],
+            "akiojin",
+            "the original author must survive parsing and cache serialization"
+        );
+        assert_eq!(
             issues[0].updated_at.as_deref(),
             Some("2026-08-05T10:00:00Z")
         );
         assert_eq!(issues[1].number, 43);
+        assert!(issues[1].author_login.is_none());
         assert!(issues[1].assignee.is_none());
         assert!(issues[1].body.is_none());
         assert_eq!(
@@ -411,11 +586,11 @@ mod tests {
         let mut calls = Vec::new();
         let issues = fetch_issues_with("acme", "widgets", |path| {
             calls.push(path.to_string());
-            Ok(if calls.len() == 1 {
+            Ok(format!("HTTP/2.0 200 OK\n\r\n{}", if calls.len() == 1 {
                 r#"[{"number":42,"title":"Fix bug","state":"open","labels":[{"name":"bug"}],"assignees":[{"login":"alice"}],"body":"b","html_url":"https://github.com/acme/widgets/issues/42","updated_at":"2026-09-01T00:00:00Z"},{"number":43,"title":"PR row","state":"open","pull_request":{"url":"x"}}]"#.to_string()
             } else {
                 "[]".to_string()
-            })
+            }))
         })
         .unwrap();
         assert_eq!(
@@ -454,7 +629,7 @@ mod tests {
                     row
                 })
                 .collect::<Vec<_>>();
-            Ok(serde_json::to_string(&rows).unwrap())
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/acme/widgets/issues?page={}>; rel=\"next\"\r\n\r\n{}", requests + 1, serde_json::to_string(&rows).unwrap()))
         })
         .unwrap();
 
@@ -467,6 +642,66 @@ mod tests {
     }
 
     #[test]
+    fn queue_label_listing_uses_the_rest_label_endpoint_and_unique_open_issues() {
+        let mut calls = Vec::new();
+        let listing = fetch_queued_issue_listing_with("acme", "widgets", |path| {
+            calls.push(path.to_string());
+            Ok("HTTP/2.0 200 OK\n\r\n[\
+                {\"number\":90,\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":42,\"title\":\"Old\",\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":42,\"title\":\"Latest\",\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":43,\"state\":\"open\",\"labels\":[{\"name\":\"gwt-queued\"}],\"pull_request\":{}},\
+                {\"number\":44,\"state\":\"closed\",\"labels\":[{\"name\":\"gwt-queued\"}]},\
+                {\"number\":45,\"state\":\"open\",\"labels\":[{\"name\":\"bug\"}]}]".to_string())
+        })
+        .unwrap();
+        assert_eq!(calls, ["repos/acme/widgets/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1"]);
+        assert!(!listing.capped);
+        assert_eq!(listing.issues.len(), 2);
+        assert_eq!(listing.issues[0].number, 90);
+        assert_eq!(listing.issues[1].number, 42);
+        assert_eq!(listing.issues[1].title, "Latest");
+    }
+
+    #[test]
+    fn queue_label_monitor_listing_unions_rows_without_promoting_incomplete_open_lists() {
+        let listing = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+            let (link, rows) = if path.contains("labels=gwt-queued") {
+                (String::new(), r#"[{"number":42,"title":"Canonical","state":"open","labels":[{"name":"gwt-queued"}]},{"number":99,"state":"open","labels":[{"name":"gwt-queued"}]}]"#)
+            } else {
+                ("Link: <https://api.github.com/repos/acme/widgets/issues?state=open&page=2>; rel=\"next\"\r\n".to_string(), r#"[{"number":42,"title":"Stale","state":"open","labels":[{"name":"gwt-queued"}]},{"number":7,"state":"open","labels":[{"name":"gwt-queued"},{"name":"bug"}]}]"#)
+            };
+            Ok(format!("HTTP/2.0 200 OK\n{link}\r\n{rows}"))
+        })
+        .unwrap();
+        assert!(
+            listing.capped,
+            "queue completeness cannot promote the open list"
+        );
+        assert_eq!(listing.issues.len(), 3, "union is unique by issue number");
+        assert_eq!(listing.issues[0].number, 42);
+        assert_eq!(listing.issues[0].title, "Canonical");
+        assert_eq!(listing.issues[1].number, 7);
+        assert_eq!(listing.issues[1].state, "OPEN");
+        assert_eq!(listing.issues[1].labels, ["bug"]);
+        assert_eq!(listing.issues[2].number, 99);
+    }
+
+    #[test]
+    fn queue_label_monitor_listing_rejects_a_failed_label_read() {
+        let error = fetch_issue_monitor_listing_with("acme", "widgets", |path| {
+            if path.contains("labels=gwt-queued") {
+                Err("HTTP 502 label list".to_string())
+            } else {
+                Ok("HTTP/2.0 200 OK\n\r\n[]".to_string())
+            }
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("HTTP 502 label list"), "{error}");
+    }
+
+    #[test]
     fn cache_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = IssueCache::with_dir(tmp.path()).unwrap();
@@ -476,6 +711,7 @@ mod tests {
 
         // Write and read back
         let issues = vec![Issue {
+            author_login: None,
             number: 1,
             title: "Test".into(),
             state: "OPEN".into(),
@@ -523,6 +759,7 @@ mod tests {
         let cache = IssueCache::with_dir(tmp.path()).unwrap();
 
         let issues = vec![Issue {
+            author_login: None,
             number: 1,
             title: "Test".into(),
             state: "OPEN".into(),

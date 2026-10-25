@@ -20,10 +20,6 @@ const indexSurfaceSource = readFileSync(
   resolve(here, "../project-index-search-surface.js"),
   "utf8",
 );
-const projectTabsRendererSource = readFileSync(
-  resolve(here, "../project-tabs-renderer.js"),
-  "utf8",
-);
 // SPEC-3064 Phase 3 (E4): the Settings window renderer, the settings:open
 // dispatch listener, and requestFullIndexStatusRefresh moved into the
 // extracted settings surface module.
@@ -31,6 +27,275 @@ const settingsSurfaceSource = readFileSync(
   resolve(here, "../settings-surface.js"),
   "utf8",
 );
+
+async function indexHealthFixture(t, onSettings = () => {}, scheduleFrame) {
+  const source = indexSurfaceSource.replace(/from "\/(.*?)"/g,
+    (_, name) => `from "${new URL(`../${name}`, import.meta.url).href}"`);
+  const { createProjectIndexSearchSurface } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  const { document } = parseHTML('<html><body><div data-id="index-1"><div id="body"></div></div></body></html>');
+  const previous = { document: globalThis.document, CSS: globalThis.CSS };
+  const selectPrototype = document.defaultView.HTMLSelectElement.prototype;
+  const previousValue = Object.getOwnPropertyDescriptor(selectPrototype, 'value');
+  globalThis.document = document;
+  globalThis.CSS = { escape: value => value };
+  // linkedom's select.value is getter-only; the browser supports assignment.
+  Object.defineProperty(selectPrototype, 'value', {
+    configurable: true, get() { return this.getAttribute('value') || ''; },
+    set(value) { this.setAttribute('value', value); },
+  });
+  t.after(() => {
+    Object.assign(globalThis, previous);
+    Object.defineProperty(selectPrototype, 'value', previousValue);
+  });
+  const makeEl = (tag, options = {}) => {
+    const node = document.createElement(tag);
+    node.className = options.className || '';
+    if (options.text) node.textContent = options.text;
+    for (const [key, value] of Object.entries(options.attrs || {})) node.setAttribute(key, value);
+    Object.assign(node.dataset, options.dataset);
+    return node;
+  };
+  let activeRoot = '/repo';
+  const sent = [];
+  const opened = [];
+  const frames = new Set();
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const controller = createProjectIndexSearchSurface({
+    focusOrSpawnPreset: preset => opened.push(preset),
+    send: message => sent.push(message), sendWindowFocus: () => {}, focusWindowLocally: () => {},
+    activeProjectTab: () => ({ project_root: activeRoot }), makeEl,
+    clearChildren: node => node.replaceChildren(),
+    renderIndexPanelInAllSettingsWindows: onSettings,
+    requestFullIndexStatusRefresh: () => sent.push({ kind: 'refresh_index_status' }),
+    scheduleFrame: scheduleFrame || (callback => { frames.add(callback); return () => frames.delete(callback); }),
+  });
+  controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  return { controller, document, sent, opened, flush, activateProject: root => {
+    activeRoot = root;
+    controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  } };
+}
+
+test("Index health commits an immutable project snapshot and ignores unrelated project updates", async t => {
+  let settingsRenders = 0;
+  let settingsSnapshot;
+  const frames = [];
+  const { controller, document, activateProject } = await indexHealthFixture(t, () => {
+    settingsRenders += 1;
+    settingsSnapshot = controller.getIndexStatus('/repo');
+  }, callback => { frames.push(callback); return () => {}; });
+  const originalSummary = document.querySelector('.index-search-health-summary').firstChild;
+  const payload = { state: 'ready', scopes: { issues: { healthy: true, document_count: 12 } } };
+  controller.setIndexStatus('/repo', payload);
+  const committed = controller.getIndexStatus('/repo');
+  assert.ok(Object.isFrozen(committed.scopes.issues));
+  payload.scopes.issues.document_count = 99;
+  assert.equal(committed.scopes.issues.document_count, 12);
+  assert.equal(settingsRenders, 0, 'model commits must not render before the frame');
+  assert.ok(document.querySelector('.index-search-health-summary').firstChild === originalSummary);
+  for (let count = 13; count <= 50; count += 1) {
+    controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true, document_count: count } } });
+  }
+  const latest = controller.getIndexStatus('/repo');
+  controller.setIndexStatus('/other', { state: 'error' });
+  assert.equal(frames.length, 1, 'both views share one pending frame despite unrelated trailing status');
+  frames.shift()();
+  assert.ok(settingsSnapshot === latest, 'Settings pulls the latest committed snapshot');
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.match(document.querySelector("tr[data-scope='issues']").textContent, /50 docs/);
+  controller.setIndexStatus('/other', { state: 'error' });
+  assert.equal(settingsRenders, 1);
+  assert.ok(controller.getIndexStatus('/repo') === latest);
+  activateProject('/other');
+  const summary = document.querySelector('.index-search-health-summary').firstChild;
+  controller.setIndexStatus('/repo', { state: 'repair_required' });
+  while (frames.length) frames.shift()();
+  assert.equal(settingsRenders, 1, 'switching projects must not turn an unrelated update into a redraw');
+  assert.strictEqual(document.querySelector('.index-search-health-summary').firstChild, summary);
+  activateProject('/repo');
+  const restoredSummary = document.querySelector('.index-search-health-summary').firstChild;
+  controller.setIndexStatus('/other', { state: 'ready' });
+  while (frames.length) frames.shift()();
+  assert.equal(settingsRenders, 1, 'returning to a project must not revive its old render eligibility');
+  assert.ok(document.querySelector('.index-search-health-summary').firstChild === restoredSummary);
+});
+
+test("Index search renders committed responses, recovers lost reads and clears closed-window subscriptions", async t => {
+  const { controller, document, sent, flush } = await indexHealthFixture(t);
+  const submit = query => {
+    const input = document.querySelector('.index-search-input');
+    input.value = query;
+    input.dispatchEvent(new document.defaultView.Event('input'));
+    document.querySelector('.index-search-box').dispatchEvent(new document.defaultView.Event('submit'));
+    return sent.findLast(message => message.kind === 'search_project_index');
+  };
+  const request = submit('first');
+  const payload = { id: 'index-1', request_id: request.request_id,
+    results: [{ title: 'Committed', preview: 'Original preview', target: { kind: 'issue', number: 5016 } }],
+    suggestions: [] };
+  controller.handleProjectIndexSearchResults(payload);
+  payload.results[0].title = 'Mutated';
+  payload.results[0].preview = 'Mutated preview';
+  controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  assert.match(document.querySelector('.index-result-list').textContent, /Committed/);
+  assert.equal(document.querySelector('.index-detail-preview').textContent, 'Original preview');
+  assert.match(document.querySelector('.index-search-status').textContent, /1 results/);
+  const pending = submit('second');
+  // Issue #5531: recover a real pending read through the canonical response model.
+  controller.resyncProjectIndexSearch(['index-1', 'other']);
+  const replacement = sent.at(-1);
+  assert.equal(replacement.query, 'second');
+  assert.deepEqual(replacement.scopes, pending.scopes);
+  assert.equal(replacement.match_mode, pending.match_mode);
+  assert.ok(replacement.request_id > pending.request_id);
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: pending.request_id, results: [] });
+  assert.match(document.querySelector('.index-search-status').textContent, /Updating results/);
+  assert.match(document.querySelector('.index-result-list').textContent, /Committed/);
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: replacement.request_id,
+    results: [{ title: 'Fresh snapshot' }], suggestions: [] });
+  flush();
+  assert.match(document.querySelector('.index-search-status').textContent, /1 results/);
+  assert.match(document.querySelector('.index-result-list').textContent, /Fresh snapshot/);
+  submit('');
+  controller.handleProjectIndexSearchError({ id: 'index-1', request_id: pending.request_id, message: 'stale' });
+  assert.match(document.querySelector('.index-search-status').textContent, /^Ready/);
+  const closedRequest = submit('closing');
+  controller.disposeIndexSearchWindow('index-1');
+  const oldContent = document.getElementById('body').innerHTML;
+  controller.handleProjectIndexSearchResults({ ...payload, request_id: closedRequest.request_id });
+  assert.equal(document.getElementById('body').innerHTML, oldContent);
+  controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  assert.match(document.querySelector('.index-result-list').textContent, /Search indexed content/);
+  const recovered = submit('recovered');
+  controller.handleProjectIndexSearchError({ id: 'index-1', request_id: recovered.request_id, message: 'Try again' });
+  flush();
+  assert.equal(document.querySelector('.index-search-status').textContent, 'Try again');
+  controller.handleProjectIndexSearchResults({ ...payload, request_id: closedRequest.request_id });
+  assert.equal(document.querySelector('.index-search-status').textContent, 'Try again');
+});
+
+test("Index search isolates window selectors and cancels pending searches on close", async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { controller, document, sent, flush } = await indexHealthFixture(t);
+  const other = document.createElement('div');
+  other.dataset.id = 'index-2';
+  const body = document.createElement('div');
+  other.appendChild(body);
+  document.body.appendChild(other);
+  controller.mountProjectIndexSurface(body, { id: 'index-2' });
+  const firstNode = document.querySelector('[data-id="index-1"] .index-result-list').firstChild;
+  const input = body.querySelector('.index-search-input');
+  input.value = 'pending';
+  input.dispatchEvent(new document.defaultView.Event('input'));
+  body.querySelector('.index-search-box').dispatchEvent(new document.defaultView.Event('submit'));
+  const request = sent.at(-1);
+  controller.handleProjectIndexSearchResults({ id: 'index-2', request_id: request.request_id, results: [{ title: 'Second' }] });
+  assert.strictEqual(document.querySelector('[data-id="index-1"] .index-result-list').firstChild, firstNode);
+  input.value = 'close before debounce';
+  input.dispatchEvent(new document.defaultView.Event('input'));
+  controller.disposeIndexSearchWindow('index-2');
+  const sendCount = sent.length;
+  t.mock.timers.tick(1000);
+  assert.equal(sent.length, sendCount);
+  assert.equal(controller.indexSearchStateMap.has('index-2'), false);
+  controller.mountProjectIndexSurface(body, { id: 'index-2' });
+  const freshInput = body.querySelector('.index-search-input');
+  freshInput.value = 'fresh';
+  freshInput.dispatchEvent(new document.defaultView.Event('input'));
+  body.querySelector('.index-search-box').dispatchEvent(new document.defaultView.Event('submit'));
+  assert.notEqual(sent.at(-1).request_id, request.request_id);
+  controller.handleProjectIndexSearchResults({ id: 'index-2', request_id: request.request_id, results: [{ title: 'Stale' }] });
+  assert.doesNotMatch(body.querySelector('.index-result-list').textContent, /Stale/);
+});
+
+test("Index responses share one frame while local search, remount and disposal stay synchronous", async t => {
+  const frames = new Set();
+  const { controller, document, sent, opened } = await indexHealthFixture(t, () => {}, callback => {
+    frames.add(callback);
+    return () => frames.delete(callback);
+  });
+  const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
+  const first = document.getElementById('body');
+  const host = document.createElement('div');
+  host.dataset.id = 'index-2';
+  const second = document.createElement('div');
+  host.appendChild(second);
+  document.body.appendChild(host);
+  controller.mountProjectIndexSurface(second, { id: 'index-2' });
+  const originalPush = sent.push;
+  sent.push = function(message) {
+    if (message.kind === 'search_project_index') {
+      const body = message.id === 'index-1' ? first : second;
+      assert.equal(body.querySelector('.index-run-button').disabled, true, 'disable before send');
+      assert.equal(body.querySelector('.index-search-layout').getAttribute('aria-busy'), 'true');
+    }
+    return originalPush.call(this, message);
+  };
+  const submit = (body, query) => {
+    const input = body.querySelector('.index-search-input');
+    input.value = query;
+    input.dispatchEvent(new document.defaultView.Event('input'));
+    body.querySelector('.index-search-box').dispatchEvent(new document.defaultView.Event('submit'));
+    return sent.findLast(message => message.kind === 'search_project_index');
+  };
+  const request = submit(first, 'first');
+  const other = submit(second, 'second');
+  flush();
+  const nodes = [first, second].map(body => body.querySelector('.index-result-list').firstChild);
+  const payload = { id: 'index-1', request_id: request.request_id, results: [{ title: 'Committed', target: { kind: 'board' } }, { title: 'Old selection', target: { kind: 'memory' } }] };
+  controller.handleProjectIndexSearchResults(payload);
+  payload.results[0].title = 'Mutated';
+  controller.handleProjectIndexSearchError({ id: 'index-2', request_id: other.request_id, message: 'Retry later' });
+  assert.equal(controller.indexSearchStateMap.get('index-1').inFlightRequestId, 0);
+  assert.equal(controller.indexSearchStateMap.get('index-2').inFlightRequestId, 0);
+  for (const [index, body] of [first, second].entries()) {
+    assert.ok(body.querySelector('.index-result-list').firstChild === nodes[index], 'receipt waits for a frame');
+  }
+  assert.equal(frames.size, 1, 'both window selectors share one reservation');
+  flush();
+  assert.match(first.querySelector('.index-result-list').textContent, /Committed/);
+  assert.equal(second.querySelector('.index-search-status').textContent, 'Retry later');
+  const untouched = second.querySelector('.index-result-list').firstChild;
+  first.querySelector('[data-result-index="1"]').dispatchEvent(new document.defaultView.Event('click', { bubbles: true }));
+  const next = submit(first, 'next');
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: next.request_id, results: [{ title: 'Remounted', target: { kind: 'board' } }, { title: 'Selected' }] });
+  first.querySelector('[data-action="open-index-result"]').dispatchEvent(new document.defaultView.Event('click', { bubbles: true }));
+  first.querySelector('.index-result-list').dispatchEvent(Object.assign(new document.defaultView.Event('keydown', { bubbles: true }), { key: 'Enter' }));
+  first.querySelector('[data-result-index="1"]').dispatchEvent(new document.defaultView.Event('dblclick', { bubbles: true }));
+  assert.deepEqual(opened, ['index', 'index', 'index'], 'all activation paths open the displayed result and selection while a new response waits');
+  assert.equal(controller.indexSearchStateMap.get('index-1').selectedResultIndex, 0, 'opening an old row does not change the incoming selection');
+  controller.mountProjectIndexSurface(first, { id: 'index-1' });
+  assert.match(first.querySelector('.index-result-list').textContent, /Remounted/, 'remount reads the committed response immediately');
+  first.querySelector('[data-result-index="1"]').dispatchEvent(new document.defaultView.Event('click', { bubbles: true }));
+  assert.equal(controller.indexSearchStateMap.get('index-1').selectedResultIndex, 1);
+  const hydrated = first.querySelector('.index-result-list').firstChild;
+  const selected = first.querySelector('[data-result-index="1"]');
+  flush();
+  assert.ok(first.querySelector('.index-result-list').firstChild === hydrated, 'frame skips an already rendered response');
+  assert.ok(first.querySelector('[data-result-index="1"]') === selected, 'frame preserves the locally selected row');
+  assert.ok(second.querySelector('.index-result-list').firstChild === untouched, 'unrelated selector stays unchanged');
+  controller.handleProjectIndexSearchError({ id: 'index-1', request_id: request.request_id, message: 'stale' });
+  assert.equal(frames.size, 0, 'stale replies do not schedule views');
+  submit(first, '');
+  assert.match(first.querySelector('.index-search-status').textContent, /^Ready/);
+  const closing = submit(first, 'closing');
+  controller.handleProjectIndexSearchResults({ id: 'index-1', request_id: closing.request_id, results: [{ title: 'Closed' }] });
+  controller.disposeIndexSearchWindow('index-1');
+  controller.disposeIndexSearchWindow('index-2');
+  assert.equal(frames.size, 0, 'closing the last window cancels the reserved frame');
+  controller.handleProjectIndexSearchError({ id: 'index-1', request_id: closing.request_id, message: 'late' });
+  assert.equal(controller.indexSearchStateMap.size, 0);
+});
+
+test("Index health still renders a committed snapshot when another view fails", async t => {
+  const frames = [];
+  const { controller, document } = await indexHealthFixture(t, () => { throw new Error('settings failed'); },
+    callback => { frames.push(callback); return () => {}; });
+  controller.setIndexStatus('/repo', { state: 'ready', scopes: { issues: { healthy: true } } });
+  assert.throws(() => frames.shift()(), /settings failed/);
+  assert.match(document.querySelector('.index-search-health-summary').textContent, /1 ready/);
+  assert.equal(controller.getIndexStatus('/repo').scopes.issues.healthy, true);
+});
 
 test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
   const { document } = parseHTML(indexHtml);
@@ -54,10 +319,6 @@ test("project-bar Index badge has been withdrawn (SPEC-1939 Phase 13)", () => {
 });
 
 test("project tab state cues no longer wire Project Index health", () => {
-  assert.ok(
-    !projectTabsRendererSource.includes("aggregateProjectTabDotState"),
-    "project tab state cues should be driven by agent runtime state, not Project Index health",
-  );
   assert.ok(
     !appSource.includes("aggregateProjectTabDotState"),
     "app.js must not import or call the removed project-tab Index health helper",
@@ -129,7 +390,7 @@ test("Index search UI exposes explicit search controls and readable result scori
   );
   assert.ok(
     indexSurfaceSource.includes("inFlightSignature") &&
-      indexSurfaceSource.includes("state.searching && state.inFlightSignature === searchSignature"),
+    indexSurfaceSource.includes("indexSearchModel.read()[windowId].searching && state.inFlightSignature === searchSignature"),
     "explicit search clicks should not duplicate an identical debounced search already in flight",
   );
   assert.ok(
@@ -188,7 +449,7 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
   assert.ok(
     indexSurfaceSource.includes("function openKnowledgeIndexResultTarget(preset, target)") &&
       indexSurfaceSource.includes("requestKnowledgeDetail(windowId, knowledgeKind, number)") &&
-      indexSurfaceSource.includes("pendingIndexOpenTargetsByPreset.set(preset"),
+      indexSurfaceSource.includes('pendingIndexOpenTargetsByPreset.set(knowledgeKind === "issue" ? "settings" : preset'),
     "Issue/SPEC result Open should select the indexed target number, including newly created windows",
   );
   assert.ok(
@@ -203,7 +464,10 @@ test("Index result Open uses target numbers for Issue and SPEC hits", () => {
   );
 });
 
-test("Index search tab refreshes missing health once per project root", () => {
+test("Index search tab refreshes missing health once per project root", async t => {
+  const { controller, document, sent, flush } = await indexHealthFixture(t);
+  controller.mountProjectIndexSurface(document.getElementById('body'), { id: 'index-1' });
+  assert.equal(sent.filter(message => message.kind === 'refresh_index_status').length, 1);
   assert.ok(
     indexSurfaceSource.includes("function ensureIndexStatusRefresh(state, status)") &&
       indexSurfaceSource.includes("state.statusRefreshProjectRoot !== activeProjectRoot") &&

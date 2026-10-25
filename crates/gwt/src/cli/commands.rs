@@ -4,6 +4,12 @@ pub enum IssueMonitorPriorityPosition {
     Index(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueLabelAction {
+    Add,
+    Remove,
+}
+
 /// SPEC-1942 command model for `issue.*` and `issue.spec.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCommand {
@@ -74,6 +80,28 @@ pub enum IssueCommand {
     SpecRepair {
         number: u64,
     },
+    /// Issue #4541: run the deterministic SPEC artifact lint and, unless
+    /// `snapshot` is off, finalize the Intake Inspection Snapshot with the
+    /// lint result and seed the Finding Disposition Ledger from it.
+    SpecLint {
+        number: u64,
+        /// Empty means the default `spec` / `plan` / `tasks` set.
+        sections: Vec<String>,
+        snapshot: bool,
+        directive_epoch: Option<String>,
+        phase_slice: Option<String>,
+    },
+    /// Issue #4541 AC-6: decide whether intake may declare the owner complete
+    /// — GitHub-entity readback per section plus a disposition for every
+    /// critical finding.
+    SpecInspectionComplete {
+        number: u64,
+    },
+    /// Issue #4392 AC-3: rewrite an Issue's cache entry together with its
+    /// validation receipt, the state no other operation could restore.
+    CacheRepair {
+        number: u64,
+    },
     SpecRename {
         number: u64,
         title: String,
@@ -99,6 +127,7 @@ pub enum IssueCommand {
         title: String,
         body: String,
         labels: Vec<String>,
+        owner_check: Option<super::hook::pm_spec_survey::IssueOwnerCheck>,
     },
     /// Issue #3865: update a plain Issue in place. Every field is optional and
     /// only the supplied ones are sent; `body` is a whole-body replacement and
@@ -108,6 +137,28 @@ pub enum IssueCommand {
         title: Option<String>,
         body: Option<String>,
         labels: Option<Vec<String>>,
+    },
+    /// SPEC #4249 FR-001: move a plain or `gwt-spec` Issue to closed. `reason`
+    /// is the GitHub `state_reason`; `comment` is posted before the close so the
+    /// rationale is already on the Issue when it drops out of the Monitor inbox.
+    Close {
+        number: u64,
+        reason: Option<gwt_github::client::IssueCloseReason>,
+        comment: Option<String>,
+    },
+    /// SPEC #4249 FR-001: reopen a closed Issue so it returns to readiness
+    /// evaluation and can be requeued.
+    Reopen {
+        number: u64,
+        comment: Option<String>,
+    },
+    Label {
+        number: u64,
+        action: IssueLabelAction,
+        labels: Vec<String>,
+        confirm_queue: bool,
+        confirm_design_gate: bool,
+        confirm_auto_merge: bool,
     },
     Comment {
         number: u64,
@@ -130,49 +181,115 @@ pub enum IssueCommand {
     },
     MonitorPriorityMove {
         project_root: Option<std::path::PathBuf>,
+        expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         number: u64,
         position: IssueMonitorPriorityPosition,
     },
     MonitorPrioritySet {
         project_root: Option<std::path::PathBuf>,
+        expected_priority_order: Option<Vec<u64>>,
+        reason: Option<String>,
         issue_numbers: Vec<u64>,
+    },
+    MonitorQueueList {
+        project_root: Option<std::path::PathBuf>,
+        terminal: Option<String>,
+    },
+    MonitorSchedule {
+        project_root: Option<std::path::PathBuf>,
+        action: crate::issue_monitor::AgentScheduleAction,
+    },
+    MonitorQueuePush {
+        project_root: Option<std::path::PathBuf>,
+        issue_numbers: Vec<u64>,
+        position: Option<usize>,
+        force: bool,
+    },
+    MonitorQueueRemove {
+        project_root: Option<std::path::PathBuf>,
+        expected_queue_order: Option<Vec<u64>>,
+        issue_numbers: Vec<u64>,
+        all_terminals: bool,
+    },
+    MonitorQueueMove {
+        project_root: Option<std::path::PathBuf>,
+        expected_queue_order: Option<Vec<u64>>,
+        number: u64,
+        position: usize,
+    },
+    MonitorQueueAutoRefill {
+        project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
+        enabled: bool,
+        limit: usize,
+    },
+    MonitorQueueUrgentLimit {
+        project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
+        limit: usize,
+    },
+    MonitorQueueDemote {
+        project_root: Option<std::path::PathBuf>,
+        expected_urgent_queue_token: Option<String>,
+        number: u64,
     },
     MonitorConfigSet {
         project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
+        allowed_labels: Option<Vec<String>>,
         enabled: Option<bool>,
         autonomous_mode: Option<bool>,
         max_active: Option<usize>,
+        /// Explicitly clear the manual concurrency override.
+        max_active_auto: bool,
         /// Issue #3917 AC-5: explicit auto-close override (`None` leaves the
         /// stored value untouched).
         auto_close_merged_issues: Option<bool>,
-        /// Issue #3906 AC-1: explicit auto-apply-updates override (`None`
-        /// leaves the stored value untouched).
-        auto_apply_updates: Option<bool>,
         /// Issue #3923 AC-5: switch the saved launch profile's agent.
         launch_agent: Option<String>,
         /// Issue #4037 AC-5: raise (`true`, recorded as a manual drain) or
         /// clear (`false`) the non-destructive update drain.
         update_drain: Option<crate::IssueMonitorUpdateDrainControl>,
     },
-    /// SPEC #3914 FR-011: read the launch candidate pool, provider holds and
-    /// the usage threshold.
+    /// SPEC #3914 FR-011: read the launch candidate pool and provider holds.
     MonitorProfiles {
         project_root: Option<std::path::PathBuf>,
     },
-    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent)
-    /// and optionally the usage threshold.
+    /// SPEC #3914 FR-011: replace the launch candidate pool whole (idempotent).
     MonitorProfilesSet {
         project_root: Option<std::path::PathBuf>,
+        expected_profiles_token: Option<String>,
         /// Issue #4079 AC-3: sparse elements, so an omitted field inherits the
         /// saved candidate's value instead of resetting to `Default`.
         profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
         usage_threshold_percent: Option<u8>,
+    },
+    /// Read automatic launch tiers and observed landing statistics.
+    MonitorTiers {
+        project_root: Option<std::path::PathBuf>,
+    },
+    /// Configure automatic launch selection; omitted tiers restore defaults.
+    MonitorTiersSet {
+        project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
+        auto: bool,
+        tiers: Option<Vec<Vec<crate::IssueMonitorLaunchProfile>>>,
+    },
+    /// Persist a non-decreasing tier override for one Issue.
+    MonitorTierSet {
+        project_root: Option<std::path::PathBuf>,
+        expected_config_token: Option<String>,
+        number: u64,
+        tier: u8,
     },
     /// SPEC-3431 FR-006: the PM's launch instruction — move the issue to the
     /// priority head and ask for one immediate scan. Never launches directly.
     MonitorLaunchNow {
         project_root: Option<std::path::PathBuf>,
         number: u64,
+        expected_priority_order: Option<Vec<u64>>,
+        expected_queue_order: Option<Vec<u64>>,
     },
     /// SPEC-3431 FR-033: the PM's stop instruction — revoke one launch's
     /// authority and slot without requeueing or relaunching it.
@@ -185,6 +302,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        remove_from_queue: bool,
         claim_id: Option<String>,
         delivery_id: Option<String>,
         window_id: Option<String>,
@@ -212,6 +330,7 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         number: u64,
         reason: String,
+        force: bool,
     },
     /// Issue #3923 AC-1: every provider-wide quota hold in force, with the
     /// evidence it was formed from.
@@ -273,7 +392,14 @@ pub enum IssueCommand {
 /// SPEC-1942 command model for `pr.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrCommand {
+    /// Narrow Ready-creation path backed by exact canonical GitHub CI.
+    CreateFromCi(crate::cli::pr::ci_delivery::CiCreateRequest),
     Current,
+    /// Independent canonical-record/remote-head diagnostic; never admits a PR mutation.
+    HeadCheck {
+        base: String,
+        head: Option<String>,
+    },
     /// `pr.list` with the optional PM thresholds from Issue #3868 (AC-5 /
     /// AC-6); `None` keeps the crate defaults.
     List {
@@ -307,12 +433,14 @@ pub enum PrCommand {
     },
     Edit {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         file: Option<String>,
         add_labels: Vec<String>,
     },
     EditBody {
         number: u64,
+        base: Option<String>,
         title: Option<String>,
         body: Option<String>,
         add_labels: Vec<String>,
@@ -325,6 +453,10 @@ pub enum PrCommand {
     },
     Draft {
         number: u64,
+    },
+    Close {
+        number: u64,
+        comment: Option<String>,
     },
     /// SPEC #3835 AC-15: merge the base branch into the PR head so a `BEHIND`
     /// PR can reach `MERGEABLE`. The PM's only way out of `BEHIND`; a conflict
@@ -353,6 +485,7 @@ pub enum PrCommand {
     ReviewThreadsReplyAndResolveBody {
         number: u64,
         body: String,
+        thread_id: Option<String>,
     },
     Checks {
         number: u64,

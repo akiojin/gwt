@@ -14,14 +14,17 @@
 //! Per-session rows are gathered by [`collect_sessions`], which enumerates the
 //! gwt session store and reads each session's local rollout / transcript.
 
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gwt_agent::{AgentId, AgentStatus, Session};
+use gwt_agent::{AgentId, AgentStatus};
 use gwt_config::{usage_config::UsageConfig, Settings};
 use gwt_core::usage::{
-    claude, codex, consumption,
+    cache::UsageCache,
+    claude, codex,
     state::{age_secs, apply_staleness, should_fetch_claude, DEFAULT_STALE_AFTER_SECS},
     ProviderConsumption, ProviderUsage, SessionUsage, UsageProvider, UsageSnapshot, UsageState,
     WindowKind,
@@ -41,7 +44,7 @@ const TICK_SECS: u64 = 30;
 /// this often (or immediately on a forced refresh).
 const CONSUMPTION_CACHE_SECS: i64 = 300;
 
-/// Called with each tick's account rows, in addition to the client broadcast.
+/// Called when the account rows meaningfully change, alongside the client broadcast.
 ///
 /// Issue #3616: the quota classifier lives in `AppRuntime`, which only the tao
 /// event loop can touch, so the caller supplies the hop. Taking a callback
@@ -53,17 +56,24 @@ pub fn spawn_usage_poller(
     runtime: &tokio::runtime::Runtime,
     clients: ClientHub,
     refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
     observe_accounts: AccountsObserver,
 ) {
     drop(
         runtime
             .handle()
-            .spawn(run(clients, refresh, observe_accounts)),
+            .spawn(run(clients, refresh, project_roots, observe_accounts)),
     );
 }
 
-async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: AccountsObserver) {
+async fn run(
+    clients: ClientHub,
+    refresh: Arc<Notify>,
+    project_roots: Arc<RwLock<Vec<PathBuf>>>,
+    observe_accounts: AccountsObserver,
+) {
     let mut poller = Poller::default();
+    let mut observed_accounts = None;
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -78,11 +88,28 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
         if !clients.has_clients() {
             continue;
         }
-        let snapshot = poller.poll_once(Utc::now(), forced).await;
-        // Issue #3616: hand the account rows to the event loop before the
-        // broadcast. Both consumers need the same tick, and the classifier is
-        // the one whose absence lets a quota-dead pane hold a slot for days.
-        observe_accounts(snapshot.accounts.clone());
+        let now = Utc::now();
+        let roots = project_roots
+            .read()
+            .map(|roots| roots.clone())
+            .unwrap_or_default();
+        let snapshot = match poller.poll_in_background(now, forced, roots).await {
+            Ok((returned, snapshot)) => {
+                poller = returned;
+                snapshot
+            }
+            Err(error) => {
+                tracing::warn!(%error, "usage collection worker failed; retrying next tick");
+                poller = Poller::default();
+                continue;
+            }
+        };
+        // Issue #5597: only meaningful changes need a GUI-thread update.
+        // The existing terminal-convergence clock still sweeps pending quota
+        // candidates even when the account observation remains unchanged.
+        if account_usage_changed(&mut observed_accounts, &snapshot.accounts) {
+            observe_accounts(snapshot.accounts.clone());
+        }
         clients.dispatch(vec![OutboundEvent::broadcast(
             BackendEvent::ProviderUsage {
                 accounts: snapshot.accounts,
@@ -93,10 +120,97 @@ async fn run(clients: ClientHub, refresh: Arc<Notify>, observe_accounts: Account
     }
 }
 
+/// Poll timestamps and the age of an already-stale reading do not alter quota
+/// decisions. Preserve state transitions, account identity and every usage
+/// window (including its reset) when deciding whether the GUI needs a notice.
+fn account_usage_changed(
+    previous: &mut Option<Vec<ProviderUsage>>,
+    accounts: &[ProviderUsage],
+) -> bool {
+    let current = accounts
+        .iter()
+        .cloned()
+        .map(|mut account| {
+            account.fetched_at = None;
+            if let UsageState::Stale { age_secs } = &mut account.state {
+                *age_secs = 0;
+            }
+            account
+        })
+        .collect::<Vec<_>>();
+    if previous.as_ref() == Some(&current) {
+        return false;
+    }
+    *previous = Some(current);
+    true
+}
+
+/// Account recovery requires repository discovery and a durable prefs
+/// transaction. Keep both on the collection worker, including unchanged ticks
+/// so newly opened projects and failed writes still receive the observation.
+fn reconcile_project_accounts(
+    project_roots: &[PathBuf],
+    accounts: &[ProviderUsage],
+    now: DateTime<Utc>,
+) {
+    let timestamp = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let prefs_paths = project_roots
+        .iter()
+        .map(|root| gwt::issue_monitor_prefs_path_for_repo_path(root))
+        .collect::<HashSet<_>>();
+    for prefs_path in prefs_paths {
+        #[cfg(test)]
+        let timeout = crate::app_runtime::TEST_ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        #[cfg(not(test))]
+        let timeout = crate::app_runtime::ISSUE_MONITOR_FALLBACK_COMMIT_TIMEOUT;
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + timeout,
+        );
+        if let Err(error) =
+            gwt::issue_monitor::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+                let mut monitor = gwt::IssueMonitorState::with_prefs(
+                    gwt::IssueMonitorConfig::default(),
+                    prefs.clone(),
+                );
+                let mut changed = false;
+                for account in accounts {
+                    changed |= monitor.reconcile_provider_usage(account, &timestamp);
+                }
+                if changed {
+                    *prefs = monitor.prefs();
+                }
+                Ok(())
+            })
+        {
+            tracing::warn!(%error, "provider usage recovery could not be persisted; next poll retries");
+        }
+    }
+}
+
+/// Issue #4908 AC-5: publish this tick's account rows where
+/// `issue.monitor.status` reads them. The status bar was the only place these
+/// readings went, so a JSON reader could not see the usage a hold sat beside.
+/// A failed write costs that reader one tick, never the poll itself.
+fn publish_accounts(accounts: &[ProviderUsage], now: DateTime<Utc>) {
+    let path = gwt_core::usage::snapshot_store::provider_usage_snapshot_path();
+    if let Err(error) =
+        gwt_core::usage::snapshot_store::write_provider_usage_snapshot(&path, accounts, now)
+    {
+        tracing::warn!(
+            %error,
+            path = %path.display(),
+            "provider usage snapshot could not be published; issue.monitor.status keeps the previous reading"
+        );
+    }
+}
+
 /// Mutable state carried across polls (Claude cache + cadence + UA +
 /// consumption cache).
 #[derive(Default)]
 struct Poller {
+    #[cfg(test)]
+    collection_thread: Option<std::thread::ThreadId>,
+    transcripts: UsageCache,
     codex_account_id: Option<String>,
     codex_auth_observed: bool,
     codex_authenticated_at: Option<DateTime<Utc>>,
@@ -109,16 +223,42 @@ struct Poller {
 }
 
 impl Poller {
+    /// Keep all synchronous work (settings/auth, directory scans, parsing and
+    /// publication/account recovery) off async workers and the GUI thread.
+    /// HTTP futures still use the shared runtime.
+    async fn poll_in_background(
+        mut self,
+        now: DateTime<Utc>,
+        force: bool,
+        project_roots: Vec<PathBuf>,
+    ) -> Result<(Self, UsageSnapshot), tokio::task::JoinError> {
+        let runtime = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let snapshot = runtime.block_on(self.poll_once(now, force));
+            publish_accounts(&snapshot.accounts, now);
+            reconcile_project_accounts(&project_roots, &snapshot.accounts, now);
+            (self, snapshot)
+        })
+        .await
+    }
+
     async fn poll_once(&mut self, now: DateTime<Utc>, force: bool) -> UsageSnapshot {
+        #[cfg(test)]
+        {
+            self.collection_thread = Some(std::thread::current().id());
+        }
+        self.transcripts.begin_poll();
         let config = Settings::load().unwrap_or_default().usage;
         let accounts = vec![
             self.codex_account(&config, now),
             self.claude_account(&config, now, force).await,
         ];
         let consumption = self.consumption(&config, &accounts, now, force);
+        let sessions = collect_sessions_at(&config, &mut self.transcripts, now);
+        self.transcripts.end_poll();
         UsageSnapshot {
             accounts,
-            sessions: collect_sessions(&config),
+            sessions,
             consumption,
         }
     }
@@ -149,14 +289,14 @@ impl Poller {
         if config.codex_enabled {
             if let Some(home) = codex::codex_home() {
                 let week_start = week_start_for(accounts, UsageProvider::Codex, now);
-                out.push(consumption::read_codex_consumption(&home, week_start, now));
+                out.push(self.transcripts.codex_consumption(&home, week_start, now));
             }
         }
         // Claude consumption is read from local transcripts only, so it does not
         // require the account opt-in (mirrors Claude per-session usage).
         if let Some(home) = claude::claude_home() {
             let week_start = week_start_for(accounts, UsageProvider::ClaudeCode, now);
-            out.push(consumption::read_claude_consumption(&home, week_start, now));
+            out.push(self.transcripts.claude_consumption(&home, week_start, now));
         }
         self.cached_consumption = out.clone();
         self.last_consumption_at = Some(now);
@@ -181,7 +321,9 @@ impl Poller {
             self.codex_auth_observed = true;
             self.last_consumption_at = None;
         }
-        let account = codex::read_codex_account_since(&home, now, self.codex_authenticated_at);
+        let account = self
+            .transcripts
+            .codex_account_since(&home, now, self.codex_authenticated_at);
         if account.account_id != self.codex_account_id {
             // The auth file changed during collection. Publish identity only;
             // the next tick will establish the new observation boundary.
@@ -257,10 +399,10 @@ impl Poller {
                     ..ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData)
                 };
             }
-            // Only a successful fetch (has windows) replaces the cache. A
+            // Only a successful fetch (windows or credits) replaces the cache. A
             // transient failure (429 / auth / network) keeps the last good
             // value shown as stale instead of wiping the display.
-            if !fresh.windows.is_empty() {
+            if !fresh.windows.is_empty() || fresh.extra_usage.is_some() {
                 self.cached_claude = Some(fresh.clone());
                 return fresh;
             }
@@ -281,14 +423,14 @@ impl Poller {
 
 /// Serve the last good cached account (as stale) when present, else the given
 /// fallback. Keeps a transient fetch failure (e.g. 429) from wiping a usable
-/// display. "Good" = the cached value carries windows.
+/// display. "Good" = the cached value carries windows or credits.
 fn serve_cached_or(
     cached: &Option<ProviderUsage>,
     now: DateTime<Utc>,
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(c) if !c.windows.is_empty() => {
+        Some(c) if !c.windows.is_empty() || c.extra_usage.is_some() => {
             let mut c = c.clone();
             c.state = apply_staleness(c.state, c.fetched_at, now, DEFAULT_STALE_AFTER_SECS);
             c
@@ -306,7 +448,7 @@ fn serve_stale_cached_or(
     fallback: ProviderUsage,
 ) -> ProviderUsage {
     match cached {
-        Some(cached) if !cached.windows.is_empty() => {
+        Some(cached) if !cached.windows.is_empty() || cached.extra_usage.is_some() => {
             let mut cached = cached.clone();
             cached.state = UsageState::Stale {
                 age_secs: cached
@@ -357,65 +499,532 @@ fn is_active_status(status: AgentStatus) -> bool {
     )
 }
 
-/// SPEC-2970 FR-015..FR-020: enumerate active gwt sessions and build their
-/// per-session usage from local rollout / transcript files. Keyed by the gwt
-/// session id so the frontend can match it to agent cards. Per-session reads
-/// are local-only; Claude does not require the account opt-in here.
-fn collect_sessions(config: &UsageConfig) -> Vec<SessionUsage> {
+#[cfg(test)]
+fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<SessionUsage> {
+    collect_sessions_at(config, cache, Utc::now())
+}
+
+/// Read only conversations referenced by the gwt ledger. Historical rows keep
+/// their Session/member identity for Today; only the current active conversation
+/// participates in the existing per-agent table. Missing or ambiguous evidence
+/// stays NoData instead of silently becoming a measured zero.
+fn collect_sessions_at(
+    config: &UsageConfig,
+    cache: &mut UsageCache,
+    now: DateTime<Utc>,
+) -> Vec<SessionUsage> {
+    #[derive(PartialEq, Eq)]
+    enum ConversationOwner {
+        Member(String),
+        ProjectManager(PathBuf),
+    }
+
     let mut out = Vec::new();
     let dir = gwt_core::paths::gwt_sessions_dir();
     let codex_home = codex::codex_home();
     let claude_home = claude::claude_home();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = Session::load_and_migrate(&path) else {
-            continue;
-        };
-        if !is_active_status(session.status) {
-            continue;
-        }
+    let sessions = crate::session_ledger_cache::SessionLedgerCache::new().load_shared(&dir);
+    let mut references = Vec::new();
+    let mut owners: HashMap<(UsageProvider, String), Vec<Arc<gwt_agent::Session>>> = HashMap::new();
+    for session in sessions {
         let Some(provider) = session_provider(&session.agent_id) else {
             continue;
         };
-        let Some(agent_sid) = session.agent_session_id.clone() else {
+        if provider == UsageProvider::Codex && !config.codex_enabled {
             continue;
-        };
-        let usage = match provider {
-            UsageProvider::Codex => {
-                if !config.codex_enabled {
-                    continue;
-                }
-                codex_home
-                    .as_ref()
-                    .and_then(|home| codex::read_codex_session(home, &agent_sid))
-            }
-            UsageProvider::ClaudeCode => claude_home
-                .as_ref()
-                .and_then(|home| claude::read_claude_session(home, &agent_sid)),
-        };
-        if let Some(mut usage) = usage {
-            // Re-key to the gwt session id (frontend agent cards use it) and
-            // mark API-key backend sessions ineligible for subscription frames.
-            usage.session_id = session.id.clone();
-            usage.eligible = session.backend_id.is_none();
-            out.push(usage);
         }
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        for id in session.agent_session_id.iter().map(String::as_str).chain(
+            session
+                .session_history
+                .iter()
+                .map(|entry| entry.agent_session_id.as_str()),
+        ) {
+            if !id.trim().is_empty() && seen.insert(id.to_owned()) {
+                ids.push(id.to_owned());
+            }
+        }
+        if ids.is_empty() && is_active_status(session.status) {
+            ids.push(String::new());
+        }
+        for id in ids {
+            owners
+                .entry((provider, id.clone()))
+                .or_default()
+                .push(session.clone());
+            references.push((session.clone(), provider, id));
+        }
+    }
+    let confirmed_identity = |session: &gwt_agent::Session| {
+        let project = dunce::canonicalize(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        )
+        .ok()?;
+        if let Some(member) = session
+            .agent_member_id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+        {
+            return Some((ConversationOwner::Member(member.clone()), project));
+        }
+        // The resident PM has no roster member. Its canonical project-owned
+        // container is the stable identity retained across restored Sessions.
+        let worktree = dunce::canonicalize(&session.worktree_path).ok()?;
+        let expected = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+        (gwt::pm_registry::is_canonical_pm_worktree(&worktree)
+            && dunce::canonicalize(expected).ok().as_ref() == Some(&worktree))
+        .then_some((ConversationOwner::ProjectManager(worktree), project))
+    };
+    let mut registered_pms = HashMap::<PathBuf, Option<String>>::new();
+    for (session, provider, agent_sid) in references {
+        let conversation_owners = owners
+            .get(&(provider, agent_sid.clone()))
+            .expect("every conversation reference has an owner");
+        let identity = conversation_owners
+            .first()
+            .and_then(|owner| confirmed_identity(owner));
+        let same_identity = identity.as_ref().is_some_and(|identity| {
+            conversation_owners
+                .iter()
+                .all(|owner| confirmed_identity(owner).as_ref() == Some(identity))
+        });
+        let ambiguous = conversation_owners.len() > 1 && !same_identity;
+        if !ambiguous && conversation_owners.len() > 1 {
+            // A restore can retain the same provider conversation across gwt
+            // Sessions. Prefer the registered PM, otherwise the newest exact
+            // project/member owner, and count the conversation only once.
+            // Ledger status is a display hint, never a proof of physical liveness.
+            let registered_pm = identity.as_ref().and_then(|(owner, project)| {
+                let ConversationOwner::ProjectManager(worktree) = owner else {
+                    return None;
+                };
+                registered_pms
+                    .entry(project.clone())
+                    .or_insert_with(|| {
+                        let registration = gwt::pm_registry::load_pm_prefs(
+                            &gwt::pm_registry::pm_prefs_path_for_repo_path(project),
+                        )
+                        .ok()?
+                        .registration?;
+                        (dunce::canonicalize(registration.worktree_path)
+                            .ok()
+                            .as_ref()
+                            == Some(worktree))
+                        .then_some(registration.session_id)
+                    })
+                    .as_deref()
+            });
+            let selected = registered_pm
+                .and_then(|id| conversation_owners.iter().find(|owner| owner.id == id))
+                .or_else(|| {
+                    conversation_owners.iter().max_by(|a, b| {
+                        (a.created_at, a.updated_at, &a.id).cmp(&(
+                            b.created_at,
+                            b.updated_at,
+                            &b.id,
+                        ))
+                    })
+                })
+                .expect("a shared conversation has owners");
+            if selected.id != session.id {
+                continue;
+            }
+        }
+        let usage = if ambiguous || agent_sid.is_empty() {
+            None
+        } else {
+            match provider {
+                UsageProvider::Codex => session
+                    .codex_auth_root
+                    .as_ref()
+                    .map(|root| &root.path)
+                    .or(codex_home.as_ref())
+                    .and_then(|home| cache.codex_session_at(home, &agent_sid, now)),
+                UsageProvider::ClaudeCode => claude_home
+                    .as_ref()
+                    .and_then(|home| cache.claude_session_at(home, &agent_sid, now)),
+            }
+        };
+        let mut usage = usage.unwrap_or_else(|| match provider {
+            UsageProvider::Codex => codex::parse_codex_session(&agent_sid, ""),
+            UsageProvider::ClaudeCode => claude::parse_claude_transcript(&agent_sid, ""),
+        });
+        usage.session_id = session.id.clone();
+        usage.provider_session_id = (!agent_sid.is_empty()).then_some(agent_sid.clone());
+        usage.agent_member_id = session.agent_member_id.clone();
+        usage.project_path = dunce::canonicalize(
+            session
+                .project_state_root
+                .as_deref()
+                .unwrap_or(&session.worktree_path),
+        )
+        .ok();
+        usage.active = is_active_status(session.status)
+            && (session.agent_session_id.as_deref() == Some(agent_sid.as_str())
+                || agent_sid.is_empty());
+        usage.eligible = session.backend_id.is_none();
+        out.push(usage);
     }
     out
 }
 
 #[cfg(test)]
+#[path = "usage_poller_performance_tests.rs"]
+mod performance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn collect_sessions_preserves_history_and_refuses_ambiguous_conversations() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let codex_home = home.path().join("codex");
+        let _codex = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &codex_home);
+        std::fs::create_dir_all(codex_home.join("sessions")).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let make_session = |sid: &str, member: &str, status| {
+            let mut session = gwt_agent::Session::new(home.path(), "work/usage", AgentId::Codex);
+            session.agent_session_id = Some(sid.to_owned());
+            session.agent_member_id = Some(member.to_owned());
+            session.project_state_root = Some(home.path().to_owned());
+            session.status = status;
+            session
+        };
+        let mut current = make_session("current", "member-a", AgentStatus::Running);
+        for sid in ["current", "history", "ambiguous"] {
+            current
+                .session_history
+                .push(gwt_agent::session::AgentSessionHistoryEntry {
+                    agent_session_id: sid.to_owned(),
+                    started_at: now(),
+                });
+        }
+        current.save(&sessions_dir).unwrap();
+        let mut predecessor = make_session("current", "member-a", AgentStatus::Stopped);
+        predecessor.created_at = current.created_at - chrono::Duration::seconds(1);
+        predecessor.save(&sessions_dir).unwrap();
+        for session in [
+            make_session("ambiguous", "member-b", AgentStatus::Stopped),
+            make_session("stopped", "member-a", AgentStatus::Stopped),
+            make_session("missing", "member-a", AgentStatus::Stopped),
+        ] {
+            session.save(&sessions_dir).unwrap();
+        }
+        for sid in ["current", "history", "ambiguous", "stopped", "unowned"] {
+            let line = serde_json::json!({"timestamp": now().to_rfc3339(), "payload": {
+                "type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 10, "output_tokens": 2},
+                    "last_token_usage": {"input_tokens": 10, "output_tokens": 2}
+                }
+            }});
+            std::fs::write(
+                codex_home.join(format!("sessions/rollout-{sid}.jsonl")),
+                line.to_string(),
+            )
+            .unwrap();
+        }
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        let rows = collect_sessions(&config, &mut UsageCache::default());
+        assert_eq!(
+            rows.len(),
+            6,
+            "one row per certain conversation reference, including missing evidence"
+        );
+        let current_row = rows
+            .iter()
+            .find(|row| row.provider_session_id.as_deref() == Some("current"))
+            .unwrap();
+        assert!(current_row.active);
+        assert_eq!(current_row.session_id, current.id);
+        assert!(current_row.telemetry.is_some());
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.provider_session_id.as_deref() == Some("current"))
+                .count(),
+            1,
+            "a resumed member's conversation is measured exactly once on its newest Session"
+        );
+        assert_eq!(
+            current_row.project_path,
+            Some(
+                crate::runtime_support::resolve_project_target(home.path())
+                    .unwrap()
+                    .project_root
+            ),
+            "usage paths must use the same canonical spelling as the project wire"
+        );
+        assert_eq!(current_row.agent_member_id.as_deref(), Some("member-a"));
+        for sid in ["history", "stopped"] {
+            let row = rows
+                .iter()
+                .find(|row| row.provider_session_id.as_deref() == Some(sid))
+                .unwrap();
+            assert!(!row.active);
+            assert!(row.telemetry.is_some());
+        }
+        let ambiguous = rows
+            .iter()
+            .filter(|row| row.provider_session_id.as_deref() == Some("ambiguous"))
+            .collect::<Vec<_>>();
+        assert_eq!(ambiguous.len(), 2);
+        assert!(ambiguous
+            .iter()
+            .all(|row| row.telemetry.is_none() && row.state == UsageState::NoData));
+        let missing = rows
+            .iter()
+            .find(|row| row.provider_session_id.as_deref() == Some("missing"))
+            .unwrap();
+        assert_eq!(missing.state, UsageState::NoData);
+        assert!(missing.telemetry.is_none());
+    }
+
+    #[test]
+    fn collect_sessions_attributes_restored_pm_usage_to_registered_session() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let claude_home = home.path().join("claude");
+        let _claude = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+        std::fs::create_dir_all(&worktree).unwrap();
+        let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+        let make_session = |path: &std::path::Path, sid: &str, status, age| {
+            let mut session = gwt_agent::Session::new(path, "work", AgentId::ClaudeCode);
+            session.project_state_root = Some(project.clone());
+            session.agent_session_id = Some(sid.to_owned());
+            session.status = status;
+            session.created_at = now() + chrono::Duration::seconds(age);
+            session.updated_at = session.created_at;
+            session
+        };
+        let current = make_session(&worktree, "pm-conversation", AgentStatus::Running, 0);
+        for session in [
+            current.clone(),
+            make_session(&worktree, "pm-conversation", AgentStatus::Stopped, -1),
+            make_session(&worktree, "pm-conversation", AgentStatus::Stopped, 1),
+            make_session(&project, "ordinary-conversation", AgentStatus::Running, 0),
+            make_session(&project, "ordinary-conversation", AgentStatus::Stopped, -1),
+        ] {
+            session.save(&sessions_dir).unwrap();
+        }
+        gwt::pm_registry::save_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+            &gwt::pm_registry::PmPrefs {
+                registration: Some(gwt::pm_registry::PmRegistration {
+                    session_id: current.id.clone(),
+                    agent_id: "claude".into(),
+                    worktree_path: worktree.display().to_string(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let transcripts = claude_home.join("projects/project");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let line = serde_json::json!({"type": "assistant", "timestamp": now().to_rfc3339(),
+        "message": {"model": "claude-sonnet-4-5", "usage": {
+            "input_tokens": 80, "output_tokens": 12,
+            "cache_read_input_tokens": 40, "cache_creation_input_tokens": 5
+        }}});
+        for sid in ["pm-conversation", "ordinary-conversation"] {
+            std::fs::write(transcripts.join(format!("{sid}.jsonl")), line.to_string()).unwrap();
+        }
+        let config = UsageConfig {
+            codex_enabled: false,
+            claude_account_enabled: false,
+        };
+        let rows = collect_sessions_at(&config, &mut UsageCache::default(), now());
+        let pm = rows
+            .iter()
+            .filter(|row| row.provider_session_id.as_deref() == Some("pm-conversation"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pm.len(),
+            1,
+            "restored PM Sessions share one canonical PM identity"
+        );
+        assert_eq!(
+            pm[0].session_id, current.id,
+            "the registered PM wins over newer stopped history"
+        );
+        assert!(pm[0].active);
+        assert_eq!(pm[0].state, UsageState::Ok);
+        assert_eq!(pm[0].model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!((pm[0].input_tokens, pm[0].output_tokens), (80, 12));
+        assert_eq!(
+            (pm[0].cache_read_tokens, pm[0].cache_creation_tokens),
+            (Some(40), Some(5))
+        );
+        assert!(pm[0]
+            .telemetry
+            .as_ref()
+            .unwrap()
+            .minute_buckets
+            .iter()
+            .any(|bucket| bucket.tokens == Some(137)));
+        let ordinary = rows
+            .iter()
+            .filter(|row| row.provider_session_id.as_deref() == Some("ordinary-conversation"))
+            .collect::<Vec<_>>();
+        assert_eq!(ordinary.len(), 2);
+        assert!(
+            ordinary
+                .iter()
+                .all(|row| row.state == UsageState::NoData && row.telemetry.is_none()),
+            "memberless ordinary work must remain ambiguous"
+        );
+
+        let foreign_project = home.path().join("foreign");
+        std::fs::create_dir_all(&foreign_project).unwrap();
+        let foreign_worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&foreign_project);
+        std::fs::create_dir_all(&foreign_worktree).unwrap();
+        let mut foreign = make_session(
+            &foreign_worktree,
+            "pm-conversation",
+            AgentStatus::Stopped,
+            -2,
+        );
+        foreign.project_state_root = Some(foreign_project);
+        foreign.save(&sessions_dir).unwrap();
+        let rows = collect_sessions_at(&config, &mut UsageCache::default(), now());
+        assert!(
+            rows.iter()
+                .filter(|row| row.provider_session_id.as_deref() == Some("pm-conversation"))
+                .all(|row| row.state == UsageState::NoData && row.telemetry.is_none()),
+            "a different project's PM must not inherit the conversation"
+        );
+    }
+
+    #[test]
+    fn account_notifications_ignore_poll_time_but_preserve_usage_changes() {
+        let mut previous = None;
+        let mut account = account_with_weekly_reset(UsageProvider::Codex, Some(now()));
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.fetched_at = Some(now() + chrono::Duration::seconds(30));
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].used_percent = 100.0;
+        account.limit_reached = true;
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 300 };
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.state = UsageState::Stale { age_secs: 330 };
+        assert!(!account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.account_id = Some("replacement".into());
+        assert!(account_usage_changed(
+            &mut previous,
+            std::slice::from_ref(&account)
+        ));
+        account.windows[0].resets_at = Some(now() + chrono::Duration::days(7));
+        assert!(account_usage_changed(&mut previous, &[account]));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // isolated env must survive the worker's reads
+    async fn complete_poll_collects_on_a_blocking_thread_and_keeps_its_cache() {
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        // The collector crosses threads, so isolate the inherited environment.
+        let _home = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+        let _profile = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+        let _codex =
+            gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", home.path().join("codex"));
+        let _claude = gwt_core::test_support::ScopedEnvVar::set(
+            "CLAUDE_CONFIG_DIR",
+            home.path().join("claude"),
+        );
+        let codex_home = home.path().join("codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(
+            codex_home.join("auth.json"),
+            r#"{"tokens":{"account_id":"account-a"}}"#,
+        )
+        .unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let calling_thread = std::thread::current().id();
+        let (poller, first) = Poller::default()
+            .poll_in_background(now(), false, vec![project.clone()])
+            .await
+            .unwrap();
+        assert_ne!(poller.collection_thread, Some(calling_thread));
+        assert_eq!(first.accounts.len(), 2);
+        assert!(first.sessions.is_empty());
+        assert_eq!(first.accounts[1].state, UsageState::Disabled);
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        let prefs = gwt::issue_monitor::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs.provider_quota_accounts["codex"].account_id,
+            first.accounts[0].account_id.as_deref().unwrap(),
+            "the collection worker must persist the same account recovery observation"
+        );
+        let (poller, second) = poller
+            .poll_in_background(now(), false, vec![project])
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(poller.last_consumption_at, Some(now()));
+        assert_eq!(poller.transcripts.bytes_read(), 0);
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::from_timestamp(1_780_000_000, 0).unwrap()
+    }
+
+    #[test]
+    fn credits_only_cache_survives_cooldown_and_failed_refresh() {
+        let mut good = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::Ok);
+        good.fetched_at = Some(now());
+        good.extra_usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "is_enabled":true, "monthly_limit":100, "used_credits":25,
+                "utilization":25, "currency":"USD"
+            }))
+            .unwrap(),
+        );
+        let fail = ProviderUsage::degraded(UsageProvider::ClaudeCode, UsageState::NoData);
+        assert_eq!(
+            serve_cached_or(&Some(good.clone()), now(), fail.clone()),
+            good
+        );
+        let stale = serve_stale_cached_or(&Some(good.clone()), now(), fail);
+        assert_eq!(stale.extra_usage, good.extra_usage);
+        assert_eq!(stale.state, UsageState::Stale { age_secs: 0 });
     }
 
     #[test]
@@ -426,6 +1035,7 @@ mod tests {
             account_id: None,
             account_label: Some("claude@example.com".into()),
             plan: Some("max".into()),
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(
                 WindowKind::FiveHour,
                 19.0,
@@ -472,6 +1082,55 @@ mod tests {
         assert!(is_active_status(AgentStatus::WaitingInput));
         assert!(!is_active_status(AgentStatus::Stopped));
         assert!(!is_active_status(AgentStatus::Unknown));
+    }
+
+    #[test]
+    fn repeated_collection_skips_preferences_and_caches_bad_sessions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing_subscriber::prelude::*;
+
+        struct Warnings(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::WARN
+                    && event.metadata().target().starts_with("gwt_agent::session")
+                {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("display.toml"), "display_mode = 'grid'").unwrap();
+        std::fs::write(sessions.join("broken.toml"), "id = [").unwrap();
+        gwt_agent::Session::new(home.path(), "work/valid", AgentId::Codex)
+            .save(&sessions)
+            .unwrap();
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(Warnings(warnings.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..2 {
+                collect_sessions(
+                    &UsageConfig {
+                        codex_enabled: false,
+                        claude_account_enabled: false,
+                    },
+                    &mut UsageCache::default(),
+                );
+            }
+        });
+        assert_eq!(
+            warnings.load(Ordering::Relaxed),
+            1,
+            "only the first bad Session read warns"
+        );
     }
 
     #[test]
@@ -647,6 +1306,7 @@ mod tests {
             account_id: None,
             account_label: None,
             plan: None,
+            extra_usage: None,
             windows: vec![gwt_core::usage::UsageWindow::new(kind, 10.0, reset)],
             limit_reached: false,
             state: UsageState::Ok,

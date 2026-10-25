@@ -66,9 +66,17 @@ fn expected_existing_hook_output(
                 format!(
                     "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.merge`, `pr.review_threads.reply_and_resolve`\n\
-- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
+- Automatic updates: JSON operation `update.settings.set`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
+- Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
                 ),
@@ -80,10 +88,15 @@ Blocked command: {command}"
                 format!(
                     "GitHub writes must go through the canonical gwt operations so the completion/PR gates and audit state see them (SPEC-3248 P10, T-217).\n\n\
 Recommended alternatives:\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.comment`, `issue.spec.*`\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\
-- releases: the release workflow owns publishing — not agent Bash\n\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\n\
 Blocked command: {command}"
                 ),
             ))
@@ -775,6 +788,62 @@ fn blocks_github_workflow_mutations() {
 }
 
 #[test]
+fn blocks_github_writes_inside_execution_wrappers() {
+    for command in [
+        "timeout 60 gh pr merge 481 --auto --merge",
+        "env -u GH_TOKEN CI=1 timeout --signal TERM 60 nice -n 10 command gh pr merge 481",
+        "command -- gh issue close 481",
+        "xargs -I {} gh pr merge {} --auto",
+        "bash -lc 'gh pr merge 481 --auto'",
+        "sh -c 'timeout 60 gh pr merge 481'",
+        "pwsh -NoProfile -c \"gh pr merge 481 --auto\"",
+        "(gh pr merge 481 --auto)",
+        "printf 481 | xargs gh pr merge --auto",
+        "for n in 478 481 479; do timeout 60 gh pr merge $n --auto --merge; done",
+        "timeout 60 gh api -X PATCH repos/o/r/pulls/481 -f title=updated",
+        "bash -c 'gh api graphql -f query=\"mutation { closeIssue(input: {}) { clientMutationId } }\"'",
+        "nice -n 10 curl -X DELETE https://api.github.com/repos/o/r/issues/481",
+        r#"gh issue comment 481 --body "say \"hi""#,
+        "timeout 60 gh pr comment 481 --body can\\'t",
+        "for n in 481; do (gh pr merge $n); done",
+        "if (gh pr merge 481); then echo done; fi",
+        "bash -ec 'gh pr merge 481'",
+        "xargs --replace gh pr merge {}",
+        "env -S 'gh pr merge 481'",
+        r#"pwsh -c 'gh issue comment 481 --body "say `"hi"'"#,
+    ] {
+        block(command);
+    }
+}
+
+#[test]
+fn execution_wrapper_reads_and_quoted_command_data_stay_allowed() {
+    for command in [
+        "timeout 60 gh pr view 481",
+        "env -u GH_TOKEN nice -n 10 command gh issue list",
+        "xargs -I {} gh pr view {}",
+        "bash -lc 'gh pr view 481'",
+        "pwsh -NoProfile -c \"gh pr checks 481\"",
+        "echo 'timeout 60 gh pr merge 481'",
+        "printf '%s' 'bash -c gh pr merge 481'",
+        "bash -c 'echo \"gh pr merge 481\"'",
+        "timeout 60 gh issue list --search 'x; gh pr merge 481'",
+        "nice echo 'gh pr merge 481'",
+        "command -v gh pr merge",
+        "command -p -v gh pr merge",
+        "command -pv gh pr merge",
+        "bash script.sh -c 'gh pr merge 481'",
+        "env -S \"echo 'gh pr merge 481'\"",
+        r#"C:\tools\gh.exe pr view 481"#,
+        r#"echo gh\ pr\ merge"#,
+        r#"pwsh -c 'Write-Output "say `"hi; gh pr merge 481"'"#,
+        r#"pwsh -c 'gh pr view 481 --jq "say `"hi; gh pr merge 481"'"#,
+    ] {
+        allow(command);
+    }
+}
+
+#[test]
 fn github_workflow_policy_normalizes_executable_names() {
     for executable in ["/usr/bin/gh", "gh.exe", "./bin/gh", "./bin/gh.exe"] {
         allow(&format!("{executable} pr view 1949"));
@@ -815,7 +884,6 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
         "JSON-envelope operations",
         "issue.edit",
         "pr.edit",
-        "pr.merge",
         "pr.ready",
         "pr.draft",
         "actions.rerun",
@@ -829,14 +897,26 @@ fn github_workflow_block_message_points_to_canonical_gwt_surfaces() {
 }
 
 #[test]
-fn github_workflow_cli_blocks_gh_pr_merge_in_favor_of_json_operation() {
+fn github_workflow_cli_blocks_gh_pr_merge_and_names_the_automation_path() {
     let decision = block_bash_policy::evaluate_bash_command("gh pr merge 1949", &root())
         .expect("gh pr merge must block");
     let visible = decision.permission_decision_reason();
+    // Issue #4396: the message used to name `pr.merge`, which no operation
+    // implements. Delivery uses merge automation with existing CI/review gates.
     assert!(
-        visible.contains("pr.merge"),
-        "block message must name the canonical merge operation: {visible}"
+        visible.contains("gwtd has no direct merge operation")
+            && visible.contains("existing merge automation and CI/review gates decide delivery"),
+        "block message must name the real merge path: {visible}"
     );
+    assert!(!visible.contains("`pr.merge`"), "{visible}");
+    for alternative in [
+        "pr.auto_merge.enable",
+        "reviewed_head_sha",
+        "external forks",
+        "human must merge",
+    ] {
+        assert!(visible.contains(alternative), "{visible}");
+    }
     assert!(
         visible.contains("Blocked command: gh pr merge 1949"),
         "{visible}"

@@ -28,12 +28,13 @@ pub mod spec_validate;
 
 pub use body::{ParseError as BodyParseError, SectionLocation, SectionsIndex, SpecBody, SpecMeta};
 pub use cache::{
-    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueValidationReceipt,
-    ValidatedCacheEntry, VersionedCacheEntry,
+    Cache, CacheEntry, CacheError, CacheGeneration, CacheMeta, IssueSummary,
+    IssueValidationReceipt, ValidatedCacheEntry, VersionedCacheEntry,
 };
 pub use client::{
     fake::FakeIssueClient, ApiError, CommentId, CommentSnapshot, FetchResult, IssueClient,
-    IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
+    IssueCloseReason, IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary,
+    UpdatedAt,
 };
 pub use routing::{
     decide_routing, split_section_into_parts, Routing, SplitError, COMMENT_PART_BUDGET_BYTES,

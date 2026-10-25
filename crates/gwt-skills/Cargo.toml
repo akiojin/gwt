@@ -9,6 +9,7 @@ description = "Skill registry and hooks management for gwt"
 publish = false
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 dunce.workspace = true
 fs2.workspace = true
@@ -24,7 +25,9 @@ thiserror.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
 ] }
 
 [dev-dependencies]
+gwt-core = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true

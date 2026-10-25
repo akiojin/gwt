@@ -65,16 +65,57 @@ pub enum IssueState {
     Closed,
 }
 
+/// Why an Issue is being closed (SPEC #4249 FR-001). Mirrors the GitHub REST
+/// `state_reason` field; `None` leaves the reason to GitHub's default, and the
+/// field is meaningless when reopening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IssueCloseReason {
+    Completed,
+    NotPlanned,
+}
+
+impl IssueCloseReason {
+    /// The literal GitHub REST `state_reason` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotPlanned => "not_planned",
+        }
+    }
+
+    /// Parse an operation parameter. Accepts the REST spellings plus the
+    /// hyphenated form agents type by habit.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "completed" => Some(Self::Completed),
+            "not_planned" => Some(Self::NotPlanned),
+            _ => None,
+        }
+    }
+
+    /// Every accepted spelling, for refusal messages.
+    pub const ACCEPTED: [&'static str; 2] = ["completed", "not_planned"];
+}
+
 /// Snapshot of a single Issue including its body and every artifact comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSnapshot {
     pub number: IssueNumber,
+    /// Original creator reported by GitHub; absent in legacy caches.
+    pub author_login: Option<String>,
     pub title: String,
     pub body: String,
     pub labels: Vec<String>,
     pub state: IssueState,
     pub updated_at: UpdatedAt,
     pub comments: Vec<CommentSnapshot>,
+}
+
+/// GitHub's latest assignment of a label to an Issue.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LabelAssignment {
+    pub actor: Option<String>,
+    pub created_at: String,
 }
 
 /// Snapshot of a single Issue comment.
@@ -116,8 +157,10 @@ pub struct SpecSummary {
 /// Errors returned by [`IssueClient`] operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
-    #[error("issue #{0} not found")]
+    #[error("Issue {0} not found")]
     NotFound(IssueNumber),
+    #[error("PR {0} is a pull request, not an issue. Use `pr.view` instead.")]
+    PullRequestInsteadOfIssue(IssueNumber),
     #[error("comment {0} not found")]
     CommentNotFound(CommentId),
     #[error("body exceeds GitHub 65536 byte limit")]
@@ -189,6 +232,15 @@ pub trait IssueClient: Send + Sync {
         number: IssueNumber,
         since: Option<&UpdatedAt>,
     ) -> Result<FetchResult, ApiError>;
+
+    /// Return the latest assignment, or `None` if absent or subsequently removed.
+    fn fetch_label_assignment(
+        &self,
+        _number: IssueNumber,
+        _label: &str,
+    ) -> Result<Option<LabelAssignment>, ApiError> {
+        Ok(None)
+    }
 
     fn patch_body(&self, number: IssueNumber, new_body: &str) -> Result<IssueSnapshot, ApiError>;
 
@@ -270,7 +322,32 @@ pub trait IssueClient: Send + Sync {
     fn set_labels(&self, number: IssueNumber, labels: &[String])
         -> Result<IssueSnapshot, ApiError>;
 
-    fn set_state(&self, number: IssueNumber, state: IssueState) -> Result<IssueSnapshot, ApiError>;
+    /// Add labels without replacing unrelated labels. Never automatically retry.
+    fn add_labels_mutation(
+        &self,
+        _number: IssueNumber,
+        _labels: &[String],
+    ) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "add labels unsupported".into(),
+        )))
+    }
+
+    /// Remove one label without replacing unrelated labels. Never automatically retry.
+    fn remove_label_mutation(&self, _number: IssueNumber, _label: &str) -> OwnerMutationResult<()> {
+        Err(OwnerMutationError::PreSubmit(ApiError::Unexpected(
+            "remove label unsupported".into(),
+        )))
+    }
+
+    /// Move an Issue between open and closed. `reason` is the GitHub
+    /// `state_reason` and is only meaningful when closing (SPEC #4249 FR-001).
+    fn set_state(
+        &self,
+        number: IssueNumber,
+        state: IssueState,
+        reason: Option<IssueCloseReason>,
+    ) -> Result<IssueSnapshot, ApiError>;
 
     fn list_spec_issues(&self, filter: &SpecListFilter) -> Result<Vec<SpecSummary>, ApiError>;
 }

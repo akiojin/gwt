@@ -9,11 +9,11 @@
 //! reports the candidates, the kept worktrees with their reasons, and the
 //! bytes that would be freed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use gwt_github::SpecOpsError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use super::verification_lease::admission::attribute_worktree;
@@ -59,7 +59,7 @@ pub(crate) struct WorktreeProbe {
     pub has_build_artifacts: bool,
     /// Processes whose cwd or executable lies under `root` (`name (pid N)`).
     pub active_processes: Vec<String>,
-    /// gwt session ids whose launch is still live under `root`.
+    /// Launches still live under `root`: `<session id> (<evidence>)`.
     pub tracked_sessions: Vec<String>,
     /// Whether HEAD is an ancestor of `origin/<base>`; `Err` when the check
     /// itself failed.
@@ -79,17 +79,25 @@ pub(crate) struct GcCandidate {
     pub worktree: PathBuf,
     pub branch: Option<String>,
     pub target: PathBuf,
-    /// Measured after planning, only for candidates: sizing every worktree
-    /// would walk hundreds of gigabytes for nothing.
+    /// Best-effort measured cache size, also used for pressure priority.
     pub bytes: u64,
 }
 
 /// A worktree the sweep keeps, with the reason shown to the operator (AC-2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GcKept {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcKept {
     pub worktree: PathBuf,
     pub branch: Option<String>,
     pub reason: String,
+    pub bytes: u64,
+}
+
+/// Retained or failed cache bytes, ranked largest first in GC results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcUnreclaimedReason {
+    pub reason: String,
+    pub bytes: u64,
+    pub worktrees: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -121,6 +129,7 @@ pub(crate) fn plan(
                 worktree: probe.root,
                 branch: probe.branch,
                 reason,
+                bytes: 0,
             }),
             None => plan.candidates.push(GcCandidate {
                 target: probe.root.join(BUILD_ARTIFACT_DIR),
@@ -216,43 +225,63 @@ pub(super) fn run<E: CliEnv>(
     }
 }
 
-#[derive(Debug, Serialize)]
-struct GcRemoval {
-    worktree: PathBuf,
-    target: PathBuf,
-    bytes: u64,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcRemoval {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcFailure {
+    pub worktree: PathBuf,
+    pub target: PathBuf,
+    pub reason: String,
+    #[serde(default)]
+    pub bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
-struct GcFailure {
-    worktree: PathBuf,
-    target: PathBuf,
-    reason: String,
+pub(crate) struct GcReport {
+    pub dry_run: bool,
+    pub base: String,
+    pub include_unmerged: bool,
+    pub include_protected_workspaces: bool,
+    pub candidates: Vec<GcCandidate>,
+    pub kept: Vec<GcKept>,
+    pub reclaimable_bytes: u64,
+    pub removed: Vec<GcRemoval>,
+    pub failed: Vec<GcFailure>,
+    pub reclaimed_bytes: u64,
+    pub unreclaimed_bytes: u64,
+    pub unreclaimed_by_reason: Vec<GcUnreclaimedReason>,
+    pub pressure_volumes: BTreeSet<String>,
+    pub reclaimed_volumes: BTreeMap<String, u64>,
+    pub disk_space: crate::disk_space::DiskSpaceStatus,
 }
 
-#[derive(Debug, Serialize)]
-struct GcReport {
-    dry_run: bool,
-    base: String,
-    include_unmerged: bool,
-    include_protected_workspaces: bool,
-    candidates: Vec<GcCandidate>,
-    kept: Vec<GcKept>,
-    reclaimable_bytes: u64,
-    removed: Vec<GcRemoval>,
-    failed: Vec<GcFailure>,
-    reclaimed_bytes: u64,
-    disk_space: crate::disk_space::DiskSpaceStatus,
-}
-
-fn run_gc(
+pub(crate) fn run_gc(
     repo_path: &Path,
     base: &str,
     options: GcOptions,
     dry_run: bool,
 ) -> Result<GcReport, SpecOpsError> {
+    run_gc_with_pressure(repo_path, base, options, dry_run, None)
+}
+
+/// Automatic GC gives unmerged caches lower priority, rather than permanent
+/// protection. The probe is shared with the trigger, including its configured
+/// thresholds. Every target must belong to a volume still under pressure.
+pub(crate) fn run_gc_with_pressure(
+    repo_path: &Path,
+    base: &str,
+    mut options: GcOptions,
+    dry_run: bool,
+    pressure_probe: Option<&dyn Fn() -> crate::disk_space::DiskSpaceStatus>,
+) -> Result<GcReport, SpecOpsError> {
     let repo_path = dunce::canonicalize(repo_path).unwrap_or_else(|_| repo_path.to_path_buf());
-    let worktrees = gwt_git::worktree::WorktreeManager::new(&repo_path)
+    let git_root = git_root_for(&repo_path);
+    let worktrees = gwt_git::worktree::WorktreeManager::new(&git_root)
         .list()
         .map_err(|error| unexpected(format!("git worktree list failed: {error}")))?;
     let roots: Vec<(PathBuf, Option<String>)> = worktrees
@@ -266,8 +295,10 @@ fn run_gc(
         })
         .collect();
     let root_paths: Vec<PathBuf> = roots.iter().map(|(root, _)| root.clone()).collect();
-    let processes = scan_processes(&root_paths);
-    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir());
+    let system = process_table();
+    let processes = scan_processes(&system, &root_paths);
+    let hosts = live_gwt_hosts(&system);
+    let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
     let probes: Vec<WorktreeProbe> = roots
         .iter()
         .enumerate()
@@ -279,19 +310,107 @@ fn run_gc(
             has_build_artifacts: root.join(BUILD_ARTIFACT_DIR).is_dir(),
             active_processes: processes.get(root).cloned().unwrap_or_default(),
             tracked_sessions: tracked.get(root).cloned().unwrap_or_default(),
-            merged: head_is_merged_into(&repo_path, root, base),
+            merged: head_is_merged_into(&git_root, root, base),
         })
         .collect();
     let protected = protected_roots(&repo_path, &root_paths);
+    let unmerged: BTreeSet<_> = probes
+        .iter()
+        .filter(|probe| probe.merged == Ok(false))
+        .map(|probe| probe.root.clone())
+        .collect();
+    if pressure_probe.is_some() {
+        options.include_unmerged = true;
+    }
     let mut plan = plan(probes, base, options, &protected);
     for candidate in &mut plan.candidates {
         candidate.bytes = directory_size(&candidate.target);
     }
-    let reclaimable_bytes = plan.candidates.iter().map(|c| c.bytes).sum();
+    let initially_kept = plan.kept.len();
+    if pressure_probe.is_some() {
+        plan.candidates.sort_by_key(|candidate| {
+            (
+                unmerged.contains(&candidate.worktree),
+                std::cmp::Reverse(candidate.bytes),
+            )
+        });
+    }
+    let mut candidates = Vec::new();
     let mut removed = Vec::new();
     let mut failed = Vec::new();
-    if !dry_run {
-        for candidate in &plan.candidates {
+    let mut pressure_volumes = BTreeSet::new();
+    let mut reclaimed_volumes = BTreeMap::new();
+    for candidate in plan.candidates {
+        let target_volume = crate::disk_space::volume_id(&candidate.target);
+        if let Some(probe) = pressure_probe {
+            let low_volumes = probe().low_volume_ids();
+            pressure_volumes.extend(low_volumes.iter().cloned());
+            let reason = match &target_volume {
+                Err(error) => Some(format!("target volume unknown: {error}")),
+                Ok(volume) if !low_volumes.contains(volume) => Some(format!(
+                    "target volume is not under disk pressure: {volume}"
+                )),
+                Ok(_) => None,
+            };
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+        }
+        // Dry runs use the same kernel evidence as deletion. Marker files
+        // alone never make a cache busy. Hold both guards through deletion.
+        let _artifacts_guard = match try_lock_gc_build_artifacts(&candidate.target) {
+            Ok(GcArtifactAccess::Available(guard)) => guard,
+            Ok(GcArtifactAccess::Busy(reason)) => {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+            Err(error) => {
+                failed.push(GcFailure {
+                    worktree: candidate.worktree.clone(),
+                    target: candidate.target.clone(),
+                    reason: format!("build artifact coordination unavailable: {error}"),
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
+        };
+        if !dry_run {
+            // A sweep can take many minutes. Re-read physical processes and
+            // live pane/launch sidecars while holding the deletion boundary;
+            // enumeration's snapshot cannot authorize a later deletion.
+            let system = process_table();
+            let roots = std::slice::from_ref(&candidate.worktree);
+            let processes = scan_processes(&system, roots);
+            let hosts = live_gwt_hosts(&system);
+            let tracked = scan_tracked_launches(&gwt_core::paths::gwt_sessions_dir(), &hosts);
+            let reason = processes
+                .get(&candidate.worktree)
+                .map(|names| format!("active process: {}", names.join(", ")))
+                .or_else(|| {
+                    tracked
+                        .get(&candidate.worktree)
+                        .map(|sessions| format!("tracked launch: {}", sessions.join(", ")))
+                });
+            if let Some(reason) = reason {
+                plan.kept.push(GcKept {
+                    worktree: candidate.worktree,
+                    branch: candidate.branch,
+                    reason,
+                    bytes: candidate.bytes,
+                });
+                continue;
+            }
             // Only ever `<worktree>/target` of a listed worktree; the plan
             // cannot name anything else.
             debug_assert_eq!(
@@ -299,35 +418,196 @@ fn run_gc(
                 candidate.worktree.join(BUILD_ARTIFACT_DIR)
             );
             match std::fs::remove_dir_all(&candidate.target) {
-                Ok(()) => removed.push(GcRemoval {
-                    worktree: candidate.worktree.clone(),
-                    target: candidate.target.clone(),
-                    bytes: candidate.bytes,
-                }),
+                Ok(()) => {
+                    if let Ok(volume) = target_volume {
+                        *reclaimed_volumes.entry(volume).or_default() += candidate.bytes;
+                    }
+                    removed.push(GcRemoval {
+                        worktree: candidate.worktree.clone(),
+                        target: candidate.target.clone(),
+                        bytes: candidate.bytes,
+                    });
+                }
                 Err(error) => failed.push(GcFailure {
                     worktree: candidate.worktree.clone(),
                     target: candidate.target.clone(),
                     reason: error.to_string(),
+                    // remove_dir_all may already have removed part of it.
+                    bytes: directory_size(&candidate.target),
                 }),
             }
         }
+        candidates.push(candidate);
     }
+    let reclaimable_bytes = candidates.iter().map(|c| c.bytes).sum();
     let reclaimed_bytes = removed.iter().map(|r| r.bytes).sum();
+    // Relieve pressure before walking caches that cannot be reclaimed.
+    for kept in &mut plan.kept[..initially_kept] {
+        kept.bytes = directory_size(&kept.worktree.join(BUILD_ARTIFACT_DIR));
+    }
+    let unreclaimed_by_reason = unreclaimed_reasons(&plan.kept, &failed);
+    let unreclaimed_bytes = unreclaimed_by_reason.iter().map(|entry| entry.bytes).sum();
     let coordinator_root = gwt_core::index_coordinator::coordinator_root();
-    let disk_space = crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]);
+    let disk_space = pressure_probe.map_or_else(
+        || crate::disk_space::probe(&[repo_path.as_path(), coordinator_root.as_path()]),
+        |probe| probe(),
+    );
+    if pressure_probe.is_some() {
+        pressure_volumes.extend(disk_space.low_volume_ids());
+    }
     Ok(GcReport {
         dry_run,
         base: base.to_string(),
         include_unmerged: options.include_unmerged,
         include_protected_workspaces: options.include_protected_workspaces,
-        candidates: plan.candidates,
+        candidates,
         kept: plan.kept,
         reclaimable_bytes,
         removed,
         failed,
         reclaimed_bytes,
+        unreclaimed_bytes,
+        unreclaimed_by_reason,
+        pressure_volumes,
+        reclaimed_volumes,
         disk_space,
     })
+}
+
+pub(crate) fn kept_reason_category(reason: &str) -> String {
+    reason
+        .split([':', '('])
+        .next()
+        .unwrap_or(reason)
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn unreclaimed_reasons(
+    kept: &[GcKept],
+    failed: &[GcFailure],
+) -> Vec<GcUnreclaimedReason> {
+    let mut totals = BTreeMap::<String, (u64, usize)>::new();
+    for (reason, bytes) in kept
+        .iter()
+        .map(|entry| (kept_reason_category(&entry.reason), entry.bytes))
+        .chain(
+            failed
+                .iter()
+                .map(|entry| ("removal failed".to_string(), entry.bytes)),
+        )
+    {
+        let total = totals.entry(reason).or_default();
+        total.0 += bytes;
+        total.1 += 1;
+    }
+    let mut reasons: Vec<_> = totals
+        .into_iter()
+        .map(|(reason, (bytes, worktrees))| GcUnreclaimedReason {
+            reason,
+            bytes,
+            worktrees,
+        })
+        .collect();
+    reasons.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.reason.cmp(&b.reason)));
+    reasons
+}
+
+struct GcArtifactGuard {
+    _barrier: std::fs::File,
+    _target: super::verification_lease::BuildArtifactGuard,
+}
+
+enum GcArtifactAccess {
+    Available(GcArtifactGuard),
+    Busy(String),
+}
+
+/// Legacy/unknown verification owns the root exclusively; pooled verification
+/// owns its exact target. Neither may overlap the target deletion interval.
+fn try_lock_gc_build_artifacts(target: &Path) -> std::io::Result<GcArtifactAccess> {
+    let root = gwt_core::index_coordinator::verification_coordinator_root();
+    std::fs::create_dir_all(&root)?;
+    let barrier = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("heavy.lock"))?;
+    match fs2::FileExt::try_lock_shared(&barrier) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            // A live exclusive holder blocks the entire host, not 171
+            // independent target owners. Keep metadata as diagnostics only:
+            // even a stale ticket cannot authorize bypassing a physical lock.
+            let ticket_path = root.join("heavy.ticket.json");
+            let ticket = std::fs::read(&ticket_path).ok().and_then(|raw| {
+                serde_json::from_slice::<gwt_core::index_coordinator::Ticket>(&raw).ok()
+            });
+            let holder = ticket.map_or_else(
+                || "lease/PID unavailable (missing or unreadable ticket)".to_string(),
+                |ticket| {
+                    let alive = match crate::process::host_process_liveness(ticket.owner.pid) {
+                        Some(true) => "true",
+                        Some(false) => "false",
+                        None => "unknown",
+                    };
+                    format!(
+                        "lease_id={}; target={}; owner_pid={}; owner_start_id={}; owner_pid_alive={alive}",
+                        ticket.lease_id.as_deref().unwrap_or("unknown"),
+                        ticket.target,
+                        ticket.owner.pid,
+                        ticket.owner.start_id,
+                    )
+                },
+            );
+            return Ok(GcArtifactAccess::Busy(format!(
+                "build artifacts in use by legacy global verification barrier: kernel_lock=contended; lock={}; ticket={}; {holder}",
+                root.join("heavy.lock").display(), ticket_path.display()
+            )));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(match super::verification_lease::try_lock_build_artifacts(target)? {
+        Some(target_guard) => GcArtifactAccess::Available(GcArtifactGuard {
+            _barrier: barrier, _target: target_guard,
+        }),
+        None => GcArtifactAccess::Busy(format!(
+            "build artifacts in use by canonical verification or GC: target_lock=contended (kernel or process-local claim); target lock={}; target={}; owner_pid=unrecorded",
+            super::verification_lease::build_artifact_lock_path(target)?.display(), target.display()
+        )),
+    })
+}
+
+/// The directory every `git` call in the sweep runs from (Issue #4566 AC-1).
+///
+/// `run_gc` is handed a worktree by the CLI and the *project root* by the
+/// Issue Monitor scan. In the Nested Bare + Worktree layout that project root
+/// is the container holding `<repo>.git` next to `work/`, `develop/`, … — not
+/// a repository at all — so `git worktree list` there failed with `not a git
+/// repository` and the automatic sweep reported zero candidates while the CLI
+/// listed dozens. Resolving the repository here makes the enumeration depend
+/// on the repository rather than on which directory the caller started in, so
+/// both callers see the same worktrees.
+///
+/// A path that already is a repository is used unchanged: that is the CLI's
+/// working path, and redirecting it to the shared git directory would change
+/// nothing but the ways it can go wrong.
+fn git_root_for(repo_path: &Path) -> PathBuf {
+    if is_repository(repo_path) {
+        return repo_path.to_path_buf();
+    }
+    gwt_core::repo_hash::resolve_repository_common_dir(repo_path)
+        .unwrap_or_else(|| repo_path.to_path_buf())
+}
+
+/// A working tree (`.git` directory or worktree link file) or a git directory
+/// itself (bare repositories included).
+fn is_repository(path: &Path) -> bool {
+    path.join(".git").exists() || (path.join("HEAD").is_file() && path.join("objects").is_dir())
 }
 
 /// The calling worktree and the worktree whose `target/` hosts the running
@@ -398,15 +678,10 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Every process on the host whose cwd or executable lies under one of
-/// `roots`, keyed by root (`name (pid N)`). Any process counts, not only
-/// heavy ones: an agent shell idling in the worktree still owns its build.
-fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
-    let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    if roots.is_empty() {
-        return found;
-    }
-    let own_pid = std::process::id();
+/// One snapshot of the host's processes with their executables and working
+/// directories. Both the worktree attribution and the launch-liveness check
+/// read it, so the sweep judges every worktree against the same instant.
+fn process_table() -> System {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -415,6 +690,78 @@ fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
             .with_exe(UpdateKind::Always)
             .with_cwd(UpdateKind::Always),
     );
+    system
+}
+
+/// The gwt Host executable. It is the only process that creates a runtime
+/// namespace directory, so it is the only process whose PID can legitimately
+/// name one.
+const HOST_BINARY_STEM: &str = "gwt";
+
+/// Live gwt Host processes by PID, with the OS start time that separates a
+/// Host from a process that merely inherited its PID (Issue #4594).
+///
+/// `gwtd` and the agent processes are deliberately absent: they never own a
+/// runtime namespace.
+fn live_gwt_hosts(system: &System) -> BTreeMap<u32, u64> {
+    system
+        .processes()
+        .iter()
+        .filter(|(_, process)| {
+            let stem = process
+                .exe()
+                .and_then(Path::file_stem)
+                .map(std::ffi::OsStr::to_string_lossy)
+                .unwrap_or_else(|| Path::new(process.name()).to_string_lossy());
+            stem.eq_ignore_ascii_case(HOST_BINARY_STEM)
+        })
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                crate::process::snapshot_process_start_identity(pid.as_u32(), process),
+            )
+        })
+        .collect()
+}
+
+/// Whether the PID naming a runtime namespace still belongs to the gwt Host
+/// that wrote it (Issue #4594).
+///
+/// `hosts` holds only live gwt Hosts, so a PID the OS has handed to something
+/// else is simply absent — which is the case that mattered in production:
+/// 4016 namespaces outlived their Hosts, and the 39 live PIDs among them had
+/// become `bluetoothuserd`, `loginwindow`, `photoanalysisd` and friends,
+/// processes that never exit. When the sidecar recorded its writer's start
+/// time (Issue #3964), that must match too: one gwt Host can inherit an
+/// earlier one's PID. A Host whose start time the OS will not report keeps the
+/// launch — the sweep deletes, so an unreadable process table must not widen
+/// it.
+fn namespace_host_is_live(
+    hosts: &BTreeMap<u32, u64>,
+    host_pid: u32,
+    recorded_start: Option<u64>,
+) -> bool {
+    let Some(started_at) = hosts.get(&host_pid) else {
+        return false;
+    };
+    match recorded_start.filter(|value| *value > 0) {
+        Some(recorded) => *started_at == 0 || *started_at == recorded,
+        None => true,
+    }
+}
+
+/// Every process on the host whose cwd or executable lies under one of
+/// `roots`, keyed by root (`name (pid N)`). Any process counts, not only
+/// heavy ones: an agent shell idling in the worktree still owns its build.
+fn scan_processes(system: &System, roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
+    let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    if roots.is_empty() {
+        return found;
+    }
+    // Roots are canonical; Windows can report a process cwd through its
+    // short-name alias, which must still protect the same physical worktree.
+    let normalize = |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let own_pid = std::process::id();
     for (pid, process) in system.processes() {
         let pid = pid.as_u32();
         if pid == own_pid {
@@ -422,7 +769,11 @@ fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
         }
         let exe = process.exe();
         let cwd = process.cwd();
-        let Some(root) = attribute_worktree(cwd, exe, roots) else {
+        let normalized_exe = exe.map(normalize);
+        let normalized_cwd = cwd.map(normalize);
+        let Some(root) =
+            attribute_worktree(normalized_cwd.as_deref(), normalized_exe.as_deref(), roots)
+        else {
             continue;
         };
         let name = exe
@@ -440,12 +791,17 @@ fn scan_processes(roots: &[PathBuf]) -> BTreeMap<PathBuf, Vec<String>> {
     found
 }
 
-/// Session ids with a live launch, keyed by the worktree their Session
-/// record names. A launch is live while the gwt host process that wrote its
-/// runtime sidecar is alive, the sidecar is not terminal, and the PTY child
-/// it names (when it names one) is alive. Session status alone is not
-/// evidence: hundreds of `Running` records outlive their panes.
-fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> {
+/// Live launches, keyed by the worktree their Session record names, each
+/// described as `<session id> (<the evidence that kept it>)` (Issue #4643
+/// AC-5). A launch is live while the gwt Host process that wrote its runtime
+/// sidecar is still that Host, the sidecar is not terminal, and the PTY child
+/// it names is alive. Session status alone is not evidence: hundreds of
+/// `Running` records outlive their panes, and a live Host alone is not either
+/// — it outlives every pane it closes (Issue #4643).
+fn scan_tracked_launches(
+    sessions_dir: &Path,
+    hosts: &BTreeMap<u32, u64>,
+) -> BTreeMap<PathBuf, Vec<String>> {
     let mut found: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     let Ok(namespaces) = std::fs::read_dir(sessions_dir.join("runtime")) else {
         return found;
@@ -458,7 +814,7 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
         else {
             continue;
         };
-        if !crate::process::is_process_alive(host_pid) {
+        if !hosts.contains_key(&host_pid) {
             continue;
         }
         let Ok(sidecars) = std::fs::read_dir(namespace.path()) else {
@@ -481,18 +837,18 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
             else {
                 continue;
             };
+            if !namespace_host_is_live(hosts, host_pid, state.host_started_at) {
+                continue;
+            }
             if matches!(
                 state.status,
                 gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
             ) {
                 continue;
             }
-            if state
-                .child_pid
-                .is_some_and(|child| !crate::process::is_process_alive(child))
-            {
+            let Some(child_pid) = pty_child_is_alive(&state) else {
                 continue;
-            }
+            };
             let Ok(session) = gwt_agent::Session::load_and_migrate(
                 &sessions_dir.join(format!("{session_id}.toml")),
             ) else {
@@ -500,7 +856,10 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
             };
             let root = dunce::canonicalize(&session.worktree_path)
                 .unwrap_or_else(|_| session.worktree_path.clone());
-            found.entry(root).or_default().push(session_id.to_string());
+            found.entry(root).or_default().push(format!(
+                "{session_id} (gwt Host pid {host_pid}, PTY child pid {child_pid} alive, status {:?})",
+                state.status
+            ));
         }
     }
     for ids in found.values_mut() {
@@ -508,6 +867,23 @@ fn scan_tracked_launches(sessions_dir: &Path) -> BTreeMap<PathBuf, Vec<String>> 
         ids.dedup();
     }
     found
+}
+
+/// The PTY child the sidecar names, when it is still that process.
+///
+/// A sidecar that names no child is not a live launch (Issue #4643 AC-3): a
+/// closed pane's sidecar stays `Running` or `Idle` whenever the close could
+/// not prove the child exited, and without a child there is nothing left to
+/// tell it from a live one. A running agent is still kept by the process
+/// scan, whose cwd attribution sees it in its worktree. When the start time
+/// was recorded it must match too, so a recycled PID keeps nothing.
+fn pty_child_is_alive(state: &gwt_agent::session::SessionRuntimeState) -> Option<u32> {
+    let child_pid = state.child_pid.filter(|pid| *pid > 0)?;
+    let alive = match state.child_started_at.filter(|started| *started > 0) {
+        Some(started_at) => crate::process::exact_pty_process_tree_is_alive(child_pid, started_at),
+        None => crate::process::is_process_alive(child_pid),
+    };
+    alive.then_some(child_pid)
 }
 
 /// Sum of file sizes under `dir`, following no symlinks. Unreadable entries
@@ -678,6 +1054,199 @@ mod tests {
         assert!(kept_reason(&plan, "/work/issue-8").contains("no target/"));
     }
 
+    /// Issue #4594: a runtime namespace is named by the gwt Host's PID, and
+    /// the OS recycles PIDs. On the reporting host 4016 namespaces outlived
+    /// their Hosts; of the 40 whose PID was still alive, 39 had been inherited
+    /// by unrelated processes that never exit (`bluetoothuserd`,
+    /// `loginwindow`, `photoanalysisd`, …), so 186 of 242 `tracked launch`
+    /// keeps were permanent and held 445 GiB of build cache for launches that
+    /// had ended days earlier. `kill(pid, 0)` cannot tell an inherited PID
+    /// from its writer; the process table can.
+    #[test]
+    fn a_namespace_whose_pid_was_inherited_is_not_a_live_launch() {
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, None));
+        assert!(!namespace_host_is_live(&hosts, 909, None));
+    }
+
+    /// The other half of the same rule: one gwt Host can inherit an earlier
+    /// gwt Host's PID, which the executable alone would not catch. A sidecar
+    /// that recorded its writer's start time (Issue #3964) is judged by it.
+    #[test]
+    fn a_namespace_from_an_earlier_host_with_the_same_pid_is_not_live() {
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, Some(1000)));
+        assert!(!namespace_host_is_live(&hosts, 4242, Some(17)));
+    }
+
+    /// A Host whose start time the OS will not report stays live: the sweep
+    /// deletes build caches, so an unreadable process table keeps rather than
+    /// reclaims.
+    #[test]
+    fn an_unreadable_host_start_time_keeps_the_launch() {
+        let hosts = BTreeMap::from([(4242u32, 0u64)]);
+
+        assert!(namespace_host_is_live(&hosts, 4242, Some(1000)));
+    }
+
+    /// End to end over the sidecar tree: a namespace held by a live gwt Host
+    /// tracks its worktree, and the identical namespace of a PID something
+    /// else inherited tracks nothing (Issue #4594).
+    #[test]
+    fn scan_tracked_launches_skips_namespaces_whose_pid_was_inherited() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let live_worktree = tmp.path().join("work").join("live");
+        let dead_worktree = tmp.path().join("work").join("dead");
+        let live = write_tracked_launch(&sessions, 4242, &live_worktree);
+        let dead = write_tracked_launch(&sessions, 909, &dead_worktree);
+        let canonical = |path: &Path| dunce::canonicalize(path).expect("canonicalize");
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+
+        let evidence = tracked
+            .get(&canonical(&live_worktree))
+            .unwrap_or_else(|| panic!("live launch not tracked: {tracked:?}"));
+        assert_eq!(evidence.len(), 1, "{tracked:?}");
+        assert!(evidence[0].starts_with(&live), "{evidence:?}");
+        assert_eq!(
+            tracked.get(&canonical(&dead_worktree)),
+            None,
+            "{tracked:?} ({dead})"
+        );
+    }
+
+    /// Write `runtime` as the sidecar under `runtime/<host_pid>/` plus the
+    /// Session it names, and return the session id.
+    fn write_tracked_launch_with(
+        sessions: &Path,
+        host_pid: u32,
+        worktree: &Path,
+        runtime: gwt_agent::SessionRuntimeState,
+    ) -> String {
+        std::fs::create_dir_all(worktree).expect("worktree");
+        let session = gwt_agent::Session::new(
+            worktree.to_path_buf(),
+            "work/issue-1",
+            gwt_agent::AgentId::ClaudeCode,
+        );
+        std::fs::create_dir_all(sessions).expect("sessions dir");
+        session.save(sessions).expect("session");
+        let path = gwt_agent::runtime_state_path_for_pid(sessions, host_pid, &session.id);
+        std::fs::create_dir_all(path.parent().expect("namespace")).expect("namespace dir");
+        runtime.save(&path).expect("sidecar");
+        session.id
+    }
+
+    /// A launch whose PTY child is this very test process: alive for as long
+    /// as the assertion runs.
+    fn write_tracked_launch(sessions: &Path, host_pid: u32, worktree: &Path) -> String {
+        write_tracked_launch_with(
+            sessions,
+            host_pid,
+            worktree,
+            runtime_with_child(gwt_agent::AgentStatus::Running, Some(live_child())),
+        )
+    }
+
+    fn runtime_with_child(
+        status: gwt_agent::AgentStatus,
+        child: Option<(u32, u64)>,
+    ) -> gwt_agent::SessionRuntimeState {
+        let mut runtime = gwt_agent::SessionRuntimeState::new(status);
+        runtime.child_pid = child.map(|(pid, _)| pid);
+        runtime.child_started_at = child.map(|(_, started_at)| started_at);
+        runtime
+    }
+
+    fn live_child() -> (u32, u64) {
+        let pid = std::process::id();
+        let started_at = crate::process::host_process_start_time(pid).expect("own start time");
+        (pid, started_at)
+    }
+
+    /// A PTY child that has exited: a PID no process on the host holds, with
+    /// a start time nothing can match.
+    fn exited_child() -> (u32, u64) {
+        (i32::MAX as u32, 1)
+    }
+
+    /// Issue #4643 AC-6: the four sidecar shapes under one live gwt Host.
+    /// Only the launch whose exact PTY child is alive keeps its worktree;
+    /// a surviving Host alone never does.
+    #[test]
+    fn scan_tracked_launches_keeps_only_launches_whose_pty_child_is_alive() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let worktree = |name: &str| tmp.path().join("work").join(name);
+        let canonical = |path: &Path| dunce::canonicalize(path).expect("canonicalize");
+        let running = gwt_agent::AgentStatus::Running;
+
+        // (a) live pane
+        let live = write_tracked_launch(&sessions, 4242, &worktree("live"));
+        // (b) closed pane: the hook left it Idle, its PTY child is gone
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("closed"),
+            runtime_with_child(gwt_agent::AgentStatus::Idle, Some(exited_child())),
+        );
+        // (c) no child evidence at all
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("no-child"),
+            runtime_with_child(running, None),
+        );
+        // (d) terminal status, even with a live child recorded
+        write_tracked_launch_with(
+            &sessions,
+            4242,
+            &worktree("stopped"),
+            runtime_with_child(gwt_agent::AgentStatus::Stopped, Some(live_child())),
+        );
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+
+        let evidence = tracked
+            .get(&canonical(&worktree("live")))
+            .unwrap_or_else(|| panic!("live launch not tracked: {tracked:?}"));
+        assert_eq!(evidence.len(), 1, "{tracked:?}");
+        assert!(evidence[0].starts_with(&live), "{evidence:?}");
+        for name in ["closed", "no-child", "stopped"] {
+            assert_eq!(
+                tracked.get(&canonical(&worktree(name))),
+                None,
+                "{name}: {tracked:?}"
+            );
+        }
+    }
+
+    /// Issue #4643 AC-5: the kept reason names the evidence that kept it, so
+    /// an operator no longer has to read the sidecar by hand.
+    #[test]
+    fn tracked_launch_evidence_names_the_host_the_child_and_the_status() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sessions = tmp.path().join("sessions");
+        let worktree = tmp.path().join("work").join("live");
+        write_tracked_launch(&sessions, 4242, &worktree);
+
+        let hosts = BTreeMap::from([(4242u32, 1000u64)]);
+        let tracked = scan_tracked_launches(&sessions, &hosts);
+        let evidence = &tracked[&dunce::canonicalize(&worktree).expect("canonicalize")][0];
+
+        assert!(evidence.contains("gwt Host pid 4242"), "{evidence}");
+        assert!(
+            evidence.contains(&format!("PTY child pid {} alive", std::process::id())),
+            "{evidence}"
+        );
+        assert!(evidence.contains("status Running"), "{evidence}");
+    }
+
     /// The shared `develop` workspace is merged into the base by definition,
     /// so nothing but this rule keeps the largest `target/` on the host out
     /// of an unqualified sweep.
@@ -747,6 +1316,19 @@ mod tests {
     /// apply run, while the calling (main) worktree keeps its own.
     #[test]
     fn gc_reports_then_removes_a_merged_sibling_worktree_target() {
+        check_gc_verification_boundary(false);
+    }
+
+    #[test]
+    fn gc_keeps_target_when_legacy_verification_starts_after_snapshot() {
+        check_gc_verification_boundary(true);
+    }
+
+    fn check_gc_verification_boundary(legacy_exclusive: bool) {
+        // ScopedGwtHome is thread-local; Git still inherits the process PATH.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
         let repo = tmp.path().join("repo");
@@ -764,6 +1346,9 @@ mod tests {
             );
         };
         git(&repo, &["init", "-q", "-b", "develop"]);
+        // Fixture commits must not leave detached Git maintenance in the process census.
+        git(&repo, &["config", "maintenance.auto", "false"]);
+        git(&repo, &["config", "gc.auto", "0"]);
         git(&repo, &["config", "user.email", "t@example.com"]);
         git(&repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("README.md"), "x").expect("write");
@@ -824,6 +1409,153 @@ mod tests {
         assert!(report["disk_space"]["volumes"].is_array(), "{out}");
         assert!(sibling_target.join("blob.bin").is_file());
 
+        // A coordination I/O error makes the cache unavailable on this run.
+        let barrier =
+            gwt_core::index_coordinator::verification_coordinator_root().join("heavy.lock");
+        std::fs::remove_file(&barrier).expect("remove idle barrier");
+        std::fs::create_dir(&barrier).expect("unopenable barrier");
+        let failed =
+            run_gc(&repo, "develop", both_opt_ins(), true).expect("coordination error report");
+        assert_eq!(failed.failed.len(), 1, "{failed:?}");
+        assert_eq!(failed.unreclaimed_bytes, 4096, "{failed:?}");
+        assert_eq!(failed.reclaimable_bytes, 0, "{failed:?}");
+        std::fs::remove_dir(&barrier).expect("restore idle barrier path");
+
+        // #5082: the pressure probe runs after the process snapshot and plan.
+        // Start canonical verification there to exercise the deletion race
+        // without sleeps or a second planning implementation.
+        git(
+            &sibling,
+            &["commit", "-q", "--allow-empty", "-m", "unmerged"],
+        );
+        let verification = std::cell::RefCell::new(None);
+        let stale_ticket = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "target": "abandoned-verification",
+            "priority": gwt_core::index_coordinator::JobPriority::ManualRebuild,
+            "owner": { "pid": u32::MAX, "start_id": "dead-runner" },
+            "acquired_at_ms": 0,
+            "expires_at_ms": 1,
+            "lease_id": "expired-lease"
+        }))
+        .expect("stale ticket");
+        let pressure = || {
+            if verification.borrow().is_none() {
+                let guard = if legacy_exclusive {
+                    let coordinator =
+                        gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                            .expect("legacy coordinator");
+                    let file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .truncate(false)
+                        .read(true)
+                        .write(true)
+                        .open(coordinator.heavy_lock_path())
+                        .expect("legacy artifact barrier");
+                    fs2::FileExt::try_lock_exclusive(&file).expect("idle legacy lease");
+                    // A stale ticket must not override a physically held barrier.
+                    std::fs::write(coordinator.heavy_ticket_path(), &stale_ticket)
+                        .expect("stale marker under live kernel lock");
+                    (Some(file), None)
+                } else {
+                    (
+                        None,
+                        Some(
+                            crate::cli::verification_lease::try_lock_build_artifacts(
+                                &sibling.join(BUILD_ARTIFACT_DIR),
+                            )
+                            .expect("canonical artifact lock")
+                            .expect("idle target"),
+                        ),
+                    )
+                };
+                verification.replace(Some(guard));
+            }
+            crate::disk_space::probe_with(
+                &[sibling.as_path()],
+                crate::disk_space::DiskThresholds {
+                    below_bytes: u64::MAX,
+                    below_percent: 100,
+                },
+            )
+        };
+        let held = run_gc_with_pressure(
+            &repo,
+            "develop",
+            GcOptions::default(),
+            false,
+            Some(&pressure),
+        )
+        .expect("GC while canonical verification starts");
+        assert!(sibling_target.join("blob.bin").is_file(), "{held:?}");
+        assert!(held.candidates.is_empty(), "{held:?}");
+        assert!(held.removed.is_empty(), "{held:?}");
+        let held_json = serde_json::to_value(&held).expect("held report");
+        assert_eq!(held_json["unreclaimed_bytes"], 4096, "{held_json}");
+        assert!(
+            held_json["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["bytes"] == 4096)
+                .unwrap()["reason"]
+                .as_str()
+                .unwrap()
+                .contains(if legacy_exclusive {
+                    "legacy global verification barrier"
+                } else {
+                    "target lock"
+                }),
+            "{held_json}"
+        );
+        let unrelated_target = tmp.path().join("unrelated-target");
+        std::fs::create_dir_all(&unrelated_target).expect("unrelated target");
+        assert_eq!(
+            matches!(
+                try_lock_gc_build_artifacts(&unrelated_target).expect("unrelated lock"),
+                GcArtifactAccess::Available(_)
+            ),
+            !legacy_exclusive,
+            "target locks must not pin unrelated caches; the legacy barrier stays global"
+        );
+        if legacy_exclusive {
+            assert!(held
+                .kept
+                .iter()
+                .any(|entry| entry.reason.contains("owner_pid_alive=false")));
+        }
+        let canonical_sibling = dunce::canonicalize(&sibling).expect("canonical sibling");
+        assert!(
+            held.kept.iter().any(|kept| {
+                kept.worktree == canonical_sibling && kept.reason.contains("build artifacts in use")
+            }),
+            "{held:?}"
+        );
+
+        let dry = run_gc(&repo, "develop", both_opt_ins(), true).expect("held-target dry run");
+        assert!(dry.candidates.is_empty(), "{dry:?}");
+        assert_eq!(dry.reclaimable_bytes, 0, "{dry:?}");
+        assert!(dry.removed.is_empty(), "{dry:?}");
+        assert!(sibling_target.join("blob.bin").is_file());
+        // Explicit unlock also releases Unix fork/exec duplicates of this FD.
+        let guard = verification
+            .borrow_mut()
+            .take()
+            .expect("verification guard");
+        if let Some(legacy) = &guard.0 {
+            fs2::FileExt::unlock(legacy).expect("release verification lock");
+        }
+        drop(guard);
+        // Marker/ticket residue without a kernel owner must not pin the cache.
+        let coordinator =
+            gwt_core::index_coordinator::IndexCoordinator::open_default_verification()
+                .expect("coordinator");
+        std::fs::write(coordinator.heavy_ticket_path(), &stale_ticket).expect("stale marker");
+        git(
+            &sibling,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+
         let mut out = String::new();
         run(
             &mut env,
@@ -841,5 +1573,107 @@ mod tests {
         assert_eq!(report["reclaimed_bytes"], 4096, "{out}");
         assert!(!sibling.join(BUILD_ARTIFACT_DIR).exists());
         assert!(repo.join(BUILD_ARTIFACT_DIR).is_dir());
+    }
+
+    /// Issue #4566 AC-1 / AC-3: the Issue Monitor hands the sweep the project
+    /// root — the Nested Bare + Worktree container that holds `<repo>.git`
+    /// next to `work/`, `develop/`, … — which is not itself a repository.
+    /// Enumerating from there used to fail with `not a git repository` and
+    /// report zero candidates while the CLI, given a real worktree, listed
+    /// dozens. The sweep now resolves the repository itself, so both callers
+    /// see the same worktrees.
+    #[test]
+    fn gc_enumerates_from_a_project_root_that_is_not_a_repository() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .expect("git");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        // A seed checkout only exists to give the bare repository a commit.
+        let seed = tmp.path().join("seed");
+        std::fs::create_dir_all(&seed).expect("seed dir");
+        git(&seed, &["init", "-q", "-b", "develop"]);
+        git(&seed, &["config", "user.email", "t@example.com"]);
+        git(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("README.md"), "x").expect("write");
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init"]);
+
+        // The layout the daemon actually points at: a container directory with
+        // no `.git` of its own, holding the bare repository and the worktrees.
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project dir");
+        let bare = project_root.join("repo.git");
+        git(
+            &project_root,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                seed.to_str().expect("utf8"),
+                bare.to_str().expect("utf8"),
+            ],
+        );
+        // The container is identified through the bare child's `origin`.
+        git(
+            &bare,
+            &["remote", "set-url", "origin", "https://example.com/gwt.git"],
+        );
+        git(
+            &bare,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        assert!(
+            !project_root.join(".git").exists(),
+            "the container must not be a repository, or the test proves nothing"
+        );
+
+        let worktree = project_root.join("work").join("issue-1");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "work/issue-1",
+                worktree.to_str().expect("utf8"),
+            ],
+        );
+        let artifacts = worktree.join(BUILD_ARTIFACT_DIR).join("debug");
+        std::fs::create_dir_all(&artifacts).expect("target dir");
+        std::fs::write(artifacts.join("blob.bin"), vec![7u8; 4096]).expect("blob");
+
+        let report = run_gc(&project_root, "develop", GcOptions::default(), true)
+            .expect("enumeration from a non-repository project root");
+
+        let candidates: Vec<&PathBuf> = report.candidates.iter().map(|c| &c.worktree).collect();
+        assert_eq!(candidates.len(), 1, "{report:?}");
+        assert!(
+            candidates[0].ends_with("issue-1"),
+            "{:?}",
+            report.candidates
+        );
+        assert_eq!(report.reclaimable_bytes, 4096, "{report:?}");
+        // The merge check runs against the same repository, so a merged
+        // worktree is not kept for an unreadable merge state.
+        assert!(
+            !report
+                .kept
+                .iter()
+                .any(|kept| kept.reason.contains("merge state")),
+            "{:?}",
+            report.kept
+        );
     }
 }

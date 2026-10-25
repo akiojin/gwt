@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn migration_backfills_legacy_projection_on_first_run() {
         let temp = tempdir().expect("tempdir");
-        let workspace_dir = temp.path().join("workspace");
+        let workspace_dir = temp.path().join("project-state");
         fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let projection_path = workspace_dir.join("current.json");
         let legacy_json = serde_json::json!({
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn migration_is_idempotent_when_marker_exists() {
         let temp = tempdir().expect("tempdir");
-        let workspace_dir = temp.path().join("workspace");
+        let workspace_dir = temp.path().join("project-state");
         fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let projection_path = workspace_dir.join("current.json");
         let legacy_json = serde_json::json!({
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn migration_returns_missing_for_absent_projection_file() {
         let temp = tempdir().expect("tempdir");
-        let projection_path = temp.path().join("workspace/current.json");
+        let projection_path = temp.path().join("project-state/current.json");
 
         let outcome = migrate_workspace_projection_path(&projection_path).expect("migrate missing");
 
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn migration_writes_marker_even_when_no_backfill_needed() {
         let temp = tempdir().expect("tempdir");
-        let workspace_dir = temp.path().join("workspace");
+        let workspace_dir = temp.path().join("project-state");
         fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let projection_path = workspace_dir.join("current.json");
         let fresh = WorkspaceProjection {
@@ -371,7 +371,7 @@ mod tests {
         use fs2::FileExt;
 
         let temp = tempdir().expect("tempdir");
-        let workspace_dir = temp.path().join("workspace");
+        let workspace_dir = temp.path().join("project-state");
         fs::create_dir_all(&workspace_dir).expect("workspace dir");
         let projection_path = workspace_dir.join("current.json");
         let legacy_json = serde_json::json!({

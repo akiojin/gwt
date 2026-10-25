@@ -1,0 +1,18 @@
+
+running 1 test
+test work_events_intake::tests::contextual_shared_content_decodes_once_without_inventing_containers ... FAILED
+
+failures:
+
+---- work_events_intake::tests::contextual_shared_content_decodes_once_without_inventing_containers stdout ----
+
+thread 'work_events_intake::tests::contextual_shared_content_decodes_once_without_inventing_containers' (39844) panicked at crates\gwt-core\src\work_events_intake.rs:1644:9:
+the decoded event must move into the output instead of remaining in a cloned cache
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    work_events_intake::tests::contextual_shared_content_decodes_once_without_inventing_containers
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1242 filtered out; finished in 0.00s
+

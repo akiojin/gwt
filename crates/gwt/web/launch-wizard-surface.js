@@ -18,7 +18,8 @@
 // - closeModal(): closes the Add Window preset modal before the wizard
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
-//   the frontendUnits registry and visibleBounds() stay there).
+//   the frontendUnits registry stays there).
+import { createUiStateStore } from "/ui-state-store.js";
 import { createInteractionGuard } from "/interaction-guard.js";
 import { createFocusTrap } from "/focus-trap.js";
 import {
@@ -32,7 +33,7 @@ import {
 // conversation with input enabled; producing authority is recovered by the
 // backend continuation coordinator, and Work-level Continue work owns
 // successor generations.
-export function launchWizardStartMethodIntent(methodKind) {
+function launchWizardStartMethodIntent(methodKind) {
   switch (methodKind) {
     case "continue_last_session":
     case "open_session_picker":
@@ -68,6 +69,7 @@ export function createLaunchWizardSurface({
       const displayBranchName = (name) =>
         typeof name === "string" ? name.replace(/^origin\//, "") : name;
 
+      const visibilityModel = createUiStateStore({ open: false });
       let launchWizard = null;
       let launchWizardOpenError = null;
       let launchWizardOpening = null;
@@ -123,10 +125,16 @@ export function createLaunchWizardSurface({
               message: deferred.message || "Unable to open Launch Wizard",
             };
           }
+          publishLaunchWizardVisibility();
           renderLaunchWizard();
         },
       });
       let branchCleanupWindowId = null;
+
+      function publishLaunchWizardVisibility() {
+        const open = Boolean(launchWizard || launchWizardOpenError || launchWizardOpening);
+        visibilityModel?.update(state => state.open === open ? state : { open });
+      }
 
       function setLaunchWizardPendingDisabled(root, disabled) {
         if (!disabled) return;
@@ -194,21 +202,29 @@ export function createLaunchWizardSurface({
 
       // SPEC-3864 FR-005..FR-007: agent-independent setup affordance. The
       // backend derives `launchWizard.agent_setup` from the selected agent's
-      // descriptor (install when no Installed / latest route exists,
-      // configure when first-time setup is missing); this renders whatever
-      // it says without any per-agent branch.
+      // descriptor (install or update for the installed CLI, configure when
+      // first-time setup is missing), or reports that no supported agent is
+      // installed; this renders whatever it says without any per-agent
+      // branch.
       function appendAgentSetupNote(parent, setup) {
         if (!setup) return null;
         const note = createNode("div", "launch-note launch-agent-setup");
         note.dataset.agentId = setup.agent_id || "";
         note.dataset.setupKind = setup.kind || "";
         note.setAttribute("role", "note");
+        note.setAttribute("aria-busy", String(Boolean(setup.pending)));
         note.appendChild(
           createNode("div", "launch-agent-setup__title", setup.title || ""),
         );
         note.appendChild(
           createNode("div", "launch-agent-setup__detail", setup.detail || ""),
         );
+        if (setup.status) {
+          const status = createNode("div", "launch-agent-setup__detail", setup.status);
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+          note.appendChild(status);
+        }
         if (setup.action_label) {
           const button = createNode(
             "button",
@@ -216,6 +232,7 @@ export function createLaunchWizardSurface({
             setup.action_label,
           );
           button.type = "button";
+          button.disabled = Boolean(setup.pending);
           button.addEventListener("click", () =>
             sendWizardAction({ kind: "run_agent_setup" }),
           );
@@ -242,6 +259,125 @@ export function createLaunchWizardSurface({
         note.appendChild(
           createNode("div", "launch-pool-impact__detail", impact.detail || ""),
         );
+        parent.appendChild(note);
+        return note;
+      }
+
+      // Issue #4911: the Issue Monitor settings form repeats the Agent
+      // Settings block once per launch candidate, in launch order. The backend
+      // owns the list — it holds one editable draft, so only the open set
+      // carries the form and the others show what they launch with. Returns
+      // the body of the open set, which the setup sections render into.
+      function appendAgentSettingsSets(parent, pool) {
+        const sets = Array.isArray(pool?.sets) ? pool.sets : [];
+        if (sets.length === 0) return null;
+        const list = createNode("div", "launch-agent-sets");
+        let openBody = null;
+        const appendSetButton = (row, className, text, label, disabledReason, action) => {
+          const button = createNode("button", className, text);
+          button.type = "button";
+          button.setAttribute("aria-label", label);
+          if (disabledReason) {
+            button.disabled = true;
+            if (typeof disabledReason === "string") button.title = disabledReason;
+          }
+          button.addEventListener("click", () => {
+            if (button.disabled || !releaseWizardInteractionGuardForChromeAction()) return;
+            sendWizardAction(action);
+          });
+          row.appendChild(button);
+          return button;
+        };
+        sets.forEach((set, index) => {
+          const isOpen = index === pool.active_index;
+          const name = `Agent Settings ${index + 1}`;
+          const block = createNode("section", "launch-agent-set");
+          block.classList.toggle("is-open", isOpen);
+          block.dataset.agentId = set.agent_id || "";
+          block.setAttribute("aria-label", name);
+          const header = createNode("div", "launch-agent-set__header");
+          const heading = createNode("div", "launch-agent-set__heading");
+          heading.appendChild(createNode("div", "launch-section-title", name));
+          if (index === 0) {
+            heading.appendChild(
+              createNode("span", "launch-agent-set__badge", "Launches first"),
+            );
+          }
+          header.appendChild(heading);
+          const actions = createNode("div", "launch-agent-set__actions");
+          if (!isOpen) {
+            appendSetButton(actions, "wizard-button is-compact", "Edit", `Edit ${name}`, false, {
+              kind: "select_agent_settings_set",
+              index,
+            });
+          }
+          appendSetButton(actions, "icon-button", "↑", `Move ${name} up`, index === 0, {
+            kind: "move_agent_settings_set",
+            index,
+            to: index - 1,
+          });
+          appendSetButton(
+            actions,
+            "icon-button",
+            "↓",
+            `Move ${name} down`,
+            index === sets.length - 1,
+            { kind: "move_agent_settings_set", index, to: index + 1 },
+          );
+          appendSetButton(
+            actions,
+            "icon-button",
+            "−",
+            `Remove ${name}`,
+            pool.remove_disabled_reason,
+            { kind: "remove_agent_settings_set", index },
+          );
+          header.appendChild(actions);
+          block.appendChild(header);
+          const body = createNode("div", "launch-agent-set__body");
+          if (isOpen) {
+            openBody = body;
+          } else {
+            const summary = createNode("div", "wizard-confirm-summary");
+            for (const item of set.summary || []) {
+              const card = createNode("div", "wizard-summary-item");
+              card.appendChild(createNode("div", "wizard-summary-label", item.label));
+              card.appendChild(createNode("div", "wizard-summary-value", item.value));
+              summary.appendChild(card);
+            }
+            body.appendChild(summary);
+          }
+          block.appendChild(body);
+          list.appendChild(block);
+        });
+        const footer = createNode("div", "launch-agent-sets__footer");
+        appendSetButton(
+          footer,
+          "wizard-button is-compact",
+          "＋ Add Agent Settings",
+          "Add Agent Settings",
+          pool.add_disabled_reason,
+          { kind: "add_agent_settings_set" },
+        );
+        for (const reason of [pool.add_disabled_reason, pool.remove_disabled_reason]) {
+          if (reason) footer.appendChild(createNode("div", "launch-field-help", reason));
+        }
+        list.appendChild(footer);
+        appendAgentSettingsOrderNote(list, pool);
+        parent.appendChild(list);
+        return openBody;
+      }
+
+      // Issue #4911: the sets launch in list order, so the form states the
+      // order the save will produce in the words `issue.monitor.profiles` uses.
+      function appendAgentSettingsOrderNote(parent, pool) {
+        if (!pool?.resulting_summary) return null;
+        const note = createNode(
+          "div",
+          "launch-note launch-agent-sets__order",
+          `Sets launch in this order; the first one starts the next launch. After saving: ${pool.resulting_summary}`,
+        );
+        note.setAttribute("role", "note");
         parent.appendChild(note);
         return note;
       }
@@ -467,26 +603,6 @@ export function createLaunchWizardSurface({
         return field;
       }
 
-      function appendCheckboxField(
-        parent,
-        label,
-        copy,
-        checked,
-        onChange,
-        wide = false,
-      ) {
-        const field = createLaunchField(label, wide);
-        const checkboxLabel = createNode("label", "launch-inline-check");
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = checked;
-        input.addEventListener("change", () => onChange(input.checked));
-        checkboxLabel.appendChild(input);
-        checkboxLabel.appendChild(createNode("span", "", copy));
-        field.appendChild(checkboxLabel);
-        parent.appendChild(field);
-        return field;
-      }
 
       // SPEC-2014 2026-05-29 amendment — operation-appropriate controls.
       // These delegate to the standalone launch-controls.js builders so the
@@ -801,6 +917,7 @@ export function createLaunchWizardSurface({
         // backend state. Discard (do not replay) the deferred event
         // so we don't undo the user-initiated close.
         wizardInteractionGuard.discard();
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -815,6 +932,7 @@ export function createLaunchWizardSurface({
         launchWizardPendingAction = action || null;
         launchWizardPendingActionDisconnected = false;
         launchWizardPendingActionQueued = false;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -873,6 +991,7 @@ export function createLaunchWizardSurface({
           meta,
           message,
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -1352,6 +1471,7 @@ export function createLaunchWizardSurface({
             summaryList.appendChild(card);
           }
           section.appendChild(summaryList);
+          appendAgentSettingsOrderNote(section, launchWizard.issue_monitor_pool);
           panel.appendChild(section);
         }
 
@@ -1639,6 +1759,13 @@ export function createLaunchWizardSurface({
           panel.appendChild(section);
         }
 
+        // Issue #4911: in the Issue Monitor settings form the sections below
+        // are one Agent Settings set, so they render inside the open set.
+        const setupParent = (
+          showSetupForms
+            && appendAgentSettingsSets(panel, launchWizard.issue_monitor_pool)
+        ) || panel;
+
         if (showSetupForms) {
           const section = createLaunchSection(
             "Launch",
@@ -1751,67 +1878,7 @@ export function createLaunchWizardSurface({
               launchWizard.issue_monitor_pool_impact,
             );
           }
-          panel.appendChild(section);
-        }
-
-        if (
-          showSetupForms &&
-          (
-            launchWizard.show_version ||
-            launchWizard.show_skip_permissions ||
-            launchWizard.show_fast_mode ||
-            launchWizard.show_codex_fast_mode
-          )
-        ) {
-          const showFastMode = Boolean(
-            launchWizard.show_fast_mode ?? launchWizard.show_codex_fast_mode,
-          );
-          const section = createLaunchSection(
-            "Launch settings",
-            "Version, permissions, and tool-specific launch behavior.",
-          );
-          const grid = createNode("div", "launch-form-grid");
-          if (launchWizard.show_version) {
-            appendSelectField(
-              grid,
-              "Version",
-              launchWizard.version_options || [],
-              launchWizard.selected_version,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_version",
-                  version: value,
-                }),
-            );
-          }
-          if (launchWizard.show_skip_permissions) {
-            appendToggleField(
-              grid,
-              "Permissions",
-              "Skip permission prompts",
-              launchWizard.skip_permissions,
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_skip_permissions",
-                  enabled,
-                }),
-            );
-          }
-          if (showFastMode) {
-            appendToggleField(
-              grid,
-              "Fast mode",
-              "Use the agent's Fast mode",
-              Boolean(launchWizard.fast_mode ?? launchWizard.codex_fast_mode),
-              (enabled) =>
-                sendWizardAction({
-                  kind: "set_fast_mode",
-                  enabled,
-                }),
-            );
-          }
-          section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-3152: Hermes-specific launch options, rendered only for the
@@ -1921,7 +1988,7 @@ export function createLaunchWizardSurface({
               }),
           );
           section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-3151 FR-008: OpenCode-specific launch options, rendered only
@@ -1947,7 +2014,7 @@ export function createLaunchWizardSurface({
               }),
           );
           section.appendChild(grid);
-          panel.appendChild(section);
+          setupParent.appendChild(section);
         }
 
         // SPEC-2014 Amendment 2026-05-20 (FR-057 / FR-058):
@@ -2057,7 +2124,7 @@ export function createLaunchWizardSurface({
 
         setLaunchWizardPendingDisabled(
           panel,
-          isRuntimeResolutionPending || isLaunchActionPending,
+          isRuntimeResolutionPending || isLaunchActionPending || launchWizard.agent_setup?.pending,
         );
         wizardContentPane.appendChild(panel);
         wizardMain.appendChild(wizardContentPane);
@@ -2086,6 +2153,7 @@ export function createLaunchWizardSurface({
           launchWizardOpenError = null;
         }
         launchWizard = event.wizard;
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
         const nextHolderFingerprint = currentHolderDecision()?.fingerprint || null;
         if (
@@ -2117,6 +2185,7 @@ export function createLaunchWizardSurface({
           title: event.title || "Launch Agent",
           message: event.message || "Unable to open Launch Wizard",
         };
+        publishLaunchWizardVisibility();
         renderLaunchWizard();
       }
 
@@ -2239,6 +2308,7 @@ export function createLaunchWizardSurface({
       }
 
       return {
+        visibilityModel,
         syncWizardDraftState,
         flushWizardBranchDraft,
         renderLaunchWizard,

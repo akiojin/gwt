@@ -1,7 +1,7 @@
 //! `pane.*` JSON operations for live agent-pane inspection.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::Path,
     time::Duration,
 };
@@ -15,6 +15,7 @@ use tokio_tungstenite::{
     connect_async,
     tungstenite::{
         client::IntoClientRequest,
+        error::ProtocolError,
         http::{header::AUTHORIZATION, HeaderValue},
         protocol::{frame::coding::CloseCode, CloseFrame},
         Error as WebSocketError, Message,
@@ -45,10 +46,9 @@ const PROJECT_ROOT_ENV: &str = "GWT_PROJECT_ROOT";
 /// ordinary stall into a hard failure (#3510). The budget covers the stall
 /// instead, and the idle case is unaffected because it never waits.
 const BACKEND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
-/// Issue #3629 AC-12: bounded wait for the explicit `pane_close_result` reply
-/// before falling back to the legacy post-close readback for backends that
-/// predate the protocol. Mirrors the correlated self-close acceptance budget.
-const PANE_CLOSE_RESULT_DEADLINE: Duration = Duration::from_secs(2);
+/// Wait for explicit process-exit confirmation; window removal only accepts
+/// teardown and therefore cannot establish a completed peer close.
+const PANE_CLOSE_RESULT_DEADLINE: Duration = BACKEND_RESPONSE_TIMEOUT;
 const PM_MESSAGE_RESULT_DEADLINE: Duration = Duration::from_secs(7);
 const PM_MESSAGE_SEND_DEADLINE: Duration = Duration::from_secs(18);
 const ISSUE_MONITOR_SCAN_RESULT_DEADLINE: Duration = Duration::from_secs(5);
@@ -57,6 +57,41 @@ const PM_TARGET_REFUSAL: &str =
 
 type PaneWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+#[derive(Debug, thiserror::Error)]
+enum PaneRequestError {
+    #[error("{0}")]
+    Operation(String),
+    #[error("{0}")]
+    Network(String),
+}
+
+impl PaneRequestError {
+    fn from_websocket_error(message: String, error: &WebSocketError) -> Self {
+        if matches!(
+            error,
+            WebSocketError::Io(_)
+                | WebSocketError::Tls(_)
+                | WebSocketError::ConnectionClosed
+                | WebSocketError::AlreadyClosed
+                | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+        ) || matches!(error, WebSocketError::Http(response) if response.status().is_server_error())
+        {
+            Self::Network(message)
+        } else {
+            Self::Operation(message)
+        }
+    }
+}
+
+impl From<PaneRequestError> for SpecOpsError {
+    fn from(error: PaneRequestError) -> Self {
+        match error {
+            PaneRequestError::Operation(message) => Self::Operation(message),
+            PaneRequestError::Network(message) => ApiError::Network(message).into(),
+        }
+    }
+}
 
 /// SPEC-3431 FR-124: ask the authenticated GUI authority for one project
 /// Monitor scan. The request intentionally carries no project path; the
@@ -180,6 +215,14 @@ pub fn parse(args: &[String]) -> Result<PaneCommand, CliParseError> {
             ensure_no_args(rest)?;
             Ok(PaneCommand::List)
         }
+        "health" => {
+            if rest.len() > 1 {
+                return Err(CliParseError::Usage);
+            }
+            Ok(PaneCommand::Health {
+                id: rest.first().cloned(),
+            })
+        }
         "read" => {
             let (id, rest) = rest.split_first().ok_or(CliParseError::Usage)?;
             Ok(PaneCommand::Read {
@@ -208,8 +251,14 @@ pub(super) fn run<E: CliEnv>(
     command: PaneCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
-    let ws_url = pane_websocket_url_from_env().map_err(config_error)?;
     let project_root = project_root_for_pane(env.repo_path());
+    if let PaneCommand::Health { id } = &command {
+        out.push_str(
+            &read_pane_health(Path::new(&project_root), id.as_deref()).map_err(config_error)?,
+        );
+        return Ok(0);
+    }
+    let ws_url = pane_websocket_url_from_env().map_err(config_error)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -222,21 +271,263 @@ pub(super) fn run<E: CliEnv>(
     Ok(0)
 }
 
-/// Issue #3883 AC-6: the ids of the agent windows this project currently has on
-/// the canvas, read from the same live source `pane.list` reads.
-///
-/// `issue.monitor.reconcile` needs the canvas, not the durable snapshot: the
-/// whole failure it recovers from is a durable snapshot that disagrees with the
-/// windows that are actually running.
-pub(super) fn live_window_ids(default_project_root: &Path) -> Result<BTreeSet<String>, String> {
+/// Existing durable pane/runtime projections keep this census independent of
+/// the GUI event loop and terminal snapshot locks. This path never writes them.
+fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<String, String> {
+    use gwt_core::{
+        pane_health::{classify, PaneState, PromptKind, TailSignal},
+        process_tree::observation::ProcessSnapshot,
+    };
+    let scope = gwt_core::paths::project_scope_hash(project_root);
+    let mut workspace = crate::persistence::load_workspace_state(
+        &crate::persistence::workspace_state_path(project_root),
+    )
+    .map_err(|error| format!("pane health workspace unavailable: {error}"))?;
+    let tabs = crate::persistence::load_session_state(&gwt_core::paths::gwt_session_state_path())
+        .map_err(|error| format!("pane health project inventory unavailable: {error}"))?;
+    if let Some(tab) = tabs
+        .tabs
+        .iter()
+        .find(|tab| gwt_core::paths::project_scope_hash(&tab.project_root) == scope)
+    {
+        for window in &mut workspace.windows {
+            window.id = format!("{}::{}", tab.id, window.id);
+        }
+    }
+    workspace.windows.retain(is_agent_pane);
+    if let Some(id) = requested_id {
+        let resolved = resolve_window_id(&workspace.windows, id)
+            .ok_or_else(|| "pane health target not found in this project".to_string())?
+            .to_string();
+        workspace.windows.retain(|window| window.id == resolved);
+    }
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let session_ids: HashSet<_> = workspace
+        .windows
+        .iter()
+        .filter_map(|w| w.session_id.as_deref())
+        .collect();
+    let mut runtimes: HashMap<String, Vec<gwt_agent::SessionRuntimeState>> = HashMap::new();
+    // Read sidecars before the OS snapshot, so newly published children are
+    // never compared against an older process table. Missing/corrupt evidence
+    // stays unknown and cannot recommend stopping a pane.
+    if let Ok(hosts) = std::fs::read_dir(sessions_dir.join("runtime")) {
+        for host in hosts.flatten() {
+            let Some(pid) = host
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(started) = crate::process::host_process_start_time(pid).filter(|s| *s > 0)
+            else {
+                continue;
+            };
+            for id in &session_ids {
+                if gwt_agent::validate_session_id_path_component(id).is_err() {
+                    continue;
+                }
+                if let Ok(runtime) =
+                    gwt_agent::SessionRuntimeState::load(&host.path().join(format!("{id}.json")))
+                {
+                    if runtime.host_started_at == Some(started) {
+                        runtimes.entry((*id).to_string()).or_default().push(runtime);
+                    }
+                }
+            }
+        }
+    }
+    let snapshot = ProcessSnapshot::capture();
+    let directory_trust_windows: HashSet<_> = crate::load_issue_monitor_prefs(
+        &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(project_root),
+    )
+    .ok()
+    .into_iter()
+    .flat_map(|prefs| prefs.failed_issues)
+    .filter(|failure| failure.message == gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON)
+    .filter_map(|failure| failure.window_id)
+    .collect();
+    let panes: Vec<_> = workspace
+        .windows
+        .iter()
+        .map(|window| {
+            let persisted_state = match window.status {
+                WindowState::Running => PaneState::Running,
+                WindowState::Idle => PaneState::Idle,
+                WindowState::Waiting => PaneState::Waiting,
+                WindowState::Stopped => PaneState::Stopped,
+                WindowState::Interrupted => PaneState::Interrupted,
+                WindowState::Error => PaneState::Error,
+                WindowState::Starting => PaneState::Starting,
+            };
+            let observation = (|| {
+                let id = window.session_id.as_deref()?;
+                gwt_agent::validate_session_id_path_component(id).ok()?;
+                let session =
+                    gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()?;
+                let session_root = session
+                    .project_state_root
+                    .as_deref()
+                    .unwrap_or(&session.worktree_path);
+                if session.id != id || gwt_core::paths::project_scope_hash(session_root) != scope {
+                    return None;
+                }
+                let [runtime] = runtimes.get(id)?.as_slice() else {
+                    return None;
+                };
+                if let Some(identity) = &runtime.execution_identity {
+                    if gwt_agent::session::SessionExecutionIdentity::from_session(&session)
+                        .ok()
+                        .flatten()
+                        .as_ref()
+                        != Some(identity)
+                    {
+                        return None;
+                    }
+                }
+                let pid = runtime.child_pid.filter(|pid| *pid > 0)?;
+                let started = runtime.child_started_at.filter(|started| *started > 0)?;
+                // A missing or recycled root does not prove an empty tree:
+                // descendants may survive it, including in a Windows Job.
+                if !snapshot.contains_pid(pid)
+                    || crate::process::host_process_start_time(pid) != Some(started)
+                {
+                    return None;
+                }
+                // Preserve composed approval/launch-error state over old hooks.
+                // Historical Session exit receipts never describe this live root.
+                let state = if matches!(window.status, WindowState::Error | WindowState::Waiting) {
+                    persisted_state
+                } else {
+                    match runtime.status {
+                        gwt_agent::AgentStatus::Idle => PaneState::Idle,
+                        gwt_agent::AgentStatus::WaitingInput => PaneState::Waiting,
+                        gwt_agent::AgentStatus::Stopped => PaneState::Stopped,
+                        gwt_agent::AgentStatus::Interrupted => PaneState::Interrupted,
+                        gwt_agent::AgentStatus::Running => PaneState::Running,
+                        gwt_agent::AgentStatus::Unknown => persisted_state,
+                    }
+                };
+                let signal = if runtime.source_event.as_deref() == Some("PermissionRequest") {
+                    TailSignal::Approval(PromptKind::Permission)
+                } else {
+                    TailSignal::None
+                };
+                Some((state, signal, snapshot.descendants(pid)))
+            })();
+            let (state, mut signal, children) = match observation {
+                Some((state, signal, children)) => (state, signal, Some(children)),
+                None => (persisted_state, TailSignal::None, None),
+            };
+            if directory_trust_windows.contains(&window.id) {
+                signal = TailSignal::Approval(PromptKind::DirectoryTrust);
+            }
+            let health = classify(state, signal, children.as_deref());
+            json!({
+                "id": window.id,
+                "session_id": window.session_id,
+                "classification": health.classification,
+                "reason_code": health.reason_code,
+                "recommended_action": health.recommended_action,
+                "prompt_kind": health.prompt_kind,
+                "processes": health.processes,
+            })
+        })
+        .collect();
+    serde_json::to_string(
+        &json!({"schema_version":1,"observed_at":chrono::Utc::now().to_rfc3339(),"panes":panes}),
+    )
+    .map(|value| format!("{value}\n"))
+    .map_err(|error| error.to_string())
+}
+
+/// Close one Work through the capability-authenticated Host connection.
+pub(super) fn close_work(work_id: &str, close_kind: &str) -> Result<Value, SpecOpsError> {
+    let ws_url = pane_websocket_url_from_env().map_err(SpecOpsError::Operation)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            SpecOpsError::Operation(format!("failed to create Work close runtime: {err}"))
+        })?;
+    runtime.block_on(close_work_async(&ws_url, work_id, close_kind))
+}
+
+async fn close_work_async(
+    ws_url: &str,
+    work_id: &str,
+    close_kind: &str,
+) -> Result<Value, SpecOpsError> {
+    let mut socket = connect_pane_websocket_typed(ws_url).await?;
+    send_frontend_event_typed(
+        &mut socket,
+        json!({"kind":"close_work","work_id":work_id,"close_kind":close_kind}),
+    )
+    .await?;
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        loop {
+            let result = next_backend_json_unbounded_typed(&mut socket).await?;
+            if result["kind"] != "work_close_result"
+                || result["work_id"] != work_id
+                || result["close_kind"] != close_kind
+            {
+                continue;
+            }
+            if result["ok"].as_bool().is_none()
+                || (result["ok"] == true && result["changed"].as_bool().is_none())
+            {
+                return Err(SpecOpsError::Operation(
+                    "invalid Host Work close result; inspect Work state before retrying".into(),
+                ));
+            }
+            return Ok(result);
+        }
+    })
+    .await
+    .map_err(|_| {
+        ApiError::Network(
+            "Work close outcome unavailable; inspect Work state before retrying".to_string(),
+        )
+    })?
+}
+
+pub(super) fn live_windows(
+    default_project_root: &Path,
+) -> Result<Vec<PersistedWindowState>, String> {
     let ws_url = pane_websocket_url_from_env()?;
     let project_root = project_root_for_pane(default_project_root);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| format!("failed to create pane runtime: {err}"))?;
-    let windows = runtime.block_on(request_window_list(&ws_url, &project_root))?;
-    Ok(windows.into_iter().map(|window| window.id).collect())
+    runtime.block_on(request_window_list(&ws_url, &project_root))
+}
+
+/// Admission companions use the existing self-only authenticated route. A
+/// busy pane is left alone; an ambiguous send is never retried automatically.
+pub(super) fn notify_verification_resume(
+    worktree: &Path,
+    session: &str,
+    text: &str,
+    still_current: impl Fn() -> bool,
+) -> Result<bool, String> {
+    if std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() != Some(session) {
+        return Err("verification resume Session changed".to_string());
+    }
+    let ws_url = pane_websocket_url_from_env()?;
+    let project_root = project_root_for_pane(worktree);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        send_pane_input_guarded(&ws_url, &project_root, None, text, &|window| {
+            window.status == WindowState::Idle && still_current()
+        })
+        .await
+        .map(|sent| sent.is_some())
+    })
 }
 
 async fn run_async(
@@ -245,14 +536,21 @@ async fn run_async(
     command: PaneCommand,
 ) -> Result<String, String> {
     match command {
+        PaneCommand::Health { .. } => Err("pane.health uses the independent local census".into()),
         PaneCommand::List => {
             let windows = request_window_list(ws_url, project_root).await?;
             Ok(render_pane_list(&windows))
         }
+        PaneCommand::Name { candidate } => name_pane(ws_url, &candidate).await,
         PaneCommand::Read { id, lines } => {
             read_pane_snapshot(ws_url, project_root, &id, lines).await
         }
         PaneCommand::Close { id } => close_pane(ws_url, project_root, &id).await,
+        PaneCommand::Recover {
+            started_after,
+            started_before,
+            apply,
+        } => recover_panes(ws_url, project_root, &started_after, &started_before, apply).await,
         PaneCommand::Send { id, text } => {
             send_pane_input(ws_url, project_root, id.as_deref(), &text).await
         }
@@ -260,8 +558,49 @@ async fn run_async(
             project_root: explicit_project_root,
             id,
             text,
-        } => send_pm_pane_input(ws_url, explicit_project_root.as_deref(), &id, &text).await,
+            operation_id,
+        } => {
+            send_pm_pane_input(
+                ws_url,
+                explicit_project_root.as_deref(),
+                &id,
+                &text,
+                operation_id.as_deref(),
+            )
+            .await
+        }
     }
+}
+
+async fn name_pane(ws_url: &str, candidate: &str) -> Result<String, String> {
+    tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+        let mut socket = connect_pane_websocket(ws_url).await?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        send_frontend_event(&mut socket, json!({
+            "kind": "pane_name", "candidate": candidate, "request_id": request_id,
+        })).await?;
+        loop {
+            let value = next_backend_json_unbounded(&mut socket).await?;
+            if value.get("kind").and_then(Value::as_str) != Some("pane_name_result")
+                || value.get("request_id").and_then(Value::as_str) != Some(request_id.as_str())
+            {
+                continue;
+            }
+            let ok = value.get("ok").and_then(Value::as_bool)
+                .ok_or_else(|| "pane_name_result missing ok".to_string())?;
+            if !ok {
+                let error = value.get("error").and_then(Value::as_str)
+                    .unwrap_or("backend returned no rejection reason");
+                return Err(format!("pane.name refused: {error}"));
+            }
+            let assigned_name = value.get("agent_name").and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| "pane_name_result missing the assigned agent_name".to_string())?;
+            return Ok(format!("{assigned_name}\n"));
+        }
+    }).await.map_err(|_| {
+        "pane.name timed out waiting for its assigned name; run execution.status to check current producing authority, then retry pane.name (assignment is idempotent)".to_string()
+    })?
 }
 
 /// SPEC-3431 FR-111 (T-206): PM-privileged delivery into another agent pane
@@ -275,10 +614,13 @@ async fn send_pm_pane_input(
     project_root: Option<&str>,
     requested_id: &str,
     text: &str,
+    requested_operation_id: Option<&str>,
 ) -> Result<String, String> {
-    let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
-    tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
-        let mut expected_window_id = None::<String>;
+    let operation_id = requested_operation_id
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().hyphenated().to_string());
+    let mut expected_window_id = None::<String>;
+    let result = tokio::time::timeout(PM_MESSAGE_SEND_DEADLINE, async {
         let mut response_loss = None::<String>;
         for attempt in 0..2 {
             let mut socket = connect_pane_websocket(ws_url).await?;
@@ -286,6 +628,15 @@ async fn send_pm_pane_input(
             let windows = next_pm_workspace_windows(&mut socket, project_root).await?;
             let window_id = if let Some(expected) = expected_window_id.as_deref() {
                 expected.to_string()
+            } else if requested_operation_id.is_some()
+                && requested_id
+                    .split_once("::")
+                    .is_some_and(|(tab, window)| !tab.is_empty() && !window.is_empty())
+            {
+                // Receipt readback must survive target teardown. Only an exact
+                // saved identity bypasses live resolution; the server still
+                // checks its principal, target Session and body hash.
+                requested_id.to_string()
             } else {
                 resolve_pm_send_target(&windows, requested_id)?.id.clone()
             };
@@ -341,14 +692,16 @@ async fn send_pm_pane_input(
                 continue;
             };
             return match reply.status.as_str() {
-                "delivered" => Ok(format!("pm message delivered to {window_id}\n")),
-                "queued" => Ok(format!("pm message queued for {window_id}\n")),
-                // Issue #3608 (AC-2): an unacknowledged submit is not a failed
-                // one. The input reached the pane; only the target's
-                // acknowledgement is still outstanding, so this must never
-                // read as "the message did not arrive".
-                "unverified" => Err(format!(
-                    "pm message delivery is unverified: {}",
+                "delivered" => Ok(format!("pm message delivered to {window_id}")),
+                "queued" => Ok(format!("pm message queued for {window_id}")),
+                // Older peers call the same unresolved result `unverified`.
+                // Neither spelling proves that the target acted on the prompt.
+                "unconfirmed" | "unverified" => Ok(format!(
+                    "pm message delivery is unconfirmed for {window_id}: {}",
+                    reply.reason.unwrap_or_else(|| "no target acknowledgement".to_string())
+                )),
+                "lost" => Err(format!(
+                    "pm message replay is unavailable (lost): {}",
                     reply.reason.unwrap_or_else(|| "unknown reason".to_string())
                 )),
                 "refused" => Err(format!(
@@ -370,12 +723,21 @@ async fn send_pm_pane_input(
         ))
     })
     .await
-    .map_err(|_| {
-        format!(
+    .unwrap_or_else(|_| {
+        Err(format!(
             "pm.message.send timed out after {} seconds",
             PM_MESSAGE_SEND_DEADLINE.as_secs()
-        )
-    })?
+        ))
+    });
+    result
+        .map(|output| format!("{output} (operation {operation_id})\n"))
+        .map_err(|error| {
+            let target = match expected_window_id.as_deref() {
+                Some(target) => format!("target {target}"),
+                None => format!("requested target {requested_id}"),
+            };
+            format!("{error} (operation {operation_id}) ({target})")
+        })
 }
 
 /// SPEC-3050 FR-001/FR-002: queue one line into the calling agent's own pane.
@@ -387,6 +749,18 @@ async fn send_pane_input(
     requested_id: Option<&str>,
     text: &str,
 ) -> Result<String, String> {
+    send_pane_input_guarded(ws_url, project_root, requested_id, text, &|_| true)
+        .await?
+        .ok_or_else(|| "pane send was withheld".to_string())
+}
+
+async fn send_pane_input_guarded(
+    ws_url: &str,
+    project_root: &str,
+    requested_id: Option<&str>,
+    text: &str,
+    can_send: &dyn Fn(&PersistedWindowState) -> bool,
+) -> Result<Option<String>, String> {
     let session_id = std::env::var(GWT_SESSION_ID_ENV)
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -407,6 +781,12 @@ async fn send_pane_input(
     if scoped_window_id != window_id {
         return Err("pane send target changed while establishing the authenticated scope".into());
     }
+    if !scoped_windows
+        .iter()
+        .any(|window| window.id == scoped_window_id && can_send(window))
+    {
+        return Ok(None);
+    }
     send_frontend_event(
         &mut socket,
         json!({ "kind": "pane_send_input", "session_id": session_id, "text": line }),
@@ -419,10 +799,10 @@ async fn send_pane_input(
             continue;
         };
         return if reply.ok {
-            Ok(format!(
+            Ok(Some(format!(
                 "sent input to {}\n",
                 reply.window_id.unwrap_or(window_id)
-            ))
+            )))
         } else {
             Err(format!(
                 "pane send rejected: {}",
@@ -440,6 +820,115 @@ async fn request_window_list(
     request_window_list_with_timeout(ws_url, project_root, BACKEND_RESPONSE_TIMEOUT).await
 }
 
+/// Fleet requests have one short absolute budget and never fall back to a
+/// legacy listing or close, whose runtime identity is not strong enough.
+pub(super) fn fleet_windows(project_root: &str) -> Result<Vec<Value>, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            send_frontend_event(&mut socket, json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] == "fleet_pane_list" {
+                    let observed_root = value["project_root"]
+                        .as_str()
+                        .filter(|root| !root.is_empty())
+                        .ok_or_else(|| {
+                            "fleet pane snapshot omitted its project scope".to_string()
+                        })?;
+                    let expected_root =
+                        gwt_core::paths::resolve_main_worktree_root(Path::new(project_root));
+                    if !same_pane_scope_path(Path::new(observed_root), &expected_root) {
+                        return Err("fleet pane snapshot belongs to a different project".into());
+                    }
+                    return value["panes"]
+                        .as_array()
+                        .cloned()
+                        .ok_or_else(|| "invalid fleet pane snapshot".to_string());
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            "fleet pane snapshot unavailable: backend timed out or lacks fleet support".to_string()
+        })?
+    })
+}
+
+pub(super) fn fleet_close(
+    id: &str,
+    session_id: &str,
+    child_pid: Option<u32>,
+    child_started_at: Option<u64>,
+) -> Result<Value, String> {
+    let ws_url = pane_websocket_url_from_env()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        tokio::time::timeout(BACKEND_RESPONSE_TIMEOUT, async {
+            let mut socket = connect_pane_websocket(&ws_url).await?;
+            // The scoped fleet snapshot primes this connection's target
+            // allowlist. A new socket has no authorized peer window IDs.
+            send_frontend_event(&mut socket,json!({"kind":"list_fleet_panes"})).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if value["kind"] != "fleet_pane_list" { continue; }
+                if !value["panes"].as_array().is_some_and(|panes| panes.iter().any(|pane| pane["window_id"]==id)) {
+                    return Err("fleet target is absent from the authenticated project snapshot".into());
+                }
+                break;
+            }
+            let request_id = uuid::Uuid::new_v4().to_string();
+            send_frontend_event(&mut socket,json!({
+                "kind":"close_fleet_pane","request_id":request_id,"id":id,
+                "session_id":session_id,"child_pid":child_pid,"child_started_at":child_started_at,
+            })).await?;
+            loop {
+                let value = next_backend_json_unbounded(&mut socket).await?;
+                if let Some(result) = fleet_close_reply(&value,&request_id,id) {
+                    let mut receipt = result?;
+                    if let (Some(pid),Some(started_at)) = (child_pid,child_started_at) {
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        while crate::process::exact_pty_process_tree_is_alive(pid,started_at) {
+                            if tokio::time::Instant::now() >= deadline {
+                                return Err("pane removed, but process-tree termination is unconfirmed; re-inventory before retry".into());
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        receipt["process_tree_terminated"] = json!(true);
+                    }
+                    return Ok(receipt);
+                }
+            }
+        }).await.map_err(|_| "fleet close receipt unavailable: outcome unknown; re-inventory before retry (no legacy fallback)".to_string())?
+    })
+}
+
+fn fleet_close_reply(value: &Value, request_id: &str, id: &str) -> Option<Result<Value, String>> {
+    if value["kind"] != "fleet_pane_close_result"
+        || value["request_id"] != request_id
+        || value["window_id"] != id
+    {
+        return None;
+    }
+    Some(if value["ok"].as_bool() == Some(true) {
+        Ok(value.clone())
+    } else {
+        Err(value["reason"]
+            .as_str()
+            .or_else(|| value["error"].as_str())
+            .unwrap_or("fleet close refused without a reason")
+            .to_string())
+    })
+}
+
 async fn request_window_list_with_timeout(
     ws_url: &str,
     project_root: &str,
@@ -455,8 +944,15 @@ async fn request_window_list_with_timeout(
         response_timeout,
     )
     .await;
-    if listed.is_ok() {
-        return listed;
+    match listed {
+        Ok(windows) => return Ok(windows),
+        Err(error)
+            if !error.starts_with("pane list: pane_backend_unresponsive")
+                && !error.starts_with("pane list: pane_backend_state_missing") =>
+        {
+            return Err(error);
+        }
+        Err(_) => {}
     }
 
     // `gwtd` runs from the installed bundle while the GUI keeps running the
@@ -508,7 +1004,7 @@ async fn read_pane_snapshot_with_timeout(
         loop {
             let value = next_backend_json_unbounded(&mut socket).await?;
             received += 1;
-            if let Some(mut parsed) = parse_workspace_windows(&value, project_root) {
+            if let Some(mut parsed) = parse_workspace_windows(&value, project_root)? {
                 windows.append(&mut parsed);
             }
             if let Some((id, snapshot)) = parse_terminal_snapshot(&value)? {
@@ -568,6 +1064,160 @@ async fn read_pane_snapshot_with_timeout(
     })?
 }
 
+pub(super) fn parse_recovery_bounds(after: &str, before: &str) -> Result<(i64, i64), String> {
+    let parse = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|time| time.timestamp())
+            .map_err(|_| {
+                "pane.recover requires RFC3339 started_after and started_before".to_string()
+            })
+    };
+    let (after, before) = (parse(after)?, parse(before)?);
+    if after > before {
+        return Err("pane.recover started_after must not exceed started_before".to_string());
+    }
+    Ok((after, before))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PaneRecoveryCandidate {
+    window_id: String,
+    session_id: String,
+    worktree_path: std::path::PathBuf,
+    worktree_exists: bool,
+    started_at: String,
+    child_pid: u32,
+    child_started_at: u64,
+}
+
+fn plan_pane_recovery(
+    windows: &[PersistedWindowState],
+    sessions: &[crate::session_inventory::SessionObservation],
+    after: i64,
+    before: i64,
+    caller_session_id: Option<&str>,
+) -> Vec<PaneRecoveryCandidate> {
+    let mut selected = sessions
+        .iter()
+        .filter_map(|session| {
+            if session.launch_origin != gwt_agent::SessionLaunchOrigin::AutomaticRestore
+                || session.restore_source_session_id.is_none()
+                || caller_session_id == Some(session.session_id.as_str())
+                || sessions
+                    .iter()
+                    .filter(|other| other.session_id == session.session_id)
+                    .count()
+                    != 1
+                || windows
+                    .iter()
+                    .filter(|window| window.session_id.as_deref() == Some(&session.session_id))
+                    .count()
+                    != 1
+                || chrono::DateTime::parse_from_rfc3339(&session.started_at)
+                    .ok()
+                    .map(|started| started.timestamp())
+                    .is_none_or(|started| started < after || started > before)
+            {
+                return None;
+            }
+            let window = windows.iter().find(|window| {
+                is_agent_pane(window) && window.session_id.as_deref() == Some(&session.session_id)
+            })?;
+            Some(PaneRecoveryCandidate {
+                window_id: window.id.clone(),
+                session_id: session.session_id.clone(),
+                worktree_path: session.worktree_path.clone(),
+                worktree_exists: session.worktree_exists,
+                started_at: session.started_at.clone(),
+                child_pid: session.child_pid,
+                child_started_at: session.child_started_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    selected.sort_by(|a, b| {
+        (a.worktree_exists, a.child_started_at, &a.session_id).cmp(&(
+            b.worktree_exists,
+            b.child_started_at,
+            &b.session_id,
+        ))
+    });
+    selected
+}
+
+async fn recover_panes(
+    ws_url: &str,
+    project_root: &str,
+    started_after: &str,
+    started_before: &str,
+    apply: bool,
+) -> Result<String, String> {
+    let (after, before) = parse_recovery_bounds(started_after, started_before)?;
+    let windows = request_window_list(ws_url, project_root).await?;
+    let inventory = crate::session_inventory::observe_sessions(
+        Path::new(project_root),
+        &gwt_core::paths::gwt_sessions_dir(),
+    );
+    let caller = std::env::var(GWT_SESSION_ID_ENV).ok();
+    let candidates = plan_pane_recovery(
+        &windows,
+        &inventory.sessions,
+        after,
+        before,
+        caller.as_deref(),
+    );
+    let mut results = Vec::new();
+    if apply {
+        for candidate in &candidates {
+            let result = close_restored_pane(ws_url, project_root, candidate).await;
+            results.push(match result {
+                Ok(detail) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": true, "detail": detail.trim()}),
+                Err(reason) => json!({"window_id": candidate.window_id, "session_id": candidate.session_id, "closed": false, "reason": reason}),
+            });
+        }
+    }
+    Ok(format!(
+        "{}\n",
+        json!({
+            "apply": apply, "started_after": started_after, "started_before": started_before,
+            "selected_count": candidates.len(), "candidates": candidates, "results": results,
+            "observation_complete": inventory.uncertainties.is_empty(),
+            "uncertainties": inventory.uncertainties,
+        })
+    ))
+}
+
+async fn close_restored_pane(
+    ws_url: &str,
+    project_root: &str,
+    candidate: &PaneRecoveryCandidate,
+) -> Result<String, String> {
+    let mut socket = connect_pane_websocket(ws_url).await?;
+    send_frontend_event(&mut socket, json!({"kind": "frontend_ready"})).await?;
+    let windows = next_workspace_windows(&mut socket, project_root, "pane recover").await?;
+    if !windows.iter().any(|window| {
+        window.id == candidate.window_id
+            && window.session_id.as_deref() == Some(&candidate.session_id)
+    }) {
+        return Err("pane recover: target Session changed or left the project".to_string());
+    }
+    // The backend repeats this identity/provenance check on its event loop,
+    // atomically with teardown, so a reused window ID cannot close a new launch.
+    send_frontend_event(
+        &mut socket,
+        json!({
+            "kind": "recover_restored_window", "id": candidate.window_id,
+            "session_id": candidate.session_id,
+            "child_pid": candidate.child_pid, "child_started_at": candidate.child_started_at,
+        }),
+    )
+    .await?;
+    let reply =
+        wait_for_pane_close_result(&mut socket, &candidate.window_id, BACKEND_RESPONSE_TIMEOUT)
+            .await?
+            .ok_or_else(|| "pane recover: no matching backend close result".to_string())?;
+    pane_close_verdict(&candidate.window_id, reply)
+}
+
 async fn close_pane(
     ws_url: &str,
     project_root: &str,
@@ -596,6 +1246,20 @@ async fn close_pane(
             window.id == resolved_id && window.session_id.as_deref() == Some(session_id)
         })
     });
+    // Issue #4633 AC-4: read before the close, while the pane's session and
+    // its lease are both still there to be matched.
+    let lease_note = scoped_windows
+        .iter()
+        .find(|window| window.id == resolved_id)
+        .and_then(|window| window.session_id.as_deref())
+        .and_then(|session_id| {
+            let path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));
+            gwt_agent::Session::load(&path).ok()
+        })
+        .and_then(|session| {
+            crate::cli::verification_lease::closing_pane_lease_note(&session.worktree_path)
+        })
+        .unwrap_or_default();
     let close_request_id = closes_calling_session.then(|| uuid::Uuid::new_v4().to_string());
     let close_event = match &close_request_id {
         Some(request_id) => {
@@ -612,44 +1276,31 @@ async fn close_pane(
             Duration::from_secs(2),
         )
         .await?;
-        return Ok(format!("close requested {requested_id}\n"));
+        return Ok(format!("close requested {requested_id}\n{lease_note}"));
     }
 
-    // Issue #3629 AC-12: the backend answers a peer close with an explicit
-    // `pane_close_result`. Prefer it; a backend that predates the protocol
-    // sends nothing here, so fall back to the legacy post-close readback
-    // after the bounded wait.
+    // The backend reports a peer close only after its captured process tree
+    // exits. A workspace snapshot can arrive earlier and is not exit proof.
     if let Some(reply) =
         wait_for_pane_close_result(&mut socket, &resolved_id, PANE_CLOSE_RESULT_DEADLINE).await?
     {
-        return pane_close_verdict(requested_id, reply);
+        return pane_close_verdict(requested_id, reply).map(|closed| closed + &lease_note);
     }
-    send_frontend_event(&mut socket, json!({ "kind": "frontend_ready" })).await?;
-
-    let windows = next_workspace_windows(&mut socket, project_root, "pane close").await?;
-    if resolve_window_id(&windows, &resolved_id).is_none() {
-        Ok(format!("closed {requested_id}\n"))
-    } else {
-        // Issue #3629 AC-6: report only the observed facts — the window is
-        // still listed and no close result arrived. Never guess at session
-        // correlation on behalf of the backend.
-        Err(format!(
-            "pane close: backend did not remove {requested_id} and sent no close result; \
-             the backend may predate the close-result protocol, be saturated, or have \
-             refused the request"
-        ))
-    }
+    Err(format!(
+        "pane close: process-tree exit of {requested_id} was not confirmed by the backend; \
+         the close may still be pending"
+    ))
 }
 
 struct PaneCloseReply {
     ok: bool,
     reason: Option<String>,
+    husk_removed: bool,
 }
 
 /// Wait up to `deadline_after` for the `pane_close_result` frame that matches
 /// `window_id`, skipping unrelated broadcasts. `Ok(None)` means the deadline
-/// elapsed without a result (a pre-protocol backend); socket failures stay
-/// hard errors.
+/// elapsed without process-exit confirmation; socket failures stay hard errors.
 async fn wait_for_pane_close_result(
     socket: &mut PaneWebSocket,
     window_id: &str,
@@ -667,11 +1318,13 @@ async fn wait_for_pane_close_result(
             Ok(Err(error)) => return Err(error),
             Ok(Ok(value)) => value,
         };
-        if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+        let result_kind = value.get("kind").and_then(Value::as_str);
+        if matches!(result_kind, Some("pane_close_result" | "pane_husk_removed"))
             && value.get("window_id").and_then(Value::as_str) == Some(window_id)
         {
             return Ok(Some(PaneCloseReply {
                 ok: value.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                husk_removed: result_kind == Some("pane_husk_removed"),
                 reason: value
                     .get("reason")
                     .and_then(Value::as_str)
@@ -682,6 +1335,11 @@ async fn wait_for_pane_close_result(
 }
 
 fn pane_close_verdict(requested_id: &str, reply: PaneCloseReply) -> Result<String, String> {
+    if reply.husk_removed {
+        return Ok(format!(
+            "removed stopped pane view {requested_id} (process-tree exit unconfirmed)\n"
+        ));
+    }
     if reply.ok {
         return Ok(format!("closed {requested_id}\n"));
     }
@@ -692,11 +1350,19 @@ fn pane_close_verdict(requested_id: &str, reply: PaneCloseReply) -> Result<Strin
 }
 
 async fn connect_pane_websocket(ws_url: &str) -> Result<PaneWebSocket, String> {
-    let request = pane_websocket_request(ws_url)?;
+    connect_pane_websocket_typed(ws_url)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn connect_pane_websocket_typed(ws_url: &str) -> Result<PaneWebSocket, PaneRequestError> {
+    let request = pane_websocket_request(ws_url).map_err(PaneRequestError::Operation)?;
     connect_async(request)
         .await
         .map(|(socket, _)| socket)
-        .map_err(|err| pane_connect_error(ws_url, &err))
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(pane_connect_error(ws_url, &err), &err)
+        })
 }
 
 /// Issue #3667 AC-5: name the two very different conditions behind a failed
@@ -724,7 +1390,7 @@ fn pane_socket_closed_error(frame: Option<&CloseFrame>) -> String {
     match frame {
         Some(frame) if frame.reason == "execution binding is no longer current" => format!(
             "pane operation was refused by the gwt instance: {} — this session's execution \
-             is settled, so pane mutation (close/send) is refused while pane observation \
+             is settled, so pane mutation (close/send/name) is refused while pane observation \
              (list/read) remains available",
             frame.reason
         ),
@@ -768,10 +1434,24 @@ fn pane_websocket_request(
 }
 
 async fn send_frontend_event(socket: &mut PaneWebSocket, payload: Value) -> Result<(), String> {
+    send_frontend_event_typed(socket, payload)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn send_frontend_event_typed(
+    socket: &mut PaneWebSocket,
+    payload: Value,
+) -> Result<(), PaneRequestError> {
     socket
         .send(Message::Text(payload.to_string().into()))
         .await
-        .map_err(|err| format!("pane websocket send failed: {err}"))
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(
+                format!("pane websocket send failed: {err}"),
+                &err,
+            )
+        })
 }
 
 async fn next_backend_json(socket: &mut PaneWebSocket) -> Result<Value, String> {
@@ -788,21 +1468,49 @@ async fn next_backend_json_with_timeout(
 }
 
 async fn next_backend_json_unbounded(socket: &mut PaneWebSocket) -> Result<Value, String> {
+    next_backend_json_unbounded_typed(socket)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn next_backend_json_unbounded_typed(
+    socket: &mut PaneWebSocket,
+) -> Result<Value, PaneRequestError> {
     let message = socket
         .next()
         .await
-        .ok_or_else(|| "pane websocket closed before backend response".to_string())?
-        .map_err(|err| format!("pane websocket receive failed: {err}"))?;
+        .ok_or_else(|| {
+            PaneRequestError::Network("pane websocket closed before backend response".to_string())
+        })?
+        .map_err(|err| {
+            PaneRequestError::from_websocket_error(
+                format!("pane websocket receive failed: {err}"),
+                &err,
+            )
+        })?;
 
     match message {
-        Message::Text(text) => serde_json::from_str(text.as_ref())
-            .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
-        Message::Binary(bytes) => serde_json::from_slice(&bytes)
-            .map_err(|err| format!("pane backend returned invalid JSON: {err}")),
-        Message::Close(frame) => Err(pane_socket_closed_error(frame.as_ref())),
-        other => Err(format!(
+        Message::Text(text) => serde_json::from_str(text.as_ref()).map_err(|err| {
+            PaneRequestError::Operation(format!("pane backend returned invalid JSON: {err}"))
+        }),
+        Message::Binary(bytes) => serde_json::from_slice(&bytes).map_err(|err| {
+            PaneRequestError::Operation(format!("pane backend returned invalid JSON: {err}"))
+        }),
+        Message::Close(frame) => {
+            let message = pane_socket_closed_error(frame.as_ref());
+            Err(
+                if frame.as_ref().is_some_and(|frame| {
+                    frame.code == CloseCode::Policy && !frame.reason.is_empty()
+                }) {
+                    PaneRequestError::Operation(message)
+                } else {
+                    PaneRequestError::Network(message)
+                },
+            )
+        }
+        other => Err(PaneRequestError::Operation(format!(
             "pane backend returned unsupported websocket message: {other:?}"
-        )),
+        ))),
     }
 }
 
@@ -862,7 +1570,7 @@ async fn next_workspace_windows_with_timeout(
             Err(_) => return Err(pane_backend_silence(context, received, response_timeout)),
         };
         received += 1;
-        if let Some(windows) = parse_workspace_windows(&value, project_root) {
+        if let Some(windows) = parse_workspace_windows(&value, project_root)? {
             return Ok(windows);
         }
     }
@@ -881,9 +1589,10 @@ fn pane_backend_silence(context: &str, received: usize, budget: Duration) -> Str
         format!(
             "{context}: pane_backend_unresponsive — connected to the gwt instance behind this pane \
              WebSocket, but it sent nothing within {budget}. Pane replies come from the GUI event \
-             loop, so a single long dispatch holds them; check the gwt log for \
-             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time. Nothing \
-             was changed; retry after the stall clears."
+             loop, so a single long dispatch holds them. This may be a temporary GUI stall; \
+             replies resume when the dispatch finishes. Nothing was changed. Wait 2.5 seconds \
+             and retry; if the silence persists, check the gwt log for \
+             `gwt.frontend.timing` \"blocked the GUI event loop\" warnings at this time."
         )
     } else {
         format!(
@@ -1011,6 +1720,16 @@ fn parse_pane_close_acceptance(
     expected_request_id: &str,
     expected_window_id: &str,
 ) -> Result<bool, String> {
+    if value.get("kind").and_then(Value::as_str) == Some("pane_close_result")
+        && value.get("window_id").and_then(Value::as_str) == Some(expected_window_id)
+        && value.get("ok").and_then(Value::as_bool) == Some(false)
+    {
+        return Err(value
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("backend refused the correlated self-close")
+            .to_string());
+    }
     if value.get("kind").and_then(Value::as_str) != Some("pane_close_accepted") {
         return Ok(false);
     }
@@ -1257,7 +1976,10 @@ fn project_root_for_pane(default: &Path) -> String {
         .unwrap_or_else(|| default.to_string_lossy().into_owned())
 }
 
-fn parse_workspace_windows(value: &Value, project_root: &str) -> Option<Vec<PersistedWindowState>> {
+fn parse_workspace_windows(
+    value: &Value,
+    project_root: &str,
+) -> Result<Option<Vec<PersistedWindowState>>, String> {
     parse_workspace_windows_scoped(value, project_root, |root| {
         gwt_core::paths::project_scope_hash(Path::new(root))
             .as_str()
@@ -1299,41 +2021,38 @@ fn parse_workspace_windows_scoped(
     value: &Value,
     project_root: &str,
     scope_key: impl Fn(&str) -> String,
-) -> Option<Vec<PersistedWindowState>> {
-    if value.get("kind")?.as_str()? != "workspace_state" {
-        return None;
+) -> Result<Option<Vec<PersistedWindowState>>, String> {
+    if value.get("kind").and_then(Value::as_str) != Some("workspace_state") {
+        return Ok(None);
     }
-    let tabs = value.get("workspace")?.get("tabs")?.as_array()?;
-    let mut matching_windows = Vec::new();
-    let mut fallback_windows = Vec::new();
-    let mut matched_project = false;
-    for tab in tabs {
-        let Some(tab_windows) = tab
+    let tabs = value
+        .get("workspace")
+        .and_then(|workspace| workspace.get("tabs"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "invalid pane inventory: workspace_state missing tabs".to_string())?;
+    let owns_caller = |tab: &&Value| {
+        tab.get("project_root")
+            .and_then(Value::as_str)
+            .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key))
+    };
+    let matching_tabs: Vec<_> = tabs.iter().filter(owns_caller).collect();
+    let selected_tabs: Vec<_> = if matching_tabs.is_empty() {
+        tabs.iter().collect()
+    } else {
+        matching_tabs
+    };
+    let mut windows = Vec::new();
+    for tab in selected_tabs {
+        let tab_windows = tab
             .get("workspace")
             .and_then(|workspace| workspace.get("windows"))
-        else {
-            continue;
-        };
-        if let Ok(mut parsed) =
+            .ok_or_else(|| "invalid pane inventory: tab missing windows".to_string())?;
+        windows.extend(
             parse_wire_windows(tab_windows, tab.get("project_root").and_then(Value::as_str))
-        {
-            let owns_caller = tab
-                .get("project_root")
-                .and_then(Value::as_str)
-                .is_some_and(|root| tab_owns_caller(root, project_root, &scope_key));
-            if owns_caller {
-                matched_project = true;
-                matching_windows.append(&mut parsed);
-            } else {
-                fallback_windows.append(&mut parsed);
-            }
-        }
+                .map_err(|error| format!("invalid pane inventory: {error}"))?,
+        );
     }
-    if matched_project {
-        Some(matching_windows)
-    } else {
-        Some(fallback_windows)
-    }
+    Ok(Some(windows))
 }
 
 fn parse_terminal_snapshot(value: &Value) -> Result<Option<(String, String)>, String> {
@@ -1452,28 +2171,72 @@ fn parse_wire_windows(
 }
 
 pub(crate) fn render_pane_list(windows: &[PersistedWindowState]) -> String {
+    render_pane_list_with_sessions(windows, &gwt_core::paths::gwt_sessions_dir())
+}
+
+fn render_pane_list_with_sessions(windows: &[PersistedWindowState], sessions_dir: &Path) -> String {
     let panes = windows.iter().filter(|window| is_agent_pane(window));
     let mut out = String::new();
     for window in panes {
+        let current_title = window
+            .dynamic_title
+            .as_deref()
+            .or(window.purpose_title.as_deref())
+            .unwrap_or(&window.title);
+        let assigned_name = window.agent_name.as_deref().filter(|_| !window.is_pm);
+        let title = assigned_name.map_or_else(
+            || current_title.to_string(),
+            |name| {
+                if current_title.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} — {current_title}")
+                }
+            },
+        );
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\trole={}\n",
+            "{}\t{}\t{}\t{}",
             window.id,
             status_label(window.status),
             window
                 .agent_id
                 .as_deref()
                 .unwrap_or_else(|| preset_label(window.preset)),
-            window
-                .dynamic_title
-                .as_deref()
-                .or(window.purpose_title.as_deref())
-                .unwrap_or(&window.title),
-            if window.is_pm {
-                "pm"
-            } else {
-                "implementation_agent"
-            }
+            title
         ));
+        let mut review_dispatch = false;
+        if let Some(session) = window.session_id.as_deref().and_then(|id| {
+            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
+                .ok()
+                .filter(|session| session.id == id)
+        }) {
+            review_dispatch = session.review_dispatch;
+            let origin = serde_json::to_value(session.launch_origin)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            out.push_str(&format!(
+                "\torigin={origin}\tsession_created_at={}\tworktree={}\tsource_session={}",
+                session.created_at.to_rfc3339(),
+                session.worktree_path.display(),
+                session
+                    .restore_source_session_id
+                    .as_deref()
+                    .unwrap_or("none")
+            ));
+        } else {
+            out.push_str("\torigin=unknown");
+        }
+        if let Some(name) = assigned_name {
+            out.push_str(&format!("\tagent_name={name}"));
+        }
+        out.push_str(if window.is_pm {
+            "\trole=pm\n"
+        } else if review_dispatch {
+            "\trole=review_agent\n"
+        } else {
+            "\trole=implementation_agent\n"
+        });
     }
     if out.is_empty() {
         out.push_str("no active agent panes\n");
@@ -1550,6 +2313,7 @@ fn status_label(status: WindowState) -> &'static str {
         WindowState::Waiting => "waiting",
         WindowState::Stopped => "stopped",
         WindowState::Error => "error",
+        WindowState::Interrupted => "interrupted",
     }
 }
 
@@ -1569,7 +2333,6 @@ fn config_error(message: String) -> SpecOpsError {
 #[cfg(test)]
 mod tests {
     use crate::cli::TestEnv;
-    use crate::persistence::WindowGeometry;
     use gwt_core::test_support::ScopedEnvVar;
 
     use super::*;
@@ -1593,27 +2356,203 @@ mod tests {
             dynamic_title: None,
             dynamic_title_detail: None,
             preset,
-            geometry: WindowGeometry {
-                x: 0.0,
-                y: 0.0,
-                width: 100.0,
-                height: 100.0,
-            },
-            geometry_revision: 0,
             z_index: 1,
             status: WindowState::Running,
-            placement: WindowPlacement::Canvas,
+            placement: WindowPlacement::Surface,
             persist: true,
             agent_id: agent_id.map(str::to_string),
+            agent_name: None,
             agent_color: None,
             worktree_form: WindowWorktreeForm::Unknown,
-            tab_group_id: None,
-            tab_group_active: false,
             session_id: None,
             linked_issue_number: None,
             runtime_started_at_ms: None,
+            surface_owner: None,
             is_pm: false,
         }
+    }
+
+    #[test]
+    fn pane_health_reads_ten_panes_without_gui_or_mutating_records() {
+        assert!(
+            super::super::hook::workflow_policy::is_read_only_json_envelope_operation(
+                "pane.health"
+            )
+        );
+        assert!(super::super::operation_catalog::names().any(|name| name == "pane.health"));
+        use gwt_core::test_support::ScopedGwtHome;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let _root = ScopedEnvVar::set(PROJECT_ROOT_ENV, &project);
+        let _ws = ScopedEnvVar::set(GWT_PANE_WS_URL_ENV, "ws://127.0.0.1:1/internal/pane-ws");
+        let mut workspace = crate::persistence::empty_workspace_state();
+        for i in 0..10 {
+            let mut pane = window(&format!("agent-{i}"), WindowPreset::Codex, Some("codex"));
+            pane.status = WindowState::Error;
+            workspace.windows.push(pane);
+        }
+        let path = crate::persistence::workspace_state_path(&project);
+        crate::persistence::save_workspace_state(&path, &workspace).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // No GUI is listening: a successful result must not use pane.list/read.
+        let mut env = TestEnv::new(project.clone());
+        let command =
+            super::super::json_envelope::parse_operation("pane.health", &json!({})).unwrap();
+        let (_, output) = super::super::run_collect(&mut env, command).unwrap();
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["panes"].as_array().unwrap().len(), 10);
+        for pane in result["panes"].as_array().unwrap() {
+            assert_eq!(pane["classification"], "blocked");
+            assert_eq!(pane["reason_code"], "observation_unavailable");
+            assert_eq!(pane["recommended_action"], "none");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let command =
+            super::super::json_envelope::parse_operation("pane.health", &json!({"id":"agent-3"}))
+                .unwrap();
+        let (_, output) = super::super::run_collect(&mut env, command).unwrap();
+        let result: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(result["panes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["panes"][0]["id"], "agent-3");
+    }
+
+    #[test]
+    fn pane_health_live_child_overrides_idle_and_stale_activity() {
+        use gwt_agent::{AgentId, AgentStatus, Session, SessionRuntimeState};
+        use gwt_core::test_support::ScopedGwtHome;
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let _root = ScopedEnvVar::set(PROJECT_ROOT_ENV, &project);
+        let mut session = Session::new(&project, "work/health", AgentId::Codex);
+        session.status = AgentStatus::Idle;
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        session.save(&sessions).unwrap();
+        let pid = std::process::id();
+        let started = crate::process::host_process_start_time(pid).unwrap();
+        let runtime_path =
+            gwt_agent::session::runtime_state_path_for_pid(&sessions, pid, &session.id);
+        let mut runtime = SessionRuntimeState::new(AgentStatus::Idle);
+        runtime.host_started_at = Some(started);
+        runtime.child_pid = Some(pid);
+        runtime.child_started_at = Some(started);
+        runtime.last_activity_at = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        runtime.save(&runtime_path).unwrap();
+        let mut workspace = crate::persistence::empty_workspace_state();
+        let mut pane = window("agent-health", WindowPreset::Codex, Some("codex"));
+        pane.session_id = Some(session.id.clone());
+        pane.status = WindowState::Idle;
+        workspace.windows.push(pane);
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&project),
+            &workspace,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        let mut command = gwt_core::process::hidden_command("sleep");
+        #[cfg(unix)]
+        command.arg("60");
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+
+            let mut command = gwt_core::process::hidden_command("cmd");
+            command.args(["/C", "set /p health="]);
+            // Later assertions need a leaf; a hidden console would own conhost.
+            command.creation_flags(windows::Win32::System::Threading::DETACHED_PROCESS.0);
+            command
+        };
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = OwnedChild(
+            command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut env = TestEnv::new(project.clone());
+        let run = |env: &mut TestEnv| {
+            let cmd =
+                super::super::json_envelope::parse_operation("pane.health", &json!({})).unwrap();
+            let (_, output) = super::super::run_collect(env, cmd).unwrap();
+            serde_json::from_str::<Value>(&output).unwrap()
+        };
+        let before = std::fs::read(&runtime_path).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["classification"], "healthy");
+        assert_eq!(result["panes"][0]["recommended_action"], "none");
+        assert!(result["panes"][0]["processes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["pid"] == child.0.id()));
+        assert_eq!(std::fs::read(&runtime_path).unwrap(), before);
+        // A newer composed Waiting state must survive an older Running hook.
+        runtime.child_pid = Some(child.0.id());
+        runtime.child_started_at = crate::process::host_process_start_time(child.0.id());
+        runtime.status = AgentStatus::Running;
+        runtime.source_event = Some("untrusted /private/token-123 --key=secret".into());
+        runtime.save(&runtime_path).unwrap();
+        workspace.windows[0].status = WindowState::Waiting;
+        let workspace_path = crate::persistence::workspace_state_path(&project);
+        crate::persistence::save_workspace_state(&workspace_path, &workspace).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["classification"], "waiting_for_human");
+        assert_eq!(result["panes"][0]["prompt_kind"], "human_input");
+        assert!(!result.to_string().contains("token-123"));
+        runtime.status = AgentStatus::Idle;
+        runtime.save(&runtime_path).unwrap();
+        session.last_exit_signal = Some("SIGTERM".into());
+        session.save(&sessions).unwrap();
+        workspace.windows[0].status = WindowState::Idle;
+        crate::persistence::save_workspace_state(&workspace_path, &workspace).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["classification"], "settled_idle");
+        // Directory trust already has a durable, window-scoped receipt.
+        runtime.status = AgentStatus::Running;
+        runtime.save(&runtime_path).unwrap();
+        workspace.windows[0].status = WindowState::Running;
+        crate::persistence::save_workspace_state(&workspace_path, &workspace).unwrap();
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.failed_issues.push(crate::IssueMonitorFailedIssue {
+            issue_number: 3834,
+            window_id: Some("agent-health".into()),
+            message: "Codex requires directory trust confirmation for the managed worktree".into(),
+        });
+        let prefs_path = crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(&project);
+        std::fs::create_dir_all(prefs_path.parent().unwrap()).unwrap();
+        std::fs::write(&prefs_path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["classification"], "waiting_for_human");
+        assert_eq!(result["panes"][0]["prompt_kind"], "directory_trust");
+        assert_eq!(result["panes"][0]["recommended_action"], "report_to_human");
+        runtime.child_started_at = runtime.child_started_at.map(|value| value + 1);
+        runtime.save(&runtime_path).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["reason_code"], "observation_unavailable");
+        assert_eq!(result["panes"][0]["recommended_action"], "none");
+        runtime.child_pid = Some(u32::MAX);
+        runtime.save(&runtime_path).unwrap();
+        let result = run(&mut env);
+        assert_eq!(result["panes"][0]["reason_code"], "observation_unavailable");
+        assert_eq!(result["panes"][0]["recommended_action"], "none");
     }
 
     #[test]
@@ -1640,6 +2579,123 @@ mod tests {
                 id: "agent-1".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn recovery_plan_selects_only_the_restore_burst_and_prioritizes_missing_worktrees() {
+        use crate::session_inventory::SessionObservation;
+        use gwt_agent::SessionLaunchOrigin;
+        let after = chrono::DateTime::parse_from_rfc3339("2026-09-14T05:00:00Z").unwrap();
+        let mut windows = Vec::new();
+        let sessions = [
+            ("restored", SessionLaunchOrigin::AutomaticRestore, true, 10),
+            ("missing", SessionLaunchOrigin::AutomaticRestore, false, 20),
+            ("launch", SessionLaunchOrigin::Launch, true, 10),
+            ("restart", SessionLaunchOrigin::UserRestart, true, 10),
+            ("legacy", SessionLaunchOrigin::Unknown, false, 10),
+            ("outside", SessionLaunchOrigin::AutomaticRestore, true, 61),
+            ("self", SessionLaunchOrigin::AutomaticRestore, true, 10),
+        ]
+        .into_iter()
+        .map(|(id, origin, exists, offset)| {
+            let mut pane = window(id, WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some(id.to_string());
+            windows.push(pane);
+            SessionObservation {
+                session_id: id.to_string(),
+                issue_number: Some(4305),
+                execution_binding_missing: false,
+                agent_id: "codex".to_string(),
+                worktree_path: "/repo/work/issue-4305".into(),
+                worktree_exists: exists,
+                host_pid: 1,
+                child_pid: 2,
+                child_started_at: (after.timestamp() + offset) as u64,
+                started_at: (after + chrono::Duration::seconds(offset)).to_rfc3339(),
+                launch_origin: origin,
+                launch_entrypoint: None,
+                restore_source_session_id: Some("source".to_string()),
+            }
+        })
+        .collect::<Vec<_>>();
+        let plan = plan_pane_recovery(
+            &windows,
+            &sessions,
+            after.timestamp(),
+            after.timestamp() + 60,
+            Some("self"),
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["missing", "restored"]
+        );
+        windows[0].session_id = Some("replacement-launch".to_string());
+        assert_eq!(
+            plan_pane_recovery(
+                &windows,
+                &sessions,
+                after.timestamp(),
+                after.timestamp() + 60,
+                Some("self")
+            )
+            .len(),
+            1
+        );
+        assert!(parse_recovery_bounds("invalid", "2026-09-14T05:00:00Z").is_err());
+        assert!(parse_recovery_bounds("2026-09-14T06:00:00Z", "2026-09-14T05:00:00Z").is_err());
+    }
+
+    #[test]
+    fn pane_list_exposes_persisted_restore_origin() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            gwt_agent::Session::new(temp.path(), "work/issue-4305", gwt_agent::AgentId::Codex);
+        session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+        session.restore_source_session_id = Some("source-session".to_string());
+        session.save(temp.path()).unwrap();
+        let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+        pane.session_id = Some(session.id);
+        let text = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(text.contains("origin=automatic_restore"), "{text}");
+        assert!(text.contains("source_session=source-session"), "{text}");
+        assert!(text.contains("session_created_at="), "{text}");
+    }
+
+    #[test]
+    fn recovery_close_sends_exact_process_identity_and_reports_backend_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "test-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut pane = window("restored", WindowPreset::Agent, Some("codex"));
+            pane.session_id = Some("restored-session".to_string());
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                socket.send(Message::Text(workspace_state_for_test("/repo/test", vec![pane]).to_string().into())).await.unwrap();
+                let request = next_frontend_json(&mut socket).await;
+                assert_eq!(request, json!({"kind":"recover_restored_window", "id":"restored", "session_id":"restored-session", "child_pid":123, "child_started_at":456}));
+                socket.send(Message::Text(json!({"kind":"pane_close_result", "window_id":"restored", "ok":false, "reason":"process identity changed"}).to_string().into())).await.unwrap();
+            });
+            let candidate = PaneRecoveryCandidate {
+                window_id: "restored".to_string(), session_id: "restored-session".to_string(),
+                worktree_path: "/repo/test".into(), worktree_exists: true,
+                started_at: "1970-01-01T00:07:36Z".to_string(), child_pid: 123, child_started_at: 456,
+            };
+            let error = close_restored_pane(&format!("ws://{address}/internal/pane-ws"), "/repo/test", &candidate).await.unwrap_err();
+            assert!(error.contains("process identity changed"), "{error}");
+            server.await.unwrap();
+        });
     }
 
     #[test]
@@ -1810,6 +2866,28 @@ mod tests {
         );
         assert!(unreachable.contains("connect failed"), "{unreachable}");
         assert!(!unreachable.contains("settled"), "{unreachable}");
+
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(settled, &http_409),
+            PaneRequestError::Operation(_)
+        ));
+        let http_503 = WebSocketError::Http(Box::new(
+            tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(503)
+                .body(None)
+                .expect("HTTP response"),
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error("Host unavailable".into(), &http_503),
+            PaneRequestError::Network(_)
+        ));
+        assert!(matches!(
+            PaneRequestError::from_websocket_error(
+                "Host disconnected".into(),
+                &WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake)
+            ),
+            PaneRequestError::Network(_)
+        ));
     }
 
     /// Issue #3667 AC-3: the mutation refusal for a settled session must reach
@@ -2086,6 +3164,25 @@ mod tests {
     }
 
     #[test]
+    fn pane_name_list_exposes_assigned_name_before_current_purpose() {
+        let mut pane = window("tab::agent", WindowPreset::Codex, Some("codex"));
+        pane.purpose_title = Some("Resolve queue delay".to_string());
+        pane.dynamic_title = Some("Investigating lease contention".to_string());
+        let mut raw = serde_json::to_value(pane).unwrap();
+        raw["agent_name"] = json!("Aster");
+        let pane: PersistedWindowState = serde_json::from_value(raw).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let output = render_pane_list_with_sessions(&[pane], temp.path());
+        assert!(
+            output.starts_with(
+                "tab::agent\trunning\tcodex\tAster — Investigating lease contention\t"
+            ),
+            "{output}"
+        );
+        assert!(output.contains("\tagent_name=Aster\t"), "{output}");
+    }
+
+    #[test]
     fn pm_pane_list_preserves_wire_role_without_persisting_it() {
         let mut pm = window("tab::pm", WindowPreset::Codex, Some("codex"));
         pm.is_pm = true;
@@ -2098,7 +3195,7 @@ mod tests {
             "disk restoration must not trust a stored role"
         );
 
-        let windows = parse_workspace_windows(&value, "/repo").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo").unwrap().unwrap();
         assert!(
             windows[0].is_pm,
             "the wire PM role must survive CLI parsing"
@@ -2111,6 +3208,18 @@ mod tests {
             "{}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn review_pane_list_uses_durable_session_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = gwt_agent::Session::new(temp.path(), "review", gwt_agent::AgentId::Codex);
+        session.review_dispatch = true;
+        session.save(temp.path()).unwrap();
+        let mut review = window("tab::review", WindowPreset::Codex, Some("codex"));
+        review.session_id = Some(session.id);
+        let rows = render_pane_list_with_sessions(&[review], temp.path());
+        assert!(rows.trim_end().ends_with("\trole=review_agent"), "{rows}");
     }
 
     #[test]
@@ -2132,7 +3241,9 @@ mod tests {
             "the GUI marker identifies only the resident registration"
         );
         let value = workspace_state_for_test(repo.to_str().unwrap(), vec![pm]);
-        let windows = parse_workspace_windows(&value, repo.to_str().unwrap()).unwrap();
+        let windows = parse_workspace_windows(&value, repo.to_str().unwrap())
+            .unwrap()
+            .unwrap();
         assert!(render_pane_list(&windows).trim_end().ends_with("role=pm"));
     }
 
@@ -2159,6 +3270,29 @@ mod tests {
         let rendered = render_pane_list(&windows);
 
         assert!(rendered.contains("tab-1::codex-1\tstarting\tcodex"));
+    }
+
+    #[test]
+    fn render_pane_list_keeps_error_panes_in_mixed_state_inventory() {
+        let windows = [
+            ("running", WindowState::Running),
+            ("idle", WindowState::Idle),
+            ("stopped", WindowState::Stopped),
+            ("error", WindowState::Error),
+        ]
+        .into_iter()
+        .map(|(id, state)| {
+            let mut pane = window(id, WindowPreset::Codex, Some("codex"));
+            pane.status = state;
+            pane
+        })
+        .collect::<Vec<_>>();
+        let temp = tempfile::tempdir().unwrap();
+        let rendered = render_pane_list_with_sessions(&windows, temp.path());
+        assert_eq!(rendered.lines().count(), 4);
+        for state in ["running", "idle", "stopped", "error"] {
+            assert!(rendered.contains(&format!("{state}\t{state}\tcodex\t")));
+        }
     }
 
     #[test]
@@ -2231,7 +3365,9 @@ mod tests {
             },
         });
 
-        let windows = parse_workspace_windows(&value, "/repo/two").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo/two")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].id, "two::agent-1");
@@ -2257,7 +3393,9 @@ mod tests {
             },
         });
 
-        let windows = parse_workspace_windows(&value, "/repo/empty").unwrap();
+        let windows = parse_workspace_windows(&value, "/repo/empty")
+            .unwrap()
+            .unwrap();
 
         assert!(windows.is_empty());
     }
@@ -2279,8 +3417,9 @@ mod tests {
         let value = two_project_workspace_state();
 
         // gwt materializes work/intake worktrees inside the project container.
-        let windows =
-            parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key).unwrap();
+        let windows = parse_workspace_windows_scoped(&value, "/repo/two/work/issue-1", scope_key)
+            .unwrap()
+            .unwrap();
         assert_eq!(windows.len(), 1, "only the owning project's windows");
         assert_eq!(windows[0].id, "two::agent-1");
 
@@ -2289,6 +3428,7 @@ mod tests {
             crate::pm_registry::pm_worktree_path_for_repo_path(Path::new("/repo/two"));
         let windows =
             parse_workspace_windows_scoped(&value, &pm_worktree.to_string_lossy(), scope_key)
+                .unwrap()
                 .unwrap();
         assert_eq!(windows.len(), 1, "the PM sees only its own project");
         assert_eq!(windows[0].id, "two::agent-1");
@@ -2308,6 +3448,7 @@ mod tests {
             "/elsewhere/wt",
             scope_key,
         )
+        .unwrap()
         .unwrap();
 
         assert_eq!(windows.len(), 1);
@@ -2755,6 +3896,18 @@ mod tests {
     async fn spawn_window_list_mock(
         project_root: &'static str,
     ) -> (String, tokio::task::JoinHandle<String>) {
+        spawn_window_list_response(workspace_state_for_test(
+            project_root,
+            vec![window(
+                "tab-project::agent-project",
+                WindowPreset::Agent,
+                Some("codex"),
+            )],
+        ))
+        .await
+    }
+
+    async fn spawn_window_list_response(state: Value) -> (String, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind pane list mock");
@@ -2768,14 +3921,6 @@ mod tests {
                 .await
                 .expect("accept pane list websocket");
             let request_kind = next_frontend_kind(&mut socket).await;
-            let state = workspace_state_for_test(
-                project_root,
-                vec![window(
-                    "tab-project::agent-project",
-                    WindowPreset::Agent,
-                    Some("codex"),
-                )],
-            );
             socket
                 .send(Message::Text(state.to_string().into()))
                 .await
@@ -2784,6 +3929,40 @@ mod tests {
         });
 
         (format!("ws://{address}/internal/pane-ws"), server)
+    }
+
+    #[test]
+    fn issue_4193_pane_list_rejects_invalid_inventory_and_accepts_empty() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pane-list-token");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("pane test runtime");
+        runtime.block_on(async {
+            let mut invalid = workspace_state_for_test(
+                "/repo/project",
+                vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+            );
+            invalid["workspace"]["tabs"][0]["workspace"]["windows"][0]["status"] =
+                json!("future_state");
+            let (url, server) = spawn_window_list_response(invalid).await;
+            let error = request_window_list(&url, "/repo/project")
+                .await
+                .expect_err("an unreadable inventory must not become an empty pane list");
+            assert!(error.contains("invalid pane inventory"), "{error}");
+            server.await.expect("pane mock");
+
+            let (url, server) =
+                spawn_window_list_response(workspace_state_for_test("/repo/project", vec![])).await;
+            assert!(request_window_list(&url, "/repo/project")
+                .await
+                .unwrap()
+                .is_empty());
+            server.await.expect("empty pane mock");
+        });
     }
 
     #[test]
@@ -2816,7 +3995,7 @@ mod tests {
     }
 
     #[test]
-    fn request_window_list_identifies_backend_response_timeout() {
+    fn request_window_list_recovers_on_retry_after_backend_stall() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2844,8 +4023,24 @@ mod tests {
                     .await
                     .expect("accept pane list websocket");
                 assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
-                let _socket = socket;
-                let _ = release_rx.await;
+                // Model a dispatch holding replies beyond both response budgets.
+                release_rx.await.expect("wait for the stall to clear");
+                drop(socket);
+
+                // The same backend answers a new request once the dispatch ends.
+                let (stream, _) = listener.accept().await.expect("accept pane list retry");
+                let mut socket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept retry websocket");
+                assert_eq!(next_frontend_kind(&mut socket).await, "list_windows");
+                let state = workspace_state_for_test(
+                    "/repo/project",
+                    vec![window("tab::agent", WindowPreset::Agent, Some("codex"))],
+                );
+                socket
+                    .send(Message::Text(state.to_string().into()))
+                    .await
+                    .expect("send recovered pane list");
             });
 
             let error = request_window_list_with_timeout(
@@ -2856,7 +4051,15 @@ mod tests {
             .await
             .expect_err("pane list response must time out");
             release_tx.send(()).expect("release pane list mock");
+            let windows =
+                request_window_list(&format!("ws://{address}/internal/pane-ws"), "/repo/project")
+                    .await
+                    .expect(
+                        "retry must succeed after the stall clears without restarting the backend",
+                    );
             server.await.expect("pane list mock task");
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].id, "tab::agent");
 
             // Issue #3606 AC-3: a silent backend is named, not reported as a
             // bare give-up. #3510 raised the budget so a stalled instance still
@@ -3168,23 +4371,28 @@ mod tests {
                             .to_string(),
                     );
                     if let Some(windows) = post_close_windows.as_ref() {
-                        // Issue #3629: the CLI now waits out the bounded
-                        // close-result deadline before the legacy readback,
-                        // so give the follow-up frontend_ready extra room.
-                        received_kinds.push(
-                            tokio::time::timeout(
-                                Duration::from_secs(5),
-                                next_frontend_kind(&mut socket),
-                            )
-                            .await
-                            .expect("post-close frontend_ready timeout"),
-                        );
                         let post_close_state =
                             workspace_state_for_test(project_root, windows.clone());
                         socket
                             .send(Message::Text(post_close_state.to_string().into()))
                             .await
                             .expect("send post-close workspace state");
+                        // A removed window is observable while process teardown is
+                        // still pending; only an explicit result can confirm exit.
+                        // test-hygiene: allow-wall-clock-deadline Keep the mock socket alive until the real CLI confirmation deadline, without asserting elapsed time.
+                        if let Ok(Some(Ok(Message::Text(text)))) = tokio::time::timeout(
+                            PANE_CLOSE_RESULT_DEADLINE + Duration::from_secs(2),
+                            socket.next(),
+                        )
+                        .await
+                        {
+                            let value: Value = serde_json::from_str(text.as_ref()).unwrap();
+                            received_kinds.push(value["kind"].as_str().unwrap().to_string());
+                            socket
+                                .send(Message::Text(post_close_state.to_string().into()))
+                                .await
+                                .unwrap();
+                        }
                     } else {
                         let request_id = close["request_id"]
                             .as_str()
@@ -3242,6 +4450,7 @@ mod tests {
         target: PersistedWindowState,
         ok: bool,
         reason: Option<&'static str>,
+        result_kind: &'static str,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let initial_state = workspace_state_for_test(project_root, vec![target]);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3271,7 +4480,7 @@ mod tests {
                             .to_string(),
                     );
                     let result = json!({
-                        "kind": "pane_close_result",
+                        "kind": result_kind,
                         "ok": ok,
                         "window_id": close["id"],
                         "reason": reason,
@@ -3291,6 +4500,147 @@ mod tests {
     /// Issue #3629 AC-12: a backend that answers with `pane_close_result`
     /// settles the close without any workspace readback round.
     #[test]
+    fn workspace_close_waits_for_the_exact_host_result_and_propagates_refusal() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token =
+            ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-close-capability");
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "pm-session");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for (ok, changed) in [(false, json!(false)), (true, json!("unknown")), (true, json!(false))] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let request = next_frontend_json(&mut socket).await;
+                    assert_eq!(request, json!({"kind":"close_work","work_id":"work-1","close_kind":"discarded"}));
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"other","close_kind":"discarded","ok":true}).to_string().into())).await.unwrap();
+                    socket.send(Message::Text(json!({"kind":"work_close_result","work_id":"work-1","close_kind":"discarded","ok":ok,"changed":changed,"retryable":!ok,"error":if ok {None} else {Some("refresh and retry")} }).to_string().into())).await.unwrap();
+                }
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                next_frontend_json(&mut socket).await;
+                socket.send(Message::Text("invalid JSON".into())).await.unwrap();
+                for frame in [None, Some(CloseFrame { code: CloseCode::Away, reason: "shutting down".into() }), Some(CloseFrame { code: CloseCode::Policy, reason: "execution binding is no longer current".into() })] {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    next_frontend_json(&mut socket).await;
+                    socket.send(Message::Close(frame)).await.unwrap();
+                }
+            });
+            let url = format!("ws://{address}/internal/pane-ws");
+            let refusal = close_work_async(&url, "work-1", "discarded").await.unwrap();
+            assert_eq!(refusal["ok"], false);
+            assert_eq!(refusal["retryable"], true);
+            assert_eq!(refusal["error"], "refresh and retry");
+            let invalid_result = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(invalid_result.contains("invalid Host"), "{invalid_result}");
+            assert!(!invalid_result.starts_with("network error:"), "{invalid_result}");
+            assert_eq!(close_work_async(&url, "work-1", "discarded").await.unwrap()["changed"], false);
+            let invalid_json = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(invalid_json.contains("invalid JSON"), "{invalid_json}");
+            assert!(!invalid_json.starts_with("network error:"), "{invalid_json}");
+            for expected in ["without a reason", "shutting down"] {
+                let lost_result = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+                assert!(lost_result.starts_with("network error:"), "{lost_result}");
+                assert!(lost_result.contains(expected), "{lost_result}");
+            }
+            let policy = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(!policy.starts_with("network error:"), "{policy}");
+            assert!(policy.contains("execution binding is no longer current"), "{policy}");
+            assert!(policy.contains("observation"), "{policy}");
+            server.await.unwrap();
+            let transport = close_work_async(&url, "work-1", "discarded").await.unwrap_err().to_string();
+            assert!(transport.starts_with("network error:"), "{transport}");
+        });
+    }
+
+    #[test]
+    fn fleet_close_accepts_only_matching_correlated_receipts() {
+        let unrelated = json!({"kind":"pane_close_result","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&unrelated, "request-a", "pane-a").is_none());
+        let mismatch = json!({"kind":"fleet_pane_close_result","request_id":"request-b","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&mismatch, "request-a", "pane-a").is_none());
+        let refusal = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":false,"error":"runtime changed"});
+        assert!(fleet_close_reply(&refusal, "request-a", "pane-a")
+            .unwrap()
+            .unwrap_err()
+            .contains("runtime changed"));
+        let success = json!({"kind":"fleet_pane_close_result","request_id":"request-a","window_id":"pane-a","ok":true});
+        assert!(fleet_close_reply(&success, "request-a", "pane-a")
+            .unwrap()
+            .is_ok());
+    }
+
+    #[test]
+    fn fleet_windows_rejects_foreign_empty_snapshot() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _runtime = ScopedEnvVar::set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            persist_runtime_evidence(home.path()),
+        );
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "fleet-scope-capability",
+        );
+        let project = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let snapshots = [
+            json!({"kind":"fleet_pane_list","project_root":foreign.path(),"panes":[]}),
+            json!({"kind":"fleet_pane_list","project_root":project.path(),"panes":[]}),
+        ];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                for snapshot in snapshots {
+                    let (stream, _) =
+                    // test-hygiene: allow-wall-clock-deadline Bound fixture startup if the real WebSocket client never connects; scope assertions depend only on the received snapshot.
+                        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert_eq!(next_frontend_kind(&mut socket).await, "list_fleet_panes");
+                    socket
+                        .send(Message::Text(snapshot.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+        let _url = ScopedEnvVar::set(
+            GWT_PANE_WS_URL_ENV,
+            format!("ws://{address}/internal/pane-ws"),
+        );
+        let wrong_project = fleet_windows(&project.path().to_string_lossy());
+        let own_project = fleet_windows(&project.path().to_string_lossy());
+        server.join().unwrap();
+        assert!(
+            wrong_project.is_err(),
+            "an unrelated empty inventory is not a complete pane observation"
+        );
+        assert!(own_project.unwrap().is_empty());
+    }
+
+    #[test]
     fn non_self_pane_close_consumes_backend_close_result() {
         let _env_lock = crate::env_test_lock()
             .lock()
@@ -3306,21 +4656,29 @@ mod tests {
             .expect("build pane test runtime");
 
         runtime.block_on(async {
-            let project_root = "/repo/peer";
-            let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
-            peer.session_id = Some("session-peer".to_string());
-            let (ws_url, server) =
-                spawn_close_pane_result_mock(project_root, peer, true, None).await;
+            for (result_kind, expected) in [
+                ("pane_close_result", "closed agent-peer\n"),
+                (
+                    "pane_husk_removed",
+                    "removed stopped pane view agent-peer (process-tree exit unconfirmed)\n",
+                ),
+            ] {
+                let project_root = "/repo/peer";
+                let mut peer = window("tab-peer::agent-peer", WindowPreset::Codex, Some("codex"));
+                peer.session_id = Some("session-peer".to_string());
+                let (ws_url, server) =
+                    spawn_close_pane_result_mock(project_root, peer, true, None, result_kind).await;
 
-            let result = close_pane(&ws_url, project_root, "agent-peer").await;
-            let received_kinds = server.await.expect("pane result mock task");
+                let result = close_pane(&ws_url, project_root, "agent-peer").await;
+                let received_kinds = server.await.expect("pane result mock task");
 
-            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
-            assert_eq!(
-                received_kinds,
-                vec!["list_windows", "frontend_ready", "close_window"],
-                "an explicit close result must settle without a readback round"
-            );
+                assert_eq!(result, Ok(expected.to_string()));
+                assert_eq!(
+                    received_kinds,
+                    vec!["list_windows", "frontend_ready", "close_window"],
+                    "an explicit close result must settle without a readback round"
+                );
+            }
         });
     }
 
@@ -3351,6 +4709,7 @@ mod tests {
                 peer,
                 false,
                 Some("window is outside the authenticated project scope"),
+                "pane_close_result",
             )
             .await;
 
@@ -3400,6 +4759,56 @@ mod tests {
                 received_kinds,
                 vec!["list_windows", "frontend_ready", "close_window"],
                 "self-close must not send a second frontend_ready after revocation"
+            );
+        });
+    }
+
+    #[test]
+    fn issue_3713_self_close_rejection_reports_board_read_recovery() {
+        let refusal = json!({"kind": "pane_close_result", "window_id": "tab::own", "ok": false,
+            "reason": "unread owner evidence; run board.show with all:true"});
+        let error = parse_pane_close_acceptance(&refusal, "request", "tab::own")
+            .expect_err("a direct self-close refusal must preserve its recovery reason");
+        assert!(error.contains("board.show"), "{error}");
+        assert_eq!(
+            parse_pane_close_acceptance(&refusal, "request", "tab::other"),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn issue_3713_correlated_self_close_relays_the_direct_socket_refusal() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "self-close-capability",
+        );
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, "session-self");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut own = window("tab::own", WindowPreset::Codex, Some("codex"));
+            own.session_id = Some("session-self".into());
+            let (url, server) = spawn_close_pane_result_mock(
+                "/repo/self",
+                own,
+                false,
+                Some("unread owner evidence; run board.show all:true"),
+                "pane_close_result",
+            )
+            .await;
+            let error = close_pane(&url, "/repo/self", "own")
+                .await
+                .expect_err("read gate must refuse self-close");
+            assert!(error.contains("board.show"), "{error}");
+            let received = server.await.unwrap();
+            assert_eq!(
+                received,
+                vec!["list_windows", "frontend_ready", "close_window"]
             );
         });
     }
@@ -3500,6 +4909,14 @@ mod tests {
             assert!(
                 error.contains("gwt.frontend.timing"),
                 "the refusal must point at the event-loop stall evidence: {error}"
+            );
+            assert!(
+                error.contains("temporary GUI stall") && error.contains("replies resume"),
+                "the refusal must explain that a dispatch stall can recover: {error}"
+            );
+            assert!(
+                error.contains("Wait 2.5 seconds and retry"),
+                "the refusal must recommend a concrete retry interval: {error}"
             );
             server.abort();
             let _ = server.await;
@@ -3735,14 +5152,14 @@ mod tests {
                 None,
                 "codex-1",
                 "same operation body",
+                None,
             )
             .await;
             let mutations = server.await.expect("PM replay mock task");
 
-            assert_eq!(
-                result,
-                Ok("pm message delivered to tab::codex-1\n".to_string())
-            );
+            let output = result.expect("replayed delivery succeeds");
+            assert!(output.contains("pm message delivered to tab::codex-1"));
+            assert!(output.contains(mutations[0]["operation_id"].as_str().unwrap()));
             assert_eq!(mutations.len(), 2);
             assert_eq!(mutations[0]["kind"], "pm_pane_send_input");
             assert_eq!(mutations[0]["operation_id"], mutations[1]["operation_id"]);
@@ -3751,12 +5168,11 @@ mod tests {
         });
     }
 
-    /// Issue #3608 (AC-2): "the acknowledgement never arrived" and "the input
-    /// never committed" are different answers and must not collapse into one
-    /// error. Folding them together is what made the PM read a delivered
-    /// message as undelivered.
+    /// Issue #3897: unresolved delivery and unavailable replay must remain
+    /// distinct from refusal and failure, and every result must retain the
+    /// identity needed for same-operation recovery.
     #[test]
-    fn pm_message_unverified_and_failed_are_distinct_caller_outcomes() {
+    fn pm_message_unconfirmed_lost_refused_and_failed_are_distinct_caller_outcomes() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3769,12 +5185,14 @@ mod tests {
         runtime.block_on(async {
             let mut outcomes = Vec::new();
             for (status, reason) in [
-                ("unverified", "submit was not acknowledged"),
+                ("unconfirmed", "submit was not acknowledged"),
+                ("lost", "the original target pane is no longer available"),
                 ("failed", "input mutation was refused"),
                 (
                     "refused",
                     "self-delivery to PM window tab::codex-1 is refused",
                 ),
+                ("unverified", "older peer has no target acknowledgement"),
             ] {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                     .await
@@ -3808,28 +5226,46 @@ mod tests {
                         ))
                         .await
                         .expect("send PM outcome");
+                    mutation["operation_id"].as_str().unwrap().to_string()
                 });
-                let error = send_pm_pane_input(
+                let outcome = send_pm_pane_input(
                     &format!("ws://{address}/internal/pane-ws"),
                     None,
                     "codex-1",
                     "one outcome body",
+                    None,
                 )
-                .await
-                .expect_err("a non-delivered outcome is not a success");
-                server.await.expect("PM outcome mock task");
-                outcomes.push(error);
+                .await;
+                let operation_id = server.await.expect("PM outcome mock task");
+                assert_eq!(
+                    outcome.is_ok(),
+                    matches!(status, "unconfirmed" | "unverified")
+                );
+                outcomes.push(match outcome {
+                    Ok(message) => message,
+                    Err(error) => error,
+                });
+                assert!(outcomes.last().unwrap().contains(&operation_id));
             }
 
-            let unverified = &outcomes[0];
-            let failed = &outcomes[1];
-            let refused = &outcomes[2];
+            let unconfirmed = &outcomes[0];
+            let lost = &outcomes[1];
+            let failed = &outcomes[2];
+            let refused = &outcomes[3];
             assert!(
-                unverified.contains("unverified")
-                    && unverified.contains("submit was not acknowledged")
-                    && !unverified.contains("pm message failed")
-                    && !unverified.contains("invalid status"),
-                "{unverified}"
+                unconfirmed.contains("unconfirmed")
+                    && unconfirmed.contains("submit was not acknowledged")
+                    && !unconfirmed.contains("pm message failed")
+                    && !unconfirmed.contains("pm message delivered")
+                    && !unconfirmed.contains("pm message submitted"),
+                "{unconfirmed}"
+            );
+            assert!(
+                lost.contains("replay is unavailable")
+                    && lost.contains("original target pane")
+                    && !lost.contains("undelivered")
+                    && !lost.contains("never executed"),
+                "{lost}"
             );
             assert!(
                 failed.contains("pm message failed") && !failed.contains("unverified"),
@@ -3842,6 +5278,125 @@ mod tests {
                     && !refused.contains("invalid status"),
                 "{refused}"
             );
+            assert!(outcomes[4].contains("unconfirmed"), "{}", outcomes[4]);
+        });
+    }
+
+    #[test]
+    fn pm_message_transport_failure_retains_the_operation_identity() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+        let error = runtime
+            .block_on(send_pm_pane_input(
+                "ws://127.0.0.1:0/internal/pane-ws",
+                None,
+                "codex-1",
+                "status",
+                None,
+            ))
+            .expect_err("unreachable transport must not report a delivery");
+        let operation_id = error
+            .split("(operation ")
+            .nth(1)
+            .and_then(|tail| tail.split_once(')').map(|(id, _)| id))
+            .expect("even a transport error must retain its operation identity");
+        assert!(uuid::Uuid::parse_str(operation_id).is_ok(), "{error}");
+        assert!(error.contains("requested target codex-1"), "{error}");
+
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let mut target = window("tab::codex-1", WindowPreset::Codex, Some("codex"));
+            target.session_id = Some("codex-session".into());
+            let workspace = workspace_state_for_test("/repo/pm", vec![target]);
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                socket
+                    .send(Message::Text(workspace.to_string().into()))
+                    .await
+                    .unwrap();
+                let mutation = next_frontend_json(&mut socket).await;
+                socket.close(None).await.unwrap();
+                mutation["operation_id"].as_str().unwrap().to_string()
+            });
+            let error = send_pm_pane_input(
+                &format!("ws://{address}/internal/pane-ws"),
+                None,
+                "codex-1",
+                "status",
+                None,
+            )
+            .await
+            .expect_err("response loss and an unavailable replay remain unresolved");
+            let operation_id = server.await.expect("response-loss mock task");
+            assert!(error.contains(&operation_id), "{error}");
+            assert!(error.contains("(target tab::codex-1)"), "{error}");
+        });
+    }
+
+    #[test]
+    fn pm_message_replay_reads_the_receipt_after_the_exact_target_disappears() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _token = ScopedEnvVar::set(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV, "pm-capability");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build pane test runtime");
+        runtime.block_on(async {
+            let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643c2";
+            let target = "tab::former-codex";
+            for status in ["lost", "delivered"] {
+                let command = super::super::json_envelope::parse_operation(
+                    "pm.message.send",
+                    &json!({"id": target, "text": "original body", "operation_id": operation_id}),
+                )
+                .expect("same-operation replay must be a public input");
+                let crate::cli::CliCommand::Pane(command) = command else {
+                    panic!("PM message must dispatch to the pane operation");
+                };
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind receipt replay mock");
+                let address = listener.local_addr().unwrap();
+                let workspace = workspace_state_for_test("/repo/pm", vec![]);
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    assert_eq!(next_frontend_kind(&mut socket).await, "frontend_ready");
+                    socket.send(Message::Text(workspace.to_string().into())).await.unwrap();
+                    let mutation = next_frontend_json(&mut socket).await;
+                    assert_eq!(mutation["operation_id"], operation_id);
+                    assert_eq!(mutation["window_id"], target);
+                    socket.send(Message::Text(json!({
+                        "kind": "pm_message_send_result",
+                        "operation_id": operation_id,
+                        "window_id": target,
+                        "status": status,
+                        "reason": if status == "lost" { Some("original target is gone") } else { None },
+                    }).to_string().into())).await.unwrap();
+                });
+                let result = run_async(&format!("ws://{address}/internal/pane-ws"), "/repo/pm", command).await;
+                let output = if status == "delivered" {
+                    result.expect("verified receipt is readable after target teardown")
+                } else {
+                    let error = result.expect_err("unavailable replay must remain a distinct outcome");
+                    assert!(error.contains("replay is unavailable"), "{error}");
+                    error
+                };
+                assert!(output.contains(operation_id), "{output}");
+                assert!(output.contains(target), "{output}");
+                server.await.expect("receipt replay mock task");
+            }
         });
     }
 
@@ -3885,18 +5440,10 @@ mod tests {
                 // reports only the observed fact instead of guessing at
                 // session correlation. A current backend names the cause in
                 // its `pane_close_result` refusal instead.
-                assert!(
-                    error.contains("did not remove agent-self and sent no close result"),
-                    "{error}"
-                );
+                assert!(error.contains("not confirmed"), "{error}");
                 assert_eq!(
                     received_kinds,
-                    vec![
-                        "list_windows",
-                        "frontend_ready",
-                        "close_window",
-                        "frontend_ready"
-                    ]
+                    vec!["list_windows", "frontend_ready", "close_window"]
                 );
             }
         });
@@ -3975,7 +5522,7 @@ mod tests {
     }
 
     #[test]
-    fn non_self_pane_close_keeps_authoritative_post_close_readback() {
+    fn non_self_pane_close_requires_exit_confirmation_after_window_removal() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4004,16 +5551,12 @@ mod tests {
             let result = close_pane(&ws_url, project_root, "agent-peer").await;
             let received_kinds = server.await.expect("pane mock task");
 
-            assert_eq!(result, Ok("closed agent-peer\n".to_string()));
+            let error = result.expect_err("window removal cannot prove process-tree exit");
+            assert!(error.contains("not confirmed"), "{error}");
             assert_eq!(
                 received_kinds,
-                vec![
-                    "list_windows",
-                    "frontend_ready",
-                    "close_window",
-                    "frontend_ready"
-                ],
-                "non-self close must retain authoritative post-close readback"
+                vec!["list_windows", "frontend_ready", "close_window"],
+                "an unconfirmed close must not use window absence as success"
             );
         });
     }

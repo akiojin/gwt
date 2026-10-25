@@ -12,20 +12,20 @@ use super::{
 
 pub fn evaluate_bash_command(command: &str, worktree_root: &Path) -> Option<HookOutput> {
     effect_classifier::observe_bash_command(command, worktree_root, worktree_root);
-    evaluate_bash_command_without_observation(command, worktree_root)
+    evaluate_bash_command_without_observation(command, worktree_root, worktree_root)
 }
 
 fn evaluate_bash_command_without_observation(
     command: &str,
     worktree_root: &Path,
+    command_cwd: &Path,
 ) -> Option<HookOutput> {
     let decision = block_git_branch_ops::evaluate_bash_command(command)
         .or_else(|| block_cd_command::evaluate_bash_command(command, worktree_root))
         .or_else(|| block_file_ops::evaluate_bash_command(command, worktree_root))
-        .or_else(|| block_git_dir_override::evaluate_bash_command(command))
+        .or_else(|| block_git_dir_override::evaluate_bash_command_in(command, command_cwd))
         .or_else(|| evaluate_long_pr_ci_polling_sleep(command))
-        .or_else(|| evaluate_github_workflow_cli(command))
-        .or_else(|| evaluate_github_mutation_sinks(command));
+        .or_else(|| github_mutation_policy(command));
     if decision.is_none() {
         record_agent_gh_spend(command, &gwt_core::github_budget::BudgetLedger::global());
     }
@@ -69,16 +69,21 @@ pub(crate) fn evaluate_without_observation(
     event: &HookEvent,
     worktree_root: &Path,
 ) -> Result<HookOutput, HookError> {
-    if event.tool_name.as_deref() != Some("Bash") {
+    if !matches!(
+        event.tool_name.as_deref(),
+        Some("Bash" | "exec_command" | "functions.exec_command")
+    ) {
         return Ok(HookOutput::Silent);
     }
     let Some(command) = event.command() else {
         return Ok(HookOutput::Silent);
     };
-    Ok(
-        evaluate_bash_command_without_observation(command, worktree_root)
-            .unwrap_or(HookOutput::Silent),
+    Ok(evaluate_bash_command_without_observation(
+        command,
+        worktree_root,
+        &event.command_cwd(worktree_root),
     )
+    .unwrap_or(HookOutput::Silent))
 }
 
 pub fn handle() -> Result<HookOutput, HookError> {
@@ -96,8 +101,8 @@ pub fn handle_with_input(input: &str) -> Result<HookOutput, HookError> {
 }
 
 fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
-    for segment in super::segments::split_command_segments(command) {
-        let tokens = command_tokens(&segment);
+    for words in github_execution_commands(command) {
+        let tokens: Vec<_> = words.iter().map(String::as_str).collect();
         let Some(command_name) = tokens.first().copied() else {
             continue;
         };
@@ -109,7 +114,30 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
         if let Some(subcommand) = next_gh_workflow_word(&mut args) {
             let verb = next_gh_workflow_word(&mut args);
             match subcommand {
-                "auth" | "repo" | "release" => continue,
+                "auth" | "release" => continue,
+                "repo" => {
+                    let nested = if matches!(verb, Some("autolink" | "deploy-key")) {
+                        next_gh_workflow_word(&mut args)
+                    } else {
+                        None
+                    };
+                    if !is_blocked_repo_subcommand(verb, nested) {
+                        continue;
+                    }
+                    let trailing: Vec<_> = args.collect();
+                    // `create` (alias `new`) and `edit` use -h for homepage.
+                    let help_flag = |arg: &str| {
+                        arg == "--help"
+                            || (arg == "-h" && !matches!(verb, Some("create" | "new" | "edit")))
+                    };
+                    let help_only = trailing.iter().any(|arg| help_flag(arg))
+                        && trailing
+                            .iter()
+                            .all(|arg| help_flag(arg) || !arg.starts_with('-'));
+                    if !help_only {
+                        return Some(github_workflow_block_decision(command));
+                    }
+                }
                 "issue" if is_blocked_issue_subcommand(verb) => {
                     return Some(github_workflow_block_decision(command));
                 }
@@ -124,6 +152,240 @@ fn evaluate_github_workflow_cli(command: &str) -> Option<HookOutput> {
         }
     }
     None
+}
+
+/// Pure policy diagnosis shared by enforcement and external-skill advisories.
+/// It deliberately does not record budget spend or effect observations.
+pub(crate) fn github_mutation_policy(command: &str) -> Option<HookOutput> {
+    evaluate_github_workflow_cli(command).or_else(|| evaluate_github_mutation_sinks(command))
+}
+
+/// Inspect executable positions, not arbitrary arguments containing `gh`.
+/// Keep quote-aware segmentation ahead of unquoting so quoted search/body data
+/// cannot become shell commands. Only actual interpreter command bodies reenter
+/// segmentation; each wrapper consumes words, so nested wrappers terminate.
+fn github_execution_commands(command: &str) -> Vec<Vec<String>> {
+    let mut pending = vec![command.to_string()];
+    let mut commands = Vec::new();
+    while let Some(command) = pending.pop() {
+        for segment in super::segments::split_command_segments(&command) {
+            let segment = segment
+                .trim_start_matches(['(', '{'])
+                .trim()
+                .trim_end_matches([')', '}'])
+                .trim();
+            let mut words = github_command_words(segment);
+            let mut index = 0;
+            while let Some(word) = words.get_mut(index) {
+                *word = word.trim_start_matches(['(', '{']).to_string();
+                if word.is_empty()
+                    || is_env_assignment(word)
+                    || matches!(
+                        word.as_str(),
+                        "do" | "then" | "if" | "elif" | "else" | "while" | "until" | "!"
+                    )
+                {
+                    index += 1;
+                    continue;
+                }
+                let name = normalize_command_name(word);
+                if matches!(
+                    name.as_str(),
+                    "bash" | "sh" | "zsh" | "dash" | "pwsh" | "powershell"
+                ) {
+                    // Preserve the existing PowerShell HTTP sink diagnosis as
+                    // well as inspecting gh calls inside its script argument.
+                    commands.push(words[index..].to_vec());
+                    let powershell = matches!(name.as_str(), "pwsh" | "powershell");
+                    let mut flag = index + 1;
+                    while let Some(arg) = words.get(flag) {
+                        let lowered = arg.to_ascii_lowercase();
+                        if (!powershell
+                            && arg.starts_with('-')
+                            && !arg.starts_with("--")
+                            && arg.contains('c'))
+                            || (powershell && matches!(lowered.as_str(), "-c" | "-command"))
+                        {
+                            if let Some(script) = words.get(flag + 1) {
+                                pending.push(if powershell {
+                                    powershell_policy_script(&words[flag + 1..].join(" "))
+                                } else {
+                                    script.clone()
+                                });
+                            }
+                            break;
+                        }
+                        if !arg.starts_with('-') || arg == "--" {
+                            break; // script filename: subsequent words are data
+                        }
+                        flag += 1 + usize::from(matches!(
+                            lowered.as_str(),
+                            "-o" | "--rcfile"
+                                | "--init-file"
+                                | "-executionpolicy"
+                                | "-workingdirectory"
+                                | "-inputformat"
+                                | "-outputformat"
+                                | "-windowstyle"
+                                | "-version"
+                        ));
+                    }
+                    break;
+                }
+                if !matches!(
+                    name.as_str(),
+                    "timeout" | "env" | "nice" | "command" | "exec" | "nohup" | "xargs"
+                ) {
+                    commands.push(words[index..].to_vec());
+                    break;
+                }
+                index += 1;
+                let mut discovery = false;
+                while let Some(arg) = words.get(index).filter(|arg| arg.starts_with('-')) {
+                    index += 1;
+                    if arg == "--" {
+                        break;
+                    }
+                    if name == "command"
+                        && !arg.starts_with("--")
+                        && (arg.contains('v') || arg.contains('V'))
+                    {
+                        discovery = true;
+                        break;
+                    }
+                    if name == "env"
+                        && (matches!(arg.as_str(), "-S" | "--split-string")
+                            || arg.starts_with("--split-string="))
+                    {
+                        let (value, end) = if let Some(value) = arg.strip_prefix("--split-string=")
+                        {
+                            (value.to_string(), index)
+                        } else if let Some(value) = words.get(index) {
+                            (value.clone(), index + 1)
+                        } else {
+                            break;
+                        };
+                        // env -S splits argv; it does not evaluate shell operators.
+                        words.splice(index - 1..end, github_command_words(&value));
+                        index -= 1;
+                        continue;
+                    }
+                    let takes_value = match name.as_str() {
+                        "timeout" => {
+                            matches!(arg.as_str(), "-k" | "--kill-after" | "-s" | "--signal")
+                        }
+                        "env" => matches!(arg.as_str(), "-u" | "--unset" | "-C" | "--chdir"),
+                        "nice" => matches!(arg.as_str(), "-n" | "--adjustment"),
+                        "exec" => arg == "-a",
+                        "xargs" => matches!(
+                            arg.as_str(),
+                            "-I" | "-n"
+                                | "-L"
+                                | "-P"
+                                | "-s"
+                                | "-a"
+                                | "-d"
+                                | "-E"
+                                | "--max-args"
+                                | "--max-lines"
+                                | "--max-procs"
+                                | "--max-chars"
+                                | "--arg-file"
+                                | "--delimiter"
+                        ),
+                        _ => false,
+                    };
+                    if takes_value {
+                        index += 1;
+                    }
+                }
+                if discovery {
+                    break;
+                }
+                if name == "timeout" {
+                    index += 1; // duration, after any timeout options
+                }
+            }
+        }
+    }
+    commands
+}
+
+/// Translate PowerShell escapes only inside an actual PowerShell command
+/// body. Shared shell segmentation can then keep escaped quotes/semicolons
+/// inside their argument instead of manufacturing a second command from data.
+fn powershell_policy_script(script: &str) -> String {
+    let mut normalized = String::new();
+    let mut quote = None;
+    let mut chars = script.chars();
+    while let Some(ch) = chars.next() {
+        if quote != Some('\'') && ch == '`' {
+            if let Some(escaped) = chars.next() {
+                normalized.push('\\');
+                normalized.push(escaped);
+            }
+            continue;
+        }
+        if quote != Some('\'') && ch == '\\' {
+            normalized.push('\\'); // backslashes are literal in PowerShell
+        } else if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+        }
+        normalized.push(ch);
+    }
+    normalized
+}
+
+/// Shell quoting differs from the verification runner's direct-process argv
+/// format: an escaped quote must not turn a valid command into an opaque one.
+fn github_command_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = segment.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && quote != Some('\'') {
+            let next = chars.peek().copied();
+            let windows_path = quote.is_none() && word.as_bytes().get(1) == Some(&b':');
+            if (!windows_path && quote.is_none())
+                || (quote == Some('"') && matches!(next, Some('"' | '\\' | '$' | '`' | '\n')))
+            {
+                let Some(escaped) = chars.next() else {
+                    word.push(ch);
+                    break;
+                };
+                if escaped != '\n' {
+                    word.push(escaped);
+                    started = true;
+                }
+                continue;
+            }
+        }
+        if Some(ch) == quote {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+            started = true;
+        } else if quote.is_none() && ch.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(ch);
+            started = true;
+        }
+    }
+    // Preserve a determined executable/verb even when argument quoting is
+    // opaque (e.g. PowerShell's backtick escapes). Body data must not erase a
+    // known write. Unfinished quoted data remains one argument, not commands.
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 /// The inherited repository flag may precede either the category or its verb.
@@ -235,6 +497,18 @@ fn is_blocked_issue_subcommand(subcommand: Option<&str>) -> bool {
     )
 }
 
+fn is_blocked_repo_subcommand(subcommand: Option<&str>, nested: Option<&str>) -> bool {
+    match subcommand {
+        Some(
+            "edit" | "archive" | "unarchive" | "create" | "new" | "delete" | "rename" | "sync"
+            | "fork",
+        ) => true,
+        Some("autolink") => matches!(nested, Some("create" | "new" | "delete")),
+        Some("deploy-key") => matches!(nested, Some("add" | "delete")),
+        _ => false,
+    }
+}
+
 fn is_blocked_pr_subcommand(subcommand: Option<&str>) -> bool {
     // "draft" does not exist as a gh subcommand (the real reverse of
     // `gh pr ready` is `gh pr ready --undo`, already covered by "ready");
@@ -266,9 +540,17 @@ fn github_workflow_block_decision(command: &str) -> HookOutput {
         format!(
             "GitHub reads may use direct `gh` commands. Route GitHub writes through gwt JSON-envelope operations so workflow gates and audit state see them.\n\n\
 Recommended alternatives:\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.spec.*`\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.merge`, `pr.review_threads.reply_and_resolve`\n\
-- Actions re-run: JSON operation `actions.rerun` (`run_id` + `failed_only`, or `job_id`)\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\
+- Automatic updates: JSON operation `update.settings.set`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Merges: existing merge automation and CI/review gates decide delivery; gwtd has no direct merge operation\n\
+- External fork PRs: a delegated PM can use `pr.auto_merge.enable` with the exact PR number, reviewed_head_sha and scoped instruction_id or approval_id. Repository automation may exclude external forks; if this authorized route is unavailable, a human must merge the PR.\n\
+- Actions: JSON operations `actions.rerun` (`run_id` + `failed_only`, or `job_id`) and `actions.cancel` (`run_id`)\n\
 Use the corresponding JSON-envelope operation for other writes.\n\n\
 Blocked command: {command}"
         ),
@@ -286,8 +568,9 @@ Blocked command: {command}"
 /// path (classified as a mutation sink but policed by the PR gates, not
 /// here). Approved wrapper intents and `hub` coverage are T-217 follow-ups.
 fn evaluate_github_mutation_sinks(command: &str) -> Option<HookOutput> {
-    for segment in super::segments::split_command_segments(command) {
-        let tokens = command_tokens(&segment);
+    for words in github_execution_commands(command) {
+        let segment = words.join(" ");
+        let tokens: Vec<_> = words.iter().map(String::as_str).collect();
         let Some(first) = tokens.first().copied() else {
             continue;
         };
@@ -636,10 +919,15 @@ fn github_mutation_block_decision(command: &str) -> HookOutput {
         format!(
             "GitHub writes must go through the canonical gwt operations so the completion/PR gates and audit state see them (SPEC-3248 P10, T-217).\n\n\
 Recommended alternatives:\n\
-- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.review_threads.reply_and_resolve`\n\
-- Issues/SPECs: JSON operations `issue.create`, `issue.comment`, `issue.spec.*`\n\
+- Permission stage: instruction_or_approval for bounded PM operations. Pass a scoped instruction_id or approval_id to the canonical operation; obtain native approval with pm.approval.request. An id never permits a raw API write or bypasses CI/ownership/reviewer gates. Irreversible third-party destruction, secret exfiltration and unsupported destructive deletion remain unavailable.\n\
+- Repository settings/archive: JSON operation `repository.settings.set` (typed reversible fields; fixed repository)\n\
+- Discussions/Board: JSON operations `discussion.create`, `board.config.set`\n\
+- Required checks: JSON operation `repository.required_checks.update` (develop/main contexts only)\n\
+- PRs: JSON operations `pr.create`, `pr.edit`, `pr.ready`, `pr.draft`, `pr.comment`, `pr.reopen`, `pr.review.submit`, `pr.review_threads.reply_and_resolve`; authorized `pr.close` uses `pm.operation.execute`\n\
+- Issues/SPECs: JSON operations `issue.create`, `issue.edit`, `issue.comment`, `issue.close`, `issue.reopen`, `issue.spec.*`\n\
+- Actions: JSON operations `actions.rerun` and `actions.cancel`\n\
 - lifecycle state: JSON operations `intake.outcome.record`, `execution.*`, `verify.*`\n\
-- releases: the release workflow owns publishing — not agent Bash\n\n\
+- Release metadata: JSON operation `release.metadata.set`; publishing/assets/latest use the existing gated release workflow\n\n\
 Blocked command: {command}"
         ),
     )
@@ -805,6 +1093,98 @@ mod tests {
             evaluate_bash_command("sleep 30 && gwtd pr checks 123", Path::new("/worktree"));
 
         assert!(decision.is_none());
+    }
+
+    #[test]
+    fn blocks_repository_settings_writes_but_allows_reads_and_help() {
+        for command in [
+            "gh repo edit akiojin/gwt --description Updated",
+            "gh repo archive akiojin/gwt --yes",
+            "gh repo unarchive akiojin/gwt --yes",
+            "gh repo edit --help && gh repo archive akiojin/gwt --yes",
+        ] {
+            let decision = github_mutation_policy(command)
+                .unwrap_or_else(|| panic!("expected canonical-write block: {command}"));
+            assert!(decision.detail().contains("instruction_or_approval"));
+            assert!(decision.detail().contains("repository.settings.set"));
+        }
+        for command in [
+            "gh repo view akiojin/gwt --json description",
+            "gh repo list akiojin --limit 1",
+            "gh repo edit --help",
+            "gh repo archive akiojin/gwt -h",
+            "gh repo unarchive --help",
+            "gh help repo edit",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_none(),
+                "read/help must pass: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocks_known_repository_mutations_and_preserves_nested_reads_and_local_selection() {
+        for command in [
+            "gh repo delete owner/repo --yes",
+            "gh repo edit owner/repo -h https://example.com",
+            "gh repo rename renamed --yes",
+            "gh repo sync owner/repo --force",
+            "gh repo create owner/new --private",
+            "gh repo create owner/new -h https://example.com",
+            "gh repo new owner/new -h https://example.com",
+            "gh repo fork owner/repo --clone=false",
+            "gh -R owner/repo repo deploy-key add key.pub --allow-write",
+            "gh repo deploy-key delete 1",
+            "gh repo autolink --repo=owner/repo create TICKET- https://example.com/num",
+            "gh repo autolink new TICKET- https://example.com/num",
+            "gh repo autolink delete 1 --yes",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_some(),
+                "remote mutation must be blocked: {command}"
+            );
+        }
+        for command in [
+            "gh repo autolink list -R owner/repo",
+            "gh repo autolink -R owner/repo view 1",
+            "gh repo deploy-key list --repo owner/repo",
+            "gh repo set-default owner/repo",
+            "gh repo set-default --unset",
+            "gh repo clone owner/repo local-copy",
+            "gh repo delete --help",
+            "gh repo create --help",
+            "gh repo new --help",
+            "gh repo autolink create --help",
+            "gh repo deploy-key delete 1 -h",
+        ] {
+            assert!(
+                github_mutation_policy(command).is_none(),
+                "read/help/local selection must pass: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn github_write_denials_name_the_scoped_recovery_routes() {
+        for command in [
+            "gh pr reopen 17",
+            "gh api -X PATCH repos/akiojin/gwt/releases/17",
+        ] {
+            let decision = github_mutation_policy(command).expect("GitHub write is blocked");
+            for route in [
+                "instruction_or_approval",
+                "repository.settings.set",
+                "release.metadata.set",
+                "pr.reopen",
+                "pr.review.submit",
+            ] {
+                assert!(
+                    decision.detail().contains(route),
+                    "missing {route}: {command}"
+                );
+            }
+        }
     }
 
     // SPEC-3248 P10 (T-212/T-217 core): GitHub API mutations are blocked

@@ -72,6 +72,8 @@ fn cli_command_family_split_round_trip_parses() {
             json: true,
             workspace: None,
             all: false,
+            limit: None,
+            unresolved: false,
         })
     );
 
@@ -135,7 +137,7 @@ fn cli_command_family_split_round_trip_parses() {
         .expect("parse discuss park");
     assert!(matches!(
         cmd,
-        CliCommand::Discuss(DiscussCommand::Park { ref proposal })
+        CliCommand::Discuss(DiscussCommand::Park { ref proposal, .. })
             if proposal == "Proposal A"
     ));
 

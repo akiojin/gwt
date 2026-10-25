@@ -55,6 +55,7 @@ tasks=body\n\
 
 fn seed_issue(env: &TestEnv, number: u64, title: &str, spec: &str, tasks: &str, labels: &[&str]) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body(spec, tasks),
@@ -396,7 +397,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert!(out.contains("#42 [OPEN] [phase/review] SPEC: Launch agents"));
+    assert!(out.starts_with("Issue #42 [OPEN] [phase/review] SPEC: Launch agents"));
 
     env.files.insert(
         "legacy.md".to_string(),
@@ -474,7 +475,7 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         .unwrap(),
         0
     );
-    assert_eq!(out, "pulled #42\n");
+    assert_eq!(out, "pulled Issue #42\n");
 
     let err = run(
         &mut env,
@@ -492,7 +493,13 @@ fn run_supports_read_create_pull_repair_and_rename_workflows() {
         run(&mut env, IssueCommand::SpecRepair { number: 42 }, &mut out).unwrap(),
         0
     );
-    assert_eq!(out, "repaired cache for #42\n");
+    // #4838: the old wording claimed a repair the operation never performed —
+    // it only re-read the section. A fixture with well-formed markers now says
+    // so explicitly, and a genuine repair names the artifacts it rewrote.
+    assert_eq!(
+        out,
+        "refreshed cache for Issue #42; no artifact needed repair\n"
+    );
 
     out.clear();
     assert_eq!(
@@ -762,7 +769,9 @@ fn spec_audit_reports_closed_specs_with_untracked_task_rows() {
     );
 
     assert!(
-        out.contains("#3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"),
+        out.contains(
+            "Issue #3700 [CLOSED] completed=2 open=2 untracked=2 SPEC: perf instrumentation"
+        ),
         "untracked rows are reported with their counts: {out}"
     );
     assert!(
@@ -791,6 +800,7 @@ fn spec_audit_parse_accepts_state_flag() {
 
 fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
     let snapshot = IssueSnapshot {
+        author_login: None,
         number: IssueNumber(number),
         title: title.to_string(),
         body: issue_body("spec body", tasks),
@@ -803,4 +813,297 @@ fn seed_closed_spec(env: &TestEnv, number: u64, title: &str, tasks: &str) {
     Cache::new(env.cache_root())
         .write_snapshot(&snapshot)
         .unwrap();
+}
+
+// --- Issue #4541: the lint pre-gate and the completion evidence gate ----
+/// Issue #4541: the operations must reach `issue_spec::run` through the same
+/// dispatch a `gwtd` envelope takes. Calling `super::run` directly would have
+/// hidden the missing routing arm that panicked on the first real invocation.
+fn route<E: crate::cli::CliEnv>(
+    env: &mut E,
+    cmd: IssueCommand,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    crate::cli::issue::run(env, cmd, out)
+}
+
+/// A `TestEnv` whose `repo_path` is a real git worktree and whose `HOME` is a
+/// temp dir, so the inspection state lands somewhere disposable.
+struct LintFixture {
+    env: TestEnv,
+    _cache: tempfile::TempDir,
+    _repo: tempfile::TempDir,
+    _home: tempfile::TempDir,
+    _home_var: gwt_core::test_support::ScopedEnvVar,
+    _userprofile_var: gwt_core::test_support::ScopedEnvVar,
+    _lock: gwt_core::test_support::EnvLockGuard,
+}
+
+fn lint_fixture(number: u64, spec: &str, tasks: &str) -> LintFixture {
+    let lock = crate::env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let home = tempfile::tempdir().expect("home");
+    let home_var = gwt_core::test_support::ScopedEnvVar::set("HOME", home.path());
+    let userprofile_var = gwt_core::test_support::ScopedEnvVar::set("USERPROFILE", home.path());
+    let cache = tempfile::tempdir().expect("cache");
+    let repo = tempfile::tempdir().expect("repo");
+    crate::cli::trusted_store::init_git_repo_with_origin(repo.path());
+
+    let mut env = TestEnv::new(cache.path().to_path_buf());
+    env.repo_path = repo.path().to_path_buf();
+    seed_issue(
+        &env,
+        number,
+        "SPEC: lint fixture",
+        spec,
+        tasks,
+        &["gwt-spec"],
+    );
+
+    LintFixture {
+        env,
+        _cache: cache,
+        _repo: repo,
+        _home: home,
+        _home_var: home_var,
+        _userprofile_var: userprofile_var,
+        _lock: lock,
+    }
+}
+
+fn lint_command(number: u64) -> IssueCommand {
+    IssueCommand::SpecLint {
+        number,
+        sections: vec!["spec".to_string(), "tasks".to_string()],
+        snapshot: true,
+        directive_epoch: None,
+        phase_slice: None,
+    }
+}
+
+#[test]
+fn spec_lint_reports_missing_references_and_orphan_parts() {
+    use gwt_github::client::{CommentId, CommentSnapshot};
+
+    let mut fixture = lint_fixture(4613, "- **FR-001**: one", "- [ ] T-001: do");
+    let mut snapshot = Cache::new(fixture.env.cache_root())
+        .load_entry(IssueNumber(4613))
+        .unwrap()
+        .snapshot;
+    snapshot.body = snapshot
+        .body
+        .replace("tasks=body", "tasks=comment:111,comment:222");
+    snapshot.comments = vec![CommentSnapshot {
+        id: CommentId(333),
+        body: "<!-- artifact:tasks BEGIN part=1/2 -->\nrecovered task\n<!-- artifact:tasks END part=1/2 -->".into(),
+        updated_at: UpdatedAt::new("orphan"),
+    }];
+    fixture.env.client.seed(snapshot);
+
+    let mut out = String::new();
+    let code = route(&mut fixture.env, lint_command(4613), &mut out).unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("missing: section=tasks comment:111"), "{out}");
+    assert!(out.contains("missing: section=tasks comment:222"), "{out}");
+    assert!(
+        out.contains("orphan: section=tasks comment:333 part=1/2"),
+        "{out}"
+    );
+    assert!(
+        crate::cli::intake_inspection::load_snapshot(fixture.env.repo_path(), 4613)
+            .unwrap()
+            .is_none(),
+        "broken routing must not produce an inspection snapshot"
+    );
+}
+
+/// AC-1 / AC-3 / AC-4 / AC-5 through the operation surface: the lint runs,
+/// its findings land in the snapshot and the ledger without billing the
+/// reviewer, and the reviewer gets the four-item checklist.
+#[test]
+fn spec_lint_finalizes_the_snapshot_and_seeds_the_ledger() {
+    let mut fixture = lint_fixture(
+        4541,
+        "- **FR-001**: one\n- **FR-001**: one again\n",
+        "- [ ] T-001: do\n",
+    );
+    let mut out = String::new();
+    let code = route(&mut fixture.env, lint_command(4541), &mut out).unwrap();
+
+    assert_eq!(code, 1, "a critical finding must make the gate fail: {out}");
+    assert!(out.contains("2 section(s) scanned"), "{out}");
+    assert!(out.contains("numbering_duplicate"), "{out}");
+    assert!(
+        out.contains("0 charged to reviewer budget"),
+        "machine findings must not bill the reviewer: {out}"
+    );
+    for item in gwt_skills::inspection_guidance::REVIEWER_CHECKLIST {
+        assert!(
+            out.contains(item.id),
+            "checklist item {} missing: {out}",
+            item.id
+        );
+    }
+
+    let snapshot = crate::cli::intake_inspection::load_snapshot(fixture.env.repo_path(), 4541)
+        .unwrap()
+        .expect("snapshot persisted");
+    assert_eq!(snapshot.lint.critical_count, 1);
+    assert_eq!(snapshot.lint.sections_scanned, vec!["spec", "tasks"]);
+    assert_eq!(snapshot.section_hashes.len(), 2);
+
+    let ledger = crate::cli::intake_inspection::load_ledger(fixture.env.repo_path(), 4541)
+        .unwrap()
+        .expect("ledger persisted");
+    assert_eq!(ledger.entries.len(), snapshot.lint.finding_count);
+    assert!(ledger.reviewer_budget_entries().is_empty());
+    assert_eq!(ledger.undisposed_critical().len(), 1);
+}
+
+/// AC-6: completion needs a snapshot first — there is no evidence to check
+/// without one.
+#[test]
+fn spec_inspection_complete_requires_a_snapshot_first() {
+    let mut fixture = lint_fixture(4542, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4542 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1);
+    assert!(out.contains("run issue.spec.lint first"), "{out}");
+}
+
+/// AC-6: with a clean lint and a GitHub-entity readback that matches the
+/// snapshot, completion passes.
+#[test]
+fn spec_inspection_complete_passes_on_a_matching_github_readback() {
+    let mut fixture = lint_fixture(4543, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4543), &mut out).unwrap(),
+        0,
+        "clean artifact: {out}"
+    );
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4543 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("PASS"), "{out}");
+    assert!(out.contains("2 section(s) confirmed"), "{out}");
+}
+
+/// AC-6: an undisposed critical finding blocks completion even though the
+/// readback itself is fine.
+#[test]
+fn spec_inspection_complete_blocks_on_an_undisposed_critical_finding() {
+    let mut fixture = lint_fixture(
+        4544,
+        "- **FR-001**: one\n- **FR-001**: one again\n",
+        "- [ ] T-001: do\n",
+    );
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4544), &mut out).unwrap(),
+        1
+    );
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4544 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("BLOCKED"), "{out}");
+    assert!(out.contains("has no disposition"), "{out}");
+}
+
+/// AC-6: a section edited after the snapshot no longer matches it, so the
+/// readback cannot settle completion.
+#[test]
+fn spec_inspection_complete_blocks_when_the_artifact_moved_under_the_snapshot() {
+    let mut fixture = lint_fixture(4545, "- **FR-001**: one\n", "- [ ] T-001: do\n");
+    let mut out = String::new();
+    assert_eq!(
+        route(&mut fixture.env, lint_command(4545), &mut out).unwrap(),
+        0,
+        "{out}"
+    );
+
+    out.clear();
+    route(
+        &mut fixture.env,
+        IssueCommand::SpecEditSectionBody {
+            number: 4545,
+            section: "spec".to_string(),
+            body: "- **FR-001**: one, revised\n".to_string(),
+        },
+        &mut out,
+    )
+    .unwrap();
+
+    out.clear();
+    let code = route(
+        &mut fixture.env,
+        IssueCommand::SpecInspectionComplete { number: 4545 },
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("BLOCKED"), "{out}");
+    assert!(out.contains("snapshot recorded"), "{out}");
+}
+
+// Issue #5176 AC-1/AC-2: a plain markdown body (no section markers) must not be
+// silently dropped; it is stored as the `spec` section and the receipt names it.
+#[test]
+fn spec_create_plain_body_is_stored_as_spec_section_with_receipt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut env = TestEnv::new(temp.path().to_path_buf());
+    let body = "# SPEC: Plain\n\n## 背景\n\nplain body without markers\n";
+    let mut out = String::new();
+    let code = run(
+        &mut env,
+        IssueCommand::SpecCreateBody {
+            title: "SPEC: Plain".to_string(),
+            body: body.to_string(),
+            labels: Vec::new(),
+        },
+        &mut out,
+    )
+    .expect("plain body create succeeds");
+    assert_eq!(code, 0);
+    let stored = body.trim_end_matches('\n');
+    assert!(
+        out.contains(&format!("wrote {} bytes to section 'spec'", stored.len())),
+        "out = {out}"
+    );
+    let number: u64 = out
+        .split('#')
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .expect("created issue number in output");
+
+    let mut read = String::new();
+    run(
+        &mut env,
+        IssueCommand::SpecReadSection {
+            number,
+            section: "spec".to_string(),
+        },
+        &mut read,
+    )
+    .expect("spec section is readable");
+    assert!(read.contains("plain body without markers"), "read = {read}");
 }

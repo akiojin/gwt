@@ -5,9 +5,10 @@
 //! persists, so this tracks per-target runs of over-budget samples and emits at
 //! most one violation per run.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::record::PerfViolationDetails;
 
@@ -22,7 +23,7 @@ pub const DEFAULT_VIOLATION_SUSTAINED_SECONDS: f64 = 2.0;
 /// grow the smoother without limit.
 const MAX_TRACKED_TARGETS: usize = 512;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 struct RunState {
     consecutive: u32,
     first_over: DateTime<Utc>,
@@ -43,6 +44,23 @@ impl Default for ViolationSmoother {
 }
 
 impl ViolationSmoother {
+    /// Restore only bounded run state; thresholds remain the code defaults.
+    pub(crate) fn restore(bytes: &[u8]) -> Self {
+        let runs: HashMap<String, RunState> = serde_json::from_slice(bytes).unwrap_or_default();
+        Self {
+            runs: if runs.len() <= MAX_TRACKED_TARGETS {
+                runs
+            } else {
+                HashMap::new()
+            },
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&self.runs.iter().collect::<BTreeMap<_, _>>())
+    }
+
     /// Build a smoother with the FR-006 defaults.
     pub fn new() -> Self {
         Self::with_thresholds(

@@ -72,14 +72,21 @@ fn repeated_writes_overwrite_and_leave_no_tmp_residue() {
     runtime_state::write_for_event(&path, "Stop").unwrap();
     runtime_state::write_for_event(&path, "PreToolUse").unwrap();
 
-    // Only the canonical file should exist — no `.tmp-*` siblings.
+    // Only the canonical state and its persistent writer lock should exist;
+    // atomic publication must leave no `.tmp-*` siblings.
     let mut entries: Vec<String> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(std::result::Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     entries.sort();
-    assert_eq!(entries, vec!["runtime-state.json".to_string()]);
+    assert_eq!(
+        entries,
+        vec![
+            ".runtime-writer-runtime-state.json.lock".to_string(),
+            "runtime-state.json".to_string()
+        ]
+    );
 
     // And the *latest* write wins.
     let raw = fs::read_to_string(&path).unwrap();
@@ -110,18 +117,12 @@ fn unknown_event_surfaces_as_invalid_event_error() {
 
 #[test]
 fn handle_is_noop_when_env_var_is_unset() {
-    // SAFETY: this test manipulates a process-global env var. It runs in
-    // the same binary as other `hook_runtime_state_test` cases but none
-    // of them look at the env var, so there is no cross-test interaction.
-    // We use a short helper that saves/restores the prior value.
-    let prev = std::env::var_os("GWT_SESSION_RUNTIME_PATH");
-    std::env::remove_var("GWT_SESSION_RUNTIME_PATH");
+    let _env_lock = gwt_core::test_support::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _runtime_path = gwt_core::test_support::ScopedEnvVar::unset("GWT_SESSION_RUNTIME_PATH");
 
     let result = runtime_state::handle("PreToolUse");
-
-    if let Some(v) = prev {
-        std::env::set_var("GWT_SESSION_RUNTIME_PATH", v);
-    }
 
     assert!(
         result.is_ok(),

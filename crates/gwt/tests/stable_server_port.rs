@@ -277,8 +277,9 @@ fn terminate_child(child: &mut Child) {
 }
 
 fn base_config(extra: &str) -> String {
+    // Keep startup preference migration separate from port persistence.
     format!(
-        "# stable-port sentinel\nfuture_unknown_key = \"keep\"\n{extra}\n[board]\noauth_redirect_port = 0\n"
+        "# stable-port sentinel\nfuture_unknown_key = \"keep\"\nauto_apply_updates = false\n{extra}\n[board]\noauth_redirect_port = 0\n"
     )
 }
 

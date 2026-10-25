@@ -1,9 +1,6 @@
 //! T-112 (SPEC #1935) — workflow-policy gating tests.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use gwt::cli::{
@@ -26,9 +23,8 @@ use gwt_core::{
 use serde_json::json;
 use tempfile::TempDir;
 
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn env_lock() -> &'static gwt_core::test_support::EnvLock {
+    gwt_core::test_support::env_lock()
 }
 
 fn root() -> PathBuf {
@@ -69,6 +65,8 @@ fn evaluate(event: &HookEvent, context: workflow_policy::WorkflowContext) -> Opt
 fn semantic_classifier_distinguishes_json_operation_effects() {
     let cases = [
         ("issue.view", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.status", json!({}), GovernanceEffect::Observe),
+        ("pm.plan.apply", json!({}), GovernanceEffect::Protected),
         (
             "pr.create",
             json!({ "draft": true }),
@@ -87,7 +85,38 @@ fn semantic_classifier_distinguishes_json_operation_effects() {
         ),
         ("pr.edit", json!({}), GovernanceEffect::Reversible),
         ("pr.draft", json!({}), GovernanceEffect::Reversible),
+        (
+            "pr.close",
+            json!({"number": 42}),
+            GovernanceEffect::Reversible,
+        ),
         ("workspace.update", json!({}), GovernanceEffect::Reversible),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["bug"]}),
+            GovernanceEffect::Reversible,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["hold"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"remove","labels":["gwt-spec"]}),
+            GovernanceEffect::Protected,
+        ),
+        (
+            "issue.label",
+            json!({"action":"add","labels":["auto-merge"]}),
+            GovernanceEffect::Protected,
+        ),
+        ("issue.label", json!({}), GovernanceEffect::Protected),
         ("execution.continue", json!({}), GovernanceEffect::Protected),
         ("execution.adopt", json!({}), GovernanceEffect::Protected),
         ("execution.repair", json!({}), GovernanceEffect::Protected),
@@ -658,6 +687,7 @@ fn allows_json_envelope_discovery_and_linking_without_owner() {
         // SPEC-3431: PM diagnostics must stay diagnosable before an owner is
         // linked (ownerless-safe, read-only).
         ("pm.status", json!({})),
+        ("pm.plan.status", json!({})),
     ] {
         let event = event(
             "Bash",
@@ -1214,4 +1244,111 @@ fn spec_owner_without_plan_or_tasks_implementation_edit_stays_silent() {
         workflow_policy::WorkflowContext::unknown(),
         "AC-7 case 6: spec owner before plan/tasks refresh (requires_spec_plan_tasks removed)",
     );
+}
+
+/// Issue #4680 (AC-3): the PM registers a new Issue only after it has
+/// established which `gwt-spec` owns the area. #4677 was registered standalone
+/// while SPEC-1921 owned it, because the contract asked for a keyword search
+/// and a keyword search answers a different question.
+#[test]
+fn pm_registration_is_denied_until_the_spec_survey_has_run() {
+    for operation in ["issue.create", "issue.spec.create"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({ "title": "x" })) }),
+        );
+        let output = evaluate(
+            &event,
+            workflow_policy::WorkflowContext::unknown()
+                .with_pm_session(true)
+                .with_pm_spec_survey_fresh(false),
+        )
+        .unwrap_or_else(|| panic!("{operation} should be denied without a survey"));
+        let rendered = format!("{output:?}");
+        assert!(
+            rendered.contains("issue.spec.list"),
+            "{operation} denial should name the remedy: {rendered}"
+        );
+        for recovery_step in ["all addenda", "current develop", "owner_check"] {
+            assert!(
+                rendered.contains(recovery_step),
+                "missing recovery step: {rendered}"
+            );
+        }
+    }
+}
+
+/// Issue #4680 (AC-4): the gate asks whether the PM looked, never what it
+/// found. Once the survey is on file every registration passes, including one
+/// for an area no spec owns — the failure mode SPEC #3245 removed the owner
+/// guard for was exactly a classifier that had to be right.
+#[test]
+fn pm_registration_passes_once_the_spec_survey_is_on_file() {
+    for operation in ["issue.create", "issue.spec.create"] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({ "title": "x" })) }),
+        );
+        assert!(
+            evaluate(
+                &event,
+                workflow_policy::WorkflowContext::unknown()
+                    .with_pm_session(true)
+                    .with_pm_spec_survey_fresh(true),
+            )
+            .is_none(),
+            "{operation} should pass once the survey is recorded"
+        );
+    }
+}
+
+/// Issue #4680 (AC-4): implementation agents never call `issue.create` — they
+/// post Issue proposals to the Board and the PM registers them — so gating a
+/// non-PM session would deny an operation it does not perform.
+#[test]
+fn the_spec_survey_gate_applies_only_to_the_pm_session() {
+    let event = event(
+        "Bash",
+        json!({ "command": json_envelope_command("issue.create", json!({ "title": "x" })) }),
+    );
+    assert!(
+        evaluate(
+            &event,
+            workflow_policy::WorkflowContext::unknown()
+                .with_pm_session(false)
+                .with_pm_spec_survey_fresh(false),
+        )
+        .is_none(),
+        "a non-PM session should register unconditionally"
+    );
+}
+
+/// Issue #4680 (AC-4): the gate covers registration alone. The survey itself,
+/// and every other PM operation, stay open — otherwise the remedy for the
+/// denial would itself be denied.
+#[test]
+fn the_spec_survey_gate_leaves_the_survey_and_other_operations_open() {
+    for operation in [
+        "issue.spec.list",
+        "issue.edit",
+        "issue.spec.edit",
+        "issue.comment",
+        "issue.monitor.status",
+        "board.post",
+    ] {
+        let event = event(
+            "Bash",
+            json!({ "command": json_envelope_command(operation, json!({})) }),
+        );
+        assert!(
+            evaluate(
+                &event,
+                workflow_policy::WorkflowContext::unknown()
+                    .with_pm_session(true)
+                    .with_pm_spec_survey_fresh(false),
+            )
+            .is_none(),
+            "{operation} must not be gated by the registration survey"
+        );
+    }
 }

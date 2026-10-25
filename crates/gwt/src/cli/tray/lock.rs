@@ -35,6 +35,10 @@ pub struct TrayLockFile {
     pub url: String,
     pub started_at: DateTime<Utc>,
     pub version: String,
+    /// Issue #4538 AC-4: per-process bearer token for the local project-open
+    /// control request. Absent in locks written by older gwt releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_token: Option<String>,
 }
 
 /// Resolve the canonical tray lock path for the given gwt_home + user id.
@@ -86,6 +90,7 @@ fn sanitize_user_id_segment(value: &str) -> String {
 pub struct TrayLockHandle {
     path: PathBuf,
     file: File,
+    control_token: String,
     guard_path: PathBuf,
     guard_file: File,
 }
@@ -95,6 +100,11 @@ impl TrayLockHandle {
         &self.path
     }
 
+    /// Bearer token accepted by `POST /internal/projects/open`.
+    pub fn control_token(&self) -> &str {
+        &self.control_token
+    }
+
     /// Update the URL stored inside the lock file once the embedded
     /// server has finished binding. Uses a single rewrite (no rename)
     /// because the file is already locked exclusively by the current
@@ -102,7 +112,7 @@ impl TrayLockHandle {
     /// file from a *failed* lock attempt, in which case they re-read
     /// after seeing the contention.
     pub fn set_url(&mut self, url: &str) -> io::Result<()> {
-        let payload = build_lock_payload(std::process::id(), url);
+        let payload = build_lock_payload(std::process::id(), url, &self.control_token);
         self.file.set_len(0)?;
         write_lock_contents(&self.path, &mut self.file, &payload)
     }
@@ -166,6 +176,41 @@ pub fn acquire(gwt_home: &Path) -> Result<TrayLockHandle, TrayLockError> {
     )
 }
 
+/// Discover a resident without creating or acquiring its runtime ownership.
+/// Only a contended existing guard proves a running owner. An unreadable
+/// guard or payload stays an error so callers cannot start a competing helper.
+pub fn running_instance(gwt_home: &Path) -> Result<Option<TrayLockFile>, TrayLockError> {
+    let path = lock_path(gwt_home, &current_user_id());
+    let guard_path = guard_lock_path(&path);
+    let guard = match OpenOptions::new().read(true).write(true).open(&guard_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(TrayLockError::Io {
+                path: guard_path,
+                source,
+            });
+        }
+    };
+    match guard.try_lock_exclusive() {
+        Ok(()) => {
+            guard.unlock().map_err(|source| TrayLockError::Io {
+                path: guard_path,
+                source,
+            })?;
+            Ok(None)
+        }
+        // Windows ERROR_LOCK_VIOLATION is Uncategorized, not WouldBlock.
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            read_lock_contents(&path).map(Some)
+        }
+        Err(source) => Err(TrayLockError::Io {
+            path: guard_path,
+            source,
+        }),
+    }
+}
+
 /// Inner acquisition with the `GWT_FORCE_NEW_INSTANCE` decision injected so
 /// the override behaviour is unit-testable without mutating process env.
 ///
@@ -219,17 +264,16 @@ fn acquire_inner(
             });
         }
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)
-        .map_err(|source| TrayLockError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    let payload = build_lock_payload(std::process::id(), "");
+    let mut file = open_private_lock_file(&path).map_err(|source| TrayLockError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let control_token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let payload = build_lock_payload(std::process::id(), "", &control_token);
     write_lock_contents(&path, &mut file, &payload).map_err(|source| TrayLockError::Io {
         path: path.clone(),
         source,
@@ -237,17 +281,39 @@ fn acquire_inner(
     Ok(TrayLockHandle {
         path,
         file,
+        control_token,
         guard_path,
         guard_file,
     })
 }
 
-fn build_lock_payload(pid: u32, url: &str) -> TrayLockFile {
+/// The lock carries the control token, so it is readable by its owner only.
+fn open_private_lock_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        let file = options.open(path)?;
+        // A lock left behind by an older release may be wider; narrow it
+        // before the token is written.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(path)
+    }
+}
+
+fn build_lock_payload(pid: u32, url: &str, control_token: &str) -> TrayLockFile {
     TrayLockFile {
         pid,
         url: url.to_string(),
         started_at: Utc::now(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        control_token: Some(control_token.to_string()),
     }
 }
 
@@ -286,6 +352,7 @@ fn read_lock_contents(path: &Path) -> Result<TrayLockFile, TrayLockError> {
             url: String::new(),
             started_at: Utc::now(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            control_token: None,
         });
     }
     serde_json::from_str(&buf).map_err(|source| TrayLockError::Corrupt {
@@ -318,6 +385,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             version: "10.0.0".to_string(),
+            control_token: Some("a".repeat(64)),
         };
         let json = serde_json::to_string(&lock).expect("serialize");
         let round: TrayLockFile = serde_json::from_str(&json).expect("deserialize");
@@ -351,6 +419,33 @@ mod tests {
             !path.exists(),
             "lock file must be removed on Drop, but still exists at {}",
             path.display()
+        );
+    }
+
+    #[test]
+    fn running_instance_requires_an_existing_held_guard() {
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(running_instance(tmp.path()).unwrap().is_none());
+        assert!(!tmp.path().join("run").exists());
+
+        let mut holder = acquire_inner(tmp.path(), false).expect("acquire");
+        holder.set_url("http://127.0.0.1:55555/").unwrap();
+        let resident = running_instance(tmp.path()).unwrap().expect("held guard");
+        assert_eq!(resident.pid, std::process::id());
+        assert_eq!(
+            resident.control_token.as_deref(),
+            Some(holder.control_token())
+        );
+
+        fs::write(holder.path(), b"malformed").unwrap();
+        assert!(running_instance(tmp.path()).is_err());
+        let guard_path = holder.guard_path.clone();
+        drop(holder);
+        File::create(&guard_path).unwrap();
+        assert!(running_instance(tmp.path()).unwrap().is_none());
+        assert!(
+            guard_path.exists(),
+            "discovery does not remove stale ownership files"
         );
     }
 
@@ -430,6 +525,43 @@ mod tests {
             !forced_path.exists(),
             "forced instance must clean up its own PID-scoped lock file on drop"
         );
+    }
+
+    #[test]
+    fn acquire_publishes_a_private_control_token_that_set_url_preserves() {
+        // Issue #4538 AC-4: `gwt open <path>` authenticates with a one-time
+        // per-process token that only this OS user can read.
+        let tmp = TempDir::new().expect("tempdir");
+        let mut handle = acquire_inner(tmp.path(), false).expect("acquire");
+        let token = handle.control_token().to_string();
+        assert_eq!(token.len(), 64, "256-bit hex token");
+        assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
+        let other = acquire_inner(tmp.path(), true).expect("forced acquire");
+        assert_ne!(other.control_token(), token, "tokens are per process lock");
+
+        handle.set_url("http://127.0.0.1:54321/").expect("set_url");
+        let payload: TrayLockFile =
+            serde_json::from_str(&fs::read_to_string(handle.path()).expect("read lock"))
+                .expect("payload");
+        assert_eq!(payload.control_token.as_deref(), Some(token.as_str()));
+        assert_eq!(payload.url, "http://127.0.0.1:54321/");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(handle.path())
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "the token file is owner-only");
+        }
+    }
+
+    #[test]
+    fn legacy_lock_payload_without_a_control_token_still_parses() {
+        let legacy = r#"{"pid":1,"url":"http://127.0.0.1:1/","started_at":"2026-05-28T07:00:00Z","version":"9.0.0"}"#;
+        let payload: TrayLockFile = serde_json::from_str(legacy).expect("legacy payload");
+        assert_eq!(payload.control_token, None);
     }
 
     #[test]

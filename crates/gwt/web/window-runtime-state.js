@@ -4,6 +4,7 @@
 // protocol enum contract so Rust-side renames propagate mechanically.
 
 import { WINDOW_RUNTIME_STATES } from "./protocol-enums.js";
+import { surfaceForWindow } from "./surface-rail.js";
 
 function capitalizeRuntimeState(state) {
   return state.charAt(0).toUpperCase() + state.slice(1);
@@ -39,18 +40,6 @@ export function presetSupportsWaitingStatus(preset) {
   return preset === "agent" || preset === "claude" || preset === "codex";
 }
 
-function isCanvasAgentFocusCandidate(windowData) {
-  const placementKind = windowData?.placement?.kind;
-  if (placementKind && placementKind !== "canvas") {
-    return false;
-  }
-  const agentId = String(windowData?.agent_id || "").trim();
-  return Boolean(
-    windowData?.id &&
-      (agentId || presetSupportsWaitingStatus(windowData?.preset)),
-  );
-}
-
 function agentFocusPriority(windowData, runtimeStateForWindow) {
   const resolvedRuntimeState =
     typeof runtimeStateForWindow === "function"
@@ -72,9 +61,9 @@ function agentFocusPriority(windowData, runtimeStateForWindow) {
   return 2;
 }
 
-// Issue #3551 — focus navigation uses a deterministic Agent-only projection
-// of the Canvas workspace. Hidden tab members stay in the projection so the
-// caller can activate them before framing. Sorting by the original index after
+// Focus navigation uses the same agent and Shell projection as the Agents
+// view, including restored and hidden saved-group members, while excluding PM.
+// Sorting by the original index after
 // the runtime bucket makes the order independent of z-index and render state.
 export function selectNextAgentFocusWindowId(
   windows,
@@ -84,7 +73,7 @@ export function selectNextAgentFocusWindowId(
 ) {
   const candidates = (windows || [])
     .map((windowData, index) => ({ windowData, index }))
-    .filter(({ windowData }) => isCanvasAgentFocusCandidate(windowData))
+    .filter(({ windowData }) => windowData?.id && surfaceForWindow(windowData) === "works")
     .map((candidate) => ({
       ...candidate,
       priority: agentFocusPriority(
@@ -131,6 +120,23 @@ export function normalizeWindowRuntimeState(status, preset) {
 
 export function windowRuntimeLabel(status) {
   return WINDOW_RUNTIME_STATE_LABELS[status] || WINDOW_RUNTIME_STATE_LABELS.running;
+}
+
+// Keep compact state labels stable while explaining what an idle turn means.
+export function windowRuntimeDescription(status, preset) {
+  if (!presetSupportsWaitingStatus(preset)) {
+    return windowRuntimeLabel(status);
+  }
+  switch (status) {
+    case "idle":
+      return "Turn ended; ready for input";
+    case "running":
+      return "Turn in progress, including waiting for a model response";
+    case "waiting":
+      return "Waiting for approval or an external condition";
+    default:
+      return windowRuntimeLabel(status);
+  }
 }
 
 // SPEC-2356 — translate runtime state vocabulary to Operator telemetry states

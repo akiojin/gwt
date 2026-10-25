@@ -8,7 +8,7 @@
 //! short-circuits to `Silent` (FR-014o).
 //!
 //! Fail-open policy (FR-014u): any I/O or JSON failure resolves to
-//! `Silent`.
+//! a nonblocking warning. A missing state file stays `Silent`.
 //!
 //! Session isolation (FR-014t): if `state.session_id` differs from the
 //! current `GWT_SESSION_ID` env value, the handler returns `Silent` so
@@ -59,6 +59,7 @@ mod tests {
 
     fn active_state(session: &str) -> SkillState {
         SkillState {
+            start_evidence: None,
             active: true,
             owner_spec: Some(1935),
             started_at: Utc.with_ymd_and_hms(2026, 4, 21, 9, 0, 0).unwrap(),
@@ -148,14 +149,45 @@ mod tests {
     }
 
     #[test]
-    fn silent_when_state_file_json_is_malformed() {
+    fn malformed_state_warns_without_blocking_public_stop() {
+        use gwt_core::test_support::{ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(home.path());
+        let _session_env = [
+            gwt_agent::GWT_SESSION_ID_ENV,
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_URL_ENV,
+            gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV,
+            "CODEX_THREAD_ID",
+        ]
+        .map(ScopedEnvVar::unset);
         let dir = tempfile::tempdir().unwrap();
         let path = gwt_core::skill_state::state_path(dir.path(), SKILL_NAME);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{broken").unwrap();
-        assert_eq!(
-            handle_with_input(dir.path(), "{}", Some("sess-1")),
-            HookOutput::Silent,
-        );
+        let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+        let HookOutput::SystemMessage(message) = output else {
+            panic!("malformed skill state must warn without blocking Stop: {output:?}");
+        };
+        assert!(message.contains(SKILL_DISPLAY), "{message}");
+        assert!(message.contains("unreadable"), "{message}");
+        assert!(message.contains("not blocked"), "{message}");
+
+        let output = super::super::event_dispatcher::handle_with_input(
+            "Stop",
+            "{}",
+            dir.path(),
+            Some("sess-1"),
+        )
+        .expect("public Stop hook");
+        let HookOutput::SystemMessage(public_message) = output else {
+            panic!("public Stop must retain the skill state warning: {output:?}");
+        };
+        assert!(public_message.contains(&message), "{public_message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
     }
 }

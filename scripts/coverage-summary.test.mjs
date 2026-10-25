@@ -1,0 +1,557 @@
+// Regressions for scripts/coverage-summary.mjs (Issue #4628).
+//
+// `cargo` and `llvm-profdata` are replaced by small fakes so the cases run in
+// milliseconds: the fake profdata reads a profile iff it ends with `#OK`, and
+// the fake cargo copies fixture profiles into the coverage target directory,
+// logs every call, and fails a strict merge the way llvm-profdata does.
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test, { after } from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { inspectProfiles } from "./coverage-summary.mjs";
+
+const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
+const SCRIPT = path.join(scriptsDir, "coverage-summary.mjs");
+const THRESHOLD = path.join(scriptsDir, "check-coverage-threshold.mjs");
+const MAGIC = Buffer.from([0x81, 0x72, 0x66, 0x6f, 0x72, 0x70, 0x6c, 0xff]);
+
+test("threshold usage distinguishes unscoped coverage from the CI gate", () => {
+  const result = spawnSync(process.execPath, [THRESHOLD], { encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.match(
+    result.stderr,
+    /Without --scope or --scope-exclude,.*not a CI gate/,
+  );
+});
+
+// Windows cannot execute a shebang fixture. Keep the same Node fake behind
+// a native launcher, rather than changing the command under test to a shell.
+let launcher;
+if (process.platform === "win32") {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-launcher-"));
+  launcher = path.join(root, "launcher.exe");
+  const built = spawnSync(
+    "rustc",
+    ["--crate-name", "fixture_launcher", "-o", launcher, "-"],
+    {
+      encoding: "utf8",
+      input: `fn main() {
+    let script = format!("{}.cjs", std::env::current_exe().unwrap().display());
+    let status = std::process::Command::new(${JSON.stringify(process.execPath)})
+        .arg(script).args(std::env::args_os().skip(1)).status().unwrap();
+    std::process::exit(status.code().unwrap_or(1));
+}`,
+    },
+  );
+  assert.equal(built.status, 0, built.stderr);
+  after(() => fs.rmSync(root, { recursive: true, force: true }));
+}
+
+function profile(bodyBytes, { readable = true, magic = MAGIC } = {}) {
+  const tail = Buffer.from(readable ? "#OK" : "");
+  return Buffer.concat([magic, Buffer.alloc(bodyBytes, 1), tail]);
+}
+
+function writeExecutable(file, source) {
+  if (launcher) {
+    fs.copyFileSync(launcher, file);
+    fs.writeFileSync(`${file}.cjs`, source);
+    return;
+  }
+  fs.writeFileSync(file, `#!/usr/bin/env node\n${source}`);
+  fs.chmodSync(file, 0o755);
+}
+
+function sandbox(
+  fixtures,
+  { testExit = 0, covered = 95, artifactExit = 0 } = {},
+) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gwt-coverage-summary-"));
+  const fixtureDir = path.join(root, "fixtures");
+  const targetDir = path.join(root, "llvm-cov-target");
+  const workspaceRoot = path.join(root, "workspace");
+  fs.mkdirSync(fixtureDir);
+  fs.mkdirSync(targetDir);
+  fs.mkdirSync(workspaceRoot);
+  for (const [name, bytes] of Object.entries(fixtures)) {
+    fs.writeFileSync(path.join(fixtureDir, name), bytes);
+  }
+  const suffix = process.platform === "win32" ? ".exe" : "";
+  const profdata = path.join(root, `llvm-profdata${suffix}`);
+  writeExecutable(
+    profdata,
+    `const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "merge") {
+  const outputIndex = args.indexOf("-o");
+  const files = args.slice(1, outputIndex).filter((arg) => !arg.startsWith("-"));
+  const readable = files.filter((file) => fs.readFileSync(file).subarray(-3).equals(Buffer.from("#OK")));
+  if (readable.length === 0 || (readable.length !== files.length && !args.includes("--failure-mode=all"))) process.exit(1);
+  fs.writeFileSync(args[outputIndex + 1], "merged#OK");
+  process.exit(0);
+}
+const file = process.argv[process.argv.length - 1];
+const bytes = fs.readFileSync(file);
+if (bytes.length === 0) { console.error("empty raw profile file"); process.exit(1); }
+if (!bytes.subarray(-3).equals(Buffer.from("#OK"))) {
+  console.error("invalid instrumentation profile data (file header is corrupt)");
+  process.exit(1);
+}`,
+  );
+  const currentObject = path.join(
+    targetDir,
+    "debug",
+    "deps",
+    `gwt-123abc${suffix}`,
+  );
+  fs.mkdirSync(path.dirname(currentObject), { recursive: true });
+  fs.writeFileSync(currentObject, "100");
+  fs.chmodSync(currentObject, 0o755);
+  const cargo = path.join(root, `cargo${suffix}`);
+  writeExecutable(
+    cargo,
+    `const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const target = process.env.CARGO_LLVM_COV_TARGET_DIR;
+fs.appendFileSync(${JSON.stringify(path.join(root, "calls.jsonl"))}, JSON.stringify(args) + "\\n");
+const profiles = () => fs.readdirSync(target).filter((n) => n.endsWith(".profraw"));
+if (args[1] === "show-env") {
+  if (args.includes("--all-features") || args.includes("--workspace")) {
+    console.error("show-env does not accept test selection flags"); process.exit(2);
+  }
+  console.log("export CARGO_TARGET_DIR='" + target + "'");
+  console.log("export RUSTFLAGS='-C instrument-coverage --cfg coverage'");
+  process.exit(0);
+}
+if (args[0] === "test" && args.includes("--no-run")) {
+  if (${artifactExit} !== 0) process.exit(${artifactExit});
+  if (process.env.CARGO_TARGET_DIR !== target || !process.env.RUSTFLAGS.includes("instrument-coverage")) {
+    console.error("artifact build lost the coverage environment"); process.exit(2);
+  }
+  console.log(JSON.stringify({ reason: "compiler-artifact", executable: ${JSON.stringify(currentObject)} }));
+  console.log(JSON.stringify({ reason: "build-finished", success: true }));
+  process.exit(0);
+}
+if (args[0] === "metadata") {
+  console.log(JSON.stringify({ workspace_root: ${JSON.stringify(workspaceRoot)}, target_directory: target }));
+  process.exit(0);
+}
+if (args[0] === "nextest" && args[1] === "list") {
+  if (args.includes("--partition") || !process.env.RUSTFLAGS.includes("instrument-coverage")) process.exit(2);
+  console.log(JSON.stringify({ "rust-suites": { gwt: { testcases: { unit: { ignored: false, "filter-match": { status: "matches" } } } } } }));
+  process.exit(0);
+}
+if (args[1] === "clean") {
+  for (const name of profiles()) fs.rmSync(path.join(target, name));
+  process.exit(0);
+}
+if (args.includes("--no-report")) {
+  for (const name of fs.readdirSync(${JSON.stringify(fixtureDir)})) {
+    fs.copyFileSync(path.join(${JSON.stringify(fixtureDir)}, name), path.join(target, name));
+  }
+  // Nextest's default store is workspace-relative, independent of Cargo's target.
+  if (!fs.existsSync(${JSON.stringify(path.join(root, "omit-junit"))})) {
+    const junit = path.join(${JSON.stringify(workspaceRoot)}, "target", "nextest", process.env.NEXTEST_PROFILE || "default", "junit.xml");
+    fs.mkdirSync(path.dirname(junit), { recursive: true });
+    fs.writeFileSync(junit, '<testsuites><testsuite name="gwt"><testcase name="unit" time="1"/></testsuite></testsuites>');
+  }
+  process.exit(${testExit});
+}
+if (args[1] === "report") {
+  const lenient = args.join(" ").includes("--failure-mode all");
+  const unreadable = profiles().filter((name) => {
+    const bytes = fs.readFileSync(path.join(target, name));
+    return !bytes.subarray(-3).equals(Buffer.from("#OK"));
+  });
+  if (unreadable.length > 0 && !lenient) {
+    console.error("error: failed to merge profile data");
+    process.exit(1);
+  }
+  const out = args[args.indexOf("--output-path") + 1];
+  if (process.platform !== "win32" && fs.readdirSync(path.join(target, "debug", "deps"))
+      .some((name) => !(fs.statSync(path.join(target, "debug", "deps", name)).mode & 0o111))) {
+    console.error("coverage object lost executable permission"); process.exit(1);
+  }
+  if (args.includes("--lcov")) {
+    fs.writeFileSync(out, "TN:roundtrip\\n");
+    process.exit(0);
+  }
+  const count = fs.readdirSync(path.join(target, "debug", "deps"))
+    .reduce((sum, name) => sum + Number(fs.readFileSync(path.join(target, "debug", "deps", name), "utf8")), 0);
+  const summary = { data: [{ files: [{ filename: "crates/gwt/src/lib.rs",
+    summary: { lines: { covered: ${covered}, count } } }] }] };
+  fs.writeFileSync(out, JSON.stringify(summary));
+  process.exit(0);
+}
+console.error("unexpected cargo call: " + args.join(" "));
+process.exit(2);`,
+  );
+  const output = path.join(root, "coverage-summary.json");
+  after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return { root, targetDir, workspaceRoot, profdata, cargo, output, currentObject };
+}
+
+function run(box, extraArgs = ["--workspace", "--all-features"], ownArgs = []) {
+  const result = spawnSync(
+    process.execPath,
+    [SCRIPT, "--output-path", box.output, ...ownArgs, "--", ...extraArgs],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CARGO: box.cargo,
+        LLVM_PROFDATA: box.profdata,
+        CARGO_LLVM_COV_TARGET_DIR: box.targetDir,
+        NEXTEST_PROFILE: "coverage",
+      },
+    },
+  );
+  const calls = fs.existsSync(path.join(box.root, "calls.jsonl"))
+    ? fs
+        .readFileSync(path.join(box.root, "calls.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line))
+    : [];
+  return { ...result, calls, text: `${result.stdout}${result.stderr}` };
+}
+
+const reportCalls = (calls) => calls.filter((args) => args[1] === "report");
+
+test("nextest covers the same workspace without forwarding runner flags to artifact enumeration", () => {
+  const box = sandbox({ "gwt-1-111_0.profraw": profile(4096) });
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
+  assert.equal(result.status, 0, result.text);
+  assert.deepEqual(
+    result.calls.find((args) => args.includes("--no-report")),
+    ["llvm-cov", "nextest", "--no-report", "--retries", "0", "--workspace", "--all-features"],
+  );
+  const build = result.calls.find((args) => args[0] === "test");
+  assert.ok(build.includes("--workspace") && build.includes("--all-features"));
+  assert.ok(!build.includes("--nextest") && !build.includes("--retries"));
+  assert.deepEqual(result.calls[0], ["llvm-cov", "clean", "--workspace", "--profraw-only"]);
+  assert.equal(reportCalls(result.calls).length, 1);
+});
+
+function exportShards(box) {
+  const root = path.join(box.root, "shards");
+  for (let shard = 1; shard <= 2; shard += 1) {
+    const result = run(box, ["--workspace", "--all-features"], [
+      "--nextest", "--partition", `slice:${shard}/2`,
+      "--export-dir", path.join(root, `workspace-tests-${shard}`),
+    ]);
+    assert.equal(result.status, 0, result.text);
+  }
+  fs.writeFileSync(path.join(box.root, "calls.jsonl"), "");
+  return root;
+}
+
+test("coverage shards export only current objects and report the merged profiles without rebuilding", () => {
+  const box = sandbox({ "gwt-111_0.profraw": profile(4096) });
+  fs.writeFileSync(path.join(path.dirname(box.currentObject), "stale-object"), "1000");
+  const root = exportShards(box);
+  const retry = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2",
+    "--export-dir", path.join(root, "workspace-tests-1"),
+  ]);
+  assert.equal(retry.status, 0, retry.text);
+  fs.writeFileSync(path.join(box.root, "calls.jsonl"), "");
+  const first = path.join(root, "workspace-tests-1");
+  const second = path.join(root, "workspace-tests-2");
+  const manifest = JSON.parse(fs.readFileSync(path.join(first, "manifest.json"), "utf8"));
+  assert.equal(manifest.success, true);
+  assert.match(manifest.source_sha, /^[0-9a-f]{40}$/);
+  assert.equal(manifest.objects.length, 1);
+  assert.ok(fs.existsSync(path.join(first, "objects", manifest.objects[0].path)));
+  fs.chmodSync(path.join(first, "objects", manifest.objects[0].path), 0o644);
+  assert.ok(!fs.existsSync(path.join(second, "objects")));
+  assert.ok(fs.existsSync(path.join(first, "workspace-test-evidence/inventory.json")));
+  assert.ok(fs.existsSync(path.join(first, "nextest/ci/junit.xml")));
+  const canonicalJunit = path.join(box.workspaceRoot, "target/nextest/coverage/junit.xml");
+  assert.ok(fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(box.targetDir, "nextest/coverage/junit.xml")));
+  const lcov = path.join(box.root, "lcov.info");
+  const result = run(box, [], ["--report-from", root, "--shards", "2", "--lcov-output-path", lcov]);
+  assert.equal(result.status, 0, result.text);
+  assert.equal(reportCalls(result.calls).length, 2);
+  assert.ok(result.calls.every((args) => args[1] === "report" || args[0] === "metadata"));
+  assert.equal(JSON.parse(fs.readFileSync(box.output)).data[0].files[0].summary.lines.count, 100);
+  assert.match(fs.readFileSync(lcov, "utf8"), /TN:roundtrip/);
+  // A successful nextest exit without a fresh report cannot reuse old evidence.
+  fs.writeFileSync(path.join(box.root, "omit-junit"), "");
+  const stale = run(box, ["--workspace", "--all-features"], [
+    "--nextest", "--partition", "slice:1/2", "--export-dir", first,
+  ]);
+  assert.equal(stale.status, 4, stale.text);
+  assert.ok(!fs.existsSync(canonicalJunit));
+  assert.ok(!fs.existsSync(path.join(first, "manifest.json")));
+});
+
+test("coverage shard aggregation rejects mismatched, missing and changed artifacts and removes stale reports", () => {
+  const box = sandbox({ "gwt-111_0.profraw": profile(4096) });
+  const root = exportShards(box);
+  const file = path.join(root, "workspace-tests-2/manifest.json");
+  const original = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...original, source_sha: "0".repeat(40) }));
+  fs.writeFileSync(box.output, "stale");
+  let result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  assert.ok(!fs.existsSync(box.output));
+  assert.equal(reportCalls(result.calls).length, 0);
+  fs.writeFileSync(file, JSON.stringify({ ...original, run_args: ["--workspace"] }));
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.writeFileSync(file, JSON.stringify(original));
+  const object = path.join(root, "workspace-tests-1/objects", original.objects[0].path);
+  fs.appendFileSync(object, "changed");
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.writeFileSync(object, "100");
+  fs.appendFileSync(path.join(root, "workspace-tests-2/profiles.profdata"), "changed");
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+  fs.rmSync(path.join(root, "workspace-tests-2"), { recursive: true });
+  result = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(result.status, 4, result.text);
+});
+
+test("coverage shard export preserves conservative profile recovery and rejects profile damage", () => {
+  const box = sandbox({
+    "gwt-111_0.profraw": profile(4096),
+    "gwt-111_1.profraw": profile(1024, { readable: false }),
+  });
+  const root = exportShards(box);
+  const health = JSON.parse(fs.readFileSync(path.join(root, "workspace-tests-1/profiles.json"), "utf8"));
+  assert.equal(health.classification, "profile-truncated");
+  assert.equal(health.recovered, true);
+  const report = run(box, [], ["--report-from", root, "--shards", "2"]);
+  assert.equal(report.status, 0, report.text);
+  assert.match(report.text, /RECOVERED \[profile-truncated\]/);
+  const audit = JSON.parse(fs.readFileSync(`${box.output}.profiles.json`, "utf8"));
+  assert.equal(audit.classification, "profile-truncated");
+  assert.equal(audit.recovered, true);
+  assert.deepEqual(audit.shards.map((shard) => shard.shard), [1, 2]);
+  assert.equal(audit.shards[0].damaged[0].name, "gwt-111_1.profraw");
+  const damaged = sandbox({ "bad.profraw": Buffer.from("not a profile") });
+  const destination = path.join(damaged.root, "export");
+  const result = run(damaged, [], ["--nextest", "--partition", "slice:1/2", "--export-dir", destination]);
+  assert.equal(result.status, 3, result.text);
+  assert.ok(!fs.existsSync(path.join(destination, "manifest.json")));
+});
+
+test("inspectProfiles classifies healthy, truncated, empty, malformed, and corrupt profiles", async () => {
+  const box = sandbox({});
+  const write = (name, bytes) =>
+    fs.writeFileSync(path.join(box.targetDir, name), bytes);
+  write("gwt-100-111_0.profraw", profile(4096));
+  write("gwt-101-111_0.profraw", profile(1024, { readable: false }));
+  write("gwt-102-111_0.profraw", Buffer.alloc(0));
+  write(
+    "gwt-103-222_0.profraw",
+    profile(4096, { magic: Buffer.from("notaprof") }),
+  );
+  write("gwt-104-333_0.profraw", profile(4096, { readable: false }));
+  write("gwt-777_0.profraw", profile(4096));
+  write("gwt-777_1.profraw", profile(1024, { readable: false }));
+
+  const report = await inspectProfiles(box.targetDir, box.profdata);
+  const kinds = Object.fromEntries(
+    report.profiles.map((entry) => [entry.name, entry.kind]),
+  );
+
+  assert.deepEqual(kinds, {
+    "gwt-100-111_0.profraw": "healthy",
+    "gwt-101-111_0.profraw": "truncated",
+    "gwt-102-111_0.profraw": "truncated",
+    "gwt-103-222_0.profraw": "malformed",
+    // Unreadable with a valid header, but no readable profile of the same
+    // module proves the full length: not claimed as truncation.
+    "gwt-104-333_0.profraw": "corrupt",
+    "gwt-777_0.profraw": "healthy",
+    "gwt-777_1.profraw": "truncated",
+  });
+});
+
+test("(a) healthy profiles aggregate with the strict merge", () => {
+  const box = sandbox({ "gwt-1-111_0.profraw": profile(4096) });
+  const result = run(box, [
+    "--workspace",
+    "--all-features",
+    "--no-rustc-wrapper",
+  ]);
+
+  assert.equal(result.status, 0, result.text);
+  assert.ok(
+    result.calls
+      .find((args) => args[1] === "show-env")
+      .includes("--no-rustc-wrapper"),
+  );
+  const reports = reportCalls(result.calls);
+  assert.equal(reports.length, 1);
+  assert.ok(!reports[0].includes("--failure-mode"), reports[0].join(" "));
+  assert.ok(
+    !reports[0].includes("--workspace"),
+    "report does not accept --workspace",
+  );
+  assert.ok(
+    !reports[0].includes("--all-features"),
+    "report rejects feature flags: invalid option '--all-features' for subcommand 'report'",
+  );
+  assert.ok(fs.existsSync(box.output));
+  assert.match(result.text, /coverage-summary: PASS/);
+});
+
+test("stale artifacts stay in target without changing the current coverage denominator", () => {
+  const box = sandbox({ "gwt-1-111_0.profraw": profile(4096) });
+  const clean = run(box);
+  assert.equal(clean.status, 0, clean.text);
+  const cleanSummary = JSON.parse(fs.readFileSync(box.output, "utf8"));
+
+  const stale = path.join(
+    path.dirname(box.currentObject),
+    `gwt-deadbeef${path.extname(box.currentObject)}`,
+  );
+  fs.writeFileSync(stale, "1000");
+  const dirty = run(box);
+  assert.equal(dirty.status, 0, dirty.text);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(box.output, "utf8")),
+    cleanSummary,
+  );
+  assert.equal(cleanSummary.data[0].files[0].summary.lines.count, 100);
+  assert.ok(
+    fs.existsSync(stale),
+    "the old executable is retained, not deleted to make coverage pass",
+  );
+  const build = dirty.calls.find((args) => args[0] === "test");
+  assert.ok(build?.includes("--message-format=json"));
+  assert.ok(
+    build.includes("--tests"),
+    "match cargo-llvm-cov's default target selection",
+  );
+  assert.ok(build.includes("--workspace") && build.includes("--all-features"));
+});
+
+test("artifact enumeration failure never falls back to the old target inventory", () => {
+  const box = sandbox(
+    { "gwt-1-111_0.profraw": profile(4096) },
+    { artifactExit: 101 },
+  );
+  const result = run(box);
+  assert.equal(result.status, 4, result.text);
+  assert.match(
+    result.text,
+    /FAIL \[report-failure\].*current coverage build artifacts/,
+  );
+  assert.equal(reportCalls(result.calls).length, 0);
+  assert.ok(!fs.existsSync(box.output));
+});
+
+test("(b) a truncated profile is reported apart from tests and re-aggregated once", () => {
+  const box = sandbox({
+    "gwt-111_0.profraw": profile(4096),
+    "gwt-111_1.profraw": profile(1024, { readable: false }),
+  });
+  const result = run(box, ["-p", "gwt-core", "-p", "gwt", "--all-features"]);
+
+  assert.equal(result.status, 0, result.text);
+  const reports = reportCalls(result.calls);
+  assert.equal(
+    reports.length,
+    1,
+    "exactly one aggregation, the conservative one",
+  );
+  assert.deepEqual(
+    reports[0].slice(
+      reports[0].indexOf("--failure-mode"),
+      reports[0].indexOf("--failure-mode") + 2,
+    ),
+    ["--failure-mode", "all"],
+  );
+  assert.deepEqual(
+    reports[0].slice(0, 6),
+    ["llvm-cov", "report", "-p", "gwt-core", "-p", "gwt"],
+    "report keeps the run's package scope",
+  );
+  assert.match(result.text, /RECOVERED \[profile-truncated\]/);
+  assert.match(result.text, /tests passed/);
+  assert.match(result.text, /gwt-111_1\.profraw/);
+  const health = JSON.parse(
+    fs.readFileSync(`${box.output}.profiles.json`, "utf8"),
+  );
+  assert.equal(health.classification, "profile-truncated");
+  assert.equal(health.recovered, true);
+  assert.deepEqual(
+    health.damaged.map((entry) => entry.name),
+    ["gwt-111_1.profraw"],
+  );
+  assert.ok(
+    fs.existsSync(path.join(box.targetDir, "gwt-111_1.profraw")),
+    "the damaged profile is kept as evidence",
+  );
+});
+
+test("(c) a malformed profile fails as profile damage without aggregating", () => {
+  const box = sandbox({
+    "gwt-1-111_0.profraw": profile(4096),
+    "gwt-2-222_0.profraw": profile(4096, { magic: Buffer.from("notaprof") }),
+  });
+  const result = run(box);
+
+  assert.equal(result.status, 3, result.text);
+  assert.equal(reportCalls(result.calls).length, 0);
+  assert.match(result.text, /FAIL \[profile-damage\]/);
+  assert.match(result.text, /tests passed/);
+  assert.ok(!fs.existsSync(box.output));
+});
+
+test("a nextest failure is reported as a test failure and never aggregated", () => {
+  const box = sandbox(
+    { "gwt-1-111_0.profraw": profile(4096) },
+    { testExit: 101 },
+  );
+  const result = run(box, ["--workspace", "--all-features"], ["--nextest"]);
+
+  assert.equal(result.status, 101, result.text);
+  assert.equal(reportCalls(result.calls).length, 0);
+  assert.match(result.text, /FAIL \[test-failure\]/);
+});
+
+test("a stale summary never survives a failed run", () => {
+  const box = sandbox(
+    { "gwt-1-111_0.profraw": profile(4096) },
+    { testExit: 101 },
+  );
+  fs.writeFileSync(box.output, "{}");
+  run(box);
+  assert.ok(
+    !fs.existsSync(box.output),
+    "an old summary would let the threshold pass",
+  );
+});
+
+test("the threshold still fails after a conservative re-aggregation below it", () => {
+  const box = sandbox(
+    {
+      "gwt-1-111_0.profraw": profile(4096),
+      "gwt-2-111_0.profraw": profile(1024, { readable: false }),
+    },
+    { covered: 85 },
+  );
+  const result = run(box);
+  assert.equal(result.status, 0, result.text);
+  assert.match(result.text, /RECOVERED/);
+
+  const threshold = spawnSync(process.execPath, [THRESHOLD, box.output, "90"], {
+    encoding: "utf8",
+  });
+  assert.equal(threshold.status, 1, `${threshold.stdout}${threshold.stderr}`);
+  assert.match(threshold.stderr, /Coverage threshold not met/);
+});

@@ -1,13 +1,12 @@
 use gwt::gui_single_instance::{acquire_gui_instance_lock, gui_instance_lock_path};
-use gwt_core::test_support::{env_lock, ScopedEnvVar};
-use std::sync::MutexGuard;
+use gwt_core::test_support::{env_lock, EnvLockGuard, ScopedEnvVar};
 use tempfile::tempdir;
 
 const FORCE_NEW_INSTANCE_ENV: &str = "GWT_FORCE_NEW_INSTANCE";
 
 struct ForceEnvUnset {
     _env: ScopedEnvVar,
-    _lock: MutexGuard<'static, ()>,
+    _lock: EnvLockGuard,
 }
 
 fn unset_force_new_instance() -> ForceEnvUnset {

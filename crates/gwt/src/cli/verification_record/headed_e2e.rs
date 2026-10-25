@@ -10,6 +10,9 @@ pub struct HeadedE2eEvidence {
     pub chromium_light_passed: u64,
     pub failed: u64,
     pub status: String,
+    /// Absolute paths to files attached by the measured Playwright run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<String>,
 }
 
 impl HeadedE2eEvidence {
@@ -39,19 +42,53 @@ impl Capture {
         })
     }
 
-    pub fn configure(&self, command: &mut Command) {
-        command
-            .arg("--headed")
-            .arg("--trace=on")
-            .arg(format!(
+    /// The arguments a headed run needs appended to its command line.
+    ///
+    /// Split out from [`Self::configure`] because a verification command is
+    /// not always launched from a [`Command`]: Issue #4409 delegates it to the
+    /// daemon as an explicit program/args/env request, and that path has to
+    /// attach the same reporter by hand. Keeping both halves here means the
+    /// two launch paths cannot drift into configuring different reporters.
+    pub fn arguments(&self) -> Vec<String> {
+        vec![
+            "--headed".to_string(),
+            "--trace=on".to_string(),
+            format!(
                 "--reporter=list,{}",
                 self.directory.path().join("reporter.cjs").display()
-            ))
-            .env("GWT_HEADED_E2E_REPORT", &self.report_path);
+            ),
+        ]
+    }
+
+    /// The environment variable telling the reporter where to write, as a
+    /// `(key, value)` pair. See [`Self::arguments`] for why it is exposed.
+    pub fn environment(&self) -> (String, String) {
+        (
+            "GWT_HEADED_E2E_REPORT".to_string(),
+            self.report_path.display().to_string(),
+        )
+    }
+
+    pub fn configure(&self, command: &mut Command) {
+        command.args(self.arguments());
+        let (key, value) = self.environment();
+        command.env(key, value);
     }
 
     pub fn evidence(&self) -> Option<HeadedE2eEvidence> {
         serde_json::from_slice(&fs::read(&self.report_path).ok()?).ok()
+    }
+
+    /// Playwright tried to load only the drive letter after a wrapper split
+    /// our reporter argument. This is a launch defect, before any test ran.
+    pub fn reporter_argument_was_split(&self, output: &str) -> bool {
+        let path = self.directory.path().display().to_string();
+        let bytes = path.as_bytes();
+        bytes.len() > 1
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && output.contains(&format!("Cannot find module '{}'", bytes[0] as char))
+            && output.contains("at resolveReporter (")
     }
 }
 
@@ -66,6 +103,7 @@ mod tests {
             chromium_light_passed: 1,
             failed: 0,
             status: "passed".to_string(),
+            artifacts: Vec::new(),
         };
         assert!(pass.passed());
         assert!(HeadedE2eEvidence {
@@ -97,6 +135,21 @@ mod tests {
     }
 
     #[test]
+    fn artifact_paths_roundtrip_without_changing_legacy_serialization() {
+        let legacy =
+            r#"{"chromium_dark_passed":1,"chromium_light_passed":1,"failed":0,"status":"passed"}"#;
+        let evidence: HeadedE2eEvidence = serde_json::from_str(legacy).unwrap();
+        assert!(evidence.artifacts.is_empty());
+        assert_eq!(serde_json::to_string(&evidence).unwrap(), legacy);
+
+        let mut with_artifacts: serde_json::Value = serde_json::from_str(legacy).unwrap();
+        with_artifacts["artifacts"] =
+            serde_json::json!(["/output/screenshot.png", "/output/trace.zip"]);
+        let evidence: HeadedE2eEvidence = serde_json::from_value(with_artifacts.clone()).unwrap();
+        assert_eq!(serde_json::to_value(evidence).unwrap(), with_artifacts);
+    }
+
+    #[test]
     fn capture_reads_only_its_fresh_report() {
         let capture = Capture::new().unwrap();
         let other = Capture::new().unwrap();
@@ -116,5 +169,12 @@ mod tests {
         assert!(command.get_envs().any(|(key, value)| {
             key == "GWT_HEADED_E2E_REPORT" && value == Some(capture.report_path.as_os_str())
         }));
+    }
+
+    #[test]
+    fn missing_application_module_is_not_a_reporter_split() {
+        let capture = Capture::new().unwrap();
+        assert!(!capture
+            .reporter_argument_was_split("Cannot find module 'C'\n at loadConfig (config.js:1:1)"));
     }
 }

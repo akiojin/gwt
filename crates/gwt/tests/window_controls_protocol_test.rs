@@ -53,20 +53,6 @@ fn frontend_event_deserializes_window_state_commands() {
         other => panic!("unexpected event: {other:?}"),
     }
 
-    let dock = serde_json::from_value::<FrontendEvent>(json!({
-        "kind": "dock_window_tab",
-        "id": "project-1::board-1",
-        "target_id": "project-1::agent-1"
-    }))
-    .expect("dock_window_tab should deserialize");
-    match dock {
-        FrontendEvent::DockWindowTab { id, target_id } => {
-            assert_eq!(id, "project-1::board-1");
-            assert_eq!(target_id, "project-1::agent-1");
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-
     let activate = serde_json::from_value::<FrontendEvent>(json!({
         "kind": "activate_window_tab",
         "id": "project-1::board-1"
@@ -75,28 +61,6 @@ fn frontend_event_deserializes_window_state_commands() {
     match activate {
         FrontendEvent::ActivateWindowTab { id } => {
             assert_eq!(id, "project-1::board-1");
-        }
-        other => panic!("unexpected event: {other:?}"),
-    }
-
-    let detach = serde_json::from_value::<FrontendEvent>(json!({
-        "kind": "detach_window_tab",
-        "id": "project-1::board-1",
-        "geometry": {
-            "x": 64.0,
-            "y": 80.0,
-            "width": 720.0,
-            "height": 420.0
-        }
-    }))
-    .expect("detach_window_tab should deserialize");
-    match detach {
-        FrontendEvent::DetachWindowTab { id, geometry } => {
-            assert_eq!(id, "project-1::board-1");
-            assert_eq!(geometry.x, 64.0);
-            assert_eq!(geometry.y, 80.0);
-            assert_eq!(geometry.width, 720.0);
-            assert_eq!(geometry.height, 420.0);
         }
         other => panic!("unexpected event: {other:?}"),
     }
@@ -202,13 +166,8 @@ fn frontend_event_deserializes_agent_kanban_commands() {
     }))
     .expect("undock_agent_window should deserialize");
     match undock {
-        FrontendEvent::UndockAgentWindow { id, geometry } => {
+        FrontendEvent::UndockAgentWindow { id } => {
             assert_eq!(id, "project-1::agent-1");
-            let geometry = geometry.expect("geometry should be present");
-            assert_eq!(geometry.x, 120.0);
-            assert_eq!(geometry.y, 96.0);
-            assert_eq!(geometry.width, 720.0);
-            assert_eq!(geometry.height, 420.0);
         }
         other => panic!("unexpected event: {other:?}"),
     }
@@ -261,7 +220,7 @@ fn dock_agent_window_to_issue_event_deserializes() {
     }
 }
 
-// SPEC-3671 FR-001 / FR-004: the wire kind the frontend `isOffCanvasPlacement()` seam
+// SPEC-3671 FR-001 / FR-004: the wire kind the frontend `isContainedPlacement()` seam
 // matches on. The JS predicate and this string must move in lockstep.
 #[test]
 fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
@@ -278,16 +237,16 @@ fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
             "issue_number": 3671
         })
     );
-    assert!(placement.is_off_canvas());
-    assert!(!placement.is_canvas());
+    assert!(placement.is_contained());
+    assert!(!placement.is_surface());
     assert!(WindowPlacement::AgentKanban {
         board_id: "project-1::agent-kanban-1".to_string(),
         lane_id: AgentKanbanLane::Active,
         order: 0,
         collapsed: false,
     }
-    .is_off_canvas());
-    assert!(!WindowPlacement::Canvas.is_off_canvas());
+    .is_contained());
+    assert!(!WindowPlacement::Surface.is_contained());
 }
 
 // SPEC-3671 FR-014 / FR-015 / 受け入れシナリオ 9: the window title is the only
@@ -323,9 +282,14 @@ fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
     assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
     assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
 
-    // SPEC-3671 FR-016 / 受け入れシナリオ 10: the Work surface stays offerable
-    // while any Work information has not moved to the Issue row.
-    assert!(WindowPreset::ALL.contains(&WindowPreset::Work));
+    // Issue #5321: persisted Work metadata remains readable, while Settings
+    // owns the current Issue-family entrypoint.
+    assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
+    assert!(WindowPreset::ALL.contains(&WindowPreset::Settings));
+    assert_eq!(
+        WindowPreset::Work.canonical_surface_preset(),
+        WindowPreset::Settings
+    );
 }
 
 #[test]

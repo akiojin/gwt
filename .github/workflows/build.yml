@@ -1,8 +1,30 @@
 name: Build
 
 on:
+  push:
+    branches: [develop]
   pull_request:
     branches: [develop, main]
+  # Issue #4872: retain merge-queue compatibility for organization repositories.
+  # Issue #5169: this User-owned repository uses non-strict protection and
+  # develop push CI. The queue re-tests
+  # each pull request on the latest base under this event, and a required
+  # check nobody reports for it stays pending forever, so every job here runs
+  # for the queue exactly as it does for a pull request. Pinned by
+  # crates/gwt/tests/ci_concurrency_contract_test.rs; the settings this pairs
+  # with are recorded in AGENTS.md ("Merge queue").
+  merge_group:
+    types: [checks_requested]
+
+# Issue #4119: one run per PR. A develop merge turns every open PR BEHIND, the
+# update-branch `synchronize` starts a fresh run, and without this group the
+# superseded run stayed queued beside it (3-5 runs per branch, 35 queued and 0
+# running on 2026-09-07). Keyed by workflow + PR number so a new push cancels
+# only this PR's older run of this workflow. Pinned by
+# crates/gwt/tests/ci_concurrency_contract_test.rs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: true
 
 jobs:
   # Issue #4134 AC-3: this job is redundant on Linux. `cargo test --workspace
@@ -22,6 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Detect build profile changes
+        id: profile
+        run: python scripts/measure-build-profile.py detect
       # Issue #4191 AC-2: keyed on scripts/ci-apt.sh, which owns the package
       # list, so a changed set is never served the previous archive.
       - name: Cache Linux GTK dependency packages
@@ -45,26 +75,86 @@ jobs:
       # the script and not GitHub reports a dependency-install failure. The
       # measured step distribution behind the numbers is recorded in test.yml.
       - name: Install tray + GTK dependencies (Linux)
-        run: sudo GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
+        run: sudo GITHUB_ACTIONS=true GWT_APT_CACHE_DIR="$HOME/.cache/gwt-apt-archives" bash scripts/ci-apt.sh gtk-deps
         timeout-minutes: 18
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: linux-workspace
         continue-on-error: true
       - name: Build workspace targets
         run: cargo build -p gwt-core -p gwt --all-features
+      # Issue #4824: observational only; never add another full test suite to CI.
+      - name: Measure build profile before and after
+        id: profile_measure
+        if: steps.profile.outputs.changed == 'true'
+        run: python scripts/measure-build-profile.py measure
+        timeout-minutes: 15
+        continue-on-error: true
+      - name: Report profile measurement outcome
+        if: always() && steps.profile.outputs.changed == 'true'
+        env:
+          MEASUREMENT_OUTCOME: ${{ steps.profile_measure.outcome }}
+        run: |
+          echo "Build profile measurement outcome (non-blocking): $MEASUREMENT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload profile measurement evidence
+        if: always() && steps.profile.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: build-profile-Linux
+          path: |
+            profile-results/*.json
+            profile-results/*.log
+          if-no-files-found: warn
+          retention-days: 14
 
   check-windows:
     name: Check (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Detect build profile changes
+        id: profile
+        run: python scripts/measure-build-profile.py detect
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-windows
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: windows-workspace
         continue-on-error: true
       - name: Check Windows compilation
         run: cargo check -p gwt-core -p gwt
+      - name: Measure build profile before and after
+        id: profile_measure
+        if: steps.profile.outputs.changed == 'true'
+        run: python scripts/measure-build-profile.py measure
+        timeout-minutes: 15
+        continue-on-error: true
+      - name: Report profile measurement outcome
+        if: always() && steps.profile.outputs.changed == 'true'
+        shell: bash
+        env:
+          MEASUREMENT_OUTCOME: ${{ steps.profile_measure.outcome }}
+        run: |
+          echo "Build profile measurement outcome (non-blocking): $MEASUREMENT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload profile measurement evidence
+        if: always() && steps.profile.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7
+        continue-on-error: true
+        with:
+          name: build-profile-Windows
+          path: |
+            profile-results/*.json
+            profile-results/*.log
+          if-no-files-found: warn
+          retention-days: 14
 
   check-macos:
     name: Check (macOS)
@@ -79,10 +169,21 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --default-toolchain none --no-modify-path
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
-          key: check-macos
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: macos-workspace
         continue-on-error: true
       - name: Check macOS compilation
         run: cargo check -p gwt-core -p gwt
+      - name: Test short socket fixtures with a long native TMPDIR
+        run: bash scripts/test-short-socket-fixtures.sh
+        timeout-minutes: 15
+
+  report-post-merge-failure:
+    needs: [build, check-windows, check-macos]
+    if: ${{ github.event_name == 'push' && failure() }}
+    permissions:
+      issues: write
+    uses: ./.github/workflows/post-merge-ci.yml

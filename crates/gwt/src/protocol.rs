@@ -5,21 +5,84 @@ use gwt_core::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Payload limits shared with the file attachment pipeline.
+#[derive(Debug, Clone, Copy)]
+pub struct ContentLimits {
+    pub text_max_bytes: u64,
+    pub binary_chunk_max_bytes: u64,
+}
+
+impl Default for ContentLimits {
+    fn default() -> Self {
+        Self {
+            text_max_bytes: 5 * 1024 * 1024,
+            binary_chunk_max_bytes: 10 * 1024 * 1024,
+        }
+    }
+}
+
+/// Project Reports cursor. A new reader starts a new epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PmReportsVersion {
+    pub epoch: String,
+    pub revision: u64,
+}
+
+/// Render-only HTML is derived from durable report Markdown on the host.
+#[derive(Debug, Clone, Serialize)]
+pub struct PmReportView {
+    #[serde(flatten)]
+    pub report: gwt_core::pm_report::PmReport,
+    pub body_html: String,
+}
+
+impl From<gwt_core::pm_report::PmReport> for PmReportView {
+    fn from(report: gwt_core::pm_report::PmReport) -> Self {
+        let body_html = crate::board_remote::markdown::markdown_to_html(&report.body);
+        Self { report, body_html }
+    }
+}
+
+fn serialize_release_notes_entries<S: serde::Serializer>(
+    entries: &[gwt_core::release_notes::ReleaseEntry],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::board_remote::markdown::{render_markdown_html, MarkdownHtmlProfile};
+    let mut rendered = serde_json::to_value(entries).map_err(serde::ser::Error::custom)?;
+    for (entry, value) in entries
+        .iter()
+        .zip(rendered.as_array_mut().into_iter().flatten())
+    {
+        for (section, value) in entry
+            .sections
+            .iter()
+            .zip(value["sections"].as_array_mut().into_iter().flatten())
+        {
+            let markdown = section
+                .items
+                .iter()
+                .map(|item| format!("- {item}\n"))
+                .collect::<String>();
+            value["body_html"] = serde_json::Value::String(render_markdown_html(
+                &markdown,
+                MarkdownHtmlProfile::ReleaseNotes,
+            ));
+        }
+    }
+    rendered.serialize(serializer)
+}
+
 use crate::{
     branch_cleanup::{BranchCleanupProgressPhase, BranchCleanupResultEntry},
     branch_list::BranchListEntry,
     daemon_runtime::RuntimeHookEvent,
-    file_content::{Encoding, Newline},
-    file_tree::FileTreeEntry,
-    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView},
+    issue_monitor::{IssueMonitorInboxItem, IssueMonitorStatusView, MonitorNotificationTransition},
     knowledge_bridge::{KnowledgeDetailView, KnowledgeKind, KnowledgeListItem},
     launch_wizard::{LaunchWizardAction, LaunchWizardView},
     persistence::{
-        AgentKanbanLane, CanvasViewport, PersistedWindowState, ProjectKind, WindowGeometry,
-        WindowProcessStatus,
+        AgentKanbanLane, PersistedWindowState, ProjectKind, WindowProcessStatus, WindowSurfaceOwner,
     },
     preset::WindowPreset,
-    worktree_inventory::WorktreeEntry,
 };
 
 #[derive(Deserialize)]
@@ -41,23 +104,17 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentMode {
-    Text,
-    Hex,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentErrorKind {
-    Denied,
-    TooLarge,
-    IoError,
-    NotAFile,
-    BinaryNotText,
-    WindowNotFound,
-    WindowMismatch,
+fn deserialize_positive_capacity_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<usize>::deserialize(deserializer)?;
+    if value == Some(0) {
+        return Err(serde::de::Error::custom("manual capacity must be positive"));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -69,6 +126,7 @@ pub enum IndexSearchScope {
     Discussions,
     Board,
     Works,
+    Reports,
     Files,
     #[serde(rename = "files-docs")]
     FilesDocs,
@@ -100,6 +158,7 @@ impl IndexSearchScope {
             Self::Discussions => "discussions",
             Self::Board => "board",
             Self::Works => "works",
+            Self::Reports => "reports",
             Self::Files => "files",
             Self::FilesDocs => "files-docs",
         }
@@ -109,13 +168,40 @@ impl IndexSearchScope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IndexSearchTarget {
-    Issue { number: u64 },
-    Spec { spec_id: u64 },
-    Memory { heading: String, date: String },
-    Discussion { heading: String, date: String },
-    Board { entry_id: String },
-    Work { work_id: String },
-    File { path: String },
+    Issue {
+        number: u64,
+    },
+    Spec {
+        spec_id: u64,
+    },
+    Memory {
+        heading: String,
+        date: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_instruction: Option<Box<gwt_core::user_instruction::UserInstruction>>,
+    },
+    Discussion {
+        heading: String,
+        date: String,
+    },
+    Board {
+        entry_id: String,
+    },
+    Work {
+        work_id: String,
+    },
+    Report {
+        report_id: String,
+        created_at: String,
+        report_type: String,
+        source_kind: String,
+        question: String,
+        body: String,
+        issue_numbers: Vec<u64>,
+    },
+    File {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,32 +219,6 @@ pub struct IndexSearchResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_terms: Vec<String>,
     pub target: IndexSearchTarget,
-}
-
-/// SPEC-2006 Phase 2 amendment: structured error variants for the write
-/// surface. Kept separate from read-side `FileContentErrorKind` so the GUI
-/// can match exhaustively on save-only outcomes (conflict / read-only /
-/// out-of-range / encoding fallback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileContentSaveErrorKind {
-    Denied,
-    Conflict,
-    ReadOnly,
-    OutOfRange,
-    TooLarge,
-    IoError,
-    NotAFile,
-    WindowNotFound,
-    WindowMismatch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArrangeMode {
-    Tile,
-    Stack,
-    Align,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +285,38 @@ pub enum ContinueWorkOutcomeKind {
     StartedWithHandoff,
     ConflictUnknown,
     Failed,
+}
+
+/// Public Recovery Center state. This deliberately mirrors only the three
+/// user-facing lifecycle states and never carries durable authority details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterItemState {
+    Pending,
+    Acknowledged,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryCenterLoadStatus {
+    Ready,
+    NotFound,
+    Error,
+}
+
+/// Allowlisted Recovery Center row. `action_handle` is process-local and
+/// opaque; the remaining fields are presentation data derived from the
+/// sanitized Board payload already accepted by RecoveryStore.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryCenterItemView {
+    pub action_handle: String,
+    pub state: RecoveryCenterItemState,
+    pub worktree_form: gwt_core::coordination::BoardWorktreeForm,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub summary: String,
+    pub updated_at: String,
 }
 
 /// SPEC #1921 Phase 86 (#3813): wire shape of the agent process-tree
@@ -295,15 +387,46 @@ impl AgentResourceSettings {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
     FrontendReady,
+    ProjectClientAttention {
+        visible: bool,
+        focused: bool,
+        notification_permission: crate::project_notifications::NotificationPermission,
+    },
+    RetryWorkspaceStateLoad,
+    ProjectAggregateAck {
+        revision: u64,
+        visible: bool,
+        focused: bool,
+    },
+    /// Explicit, client-scoped Recovery Center refresh. Durable identities are
+    /// discovered from the active project and never accepted from the client.
+    LoadRecoveryCenter {
+        request_id: String,
+    },
+    /// Resolve one process-local row handle. Only acknowledged rows may yield
+    /// a public Board entry id.
+    OpenRecoveryCenterBoardEntry {
+        request_id: String,
+        generation: u64,
+        action_handle: String,
+    },
     /// Toggle Claude account-usage collection (SPEC-2970 FR-009).
     SetClaudeAccountUsageEnabled {
         enabled: bool,
     },
     /// Request an immediate usage refresh (SPEC-2970 FR-022).
     RefreshUsage,
-    StartupAutoResumeReady {
-        bounds: WindowGeometry,
+    /// Project-bound member controls. The client cannot select a filesystem root.
+    AgentRoster {
+        action: crate::agent_names::AgentRosterAction,
+        #[serde(default)]
+        expected_revision: Option<u64>,
     },
+    /// Read or reassign the authenticated project's persistent Agent schedule.
+    AgentSchedule {
+        action: crate::issue_monitor::AgentScheduleAction,
+    },
+    StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
         navigation_ms: f64,
@@ -313,15 +436,16 @@ pub enum FrontendEvent {
         id: String,
     },
     /// SPEC-3431 FR-018/FR-019: the PM launcher was activated. Opens the
-    /// resident PM pane if it is not running, then frames it in the viewport.
-    OpenPmAgent {
-        #[serde(default)]
-        bounds: Option<WindowGeometry>,
-    },
+    /// resident PM pane if it is not running, then activates its surface.
+    OpenPmAgent {},
     /// SPEC-3431 FR-026: opt the active project in or out of PM auto-start.
     /// Governs the next project open only — it never stops a live PM.
     SetPmAutoStart {
         enabled: bool,
+    },
+    /// Issue #3812: preserve residency while pausing autonomous PM work.
+    SetPmPaused {
+        paused: bool,
     },
     /// SPEC-3431 FR-132: persist the active project's resident-loop interval.
     SetPmLoopInterval {
@@ -351,42 +475,31 @@ pub enum FrontendEvent {
     },
     ReopenRecentProject {
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
-    SelectProjectTab {
-        tab_id: String,
+    PreviewCloseProject {
+        project_key: String,
     },
-    CloseProjectTab {
-        tab_id: String,
+    ConfirmCloseProject {
+        token: CloseProjectToken,
+    },
+    CancelCloseProject {
+        token: CloseProjectToken,
     },
     CreateWindow {
         preset: WindowPreset,
-        bounds: WindowGeometry,
+        #[serde(default)]
+        surface_owner: Option<WindowSurfaceOwner>,
     },
     FocusWindow {
         id: String,
-        bounds: Option<WindowGeometry>,
     },
     CycleFocus {
         direction: FocusCycleDirection,
-        bounds: WindowGeometry,
-    },
-    UpdateViewport {
-        viewport: CanvasViewport,
-    },
-    ArrangeWindows {
-        mode: ArrangeMode,
-        bounds: WindowGeometry,
-    },
-    DockWindowTab {
-        id: String,
-        target_id: String,
     },
     ActivateWindowTab {
         id: String,
-    },
-    DetachWindowTab {
-        id: String,
-        geometry: WindowGeometry,
     },
     PlaceAgentWindowInKanban {
         id: String,
@@ -402,7 +515,6 @@ pub enum FrontendEvent {
     },
     UndockAgentWindow {
         id: String,
-        geometry: Option<WindowGeometry>,
     },
     /// SPEC-3885 FR-012: fold a Windowized Issue window back into its Issue row. The
     /// window already knows its Issue, so the frontend only names the window.
@@ -419,18 +531,32 @@ pub enum FrontendEvent {
         rows: u16,
     },
     ListWindows,
-    UpdateWindowGeometry {
-        id: String,
-        geometry: WindowGeometry,
-        cols: u16,
-        rows: u16,
+    /// Read live pane identities without inferring generations from Session metadata.
+    ListFleetPanes,
+    /// Fetch the gwt-assigned identity; the principal supplies all scope.
+    PaneName {
         #[serde(default)]
-        base_geometry_revision: Option<u64>,
+        candidate: String,
+        request_id: String,
     },
     CloseWindow {
         id: String,
         #[serde(default)]
         request_id: Option<String>,
+    },
+    /// A fleet close never treats an absent runtime generation as a wildcard.
+    CloseFleetPane {
+        request_id: String,
+        id: String,
+        session_id: String,
+        child_pid: Option<u32>,
+        child_started_at: Option<u64>,
+    },
+    RecoverRestoredWindow {
+        id: String,
+        session_id: String,
+        child_pid: u32,
+        child_started_at: u64,
     },
     /// SPEC-2356 安心 Addendum (FR-041): stop the window's agent runtime (kill
     /// the PTY through the existing stop path) but KEEP the window and its
@@ -456,6 +582,19 @@ pub enum FrontendEvent {
     TerminalInput {
         id: String,
         data: String,
+    },
+    /// Read the registered PM's conversation. Native paths and identities are
+    /// resolved on the host from this authenticated window, never from the client.
+    LoadPmConversation {
+        id: String,
+    },
+    /// Read explicitly posted reports for the registered PM window.
+    LoadPmReports {
+        id: String,
+        #[serde(default)]
+        request_id: u64,
+        #[serde(default)]
+        version: Option<PmReportsVersion>,
     },
     /// Inject one line of input into the pane bound to the given agent
     /// session (SPEC-3050 FR-001/FR-002). Carries a session id instead of a
@@ -496,53 +635,17 @@ pub enum FrontendEvent {
         filename: Option<String>,
         size: u64,
     },
+    /// Browser-side upload failures use server-derived window/project scope.
+    AttachmentUploadFailed {
+        id: String,
+        operation_id: String,
+        message: String,
+    },
     AttachFiles {
         id: String,
         #[serde(default)]
         operation_id: Option<String>,
         files: Vec<FileAttachment>,
-    },
-    LoadFileTree {
-        id: String,
-        path: Option<String>,
-    },
-    ListFileTreeWorktrees {
-        id: String,
-    },
-    SelectFileTreeWorktree {
-        id: String,
-        worktree_id: String,
-    },
-    LoadFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_length: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: write the modified text or single hex
-    /// byte back to disk. `expected_mtime` / `expected_size` are the values
-    /// returned by the most recent read; mismatch raises Conflict.
-    SaveFileContent {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        expected_mtime: u64,
-        expected_size: u64,
-        #[serde(default)]
-        text: Option<String>,
-        #[serde(default)]
-        encoding: Option<Encoding>,
-        #[serde(default)]
-        newline: Option<Newline>,
-        #[serde(default)]
-        has_bom: Option<bool>,
-        #[serde(default)]
-        hex_offset: Option<u64>,
-        #[serde(default)]
-        hex_byte: Option<u8>,
     },
     LoadBranches {
         id: String,
@@ -571,13 +674,12 @@ pub enum FrontendEvent {
     },
     LoadLogs {
         id: String,
+        #[serde(default)]
+        scope: LogScopeSelection,
     },
-    /// SPEC-2809 Phase F2 — Console window mounts and asks the backend for
-    /// the current `ProcessConsoleHub` ring buffer so historical lines
-    /// (e.g. gh calls that happened before the window opened) are visible
-    /// immediately. Reply is [`BackendEvent::ProcessConsoleSnapshot`].
-    LoadProcessConsole {
+    CheckKnowledgeRevision {
         id: String,
+        knowledge_kind: KnowledgeKind,
     },
     LoadKnowledgeBridge {
         id: String,
@@ -586,6 +688,12 @@ pub enum FrontendEvent {
         request_id: Option<u64>,
         selected_number: Option<u64>,
         refresh: bool,
+    },
+    /// Issue #5287: validated Issue-window failures enter the error ledger.
+    ReportKnowledgeError {
+        id: String,
+        stage: String,
+        message: String,
     },
     SearchKnowledgeBridge {
         id: String,
@@ -639,12 +747,33 @@ pub enum FrontendEvent {
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: frontend-generated id for this cleanup run, so a
+        /// client that reconnects mid-cleanup can re-sync the operation it
+        /// started. Required before cleanup work can begin.
+        operation_id: String,
     },
     RunWorkspaceCleanup {
         branch: String,
         delete_remote: bool,
         #[serde(default)]
         force_filesystem_delete: bool,
+        /// Issue #4433: see [`FrontendEvent::RunBranchCleanup::operation_id`].
+        operation_id: String,
+    },
+    /// Issue #4433: a reconnected client asks for the current state of the
+    /// cleanup operation it is still showing as running. The backend replies
+    /// with the latest [`BackendEvent::BranchCleanupProgress`] or
+    /// [`BackendEvent::BranchCleanupResult`], or with nothing when the
+    /// operation is unknown.
+    SyncBranchCleanup {
+        id: String,
+        operation_id: String,
+    },
+    /// Issue #4433: the client consumed the operation's result, so the backend
+    /// can drop the snapshot instead of replaying it into the next cleanup.
+    ClearBranchCleanupStatus {
+        id: String,
+        operation_id: String,
     },
     /// SPEC-1939 US-5: trigger a per-cell index rebuild for
     /// `(project_root, scope, worktree_hash?)`. The backend funnels this
@@ -689,7 +818,6 @@ pub enum FrontendEvent {
     OpenBoardOriginAgent {
         id: String,
         origin_session_id: String,
-        bounds: Option<WindowGeometry>,
     },
     SelectProfile {
         id: String,
@@ -751,9 +879,7 @@ pub enum FrontendEvent {
     /// (the gwt launch / Session TOML). `agent_session_id`, when present,
     /// names a specific Session (a conversation UUID under that Work) so a
     /// single Session row can be resumed directly; when absent the Work's
-    /// latest conversation is resumed. `bounds` carries the frontend's
-    /// current viewport so the spawned agent window appears at a sensible
-    /// position inside the visible canvas.
+    /// latest conversation is resumed.
     ResumeWorkspaceAgent {
         /// Retry correlation only; this value grants no authority.
         #[serde(default)]
@@ -761,7 +887,6 @@ pub enum FrontendEvent {
         session_id: String,
         #[serde(default)]
         agent_session_id: Option<String>,
-        bounds: WindowGeometry,
     },
     /// Start or recover the producing Execution for one opaque Work identity.
     ///
@@ -771,12 +896,10 @@ pub enum FrontendEvent {
     ContinueWork {
         operation_id: String,
         work_id: String,
-        bounds: WindowGeometry,
     },
     ResumeBranchLatestAgent {
         id: String,
         branch_name: String,
-        bounds: WindowGeometry,
     },
     OpenLaunchWizard {
         id: String,
@@ -789,7 +912,6 @@ pub enum FrontendEvent {
     },
     LaunchWizardAction {
         action: LaunchWizardAction,
-        bounds: Option<WindowGeometry>,
     },
     SetIssueMonitorEnabled {
         enabled: bool,
@@ -798,28 +920,82 @@ pub enum FrontendEvent {
     SetIssueMonitorAutonomousMode {
         enabled: bool,
     },
-    /// Issue #3906 AC-1: explicit auto-apply-updates override. Persisted as
-    /// `auto_apply_updates` in the Issue Monitor prefs; without an override
-    /// the setting follows `autonomous_mode`.
-    SetIssueMonitorAutoApplyUpdates {
+    /// Read app-wide update preference and the requesting project's drain.
+    GetUpdateSettings,
+    /// GUI-only app-wide update preference shared by projects and the Hub.
+    SetAutoApplyUpdates {
         enabled: bool,
     },
+    /// Read the current project's complete saved launch profile pool.
+    GetIssueMonitorProfiles,
+    IssueMonitorProfilesSet {
+        profiles: Vec<crate::IssueMonitorLaunchProfilePatch>,
+        /// Legacy clients may still send this retired setting; ignore it.
+        #[serde(skip)]
+        usage_threshold_percent: Option<u8>,
+        request_id: Option<u64>,
+    },
     SetIssueMonitorMaxActiveAgents {
-        max_active_agents: usize,
+        #[serde(deserialize_with = "deserialize_positive_capacity_override")]
+        max_active_agents: Option<usize>,
+    },
+    SetIssueMonitorAllowedLabels {
+        allowed_labels: Vec<String>,
+        #[serde(default)]
+        request_id: Option<u64>,
     },
     ReorderIssueMonitorIssues {
         issue_numbers: Vec<u64>,
+    },
+    /// SPEC #3165 TQ-9: put Issues into this terminal's explicit queue. This is
+    /// the user's own act — the Monitor's auto-refill is a separate path — so
+    /// the entries are attributed to the operator.
+    IssueMonitorQueuePush {
+        issue_numbers: Vec<u64>,
+    },
+    /// SPEC #3165 TQ-9: remove Issues from this terminal's explicit queue.
+    /// A launch already running for them is not stopped.
+    IssueMonitorQueueRemove {
+        issue_numbers: Vec<u64>,
+    },
+    IssueMonitorQueueMove {
+        issue_number: u64,
+        position: usize,
+    },
+    SetIssueMonitorAutoRefill {
+        enabled: bool,
+        limit: usize,
+    },
+    SetIssueMonitorTier {
+        issue_number: u64,
+        tier: u8,
+        expected_config_token: String,
     },
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,
         #[serde(default)]
         launch: bool,
+        /// SPEC #3885 T-033 (FR-022): the "+ New" popover's auto-merge
+        /// checkbox; `true` creates the Issue with the `auto-merge` label.
+        #[serde(default)]
+        auto_merge: bool,
     },
     IssueMonitorLaunchNow {
         issue_number: u64,
         #[serde(default)]
         linked_issue_kind: Option<crate::LinkedIssueKind>,
+    },
+    /// Issue #3628 (AC-3): return an issue whose launch is gone to the queue,
+    /// without launching anything.
+    ///
+    /// Carries no launch identity on purpose. `stop` and `failover` resolve an
+    /// exact live launch, which is right for them and impossible here — a row
+    /// that reached `agent_failed` has already lost the launch those operations
+    /// would name, and hand-editing `issue-monitor.json` was the only remaining
+    /// recovery. The driver still refuses any row a launch does own.
+    IssueMonitorRequeue {
+        issue_number: u64,
     },
     IssueMonitorConfigureIssue {
         issue_number: u64,
@@ -849,6 +1025,12 @@ pub enum FrontendEvent {
     /// SPEC-2041 Phase 19 (FR-058): user pressed `Restart now`. Backend swaps
     /// the prepared binary via the helper subprocess and exits the parent.
     ApplyUpdateRestartNow,
+    /// Read current host activity before confirming an explicit restart.
+    GetUpdateRestartImpact {
+        request_id: String,
+    },
+    /// Explicitly schedule the staged update through the existing drain.
+    ApplyUpdateWhenIdle,
     /// Issue #3906 AC-7 / #4076 AC-2: the user cancelled the automatic apply
     /// during its grace. The `update_drain` hold is released, the staged
     /// update stays on disk for the manual button, and the tick never
@@ -870,6 +1052,15 @@ pub enum FrontendEvent {
     /// Settings > Custom Agents: list every stored custom agent. Response is
     /// [`BackendEvent::CustomAgentList`].
     ListCustomAgents,
+    /// SPEC #1921 L3: list supported built-ins and their cached detection state.
+    ListSupportedAgents,
+    MaintainSupportedAgent {
+        agent_id: String,
+        action: crate::agent_maintenance::MaintenanceAction,
+    },
+    SetAgentAutoUpdate {
+        enabled: bool,
+    },
     /// Settings > Custom Agents > Add from preset: enumerate built-in preset
     /// definitions for the picker. Response is
     /// [`BackendEvent::CustomAgentPresetList`].
@@ -1083,8 +1274,7 @@ pub enum FrontendEvent {
     /// for agent-session Works); `close_kind` is `"done"` or `"discarded"`.
     /// Done records a terminal completion, Discarded a terminal discard; both
     /// remove the Work from the active surface. The backend blocks the close
-    /// when the owning agent session is still live (the worktree is only
-    /// removed for Paused Works that have no running agent).
+    /// when the owning agent session is still live. Worktree and branch remain.
     CloseWork {
         work_id: String,
         close_kind: String,
@@ -1149,14 +1339,8 @@ fn default_board_history_limit() -> usize {
     50
 }
 
-#[allow(dead_code)]
-fn default_newline() -> Newline {
-    Newline::Lf
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkspaceView {
-    pub viewport: CanvasViewport,
     pub windows: Vec<PersistedWindowState>,
     // Compatibility field only. Workspace history is intentionally not carried
     // by frequently-broadcast workspace_state events; active_work_projection is
@@ -1165,17 +1349,37 @@ pub struct WorkspaceView {
     pub work_items: Vec<WorkspaceHistoryView>,
 }
 
+/// Select the owning project's log or process-wide diagnostics.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogScopeSelection {
+    #[default]
+    Project,
+    Global,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectTabView {
     pub id: String,
+    /// Canonical repository identity used to bind a browser connection.
+    pub project_key: String,
     pub title: String,
     pub project_root: String,
+    pub project_scope: String,
     pub kind: ProjectKind,
     pub workspace: WorkspaceView,
     #[serde(default)]
     pub running_agent_count: u32,
     #[serde(default)]
     pub running_agents: Vec<RunningAgentSummary>,
+}
+
+/// Client-bound, single-use authority for one incarnation of an open Project.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloseProjectToken {
+    pub project_key: String,
+    pub generation: u64,
+    pub nonce: String,
 }
 
 // SPEC-2013 FR-011: project tab close 確認 modal が表示する running agent の
@@ -1193,6 +1397,10 @@ pub struct RecentProjectView {
     pub path: String,
     pub title: String,
     pub kind: ProjectKind,
+    /// Issue #4538 AC-3: path-free `/p/<key>` link target. `None` until the
+    /// runtime has resolved the repository identity off the tao thread.
+    #[serde(default)]
+    pub project_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1231,6 +1439,22 @@ pub struct ProfileSnapshotView {
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
+/// Lightweight project catalog. No workspace, terminal, or agent payloads.
+#[derive(Debug, Clone, Serialize)]
+pub struct HubProjectView {
+    pub id: String,
+    pub project_key: String,
+    pub title: String,
+    pub kind: ProjectKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HubStateView {
+    pub app_version: String,
+    pub projects: Vec<HubProjectView>,
+    pub recent_projects: Vec<RecentProjectView>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppStateView {
     pub app_version: String,
@@ -1245,6 +1469,8 @@ pub struct ActiveWorkAgentView {
     pub window_id: Option<String>,
     pub agent_id: String,
     pub display_name: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
     pub affiliation_status: String,
     pub workspace_id: Option<String>,
     pub status_category: String,
@@ -1518,6 +1744,9 @@ pub struct ActiveWorkspaceWorkView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkItemView {
+    /// Complete Issue association, independent of paginated Knowledge results.
+    #[serde(default)]
+    pub linked_issue_numbers: Vec<u64>,
     pub id: String,
     pub title: String,
     pub status_category: String,
@@ -1609,6 +1838,30 @@ pub struct ActiveWorkItemView {
     pub cleanup_blocked_reason: Option<String>,
 }
 
+/// Read-only membership measured from this GUI host's current agent children.
+/// This does not grant launch, close, or Issue Monitor slot authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityView {
+    pub project_key: String,
+    pub host_id: String,
+    pub observed_at: String,
+    /// `None` is an attempted observation with unknown membership; an empty
+    /// vector is an observed zero, not missing census data.
+    #[serde(default)]
+    pub agents: Option<Vec<LocalAgentActivityAgentView>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalAgentActivityAgentView {
+    pub window_id: String,
+    pub session_id: String,
+    pub runtime_incarnation: u64,
+    pub issue_number: Option<u64>,
+    pub is_pm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActiveWorkProjectionView {
     pub id: String,
@@ -1642,6 +1895,8 @@ pub struct ActiveWorkProjectionView {
     pub agents: Vec<ActiveWorkAgentView>,
     #[serde(default)]
     pub unassigned_agents: Vec<ActiveWorkAgentView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_agent_activity: Option<LocalAgentActivityView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1690,6 +1945,22 @@ pub struct PmAgentOption {
     pub name: String,
 }
 
+/// SPEC #1921 L3: read-only Settings row, without executable paths or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SupportedAgentView {
+    pub id: String,
+    pub name: String,
+    pub installed: bool,
+    /// None distinguishes an unavailable version from a known one; `installed`
+    /// distinguishes a failed version probe from an agent that was not detected.
+    pub installed_version: Option<String>,
+    pub available_version: Option<String>,
+    pub update_check_error: Option<String>,
+    pub update_available: bool,
+    pub up_to_date: bool,
+    pub install_supported: bool,
+}
+
 /// Issue #3906 AC-7 / AC-12: phases of the automatic apply announced through
 /// [`BackendEvent::UpdateAutoApply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1698,18 +1969,151 @@ pub enum UpdateAutoApplyPhase {
     Scheduled,
     Postponed,
     Cancelled,
+    /// Automatic apply needs an administrator; retain the staged manual action.
+    ElevationRequired,
     Applying,
+}
+
+/// Server-owned project attention summary. It describes runtime state, not Work completion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectAgentAggregate {
+    pub running_count: usize,
+    pub block_count: usize,
+    pub error_count: usize,
+    pub unread: bool,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceStateNoticeKind {
+    LoadError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceStateNoticeView {
+    pub path: String,
+    pub message: String,
+    pub kind: WorkspaceStateNoticeKind,
+}
+
+/// Project-scoped, receiver-observed identity used for one fleet plan/apply cycle.
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetPaneView {
+    pub window_id: String,
+    pub project_root: String,
+    pub session_id: Option<String>,
+    pub runtime_present: bool,
+    pub child_pid: Option<u32>,
+    pub child_started_at: Option<u64>,
+    pub title: String,
+    pub state: WindowProcessStatus,
+    pub agent_name: Option<String>,
+    pub preset: WindowPreset,
+    pub worktree_path: String,
+    pub linked_issue_number: Option<u64>,
+    pub is_pm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterView {
+    pub project_key: String,
+    pub revision: u64,
+    pub members: Vec<AgentRosterMemberView>,
+    pub capacity: usize,
+    pub recommended_capacity: Option<usize>,
+    pub past_contributors: Vec<AgentPastContributorView>,
+    pub past_complete: bool,
+    pub by_session: std::collections::BTreeMap<String, AgentWorkFactsView>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterMemberView {
+    #[serde(flatten)]
+    pub member: crate::agent_names::AgentMember,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub history: Vec<AgentAssignmentHistoryView>,
+    pub issue_count: Option<usize>,
+    pub landed_count: Option<usize>,
+    pub active_seconds: Option<u64>,
+    pub tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAssignmentHistoryView {
+    pub session_id: String,
+    pub issue_number: Option<u64>,
+    pub title: Option<String>,
+    pub result: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentPastContributorView {
+    pub session_id: String,
+    pub name: String,
+    pub kind: String,
+    pub issue_numbers: Vec<u64>,
+    pub first_posted_at: Option<String>,
+    pub last_posted_at: Option<String>,
+    pub post_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentWorkFactsView {
+    pub branch: Option<String>,
+    pub ahead_of_develop: Option<usize>,
+    pub model: Option<String>,
+    pub provider: String,
+    pub last_action: Option<String>,
+    pub elapsed_seconds: Option<u64>,
+    pub warning_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BackendEvent {
+    WorkspaceStateNotice {
+        notice: Option<WorkspaceStateNoticeView>,
+    },
+    CloseProjectPreview {
+        token: CloseProjectToken,
+        title: String,
+        running_agents: Vec<RunningAgentSummary>,
+    },
+    CloseProjectError {
+        project_key: String,
+        message: String,
+    },
+    ProjectClosed {
+        project_key: String,
+    },
+    ProjectAgentAggregate {
+        aggregate: ProjectAgentAggregate,
+    },
+    ProjectNotification {
+        notification: crate::project_notifications::NotificationIntent,
+    },
+    HubState {
+        hub: HubStateView,
+    },
+    /// Issue #4538 AC-1: a `/p/<hash>` client whose hash resolves to neither
+    /// an open Project nor a Recent entry. Carries the hash only, never a path.
+    ProjectNotFound {
+        project_key: String,
+    },
     /// SPEC-2359 US-66 (T-527): canonical Rust name is Work-based; the wire
     /// `kind` stays `workspace_state` as the legacy adapter spelling so no
     /// frontend/client breaks.
     #[serde(rename = "workspace_state")]
-    WindowCanvasState {
+    WorkspaceState {
         workspace: AppStateView,
+    },
+    LocalAgentActivity {
+        activity: LocalAgentActivityView,
     },
     ActiveWorkProjection {
         projection: Box<ActiveWorkProjectionView>,
@@ -1722,6 +2126,39 @@ pub enum BackendEvent {
     },
     WindowList {
         windows: Vec<PersistedWindowState>,
+    },
+    FleetPaneList {
+        project_root: String,
+        panes: Vec<FleetPaneView>,
+    },
+    RecoveryCenterState {
+        request_id: String,
+        generation: u64,
+        status: RecoveryCenterLoadStatus,
+        items: Vec<RecoveryCenterItemView>,
+    },
+    RecoveryCenterBoardEntry {
+        request_id: String,
+        generation: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        board_entry_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Project-scoped persistent membership and assignment history.
+    AgentRoster {
+        roster: AgentRosterView,
+    },
+    AgentRosterError {
+        project_key: String,
+        message: String,
+    },
+    AgentSchedule {
+        schedule: crate::issue_monitor::AgentScheduleSnapshot,
+    },
+    AgentScheduleError {
+        project_key: String,
+        message: String,
     },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
@@ -1738,9 +2175,30 @@ pub enum BackendEvent {
         id: String,
         data_base64: String,
     },
+    /// Read-only last three screen rows, independent of terminal sizing.
+    TerminalPreview {
+        id: String,
+        text: String,
+    },
     TerminalSnapshot {
         id: String,
         data_base64: String,
+    },
+    PmConversation {
+        id: String,
+        session_id: Option<String>,
+        snapshot: crate::pm_conversation::PmConversationSnapshot,
+    },
+    PmReports {
+        id: String,
+        session_id: Option<String>,
+        request_id: u64,
+        version: Option<PmReportsVersion>,
+        snapshot: bool,
+        reports: Vec<PmReportView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current: Option<Box<crate::pm_current::PmCurrentSnapshot>>,
+        error: Option<String>,
     },
     /// Origin-client completion receipt for one authenticated pane snapshot
     /// sync (Issue #3755). Snapshot frames precede this event; these disjoint
@@ -1755,6 +2213,17 @@ pub enum BackendEvent {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retryable: Option<bool>,
+    },
+    /// Origin-connection-only result for an authenticated self-naming request.
+    PaneNameResult {
+        request_id: String,
+        ok: bool,
+        agent_name: Option<String>,
+        error: Option<String>,
     },
     /// Client-scoped reply to [`FrontendEvent::PaneSendInput`]
     /// (SPEC-3050 FR-005: failures must be explicit, never silent).
@@ -1798,6 +2267,28 @@ pub enum BackendEvent {
         window_id: String,
         reason: Option<String>,
     },
+    /// Only the stopped placeholder was removed. This is not process-tree
+    /// exit evidence for its historical runtime (Issue #4168 AC-7).
+    PaneHuskRemoved {
+        window_id: String,
+    },
+    /// Correlated acceptance/refusal of the exact fleet target. `ok` confirms
+    /// window removal and finalizer ownership, not completion of detached cleanup.
+    FleetPaneCloseResult {
+        request_id: String,
+        ok: bool,
+        window_id: String,
+        reason: Option<String>,
+    },
+    WorkCloseResult {
+        work_id: String,
+        close_kind: String,
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changed: Option<bool>,
+        retryable: bool,
+        error: Option<String>,
+    },
     /// SPEC-3431 FR-026: everything the PM settings panel renders, for the
     /// active project tab.
     ///
@@ -1811,6 +2302,7 @@ pub enum BackendEvent {
         /// non-project surface or closing the final project tab.
         available: bool,
         auto_start: bool,
+        paused: bool,
         /// SPEC-3431 FR-132: effective resident-loop interval after applying
         /// the backend minimum to legacy or manually edited preferences.
         loop_interval_secs: u64,
@@ -1826,20 +2318,54 @@ pub enum BackendEvent {
         running_reasoning: Option<String>,
         is_running: bool,
         agent_options: Vec<PmAgentOption>,
+        /// #4486 AC-7: why the PM is not running, when the reason is one a
+        /// Restart cannot clear. `None` means Restart is worth offering —
+        /// either the PM is fine, or the last refusal was transient.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_block: Option<crate::pm_registry::PmStartBlock>,
     },
     IssueMonitorStatus {
         /// Boxed: the view is by far the largest payload in this enum
         /// (clippy `large_enum_variant`), and every broadcast clones it.
         status: Box<IssueMonitorStatusView>,
     },
+    /// Client-scoped Settings snapshot, in saved launch candidate order.
+    IssueMonitorProfiles {
+        project_root: String,
+        profiles: Vec<crate::IssueMonitorLaunchProfile>,
+        choices: crate::launch_wizard::IssueMonitorProfileChoices,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+    },
+    /// Client-scoped failure for the exact Settings candidate save.
+    IssueMonitorProfilesWriteFailed {
+        project_root: String,
+        request_id: u64,
+        message: String,
+    },
+    /// Client-scoped failure for one label save; uncertain writes can still commit.
+    IssueMonitorAllowedLabelsWriteFailed {
+        request_id: u64,
+        outcome_unknown: bool,
+    },
     IssueMonitorInbox {
         items: Vec<IssueMonitorInboxItem>,
+    },
+    /// Origin-client-only result after queue control commit or refusal.
+    IssueMonitorQueueResult {
+        operation: String,
+        issue_numbers: Vec<u64>,
+        error: Option<String>,
     },
     IssueMonitorLaunchFailed {
         issue_number: u64,
         message: String,
     },
     IssueMonitorToast {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notification_transition: Option<MonitorNotificationTransition>,
         level: String,
         message: String,
         issue_number: Option<u64>,
@@ -1858,89 +2384,6 @@ pub enum BackendEvent {
     WindowState {
         window_id: String,
         state: WindowProcessStatus,
-    },
-    FileTreeEntries {
-        id: String,
-        path: String,
-        entries: Vec<FileTreeEntry>,
-    },
-    FileTreeError {
-        id: String,
-        path: String,
-        message: String,
-    },
-    FileTreeWorktrees {
-        id: String,
-        entries: Vec<WorktreeEntry>,
-    },
-    FileTreeWorktreeSelected {
-        id: String,
-        worktree_id: String,
-    },
-    FileTreeWorktreeError {
-        id: String,
-        message: String,
-    },
-    FileContentText {
-        id: String,
-        path: String,
-        encoding: Encoding,
-        text: String,
-        total_size: u64,
-        // SPEC-2006 Phase 2 amendment: extra fields the GUI needs to support
-        // dirty/save/conflict flows. Defaults keep older clients compiling.
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        has_bom: bool,
-        #[serde(default = "default_newline")]
-        newline: Newline,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentHex {
-        id: String,
-        path: String,
-        offset: u64,
-        bytes_b64: String,
-        total_size: u64,
-        #[serde(default)]
-        mtime: u64,
-        #[serde(default)]
-        read_only: bool,
-    },
-    FileContentError {
-        id: String,
-        path: String,
-        error_kind: FileContentErrorKind,
-        message: String,
-        #[serde(default)]
-        size: Option<u64>,
-        #[serde(default)]
-        limit: Option<u64>,
-    },
-    /// SPEC-2006 Phase 2 amendment: successful write. `new_mtime` / `new_size`
-    /// become the next `expected_*` baseline so subsequent saves keep their
-    /// conflict checks aligned with what is actually on disk.
-    FileContentSaved {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        new_mtime: u64,
-        new_size: u64,
-        #[serde(default)]
-        encoding_fallback: u64,
-    },
-    FileContentSaveError {
-        id: String,
-        path: String,
-        mode: FileContentMode,
-        error_kind: FileContentSaveErrorKind,
-        message: String,
-        #[serde(default)]
-        current_mtime: Option<u64>,
-        #[serde(default)]
-        current_size: Option<u64>,
     },
     BranchEntries {
         id: String,
@@ -1981,29 +2424,24 @@ pub enum BackendEvent {
     LogEntryAppended {
         entry: LogEvent,
     },
-    /// SPEC-2809 — A single redacted, ANSI-stripped stdout/stderr line
-    /// from an external process (gh / git / docker / agent / runner)
-    /// piped through `gwt_core::process_console::ProcessConsoleHub`.
-    /// Console window and Logs window both consume this event.
-    ProcessLine {
-        line: gwt_core::process_console::ProcessLine,
-    },
-    /// SPEC-2809 Phase F2 — reply to [`FrontendEvent::LoadProcessConsole`]
-    /// containing the current ring buffer for every kind, time-sorted.
-    /// The Console window controller replays these into its per-kind
-    /// buffers so historical lines are visible on first mount.
-    ProcessConsoleSnapshot {
+    KnowledgeRevision {
         id: String,
-        lines: Vec<gwt_core::process_console::ProcessLine>,
+        knowledge_kind: KnowledgeKind,
+        revision: Option<String>,
     },
     KnowledgeEntries {
         id: String,
         knowledge_kind: KnowledgeKind,
         request_id: Option<u64>,
+        /// Content revision of the enriched list, independent of selection.
+        #[serde(default)]
+        revision: String,
         entries: Vec<KnowledgeListItem>,
         selected_number: Option<u64>,
         empty_message: Option<String>,
         refresh_enabled: bool,
+        #[serde(default)]
+        cache_revision: Option<String>,
     },
     KnowledgeSearchResults {
         id: String,
@@ -2062,10 +2500,15 @@ pub enum BackendEvent {
     },
     BranchCleanupResult {
         id: String,
+        /// Issue #4433: identifies the cleanup run this result belongs to so a
+        /// reconnected client can drop a result from a superseded run.
+        operation_id: String,
         results: Vec<BranchCleanupResultEntry>,
     },
     BranchCleanupProgress {
         id: String,
+        /// Issue #4433: see [`BackendEvent::BranchCleanupResult::operation_id`].
+        operation_id: String,
         branch: String,
         execution_branch: Option<String>,
         index: usize,
@@ -2098,6 +2541,36 @@ pub enum BackendEvent {
     },
     ProjectOpenError {
         message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    ProjectOpened {
+        project_key: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    PickerStarted {
+        request_id: u64,
+        purpose: String,
+    },
+    PickerSelected {
+        request_id: u64,
+        purpose: String,
+        path: String,
+    },
+    PickerCancelled {
+        request_id: u64,
+        purpose: String,
+    },
+    PickerError {
+        request_id: u64,
+        purpose: String,
+        message: String,
+    },
+    PickerBusy {
+        purpose: String,
+        message: String,
     },
     CloneProjectParentSelected {
         path: String,
@@ -2114,10 +2587,13 @@ pub enum BackendEvent {
         message: String,
     },
     CloneProjectDone {
+        project_key: String,
         workspace_home: String,
     },
     CloneProjectError {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        existing_project_key: Option<String>,
     },
     LaunchWizardOpenError {
         title: String,
@@ -2240,6 +2716,20 @@ pub enum BackendEvent {
     CustomAgentList {
         agents: Vec<CustomCodingAgent>,
     },
+    /// Response to [`FrontendEvent::ListSupportedAgents`].
+    SupportedAgentList {
+        agents: Vec<SupportedAgentView>,
+        auto_update: bool,
+        maintenance_pending: bool,
+    },
+    SupportedAgentMaintenance {
+        agent_id: String,
+        pending: bool,
+        success: Option<bool>,
+        message: String,
+        before_version: Option<String>,
+        after_version: Option<String>,
+    },
     /// Response to [`FrontendEvent::ListCustomAgentPresets`].
     CustomAgentPresetList {
         presets: Vec<PresetDefinition>,
@@ -2318,12 +2808,25 @@ pub enum BackendEvent {
         message: String,
         recovery: String,
     },
+    /// Update-domain preference and current-project drain snapshot.
+    UpdateSettings {
+        project_root: Option<String>,
+        status: crate::update_settings::Status,
+    },
+    UpdateRestartImpact {
+        request_id: String,
+        blocking: Vec<crate::update_drain::UpdateBlocker>,
+        issue_numbers: Vec<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// SPEC-1933 US-4: response to [`FrontendEvent::GetSystemSettings`].
     /// Carries the raw global `[ai].language` value from `~/.gwt/config.toml`
     /// (`auto` / `en` / `ja`). The frontend mirrors this value into the
     /// Settings > System > Language select.
     SystemSettings {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: current Board provider (`local` / `slack` / `teams`).
@@ -2390,6 +2893,7 @@ pub enum BackendEvent {
     /// optimistic UI with the authoritative config state.
     SystemSettingsUpdated {
         language: String,
+        auto_apply_updates: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         codex_trust_managed_hooks: Option<bool>,
         /// SPEC-2959: persisted Board provider echoed back for reconciliation.
@@ -2457,6 +2961,7 @@ pub enum BackendEvent {
     /// round-trip. The value is the running binary's `CARGO_PKG_VERSION`.
     ReleaseNotesPayload {
         id: String,
+        #[serde(serialize_with = "serialize_release_notes_entries")]
         entries: Vec<gwt_core::release_notes::ReleaseEntry>,
         #[serde(skip_serializing_if = "Option::is_none")]
         focus_version: Option<String>,
@@ -2517,7 +3022,57 @@ impl BackendEventPolicy {
 
 pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     BackendEventPolicy::new(
+        "pm_reports",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "pm_conversation",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "workspace_state_notice",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "close_project_preview",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "close_project_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "project_closed",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_agent_aggregate",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "project_notification",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "hub_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "workspace_state",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "local_agent_activity",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
     ),
@@ -2532,9 +3087,44 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "recovery_center_state",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "recovery_center_board_entry",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "window_list",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
+        "fleet_pane_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_roster",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_roster_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "agent_schedule",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_schedule_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
         "provider_usage",
@@ -2552,9 +3142,9 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
-        "process_line",
-        BackendEventDeliveryClass::Streamed,
-        BackendEventBackpressurePolicy::PreserveOrder,
+        "terminal_preview",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "terminal_snapshot",
@@ -2570,6 +3160,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "terminal_status",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
+        "pane_name_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "pane_send_result",
@@ -2596,6 +3191,21 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
+    BackendEventPolicy::new(
+        "pane_husk_removed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "fleet_pane_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "work_close_result",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
     // SPEC-3431 FR-026: the PM settings snapshot is a whole-state view; only
     // the newest one matters.
     BackendEventPolicy::new(
@@ -2604,12 +3214,32 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_profiles",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_profiles_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_status",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
     ),
     BackendEventPolicy::new(
+        "issue_monitor_allowed_labels_write_failed",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
         "issue_monitor_inbox",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "issue_monitor_queue_result",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -2632,56 +3262,6 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "window_state",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_entries",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktrees",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_selected",
-        BackendEventDeliveryClass::EphemeralStatus,
-        BackendEventBackpressurePolicy::BestEffort,
-    ),
-    BackendEventPolicy::new(
-        "file_tree_worktree_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_text",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_hex",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
-    ),
-    BackendEventPolicy::new(
-        "file_content_saved",
-        BackendEventDeliveryClass::Snapshot,
-        BackendEventBackpressurePolicy::ClientScopedSnapshot,
-    ),
-    BackendEventPolicy::new(
-        "file_content_save_error",
-        BackendEventDeliveryClass::Error,
-        BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
         "branch_entries",
@@ -2715,6 +3295,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "knowledge_entries",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "knowledge_revision",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
@@ -2926,6 +3511,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
+        "supported_agent_list",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "supported_agent_maintenance",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::BestEffort,
+    ),
+    BackendEventPolicy::new(
         "agent_backend_saved",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::BestEffort,
@@ -2959,6 +3554,11 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         "migration_error",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "update_settings",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
     ),
     BackendEventPolicy::new(
         "system_settings",
@@ -3027,40 +3627,61 @@ pub fn backend_event_policy(kind: &str) -> Option<BackendEventPolicy> {
 impl BackendEvent {
     pub fn event_kind(&self) -> &'static str {
         match self {
-            BackendEvent::WindowCanvasState { .. } => "workspace_state",
+            BackendEvent::WorkspaceStateNotice { .. } => "workspace_state_notice",
+            BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
+            BackendEvent::CloseProjectError { .. } => "close_project_error",
+            BackendEvent::ProjectClosed { .. } => "project_closed",
+            BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
+            BackendEvent::ProjectNotification { .. } => "project_notification",
+            BackendEvent::HubState { .. } => "hub_state",
+            BackendEvent::ProjectNotFound { .. } => "project_not_found",
+            BackendEvent::WorkspaceState { .. } => "workspace_state",
+            BackendEvent::LocalAgentActivity { .. } => "local_agent_activity",
             BackendEvent::ActiveWorkProjection { .. } => "active_work_projection",
             BackendEvent::ActiveWorkProjectionPatch { .. } => "active_work_projection_patch",
             BackendEvent::WindowList { .. } => "window_list",
+            BackendEvent::FleetPaneList { .. } => "fleet_pane_list",
+            BackendEvent::RecoveryCenterState { .. } => "recovery_center_state",
+            BackendEvent::RecoveryCenterBoardEntry { .. } => "recovery_center_board_entry",
+            BackendEvent::AgentRoster { .. } => "agent_roster",
+            BackendEvent::AgentRosterError { .. } => "agent_roster_error",
+            BackendEvent::AgentSchedule { .. } => "agent_schedule",
+            BackendEvent::AgentScheduleError { .. } => "agent_schedule_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
+            BackendEvent::TerminalPreview { .. } => "terminal_preview",
             BackendEvent::TerminalSnapshot { .. } => "terminal_snapshot",
+            BackendEvent::PmConversation { .. } => "pm_conversation",
+            BackendEvent::PmReports { .. } => "pm_reports",
             BackendEvent::PaneSyncComplete { .. } => "pane_sync_complete",
             BackendEvent::TerminalStatus { .. } => "terminal_status",
             BackendEvent::PaneSendResult { .. } => "pane_send_result",
+            BackendEvent::PaneNameResult { .. } => "pane_name_result",
             BackendEvent::PmMessageSendResult { .. } => "pm_message_send_result",
             BackendEvent::IssueMonitorScanRequestResult { .. } => {
                 "issue_monitor_scan_request_result"
             }
             BackendEvent::PaneCloseAccepted { .. } => "pane_close_accepted",
             BackendEvent::PaneCloseResult { .. } => "pane_close_result",
+            BackendEvent::PaneHuskRemoved { .. } => "pane_husk_removed",
+            BackendEvent::FleetPaneCloseResult { .. } => "fleet_pane_close_result",
+            BackendEvent::WorkCloseResult { .. } => "work_close_result",
             BackendEvent::PmStatus { .. } => "pm_status",
             BackendEvent::IssueMonitorStatus { .. } => "issue_monitor_status",
+            BackendEvent::IssueMonitorProfiles { .. } => "issue_monitor_profiles",
+            BackendEvent::IssueMonitorProfilesWriteFailed { .. } => {
+                "issue_monitor_profiles_write_failed"
+            }
+            BackendEvent::IssueMonitorAllowedLabelsWriteFailed { .. } => {
+                "issue_monitor_allowed_labels_write_failed"
+            }
             BackendEvent::IssueMonitorInbox { .. } => "issue_monitor_inbox",
+            BackendEvent::IssueMonitorQueueResult { .. } => "issue_monitor_queue_result",
             BackendEvent::IssueMonitorLaunchFailed { .. } => "issue_monitor_launch_failed",
             BackendEvent::IssueMonitorToast { .. } => "issue_monitor_toast",
             BackendEvent::AttachmentProgress { .. } => "attachment_progress",
             BackendEvent::WindowState { .. } => "window_state",
-            BackendEvent::FileTreeEntries { .. } => "file_tree_entries",
-            BackendEvent::FileTreeError { .. } => "file_tree_error",
-            BackendEvent::FileTreeWorktrees { .. } => "file_tree_worktrees",
-            BackendEvent::FileTreeWorktreeSelected { .. } => "file_tree_worktree_selected",
-            BackendEvent::FileTreeWorktreeError { .. } => "file_tree_worktree_error",
-            BackendEvent::FileContentText { .. } => "file_content_text",
-            BackendEvent::FileContentHex { .. } => "file_content_hex",
-            BackendEvent::FileContentError { .. } => "file_content_error",
-            BackendEvent::FileContentSaved { .. } => "file_content_saved",
-            BackendEvent::FileContentSaveError { .. } => "file_content_save_error",
             BackendEvent::BranchEntries { .. } => "branch_entries",
             BackendEvent::RemoteStartWorkBranches { .. } => "remote_start_work_branches",
             BackendEvent::BoardEntries { .. } => "board_entries",
@@ -3068,9 +3689,8 @@ impl BackendEvent {
             BackendEvent::ProfileSnapshot { .. } => "profile_snapshot",
             BackendEvent::LogEntries { .. } => "log_entries",
             BackendEvent::LogEntryAppended { .. } => "log_entry_appended",
-            BackendEvent::ProcessLine { .. } => "process_line",
-            BackendEvent::ProcessConsoleSnapshot { .. } => "process_console_snapshot",
             BackendEvent::KnowledgeEntries { .. } => "knowledge_entries",
+            BackendEvent::KnowledgeRevision { .. } => "knowledge_revision",
             BackendEvent::KnowledgeSearchResults { .. } => "knowledge_search_results",
             BackendEvent::ProjectIndexSearchResults { .. } => "project_index_search_results",
             BackendEvent::ProjectIndexSearchError { .. } => "project_index_search_error",
@@ -3085,6 +3705,12 @@ impl BackendEvent {
             BackendEvent::LogError { .. } => "log_error",
             BackendEvent::KnowledgeError { .. } => "knowledge_error",
             BackendEvent::ProjectOpenError { .. } => "project_open_error",
+            BackendEvent::ProjectOpened { .. } => "project_opened",
+            BackendEvent::PickerStarted { .. } => "picker_started",
+            BackendEvent::PickerSelected { .. } => "picker_selected",
+            BackendEvent::PickerCancelled { .. } => "picker_cancelled",
+            BackendEvent::PickerError { .. } => "picker_error",
+            BackendEvent::PickerBusy { .. } => "picker_busy",
             BackendEvent::CloneProjectParentSelected { .. } => "clone_project_parent_selected",
             BackendEvent::GithubRepositorySearchResults { .. } => {
                 "github_repository_search_results"
@@ -3109,6 +3735,8 @@ impl BackendEvent {
             BackendEvent::UpdateApplyPendingPersisted { .. } => "update_apply_pending_persisted",
             BackendEvent::UpdateApplyError { .. } => "update_apply_error",
             BackendEvent::CustomAgentList { .. } => "custom_agent_list",
+            BackendEvent::SupportedAgentList { .. } => "supported_agent_list",
+            BackendEvent::SupportedAgentMaintenance { .. } => "supported_agent_maintenance",
             BackendEvent::CustomAgentPresetList { .. } => "custom_agent_preset_list",
             BackendEvent::CustomAgentSaved { .. } => "custom_agent_saved",
             BackendEvent::CustomAgentDeleted { .. } => "custom_agent_deleted",
@@ -3122,6 +3750,8 @@ impl BackendEvent {
             BackendEvent::MigrationProgress { .. } => "migration_progress",
             BackendEvent::MigrationDone { .. } => "migration_done",
             BackendEvent::MigrationError { .. } => "migration_error",
+            BackendEvent::UpdateSettings { .. } => "update_settings",
+            BackendEvent::UpdateRestartImpact { .. } => "update_restart_impact",
             BackendEvent::SystemSettings { .. } => "system_settings",
             BackendEvent::BoardAuthStatus { .. } => "board_auth_status",
             BackendEvent::ProjectBoardConfig { .. } => "project_board_config",
@@ -3181,6 +3811,18 @@ pub enum KnowledgePhaseUpdateResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_client_attention_accepts_only_known_permissions() {
+        let wire = serde_json::json!({
+            "kind": "project_client_attention", "visible": false, "focused": true,
+            "notification_permission": "granted"
+        });
+        assert!(serde_json::from_value::<super::FrontendEvent>(wire.clone()).is_ok());
+        let mut invalid = wire;
+        invalid["notification_permission"] = serde_json::json!("allow");
+        assert!(serde_json::from_value::<super::FrontendEvent>(invalid).is_err());
+    }
+
     use gwt_core::{
         coordination::{
             AuthorKind, BoardEntry, BoardEntryKind, BoardMention, BoardMentionTargetKind,
@@ -3194,16 +3836,240 @@ mod tests {
             BranchCleanupAvailability, BranchCleanupInfo, BranchCleanupRisk, BranchListEntry,
             BranchResumeInfo, BranchScope,
         },
-        persistence::{WindowGeometry, WindowState},
+        persistence::WindowState,
     };
 
     use super::{
         backend_event_policy, AttachmentProgressPhase, BackendEvent,
         BackendEventBackpressurePolicy, BackendEventDeliveryClass, BranchEntriesPhase,
         ContinueWorkOutcomeKind, FrontendEvent, IndexSearchMatchMode, IndexSearchResult,
-        IndexSearchScope, IndexSearchTarget, ProfileEntryView, ProfileEnvEntryView,
-        ProfileSnapshotView, UiTracePayload, BACKEND_EVENT_POLICIES,
+        IndexSearchScope, IndexSearchTarget, LogScopeSelection, ProfileEntryView,
+        ProfileEnvEntryView, ProfileSnapshotView, RecoveryCenterItemState, RecoveryCenterItemView,
+        RecoveryCenterLoadStatus, UiTracePayload, BACKEND_EVENT_POLICIES,
     };
+
+    #[test]
+    fn create_window_surface_owner_accepts_legacy_requests_and_validates_owners() {
+        let legacy = serde_json::json!({
+            "kind": "create_window",
+            "preset": "settings",
+            "bounds": {"x": 0.0, "y": 0.0, "width": 1000.0, "height": 800.0}
+        });
+        let _: FrontendEvent = serde_json::from_value(legacy.clone()).expect("legacy request");
+        for owner in ["pm", "agents"] {
+            let mut owned = legacy.clone();
+            owned["surface_owner"] = serde_json::json!(owner);
+            let _: FrontendEvent = serde_json::from_value(owned).expect("owned request");
+        }
+        let mut invalid = legacy;
+        invalid["surface_owner"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<FrontendEvent>(invalid).is_err());
+    }
+
+    #[test]
+    fn pm_reports_wire_uses_safe_shared_markdown_and_client_scoped_snapshot() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm"
+        }))
+        .unwrap();
+        assert!(
+            matches!(request, FrontendEvent::LoadPmReports { id, request_id: 0, version: None } if id == "pm")
+        );
+        let version = super::PmReportsVersion {
+            epoch: "reader-epoch".into(),
+            revision: 3,
+        };
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_reports", "id": "pm", "request_id": 7, "version": version,
+        }))
+        .unwrap();
+        assert!(
+            matches!(request, FrontendEvent::LoadPmReports { request_id: 7, version: Some(cursor), .. } if cursor == version)
+        );
+        let event = BackendEvent::PmReports {
+            id: "pm".into(), session_id: Some("session".into()), error: None,
+            request_id: 7, version: Some(version.clone()), snapshot: false,
+            current: None,
+            reports: vec![super::PmReportView::from(gwt_core::pm_report::PmReport {
+                id: "one".into(), kind: gwt_core::pm_report::PmReportKind::Progress, question: None,
+                body: "# Report\n\n**Ready** and `code`\n\n- Item\n\n```sh\ncargo test\n```\n<script>bad()</script>".into(),
+                created_at: chrono::Utc::now(),
+            }), super::PmReportView::from(serde_json::from_value::<gwt_core::pm_report::PmReport>(serde_json::json!({
+                "id": "qa", "kind": "qa", "question": "Can we ship?",
+                "body": "**Yes.** Checks passed.", "created_at": "2026-10-13T00:00:00Z"
+            })).unwrap())],
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["request_id"], 7);
+        assert_eq!(value["version"], serde_json::to_value(version).unwrap());
+        assert_eq!(value["snapshot"], false);
+        let html = value["reports"][0]["body_html"].as_str().unwrap();
+        for expected in [
+            "<h1>Report</h1>",
+            "<strong>Ready</strong>",
+            "<code>code</code>",
+            "<li>Item</li>",
+            "<pre><code",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+        assert!(!html.contains("<script>"));
+        assert_eq!(value["reports"][0]["kind"], "progress");
+        assert_eq!(value["reports"][1]["kind"], "qa");
+        assert_eq!(value["reports"][1]["question"], "Can we ship?");
+        assert!(value["reports"][1]["body_html"]
+            .as_str()
+            .unwrap()
+            .contains("<strong>Yes.</strong>"));
+        assert_eq!(
+            event.delivery_policy().delivery,
+            BackendEventDeliveryClass::Snapshot
+        );
+        assert_eq!(
+            event.delivery_policy().backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn release_notes_wire_uses_shared_markdown_preserving_literal_html() {
+        let event = BackendEvent::ReleaseNotesPayload {
+            id: "notes".into(),
+            focus_version: None,
+            current_version: "1.0.0".into(),
+            entries: vec![gwt_core::release_notes::ReleaseEntry {
+                version: "1.0.0".into(),
+                date: "2026-10-11".into(),
+                sections: vec![gwt_core::release_notes::Section {
+                    heading: "Fixed".into(),
+                    items: vec!["**Ready** and `code` <script>literal</script>".into()],
+                }],
+            }],
+        };
+        let value = serde_json::to_value(event).unwrap();
+        let section = &value["entries"][0]["sections"][0];
+        assert_eq!(section["heading"], "Fixed");
+        let html = section["body_html"]
+            .as_str()
+            .expect("derived Markdown HTML");
+        assert!(html.contains("<strong>Ready</strong>"));
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("&lt;script&gt;literal&lt;/script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn close_project_protocol_rejects_legacy_tab_operations_and_preserves_delivery() {
+        for kind in ["select_project_tab", "close_project_tab"] {
+            assert!(
+                serde_json::from_value::<super::FrontendEvent>(serde_json::json!({
+                    "kind": kind, "tab_id": "a"
+                }))
+                .is_err()
+            );
+        }
+        let token = super::CloseProjectToken {
+            project_key: "a".into(),
+            generation: 7,
+            nonce: "opaque".into(),
+        };
+        for event in [
+            super::BackendEvent::CloseProjectPreview {
+                token,
+                title: "A".into(),
+                running_agents: Vec::new(),
+            },
+            super::BackendEvent::CloseProjectError {
+                project_key: "a".into(),
+                message: "expired".into(),
+            },
+            super::BackendEvent::ProjectClosed {
+                project_key: "a".into(),
+            },
+        ] {
+            assert_eq!(event.delivery_policy().kind, event.event_kind());
+            assert!(!event.delivery_policy().coalesces_on_frontend());
+        }
+    }
+
+    #[test]
+    fn issue_monitor_tier_set_requires_an_observed_configuration() {
+        let event = serde_json::json!({
+            "kind": "set_issue_monitor_tier",
+            "issue_number": 4499,
+            "tier": 1,
+            "expected_config_token": "observed-tier-config"
+        });
+        assert!(serde_json::from_value::<FrontendEvent>(event.clone()).is_ok());
+        let mut unguarded = event;
+        unguarded
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_config_token");
+        assert!(serde_json::from_value::<FrontendEvent>(unguarded).is_err());
+    }
+
+    #[test]
+    fn issue_monitor_control_errors_never_fall_back_to_global_delivery() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let errors = runtime
+            .split("fn issue_monitor_control_error_events(")
+            .nth(1)
+            .unwrap()
+            .split("fn quick_register_issue_events(")
+            .next()
+            .unwrap();
+        assert!(
+            !errors.contains("OutboundEvent::broadcast("),
+            "project control errors must never reach unrelated clients"
+        );
+        assert!(
+            errors.contains("project_context_for_root"),
+            "control errors must resolve their explicit project owner"
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_elevation_required_serializes_without_a_grace() {
+        let phase: super::UpdateAutoApplyPhase =
+            serde_json::from_value(serde_json::json!("elevation_required"))
+                .expect("administrator-required phase is part of the update protocol");
+        let event = BackendEvent::UpdateAutoApply {
+            version: "9.106.0".into(),
+            phase,
+            grace_secs: None,
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "kind": "update_auto_apply",
+                "version": "9.106.0",
+                "phase": "elevation_required",
+            })
+        );
+    }
+
+    #[test]
+    fn update_auto_apply_uses_project_context_instead_of_active_tab() {
+        let runtime = include_str!("app_runtime/mod.rs");
+        let update = runtime
+            .split("pub(crate) fn update_staged_events(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn register_agent_backend_connection_probe(")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "active_project_root(",
+            "active_auto_update_drain(",
+            "self.update_auto_apply",
+        ] {
+            assert!(
+                !update.contains(forbidden),
+                "update lifecycle must use each project's context, found {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn knowledge_search_results_retains_the_baseline_rust_shape() {
@@ -3309,6 +4175,7 @@ mod tests {
         let event = BackendEvent::PmStatus {
             available: true,
             auto_start: true,
+            paused: false,
             loop_interval_secs: u64::MAX,
             loop_interval_secs_decimal: u64::MAX.to_string(),
             configured_agent_id: "claude".to_string(),
@@ -3319,6 +4186,7 @@ mod tests {
             running_reasoning: None,
             is_running: false,
             agent_options: Vec::new(),
+            start_block: None,
         };
 
         let value = serde_json::to_value(&event).expect("serialize PM status");
@@ -3333,6 +4201,67 @@ mod tests {
                 .get("loop_interval_secs_decimal")
                 .and_then(Value::as_str),
             Some("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn agent_schedule_actions_and_snapshot_use_project_scoped_wire_contract() {
+        for action in [
+            serde_json::json!({"kind": "read"}),
+            serde_json::json!({
+                "kind": "reassign", "issue_number": 42,
+                "source_member_id": "member-a", "target_member_id": "member-b",
+                "expected_roster_revision": 3, "expected_queue_revision": "queue-3",
+                "expected_schedule_revision": 2,
+            }),
+        ] {
+            let wire = serde_json::json!({"kind": "agent_schedule", "action": action});
+            let _: FrontendEvent = serde_json::from_value(wire).unwrap();
+        }
+        let policy = backend_event_policy("agent_schedule").unwrap();
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot,
+        );
+        let schedule = serde_json::json!({
+            "project_key": "0123456789abcdef",
+            "roster_revision": 3, "queue_revision": "queue-3", "schedule_revision": 2,
+            "members": [{
+                "agent_member_id": "member-a",
+                "issues": [{"issue_number": 42, "reason": "queue_order"}],
+                "empty_reason": null,
+            }],
+        });
+        let event = BackendEvent::AgentSchedule {
+            schedule: serde_json::from_value(schedule.clone()).unwrap(),
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({"kind": "agent_schedule", "schedule": schedule}),
+        );
+        assert_eq!(event.delivery_policy(), policy);
+    }
+
+    #[test]
+    fn issue_monitor_queue_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::IssueMonitorQueueResult {
+            operation: "move".into(),
+            issue_numbers: vec![42],
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&event).expect("queue result wire shape"),
+            serde_json::json!({
+                "kind": "issue_monitor_queue_result", "operation": "move",
+                "issue_numbers": [42], "error": null,
+            })
+        );
+        let policy = event.delivery_policy();
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
         );
     }
 
@@ -3359,6 +4288,28 @@ mod tests {
         );
     }
 
+    /// Issue #4249 AC-19: the close result reaches its origin client reliably.
+    #[test]
+    fn work_close_result_has_client_scoped_snapshot_policy() {
+        let event = BackendEvent::WorkCloseResult {
+            work_id: "work-1".into(),
+            close_kind: "done".into(),
+            ok: false,
+            changed: None,
+            retryable: true,
+            error: Some("refresh and retry".into()),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "work_close_result");
+        assert!(value.get("changed").is_none());
+        let policy = event.delivery_policy();
+        assert_eq!(policy.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            policy.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
     /// Issue #3755 AC-2: the final availability receipt is origin-client
     /// state and must survive outbound pressure like the pane snapshot itself.
     #[test]
@@ -3370,6 +4321,60 @@ mod tests {
         assert_eq!(
             policy.backpressure,
             BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+    }
+
+    #[test]
+    fn fleet_pane_inventory_request_is_distinct_from_legacy_listing() {
+        serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "list_fleet_panes"
+        }))
+        .expect("fleet inventory has a dedicated generation-aware request");
+    }
+
+    #[test]
+    fn fleet_pane_close_request_requires_correlated_generation() {
+        let request = serde_json::json!({
+            "kind": "close_fleet_pane",
+            "request_id": "84ef22cc-44ef-415d-b4c4-06a6d4cc7416",
+            "id": "tab-1::agent-1",
+            "session_id": "expected-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(request.clone())
+            .expect("fleet close carries the observed Session and runtime generation");
+        let mut stopped = request.clone();
+        stopped["child_pid"] = serde_json::Value::Null;
+        stopped["child_started_at"] = serde_json::Value::Null;
+        serde_json::from_value::<FrontendEvent>(stopped)
+            .expect("a stopped pane has an explicitly absent runtime generation");
+        for field in ["request_id", "session_id"] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<FrontendEvent>(incomplete).is_err(),
+                "fleet close requires {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn recover_restored_window_request_preserves_expected_session() {
+        let value = serde_json::json!({
+            "kind": "recover_restored_window",
+            "id": "tab-1::agent-1",
+            "session_id": "restored-session",
+            "child_pid": 123,
+            "child_started_at": 456
+        });
+        serde_json::from_value::<FrontendEvent>(value).expect("restored-window recovery request");
+        assert!(
+            serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind": "recover_restored_window", "id": "tab-1::agent-1"
+            }))
+            .is_err(),
+            "recovery requires an expected Session identity"
         );
     }
 
@@ -3418,76 +4423,14 @@ mod tests {
     }
 
     #[test]
-    fn update_window_geometry_deserializes_base_geometry_revision_contract() {
-        let legacy = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "update_window_geometry",
-            "id": "w-1",
-            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
-            "cols": 80,
-            "rows": 24
-        }))
-        .expect("deserialize legacy update_window_geometry");
-
-        assert!(matches!(
-            legacy,
-            FrontendEvent::UpdateWindowGeometry {
-                id,
-                geometry: WindowGeometry {
-                    x: 1.0,
-                    y: 2.0,
-                    width: 300.0,
-                    height: 200.0,
-                },
-                base_geometry_revision: None,
-                ..
-            } if id == "w-1"
-        ));
-
-        let modern = serde_json::from_value::<FrontendEvent>(serde_json::json!({
-            "kind": "update_window_geometry",
-            "id": "w-1",
-            "geometry": { "x": 1.0, "y": 2.0, "width": 300.0, "height": 200.0 },
-            "cols": 80,
-            "rows": 24,
-            "base_geometry_revision": 7
-        }))
-        .expect("deserialize modern update_window_geometry");
-
-        assert!(matches!(
-            modern,
-            FrontendEvent::UpdateWindowGeometry {
-                id,
-                geometry: WindowGeometry {
-                    x: 1.0,
-                    y: 2.0,
-                    width: 300.0,
-                    height: 200.0,
-                },
-                base_geometry_revision: Some(7),
-                ..
-            } if id == "w-1"
-        ));
-    }
-
-    #[test]
-    fn frontend_event_startup_auto_resume_ready_deserializes_visible_bounds() {
+    fn frontend_event_startup_auto_resume_ready_ignores_legacy_bounds() {
         let event = serde_json::from_value::<FrontendEvent>(serde_json::json!({
             "kind": "startup_auto_resume_ready",
             "bounds": { "x": 8.0, "y": 16.0, "width": 1200.0, "height": 800.0 }
         }))
         .expect("deserialize startup auto-resume readiness");
 
-        assert!(matches!(
-            event,
-            FrontendEvent::StartupAutoResumeReady {
-                bounds: WindowGeometry {
-                    x: 8.0,
-                    y: 16.0,
-                    width: 1200.0,
-                    height: 800.0,
-                }
-            }
-        ));
+        assert!(matches!(event, FrontendEvent::StartupAutoResumeReady {}));
     }
 
     #[test]
@@ -3781,13 +4724,6 @@ mod tests {
             BackendEventBackpressurePolicy::PreserveOrder
         );
 
-        let process_line = backend_event_policy("process_line").expect("process_line policy");
-        assert_eq!(process_line.delivery, BackendEventDeliveryClass::Streamed);
-        assert_eq!(
-            process_line.backpressure,
-            BackendEventBackpressurePolicy::PreserveOrder
-        );
-
         let workspace_state =
             backend_event_policy("workspace_state").expect("workspace_state policy");
         assert_eq!(
@@ -3800,16 +4736,14 @@ mod tests {
         );
         assert!(workspace_state.coalesces_on_frontend());
 
-        let active_work_projection =
-            backend_event_policy("active_work_projection").expect("active_work_projection policy");
-        assert_eq!(
-            active_work_projection.delivery,
-            BackendEventDeliveryClass::IdempotentLatest
-        );
-        assert_eq!(
-            active_work_projection.backpressure,
-            BackendEventBackpressurePolicy::LatestWins
-        );
+        for kind in ["active_work_projection", "local_agent_activity"] {
+            let policy = backend_event_policy(kind).expect("projection policy");
+            assert_eq!(policy.delivery, BackendEventDeliveryClass::IdempotentLatest);
+            assert_eq!(
+                policy.backpressure,
+                BackendEventBackpressurePolicy::LatestWins
+            );
+        }
 
         let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
         assert_eq!(
@@ -3844,17 +4778,6 @@ mod tests {
             runtime_hook_event.backpressure,
             BackendEventBackpressurePolicy::BestEffort
         );
-
-        let file_content_saved =
-            backend_event_policy("file_content_saved").expect("file_content_saved policy");
-        assert_eq!(
-            file_content_saved.delivery,
-            BackendEventDeliveryClass::Snapshot
-        );
-        assert_eq!(
-            file_content_saved.backpressure,
-            BackendEventBackpressurePolicy::ClientScopedSnapshot
-        );
     }
 
     #[test]
@@ -3882,6 +4805,16 @@ mod tests {
             data_base64: "ZWNobw==".to_string(),
         };
         assert_eq!(event.delivery_policy().kind, "terminal_output");
+    }
+
+    #[test]
+    fn pm_conversation_request_addresses_a_window() {
+        let request: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_pm_conversation",
+            "id": "tab-1::pm"
+        }))
+        .expect("PM conversation is requested through the authenticated window");
+        assert!(format!("{request:?}").contains("tab-1::pm"));
     }
 
     #[test]
@@ -3990,8 +4923,10 @@ mod tests {
                     remote_delete_available: true,
                 }),
                 managed_hook_health: None,
+                local_agent_activity: None,
                 active_work_count: 1,
                 active_works: vec![super::ActiveWorkItemView {
+                    linked_issue_numbers: Vec::new(),
                     id: "work-1".to_string(),
                     title: "Implement Start Work".to_string(),
                     status_category: "active".to_string(),
@@ -4030,6 +4965,7 @@ mod tests {
                     window_id: Some("tab-1::agent-1".to_string()),
                     agent_id: "codex".to_string(),
                     display_name: "Codex".to_string(),
+                    agent_name: None,
                     affiliation_status: "assigned".to_string(),
                     workspace_id: Some("work-1".to_string()),
                     status_category: "active".to_string(),
@@ -4048,6 +4984,17 @@ mod tests {
         };
 
         let value = serde_json::to_value(&event).expect("serialize active work projection");
+
+        let mut legacy_agent = value.pointer("/projection/agents/0").unwrap().clone();
+        legacy_agent.as_object_mut().unwrap().remove("agent_name");
+        let legacy: super::ActiveWorkAgentView = serde_json::from_value(legacy_agent.clone())
+            .expect("legacy Active Work agent without an assigned name");
+        assert!(serde_json::to_value(legacy).unwrap()["agent_name"].is_null());
+        let mut named_agent = legacy_agent;
+        named_agent["agent_name"] = Value::String("Aster".to_string());
+        let named: super::ActiveWorkAgentView =
+            serde_json::from_value(named_agent).expect("named Active Work agent");
+        assert_eq!(serde_json::to_value(named).unwrap()["agent_name"], "Aster");
 
         assert_eq!(
             value.get("kind"),
@@ -4105,9 +5052,50 @@ mod tests {
             Some(false),
             "Work cleanup must default to local-only deletion"
         );
-        let BackendEvent::ActiveWorkProjection { projection } = event else {
+        let BackendEvent::ActiveWorkProjection { mut projection } = event else {
             unreachable!("constructed full projection")
         };
+        assert!(
+            serde_json::to_value(&projection)
+                .unwrap()
+                .get("local_agent_activity")
+                .is_none(),
+            "non-observing producers omit the census"
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:unknown",
+                "observed_at": "2026-10-24T00:00:00Z",
+                "agents": null
+            }))
+            .expect("an Unknown observation retains its metadata"),
+        );
+        let unknown = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            unknown.pointer("/local_agent_activity/agents"),
+            Some(&Value::Null)
+        );
+        assert_eq!(
+            unknown
+                .pointer("/local_agent_activity/host_id")
+                .and_then(Value::as_str),
+            Some("123:unknown")
+        );
+        projection.local_agent_activity = Some(
+            serde_json::from_value(serde_json::json!({
+                "project_key": "0123456789abcdef",
+                "host_id": "123:456",
+                "observed_at": "2026-10-24T00:00:01Z",
+                "agents": []
+            }))
+            .expect("an observed zero remains distinct from Unknown"),
+        );
+        let zero = serde_json::to_value(&projection).unwrap();
+        assert_eq!(
+            zero.pointer("/local_agent_activity/agents"),
+            Some(&serde_json::json!([]))
+        );
         let patch = serde_json::to_value(BackendEvent::ActiveWorkProjectionPatch { projection })
             .expect("serialize bounded active work projection patch");
         assert_eq!(
@@ -4207,6 +5195,20 @@ mod tests {
             FrontendEvent::RefreshIndexStatus { project_root }
                 if project_root == "/repo/worktree"
         ));
+    }
+
+    #[test]
+    fn frontend_event_accepts_project_roster_actions() {
+        for action in [
+            serde_json::json!({"kind":"read"}),
+            serde_json::json!({"kind":"add"}),
+            serde_json::json!({"kind":"rest","member_id":"member-1"}),
+        ] {
+            let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+                "kind":"agent_roster", "action":action, "expected_revision":3
+            }));
+            assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
+        }
     }
 
     #[test]
@@ -4422,6 +5424,7 @@ mod tests {
 
         let error = BackendEvent::CloneProjectError {
             message: "target already exists".to_string(),
+            existing_project_key: None,
         };
         let value = serde_json::to_value(error).expect("serialize clone error");
         assert_eq!(
@@ -4895,10 +5898,8 @@ mod tests {
             FrontendEvent::OpenBoardOriginAgent {
                 id,
                 origin_session_id,
-                bounds,
             } if id == "tab-1::board-1"
                 && origin_session_id == "session-origin"
-                && bounds.as_ref().is_some_and(|bounds| bounds.width == 1200.0)
         ));
     }
 
@@ -5114,6 +6115,85 @@ mod tests {
             value["entries"][0]["detail"],
             Value::String("tail retry".to_string())
         );
+    }
+
+    #[test]
+    fn load_logs_scope_selection_defaults_legacy_payload_to_project() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-legacy"
+        }))
+        .expect("deserialize legacy load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Project,
+            } if id == "logs-legacy"
+        ));
+    }
+
+    #[test]
+    fn load_logs_scope_selection_accepts_global_snake_case() {
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind": "load_logs",
+            "id": "logs-global",
+            "scope": "global"
+        }))
+        .expect("deserialize global load_logs payload");
+
+        assert!(matches!(
+            event,
+            FrontendEvent::LoadLogs {
+                id,
+                scope: LogScopeSelection::Global,
+            } if id == "logs-global"
+        ));
+    }
+
+    #[test]
+    fn log_entries_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Info, "gwt::project", "project entry");
+        scoped.project_scope = Some("0123456789abcdef".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-project".to_string(),
+            entries: vec![scoped],
+        })
+        .expect("serialize scoped log_entries");
+        assert_eq!(
+            scoped_value["entries"][0]["project_scope"],
+            Value::String("0123456789abcdef".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntries {
+            id: "logs-legacy".to_string(),
+            entries: vec![LogEvent::new(
+                LogLevel::Info,
+                "gwt::legacy",
+                "unscoped entry",
+            )],
+        })
+        .expect("serialize unscoped log_entries");
+        assert!(legacy_value["entries"][0].get("project_scope").is_none());
+    }
+
+    #[test]
+    fn log_entry_appended_serializes_optional_project_scope_compatibly() {
+        let mut scoped = LogEvent::new(LogLevel::Warn, "gwt::project", "live project entry");
+        scoped.project_scope = Some("fedcba9876543210".to_string());
+        let scoped_value = serde_json::to_value(BackendEvent::LogEntryAppended { entry: scoped })
+            .expect("serialize scoped log_entry_appended");
+        assert_eq!(
+            scoped_value["entry"]["project_scope"],
+            Value::String("fedcba9876543210".to_string())
+        );
+
+        let legacy_value = serde_json::to_value(BackendEvent::LogEntryAppended {
+            entry: LogEvent::new(LogLevel::Info, "gwt::legacy", "unscoped live entry"),
+        })
+        .expect("serialize unscoped log_entry_appended");
+        assert!(legacy_value["entry"].get("project_scope").is_none());
     }
 
     #[test]
@@ -5442,6 +6522,88 @@ mod tests {
         let value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(value["kind"], "ui_trace_error");
         assert_eq!(value["message"], "trace payload missing entries");
+    }
+
+    #[test]
+    fn recovery_center_frontend_events_carry_only_correlation_and_opaque_handles() {
+        let load = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "load_recovery_center",
+            "request_id": "request-1"
+        }))
+        .expect("deserialize recovery center load");
+        assert!(matches!(
+            load,
+            FrontendEvent::LoadRecoveryCenter { request_id } if request_id == "request-1"
+        ));
+
+        let open = serde_json::from_value::<FrontendEvent>(serde_json::json!({
+            "kind": "open_recovery_center_board_entry",
+            "request_id": "request-2",
+            "generation": 7,
+            "action_handle": "opaque-row-handle"
+        }))
+        .expect("deserialize recovery center Board action");
+        assert!(matches!(
+            open,
+            FrontendEvent::OpenRecoveryCenterBoardEntry {
+                request_id,
+                generation: 7,
+                action_handle,
+            } if request_id == "request-2" && action_handle == "opaque-row-handle"
+        ));
+    }
+
+    #[test]
+    fn recovery_center_backend_projection_is_public_safe_and_uses_canonical_facets() {
+        let event = BackendEvent::RecoveryCenterState {
+            request_id: "request-1".to_string(),
+            generation: 3,
+            status: RecoveryCenterLoadStatus::Ready,
+            items: vec![RecoveryCenterItemView {
+                action_handle: "opaque-row-handle".to_string(),
+                state: RecoveryCenterItemState::Acknowledged,
+                worktree_form: gwt_core::coordination::BoardWorktreeForm::BranchBacked,
+                title: Some("Delivery recovered".to_string()),
+                summary: "Public Board summary".to_string(),
+                updated_at: "2026-08-10T00:00:00Z".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(event).expect("serialize recovery center state");
+        assert_eq!(value["kind"], "recovery_center_state");
+        assert_eq!(value["status"], "ready");
+        assert_eq!(value["items"][0]["state"], "acknowledged");
+        assert_eq!(value["items"][0]["worktree_form"], "branch-backed");
+        assert_eq!(value["items"][0]["action_handle"], "opaque-row-handle");
+        let encoded = serde_json::to_string(&value).expect("encode projection");
+        for forbidden in [
+            "session_id",
+            "project_root",
+            "recovery_id",
+            "intent_id",
+            "provider_receipt",
+            "payload_digest",
+            "private_error",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "Recovery Center wire projection leaked private field {forbidden}: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_center_board_action_returns_only_public_board_entry_identity() {
+        let event = BackendEvent::RecoveryCenterBoardEntry {
+            request_id: "request-2".to_string(),
+            generation: 3,
+            board_entry_id: Some("public-board-entry".to_string()),
+            error: None,
+        };
+        let value = serde_json::to_value(event).expect("serialize recovery center action");
+        assert_eq!(value["kind"], "recovery_center_board_entry");
+        assert_eq!(value["board_entry_id"], "public-board-entry");
+        assert_eq!(value.as_object().expect("object").len(), 4);
     }
 
     // SPEC-2356 安心 Addendum (FR-041): StopWindow is a distinct kill-switch

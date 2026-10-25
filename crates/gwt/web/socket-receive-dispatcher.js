@@ -9,16 +9,18 @@
 //
 // `createSocketReceiveDispatcher` wraps `receive` so:
 // - inbound events accumulate in a queue,
-// - the queue is flushed on the next animation frame,
+// - the queue is flushed on the next animation frame or a bounded timer,
 // - string payloads keep full JSON.parse work inside the scheduled flush budget,
 // - idempotent global-state kinds (e.g. workspace_state) collapse to the
 //   latest occurrence, sparing redundant DOM mutations,
 // - long streamed-event backlogs deliver a bounded chunk before latest state so
 //   tab/project updates are not starved behind terminal output,
-// - per-frame time budget (default 8ms) bounds long tasks; remaining events
-//   defer to the next frame.
+// - per-flush time budget (default 8ms) bounds long tasks; remaining events
+//   defer to the next scheduled flush.
 
 const DEFAULT_BUDGET_MS = 8;
+const DEFAULT_FALLBACK_DELAY_MS = 100;
+const DEFAULT_MAX_QUEUE_SIZE = 2048;
 export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 
 // Snapshot kinds that must preserve multiplicity and their position relative
@@ -26,15 +28,17 @@ export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 // ahead of workspace_state can make project-scoped snapshots fail their
 // active-project fence. Empty since Issue #3164 retired the Improvement Inbox
 // events; callers can still opt a kind in through `orderedStateKinds`.
-export const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
+const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
 
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
 export const DEFAULT_COALESCE_KINDS = Object.freeze(
   new Set([
+    "hub_state",
     "workspace_state",
     "active_work_projection",
     "active_work_projection_patch",
+    "local_agent_activity",
     "window_list",
     "provider_usage",
     "runtime_health",
@@ -58,6 +62,8 @@ export function createSocketReceiveDispatcher({
   coalesceKinds = DEFAULT_COALESCE_KINDS,
   orderedStateKinds = DEFAULT_ORDERED_STATE_KINDS,
   maxStreamedBeforeState = DEFAULT_MAX_STREAMED_BEFORE_STATE,
+  maxQueueSize = DEFAULT_MAX_QUEUE_SIZE,
+  onResync,
   onTrace,
   shouldTrace,
   // Issue #3365 — continuing past a throwing receive() is the right
@@ -71,13 +77,7 @@ export function createSocketReceiveDispatcher({
       "createSocketReceiveDispatcher requires a receive callback",
     );
   }
-  const scheduleImpl = schedule
-    ?? ((cb) => {
-      if (typeof requestAnimationFrame === "function") {
-        return requestAnimationFrame(cb);
-      }
-      return setTimeout(cb, 0);
-    });
+  const scheduleImpl = schedule ?? scheduleReceiveFlush;
   const nowImpl = now ?? (() => {
     if (typeof performance !== "undefined" && typeof performance.now === "function") {
       return performance.now();
@@ -87,8 +87,46 @@ export function createSocketReceiveDispatcher({
   const traceImpl = typeof onTrace === "function" ? onTrace : null;
   const shouldTraceImpl = typeof shouldTrace === "function" ? shouldTrace : null;
 
-  const queue = [];
-  let scheduled = false;
+  const queueLimit = Number.isSafeInteger(maxQueueSize) && maxQueueSize > 0
+    ? maxQueueSize : DEFAULT_MAX_QUEUE_SIZE;
+  let queue = [];
+  let pendingFlush = null;
+  let resyncReason = null;
+  let disposed = false;
+
+  function cancelFlush() {
+    const reservation = pendingFlush;
+    pendingFlush = null;
+    if (typeof reservation?.cancel === "function") reservation.cancel();
+  }
+
+  function invalidate(reason) {
+    queue = [];
+    resyncReason = reason;
+    scheduleFlush();
+  }
+
+  function append(entry) {
+    if (disposed || resyncReason) return;
+    if (queue.length >= queueLimit) {
+      // Discard the whole obsolete stream, including this event. A single
+      // scheduled recovery requests snapshots instead of replaying gaps.
+      invalidate("overflow");
+      return;
+    }
+    queue.push(entry);
+    scheduleFlush();
+  }
+
+  function scheduleFlush() {
+    if (disposed || pendingFlush) return;
+    const reservation = { cancel: null };
+    pendingFlush = reservation;
+    reservation.cancel = scheduleImpl(() => {
+      // A timer/frame race or flushNow may have already consumed this flush.
+      if (pendingFlush === reservation) flush();
+    });
+  }
 
   function traceActive() {
     if (!traceImpl) {
@@ -117,7 +155,14 @@ export function createSocketReceiveDispatcher({
   }
 
   function flush() {
-    scheduled = false;
+    cancelFlush();
+    if (disposed) return;
+    if (resyncReason) {
+      const reason = resyncReason;
+      resyncReason = null;
+      onResync?.(reason);
+      return;
+    }
     if (queue.length === 0) {
       return;
     }
@@ -125,7 +170,7 @@ export function createSocketReceiveDispatcher({
       maxStreamedBeforeState,
       orderedStateKinds,
     });
-    queue.length = 0;
+    queue = [];
     const start = nowImpl();
     trace("ws_flush_start", () => ({
       ready_count: ready.length,
@@ -164,17 +209,21 @@ export function createSocketReceiveDispatcher({
         }
       }
       cursor += 1;
+      if (disposed || resyncReason) return;
       if (cursor < ready.length && nowImpl() - start > budgetMs) {
-        for (let i = ready.length - 1; i >= cursor; i -= 1) {
-          queue.unshift(ready[i]);
+        // Preserve events enqueued by receive(), without N single-item
+        // prepends shifting the remainder N times.
+        if (ready.length - cursor + queue.length > queueLimit) {
+          invalidate("overflow");
+          return;
         }
+        queue = ready.slice(cursor).concat(queue);
         trace("ws_flush_defer", () => ({
           processed_count: cursor,
           remaining_count: ready.length - cursor,
           duration_ms: nowImpl() - start,
         }));
-        scheduled = true;
-        scheduleImpl(flush);
+        scheduleFlush();
         return;
       }
     }
@@ -185,11 +234,7 @@ export function createSocketReceiveDispatcher({
   }
 
   function enqueue(event) {
-    queue.push(parsedQueueEntry(event));
-    if (!scheduled) {
-      scheduled = true;
-      scheduleImpl(flush);
-    }
+    append(parsedQueueEntry(event));
   }
 
   function handle(messageEvent) {
@@ -201,7 +246,7 @@ export function createSocketReceiveDispatcher({
         parse_ms: nowImpl() - parseStart,
         deferred_parse: true,
       }));
-      queue.push(entry);
+      append(entry);
     } else if (
       messageEvent
       && typeof messageEvent === "object"
@@ -212,20 +257,16 @@ export function createSocketReceiveDispatcher({
         event_kind: entry.kind,
         parse_ms: nowImpl() - parseStart,
       }));
-      queue.push(entry);
+      append(entry);
     } else {
       throw new TypeError(
         "createSocketReceiveDispatcher.handle expects a WebSocket message event or parsed payload",
       );
     }
-    if (!scheduled) {
-      scheduled = true;
-      scheduleImpl(flush);
-    }
   }
 
   function flushNow() {
-    if (scheduled || queue.length > 0) {
+    if (pendingFlush || queue.length > 0 || resyncReason) {
       flush();
     }
   }
@@ -234,7 +275,34 @@ export function createSocketReceiveDispatcher({
     return queue.length;
   }
 
-  return { handle, enqueue, flushNow, pendingCount };
+  function resume() {
+    if (disposed) return;
+    invalidate("visible");
+    flushNow();
+  }
+
+  function dispose() {
+    disposed = true;
+    cancelFlush();
+    queue = [];
+    resyncReason = null;
+  }
+
+  return { handle, enqueue, flushNow, pendingCount, resume, dispose };
+}
+
+function scheduleReceiveFlush(callback) {
+  const hasFrameScheduler = typeof requestAnimationFrame === "function";
+  // rAF can stop in an inactive window. Keep state delivery independent of
+  // focus while retaining frame batching in active windows.
+  const timer = setTimeout(callback, hasFrameScheduler ? DEFAULT_FALLBACK_DELAY_MS : 0);
+  const frame = hasFrameScheduler ? requestAnimationFrame(callback) : null;
+  return () => {
+    clearTimeout(timer);
+    if (frame !== null && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(frame);
+    }
+  };
 }
 
 function parsedQueueEntry(event) {

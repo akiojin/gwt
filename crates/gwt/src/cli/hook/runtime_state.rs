@@ -9,12 +9,15 @@ use std::{
     io,
     io::Read,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use chrono::{SecondsFormat, Utc};
+#[cfg(test)]
+use gwt_agent::persist_agent_session_id;
 use gwt_agent::{
-    persist_agent_session_id, persist_session_status, AgentStatus, PendingDiscussionResume,
-    Session, SessionRuntimeState,
+    persist_session_hook_metadata_with_wait, AgentStatus, PendingDiscussionResume, Session,
+    SessionRuntimeState,
 };
 use serde::Serialize;
 
@@ -24,6 +27,8 @@ use super::{
 };
 use crate::discussion_resume::load_pending_resume;
 use crate::window_state::window_state_for_hook_event;
+
+const HOOK_SESSION_METADATA_LEASE_WAIT: Duration = Duration::from_millis(25);
 
 /// The JSON shape the Branches tab polls from `$GWT_SESSION_RUNTIME_PATH`.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -49,6 +54,7 @@ pub fn status_for_event(event: &str) -> Option<&'static str> {
         crate::persistence::WindowState::Waiting => Some("Waiting"),
         crate::persistence::WindowState::Stopped => Some("Stopped"),
         crate::persistence::WindowState::Error => Some("Error"),
+        crate::persistence::WindowState::Interrupted => Some("Interrupted"),
     }
 }
 
@@ -75,7 +81,7 @@ fn write_for_event_with_pending_discussion(
 ) -> Result<(), HookError> {
     let status =
         status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
-    write_state_with_status(path, event, status, pending_discussion)
+    write_state_with_status(path, event, status, pending_discussion, None)
 }
 
 fn write_state_with_status(
@@ -83,7 +89,30 @@ fn write_state_with_status(
     event: &str,
     status: &str,
     pending_discussion: Option<PendingDiscussionResume>,
+    tool_use_id: Option<&str>,
 ) -> Result<(), HookError> {
+    let _writer = gwt_agent::session::runtime_writer_lease(path)?;
+    let _publication = gwt_agent::session::runtime_publication_lease(path)?;
+    let previous = SessionRuntimeState::load(path).ok();
+    let mut active_tool_calls = previous
+        .as_ref()
+        .and_then(|state| state.active_tool_calls.clone());
+    match (event, tool_use_id) {
+        ("SessionStart" | "Stop", _) => active_tool_calls = Some(Default::default()),
+        ("PreToolUse", Some(id)) => {
+            active_tool_calls
+                .get_or_insert_with(Default::default)
+                .insert(id.to_string());
+        }
+        ("PostToolUse", Some(id)) => {
+            if let Some(calls) = active_tool_calls.as_mut() {
+                calls.remove(id);
+            }
+        }
+        // Providers without call ids cannot establish a complete active set.
+        ("PreToolUse" | "PostToolUse", None) => active_tool_calls = None,
+        _ => {}
+    }
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let state = RuntimeState {
         status: status.to_string(),
@@ -94,10 +123,16 @@ fn write_state_with_status(
     };
 
     let mut value = serde_json::to_value(&state)?;
-    if let Ok(previous) = SessionRuntimeState::load(path) {
-        let object = value
-            .as_object_mut()
-            .expect("RuntimeState serializes as an object");
+    let object = value
+        .as_object_mut()
+        .expect("RuntimeState serializes as an object");
+    if let Some(calls) = active_tool_calls {
+        object.insert(
+            "active_tool_calls".to_string(),
+            serde_json::to_value(calls)?,
+        );
+    }
+    if let Some(previous) = previous {
         if let Some(identity) = previous.execution_identity {
             object.insert(
                 "execution_identity".to_string(),
@@ -110,6 +145,18 @@ fn write_state_with_status(
                 serde_json::to_value(incarnation)?,
             );
         }
+        // Issue #4643: the launch's process identity outlives every hook
+        // event. Dropping it left the sweep with nothing but a live Host to
+        // judge by, so closed panes kept their worktrees forever.
+        for (key, value) in [
+            ("host_started_at", previous.host_started_at),
+            ("child_pid", previous.child_pid.map(u64::from)),
+            ("child_started_at", previous.child_started_at),
+        ] {
+            if let Some(value) = value {
+                object.insert(key.to_string(), serde_json::Value::from(value));
+            }
+        }
         if let Some(completed_at) = previous.last_completed_hook_event_at {
             object.insert(
                 "last_completed_hook_event_at".to_string(),
@@ -118,7 +165,15 @@ fn write_state_with_status(
         }
     }
     let bytes = serde_json::to_vec_pretty(&value)?;
-    gwt_github::cache::write_atomic(path, &bytes)?;
+    // Issue #3777: this file is pure liveness for the Branches tab and every
+    // hook event rewrites it, so waiting for the device buys nothing while
+    // costing the prompt its budget (522ms measured on a stalled Windows
+    // runner). The rename still publishes it whole.
+    gwt_github::cache::write_atomic_with_durability(
+        path,
+        &bytes,
+        gwt_github::cache::Durability::RenameOnly,
+    )?;
     Ok(())
 }
 
@@ -131,7 +186,17 @@ pub(crate) fn record_hook_event_completed_from_env() {
         return;
     };
     let runtime_path = PathBuf::from(runtime_path);
-    let Ok(raw) = std::fs::read_to_string(&runtime_path) else {
+    record_hook_event_completed(&runtime_path);
+}
+
+fn record_hook_event_completed(runtime_path: &Path) {
+    let Ok(_writer) = gwt_agent::session::runtime_writer_lease(runtime_path) else {
+        return;
+    };
+    let Ok(_publication) = gwt_agent::session::runtime_publication_lease(runtime_path) else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(runtime_path) else {
         return;
     };
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -145,7 +210,7 @@ pub(crate) fn record_hook_event_completed_from_env() {
         serde_json::Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
     );
     if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
-        let _ = gwt_github::cache::write_atomic(&runtime_path, &bytes);
+        let _ = gwt_github::cache::write_atomic(runtime_path, &bytes);
     }
 }
 
@@ -190,6 +255,7 @@ fn current_session_for_id(sessions_dir: &Path, gwt_session_id: &GwtSessionId) ->
     }
 }
 
+#[cfg(test)]
 fn sync_agent_session_id(
     sessions_dir: &Path,
     gwt_session_id: &GwtSessionId,
@@ -200,6 +266,13 @@ fn sync_agent_session_id(
         gwt_session_id.as_str(),
         agent_session_id.as_str(),
     )
+}
+
+fn agent_session_id_needs_sync(
+    session: Option<&Session>,
+    agent_session_id: &HookSessionId,
+) -> bool {
+    session.and_then(Session::exact_resume_session_id) != Some(agent_session_id.as_str())
 }
 
 fn validated_hook_agent_session_id(
@@ -270,8 +343,15 @@ pub fn handle(event: &str) -> Result<(), HookError> {
 }
 
 pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
+    handle_with_input_prepared(event, input).map(|_| ())
+}
+
+pub(crate) fn handle_with_input_prepared(
+    event: &str,
+    input: &str,
+) -> Result<Option<Session>, HookError> {
     let Some(runtime_path) = std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV) else {
-        return Ok(());
+        return Ok(None);
     };
     let runtime_path = PathBuf::from(runtime_path);
     let hook_event = if input.trim().is_empty() {
@@ -281,33 +361,93 @@ pub fn handle_with_input(event: &str, input: &str) -> Result<(), HookError> {
     };
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let gwt_session_id = GwtSessionId::required_from_env(event)?;
-    let session = current_session_for_id(&sessions_dir, &gwt_session_id);
+    let mut session = timed_substage(event, "runtime-state/session-load", || {
+        current_session_for_id(&sessions_dir, &gwt_session_id)
+    });
     let agent_session_id = validated_hook_agent_session_id(
         event,
         &gwt_session_id,
         session.as_ref(),
         hook_event.as_ref(),
     )?;
-    if let Some(agent_session_id) = agent_session_id.as_ref() {
-        if let Err(error) = sync_agent_session_id(&sessions_dir, &gwt_session_id, agent_session_id)
-        {
-            log_session_metadata_error("sync agent_session_id for", &gwt_session_id, &error);
-        }
-    }
     if session.is_some() {
-        if let Err(error) =
-            gwt_agent::persist_session_hook_event(&sessions_dir, gwt_session_id.as_str(), event)
-        {
-            log_session_metadata_error("record hook event for", &gwt_session_id, &error);
+        let legacy_project_state_root = session.as_ref().and_then(|session| {
+            session.project_state_root.is_none().then(|| {
+                crate::agent_project_state::canonical_project_state_root_for_session(
+                    session,
+                    &session.worktree_path,
+                )
+            })
+        });
+        let agent_session_id_to_sync = agent_session_id.as_ref().filter(|agent_session_id| {
+            event == "SessionStart"
+                || agent_session_id_needs_sync(session.as_ref(), agent_session_id)
+        });
+        let persisted = timed_substage(event, "runtime-state/session-metadata", || {
+            persist_session_hook_metadata_with_wait(
+                &sessions_dir,
+                gwt_session_id.as_str(),
+                event,
+                agent_session_id_to_sync.map(HookSessionId::as_str),
+                legacy_project_state_root.as_deref(),
+                HOOK_SESSION_METADATA_LEASE_WAIT,
+            )
+        });
+        match persisted {
+            Ok(updated) => session = Some(updated),
+            Err(error) => {
+                log_session_metadata_error("record hook metadata for", &gwt_session_id, &error);
+                if event == "SessionStart" && agent_session_id.is_some() {
+                    return Err(error.into());
+                }
+            }
         }
     }
 
-    let pending_discussion = session.as_ref().and_then(|session| {
-        pending_discussion_for_session(&sessions_dir, &session.id)
-            .ok()
-            .flatten()
+    if event == "SessionStart" {
+        if let Some(expected) = agent_session_id.as_ref() {
+            if session.as_ref().and_then(Session::exact_resume_session_id)
+                != Some(expected.as_str())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    session_start_persisted_id_missing_message(gwt_session_id.as_str()),
+                )
+                .into());
+            }
+        }
+    }
+
+    let pending_discussion = timed_substage(event, "runtime-state/pending-resume", || {
+        session
+            .as_ref()
+            .and_then(|session| load_pending_resume(&session.worktree_path).ok().flatten())
     });
-    write_for_event_with_pending_discussion(&runtime_path, event, pending_discussion)
+    timed_substage(event, "runtime-state/state-write", || {
+        let status =
+            status_for_event(event).ok_or_else(|| HookError::InvalidEvent(event.to_string()))?;
+        write_state_with_status(
+            &runtime_path,
+            event,
+            status,
+            pending_discussion,
+            hook_event.as_ref().and_then(RawHookEvent::tool_use_id),
+        )
+    })
+    .map(|_| session)
+}
+
+/// Time one `runtime-state` substage into the opt-in hook profile.
+///
+/// Issue #3777: the aggregate `runtime-state` record hides which of the two
+/// durable writes, the Session read, or the pending-resume read consumes the
+/// UserPromptSubmit budget, and the slow mode only reproduces on Windows CI.
+/// The handler names stay on the content-free allowlist in [`super::diagnostics`].
+fn timed_substage<T>(event: &str, handler: &'static str, work: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = work();
+    super::diagnostics::record_handler_duration(event, handler, started.elapsed(), "ok");
+    value
 }
 
 pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<String> {
@@ -321,13 +461,13 @@ pub(crate) fn session_start_agent_session_diagnostic(input: &str) -> Option<Stri
     };
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     match resolve_hook_agent_session_id(session.as_ref(), hook_event.as_ref()) {
-        HookAgentSessionId::Provided(_) => {
+        HookAgentSessionId::Provided(expected) => {
             let Some(session) = current_session_for_id(&sessions_dir, &gwt_session_id) else {
                 return Some(session_start_persisted_id_missing_message(
                     gwt_session_id.as_str(),
                 ));
             };
-            if session.exact_resume_session_id().is_some() {
+            if session.exact_resume_session_id() == Some(expected.as_str()) {
                 None
             } else {
                 Some(session_start_persisted_id_missing_message(
@@ -388,9 +528,14 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
     let sessions_dir = sessions_dir_for_runtime_path(&runtime_path);
     let session = current_session_for_id(&sessions_dir, &gwt_session_id);
     if session.is_some() {
-        if let Err(error) =
-            persist_session_status(&sessions_dir, gwt_session_id.as_str(), AgentStatus::Running)
-        {
+        if let Err(error) = gwt_agent::update_session_if_changed(
+            &sessions_dir,
+            gwt_session_id.as_str(),
+            |session| {
+                session.record_hook_status(AgentStatus::Running);
+                Ok(())
+            },
+        ) {
             log_session_metadata_error("restore blocked Stop status for", &gwt_session_id, &error);
         }
     }
@@ -399,7 +544,7 @@ pub fn record_blocked_stop_from_env() -> Result<(), HookError> {
             .ok()
             .flatten()
     });
-    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion)
+    write_state_with_status(&runtime_path, "Stop", "Running", pending_discussion, None)
 }
 
 fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
@@ -409,14 +554,16 @@ fn sessions_dir_for_runtime_path(runtime_path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use fs2::FileExt;
     use gwt_agent::{AgentId, Session, GWT_SESSION_ID_ENV};
     use gwt_core::coordination::{coordination_events_segments_dir, load_snapshot};
     use std::ffi::OsString;
+    use std::fs::OpenOptions;
     use std::time::Duration;
 
     use super::*;
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    fn env_lock() -> gwt_core::test_support::EnvLockGuard {
         crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -591,15 +738,23 @@ mod tests {
         let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
             .unwrap()
             .unwrap();
-        gwt_agent::SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 41)
-            .save(&path)
-            .unwrap();
+        let mut runtime =
+            gwt_agent::SessionRuntimeState::for_execution(AgentStatus::Running, &identity, 41);
+        runtime.host_started_at = Some(1_000);
+        runtime.child_pid = Some(4_242);
+        runtime.child_started_at = Some(2_000);
+        runtime.save(&path).unwrap();
 
         write_for_event_with_pending_discussion(&path, "Stop", None).unwrap();
 
         let updated = gwt_agent::SessionRuntimeState::load(&path).unwrap();
         assert_eq!(updated.execution_identity.as_ref(), Some(&identity));
         assert_eq!(updated.runtime_incarnation, Some(41));
+        // Issue #4643: the PTY child identity is the only sidecar-local
+        // evidence that the launch has ended; a hook event must not erase it.
+        assert_eq!(updated.host_started_at, Some(1_000));
+        assert_eq!(updated.child_pid, Some(4_242));
+        assert_eq!(updated.child_started_at, Some(2_000));
         assert_eq!(updated.source_event.as_deref(), Some("Stop"));
     }
 
@@ -610,6 +765,83 @@ mod tests {
         assert_eq!(status_for_event("PreToolUse"), Some("Running"));
         assert_eq!(status_for_event("PostToolUse"), Some("Running"));
         assert_eq!(status_for_event("Stop"), Some("Idle"));
+    }
+
+    #[test]
+    fn active_tool_calls_follow_identified_provider_lifecycle() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime-state.json");
+        env.set(GWT_SESSION_ID_ENV, "tool-lifecycle");
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+
+        for (event, id, expected) in [
+            ("UserPromptSubmit", None, "null"),
+            ("SessionStart", None, "[]"),
+            ("PreToolUse", Some("a"), r#"["a"]"#),
+            ("PreToolUse", Some("a"), r#"["a"]"#),
+            ("PreToolUse", Some("b"), r#"["a","b"]"#),
+            ("PostToolUse", Some("other"), r#"["a","b"]"#),
+            ("PostToolUse", Some("a"), r#"["b"]"#),
+            ("UserPromptSubmit", None, r#"["b"]"#),
+            ("PostToolUse", Some("b"), "[]"),
+            ("PreToolUse", Some("c"), r#"["c"]"#),
+            ("Stop", None, "[]"),
+            ("PreToolUse", None, "null"),
+            ("PostToolUse", Some("c"), "null"),
+            ("PreToolUse", Some("d"), r#"["d"]"#),
+            ("PostToolUse", None, "null"),
+        ] {
+            let input = serde_json::json!({"tool_use_id": id}).to_string();
+            handle_with_input(event, &input).unwrap();
+            let state: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                state["active_tool_calls"].to_string(),
+                expected,
+                "{event} {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_tool_hooks_and_completion_share_the_runtime_writer_lease() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = gwt_agent::runtime_state_path(dir.path(), "parallel-tools");
+        env.set(GWT_SESSION_ID_ENV, "parallel-tools");
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, path.as_os_str());
+        write_for_event(&path, "SessionStart").unwrap();
+        let ready = std::sync::Barrier::new(4);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = gwt_agent::session::runtime_writer_lease(&path).unwrap();
+            for id in [Some("a"), Some("b"), None] {
+                let (path, ready, done) = (&path, &ready, done_tx.clone());
+                scope.spawn(move || {
+                    ready.wait();
+                    if let Some(id) = id {
+                        write_state_with_status(path, "PreToolUse", "Running", None, Some(id))
+                            .unwrap();
+                    } else {
+                        record_hook_event_completed_from_env();
+                    }
+                    done.send(()).unwrap();
+                });
+            }
+            ready.wait();
+            // test-hygiene: allow-wall-clock-deadline This negative receipt probe checks native writer-lock exclusion; successful publication is joined after releasing the lock.
+            assert!(done_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            drop(writer);
+        });
+        let state = SessionRuntimeState::load(&path).unwrap();
+        assert_eq!(
+            state.active_tool_calls,
+            Some(["a".into(), "b".into()].into())
+        );
+        assert!(state.last_completed_hook_event_at.is_some());
     }
 
     #[test]
@@ -636,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_with_input_fails_open_when_corrupt_metadata_has_hook_session_id() {
+    fn session_start_rejects_corrupt_metadata_with_provider_identity() {
         let _lock = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let sessions_dir = dir.path().join("sessions");
@@ -655,12 +887,62 @@ mod tests {
         );
 
         handle_with_input("SessionStart", r#"{"session_id":"agent-123"}"#)
-            .expect("corrupt metadata with a hook session_id must fail open");
+            .expect_err("SessionStart must not accept an uncommitted provider identity");
+        assert!(
+            !runtime_path.exists(),
+            "failed identity must not publish Idle"
+        );
+    }
 
-        let raw = std::fs::read_to_string(&runtime_path).unwrap();
-        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
-        assert_eq!(state.status, "Idle");
-        assert_eq!(state.source_event, "SessionStart");
+    #[test]
+    fn session_start_rejects_failed_identity_commit_under_session_lease() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        env.unset(gwt_agent::GWT_HOOK_FORWARD_URL_ENV);
+        env.unset(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/issue-5102", AgentId::Codex);
+        session.agent_session_id = Some("source-provider-5102".to_string());
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+        // A held canonical lease rejects a nested writer deterministically;
+        // no wall-clock ordering is needed to exercise persistence failure.
+        gwt_agent::with_session_path_lease(&sessions_dir, &session.id, |_| {
+            crate::daemon_runtime::handle_runtime_state(
+                "SessionStart",
+                r#"{"session_id":"provider-5102"}"#,
+            )
+            .expect_err("a failed identity commit must not reach hook-live success");
+            Ok(())
+        })
+        .unwrap();
+
+        let loaded = Session::load(&sessions_dir.join(format!("{}.toml", session.id))).unwrap();
+        assert_eq!(loaded.agent_session_id, session.agent_session_id);
+        assert!(!runtime_path.exists());
+    }
+
+    #[test]
+    fn session_start_diagnostic_rejects_a_different_persisted_provider_id() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/issue-5102", AgentId::ClaudeCode);
+        session.agent_session_id = Some("source-provider-5102".to_string());
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV, &runtime_path);
+
+        assert!(
+            session_start_agent_session_diagnostic(r#"{"session_id":"provider-5102"}"#).is_some(),
+            "an old resume handle does not prove the supplied identity was committed"
+        );
     }
 
     #[test]
@@ -862,6 +1144,62 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_submit_session_bookkeeping_fails_open_under_lease_contention() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "feature/demo", AgentId::Codex);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        let lease = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(sessions_dir.join(format!(".{session_id}.lock")))
+            .unwrap();
+        lease.lock_exclusive().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            lease.unlock().unwrap();
+        });
+
+        handle_with_input("UserPromptSubmit", r#"{"session_id":"agent-new"}"#)
+            .expect("contended bookkeeping must fail open");
+        release.join().unwrap();
+
+        // Assert the bound itself rather than how long the call happened to
+        // take. The wall clock measures the runner as much as the code: under
+        // CI's default parallelism this observed 259ms against a 200ms limit
+        // even though the wait was clamped (Issue #3777, CI run 34490959331).
+        // The hook waits `HOOK_SESSION_METADATA_LEASE_WAIT` for the Session
+        // lease, so holding that constant below the 300ms the thread above
+        // keeps the lease is what proves the hook cannot have waited the
+        // contended lease out — and it stays true on a loaded runner.
+        assert!(
+            HOOK_SESSION_METADATA_LEASE_WAIT <= Duration::from_millis(25),
+            "the Session lease wait must stay clamped well under the contended \
+             hold, otherwise UserPromptSubmit blocks on it: \
+             {HOOK_SESSION_METADATA_LEASE_WAIT:?}"
+        );
+        let raw = std::fs::read_to_string(&runtime_path).expect("runtime state written");
+        let state: RuntimeState = serde_json::from_str(&raw).unwrap();
+        assert_eq!(state.status, "Running");
+        assert_eq!(state.source_event, "UserPromptSubmit");
+    }
+
+    #[test]
     fn codex_runtime_state_fails_open_when_hook_session_id_blank() {
         // A blank session_id resolves to MissingRequiredForCodex with no
         // persisted id to fall back to. The hook must still fail open: write
@@ -978,6 +1316,47 @@ mod tests {
         assert!(loaded.should_mark_interrupted_from_lifecycle());
     }
 
+    /// Issue #4768: Grok Build sends every hook field under both its
+    /// camelCase key and the Claude-compatible snake_case key. Both spellings
+    /// in one payload must not fail the hook closed.
+    #[test]
+    fn runtime_state_records_grok_payload_carrying_both_key_spellings() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join(".gwt").join("sessions");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let session = Session::new(&worktree, "work/issue-277", AgentId::GrokBuild);
+        let session_id = session.id.clone();
+        session.save(&sessions_dir).unwrap();
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session_id);
+        env.set(GWT_SESSION_ID_ENV, session_id.clone());
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str().to_os_string(),
+        );
+
+        handle_with_input(
+            "SessionStart",
+            r#"{"hookEventName":"session_start","hook_event_name":"SessionStart","sessionId":"grok-conversation-4768","session_id":"grok-conversation-4768","cwd":"repo"}"#,
+        )
+        .expect("SessionStart with both session id spellings must succeed");
+        handle_with_input(
+            "PreToolUse",
+            r#"{"hookEventName":"pre_tool_use","hook_event_name":"PreToolUse","sessionId":"grok-conversation-4768","session_id":"grok-conversation-4768","toolName":"run_command","tool_name":"Bash","toolInput":{"command":"ls"},"tool_input":{"command":"ls"}}"#,
+        )
+        .expect("PreToolUse with both key spellings must succeed");
+
+        let loaded = Session::load(&sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+        assert_eq!(loaded.last_hook_event.as_deref(), Some("PreToolUse"));
+        assert_eq!(
+            loaded.exact_resume_session_id(),
+            Some("grok-conversation-4768")
+        );
+    }
+
     #[test]
     fn runtime_state_records_completed_stop_as_clean_boundary() {
         let _lock = env_lock();
@@ -1009,5 +1388,45 @@ mod tests {
         assert!(loaded.last_completed_stop_at.is_some());
         assert_eq!(serde_json::to_string(&loaded.status).unwrap(), "\"Idle\"");
         assert!(!loaded.should_mark_interrupted_from_lifecycle());
+    }
+
+    #[test]
+    fn late_hooks_preserve_explicit_close_until_relaunch() {
+        let _lock = env_lock();
+        let mut env = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("sessions");
+        let mut session = Session::new(dir.path(), "work/closed", AgentId::ClaudeCode);
+        session.record_terminal_stop();
+        session.save(&sessions_dir).unwrap();
+        let path = sessions_dir.join(format!("{}.toml", session.id));
+        let runtime_path = gwt_agent::runtime_state_path(&sessions_dir, &session.id);
+        env.set(GWT_SESSION_ID_ENV, &session.id);
+        env.set(
+            gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV,
+            runtime_path.as_os_str(),
+        );
+
+        for event in ["PostToolUse", "Stop"] {
+            handle_with_input(event, "{}").unwrap();
+            let loaded = Session::load(&path).unwrap();
+            assert_eq!(loaded.status, AgentStatus::Stopped, "late {event}");
+            assert_eq!(loaded.last_hook_event.as_deref(), Some(event));
+        }
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Stopped);
+        record_blocked_stop_from_env().unwrap();
+        let closed = Session::load(&path).unwrap();
+        assert_eq!(closed.status, AgentStatus::Stopped);
+        assert!(!closed.restore_window_on_startup);
+
+        // Explicit launch enables restore before the new child's hooks run.
+        session.restore_window_on_startup = true;
+        session.save(&sessions_dir).unwrap();
+        record_blocked_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Running);
+        handle_with_input("Stop", "{}").unwrap();
+        record_completed_stop_from_env().unwrap();
+        assert_eq!(Session::load(&path).unwrap().status, AgentStatus::Idle);
     }
 }

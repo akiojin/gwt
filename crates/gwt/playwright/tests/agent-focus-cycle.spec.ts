@@ -1,207 +1,183 @@
 import { expect, test, type Page } from "@playwright/test";
 import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 
+// browser-check supplies a fresh checkout server. Keep the deterministic
+// protocol fixture in both modes, but never replace that server's UI assets.
+const focusAppUrl = process.env.GWT_PLAYWRIGHT_BASE_URL
+  ? new URL(new URL(APP_URL).pathname, process.env.GWT_PLAYWRIGHT_BASE_URL).href
+  : APP_URL;
+
 type SentMessage = {
   kind?: string;
   id?: string;
+  data?: string;
+};
+
+const agentNames: Record<string, string> = {
+  "shell-topmost": "Shell",
+  "agent-running": "Aster", "agent-waiting": "Birch", "agent-stopped-tab-peer": "Cedar",
+  "agent-live-future": "Dune", "agent-starting-hidden": "Elm",
 };
 
 test.describe("Agent-prioritized focus cycling", () => {
-  test.use({
-    deviceScaleFactor: 1,
-    viewport: { width: 1440, height: 900 },
+  test.setTimeout(60_000);
+  test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
+
+  test("cycles canonical live Works in runtime priority order and reuses the native terminal", async ({ page }, testInfo) => {
+    const problems = recordErrors(page);
+    await openFixture(page);
+    await expect(windowById(page, "shell-topmost")).toHaveClass(/focused/);
+    await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState());
+    await settleAndClearMessages(page);
+    // Shell remains an auxiliary Settings terminal. PM and the recorded stopped
+    // window are absent from the implementation-agent focus census.
+    for (const [key, id] of [["ArrowRight", "agent-running"], ["ArrowRight", "agent-starting-hidden"],
+      ["ArrowRight", "agent-waiting"], ["ArrowRight", "agent-live-future"],
+      ["ArrowLeft", "agent-waiting"], ["ArrowLeft", "agent-starting-hidden"],
+      ["ArrowLeft", "agent-running"], ["ArrowLeft", "agent-live-future"]] as const) {
+      await pressFocusCycle(page, key, "Control"); await expectAgentWorkFocus(page, id);
+    }
+    await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
+    await expect(windowById(page, "agent-live-future").locator(".status-chip"))
+      .toHaveAttribute("aria-label", /^Running: .*focus-cycle runtime running$/);
+    await expect(windowById(page, "agent-live-future").locator(".title-text"))
+      .toHaveAttribute("title", "focus-cycle snapshot running");
+    await pressFocusCycle(page, "ArrowRight", "Meta"); await expectAgentWorkFocus(page, "agent-running");
+    await expect.poll(() => focusTargets(page)).toEqual(["agent-running", "agent-starting-hidden", "agent-waiting", "agent-live-future",
+      "agent-waiting", "agent-starting-hidden", "agent-running", "agent-live-future", "agent-running"]);
+    await agentTile(page, "agent-running").locator(".xterm").evaluate(node => { (window as any).__focusCycleTerminal = node; });
+    await expect(page.locator('.work-row[data-window-id="pm-window"]')).toHaveCount(1);
+    await expect(page.locator('.work-row[data-window-id="shell-topmost"], .work-row[data-window-id="agent-stopped-tab-peer"]')).toHaveCount(0);
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.evaluate(() => (window as any).__agentFocusCycleSocket().emit({
+      kind: "terminal_output", id: "agent-running", data_base64: btoa("LIVE AFTER BACK\r\n"),
+    }));
+    await expect(page.locator('.work-row[data-window-id="agent-running"] .work-tail > pre')).toContainText("LIVE AFTER BACK");
+    await pressFocusCycle(page, "ArrowRight", "Control"); await expectAgentWorkFocus(page, "agent-starting-hidden");
+    await pressFocusCycle(page, "ArrowLeft", "Meta"); await expectAgentWorkFocus(page, "agent-running");
+    expect(await agentTile(page, "agent-running").locator(".xterm").evaluate(node => node === (window as any).__focusCycleTerminal)).toBe(true);
+    await page.keyboard.press("q");
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input"))
+      .toEqual([{ kind: "terminal_input", id: "agent-running", data: "q" }]);
+    expectNavigationOnly(await sentMessages(page));
+    await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    expect(problems).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("agent-cycle-selected.png") });
   });
 
-  test("cycles only Agents by runtime priority and activates hidden tabs before focus", async ({
-    page,
-  }) => {
-    // Issue #4069 AC-2: the headed run must finish with zero console / page
-    // errors in both themes, not just the right focus targets.
-    const consoleErrors: string[] = [];
-    const pageErrors: string[] = [];
-    page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
-    });
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
+  test("legacy grouped focus opens Works immediately and later state keeps split selection", async ({ page }) => {
+    const problems = recordErrors(page);
+    await openFixture(page);
+    await expect(windowById(page, "shell-topmost")).toHaveClass(/focused/);
 
-    await installEmbeddedRoutes(page);
-    await installFocusCycleBackend(page);
-    await page.goto(APP_URL);
+    // The runtime-health entry point ignores legacy tab activation metadata.
+    await page.evaluate(() => (window as any).__operatorShell.applyRuntimeHealth({
+      state: "ok", processes: [{ pid: 301, role: "codex", name: "codex",
+        focus_window_id: "agent-starting-hidden" }],
+    }));
+    await page.locator("#op-strip-runtime-health").hover();
+    await page.getByRole("button", { name: "Focus codex process 301", exact: true }).click();
+    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "activate_window_tab"))
+      .toEqual([]);
+    await expect(page.locator(".works-full-name")).toHaveText("Elm");
+    await expect(agentTile(page, "agent-starting-hidden")).toBeVisible();
+    await expect(windowById(page, "agent-starting-hidden")).toHaveClass(/focused/);
 
-    const shell = windowById(page, "shell-topmost");
-    const runningAgent = windowById(page, "agent-running");
-    const hiddenStartingAgent = windowById(page, "agent-starting-hidden");
-    const stoppedTabPeer = windowById(page, "agent-stopped-tab-peer");
-
-    // The fixture starts on the non-Agent Shell. In workspace order the next
-    // visible window is the waiting Agent, which is exactly where the legacy
-    // all-window cycle goes. The Agent-priority contract instead starts at the
-    // first active candidate: agent-running.
-    await expect(shell).toBeVisible({ timeout: 10_000 });
-    await expect(shell).toHaveClass(/focused/);
-    await expect(runningAgent).toBeVisible();
-    await expect(hiddenStartingAgent).toBeHidden();
-    await page.evaluate(() => {
-      (window as any).__emitAgentFocusCycleFutureState();
-    });
-
-    const stage = page.locator("#canvas-stage");
-    const initialTransform = await stage.evaluate(
-      (element) => (element as HTMLElement).style.transform,
-    );
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    const left = page.getByRole("region", { name: "Left pane", exact: true });
+    const right = page.getByRole("region", { name: "Right pane", exact: true });
+    await left.getByRole("combobox", { name: "Left pane surface" }).selectOption("issues");
+    await right.getByRole("combobox", { name: "Right pane surface" }).selectOption("works");
+    await expect(left).toHaveAttribute("data-surface", "issues");
+    await expect(right).toHaveAttribute("data-surface", "works");
+    // Start in the sibling pane: cycling must activate the existing Agents
+    // pane rather than replace Issues with a second Agents surface.
+    await left.getByRole("combobox", { name: "Left pane surface" }).focus();
+    await expect(left).toHaveAttribute("data-active", "true");
     await settleAndClearMessages(page);
+    await pressFocusCycle(page, "ArrowRight", "Control");
+    await expectAgentWorkFocus(page, "agent-waiting");
 
-    await pressFocusCycle(page, "ArrowRight");
-
-    // RED on the legacy implementation: actual is agent-waiting because it
-    // walks every visible window in workspace order.
-    await expect.poll(() => focusTargets(page)).toEqual(["agent-running"]);
-    await expect(runningAgent).toHaveClass(/focused/);
-    await expect
-      .poll(() =>
-        stage.evaluate((element) => (element as HTMLElement).style.transform),
-      )
-      .not.toBe(initialTransform);
-
-    // starting shares the active bucket with running, so the hidden starting
-    // tab must be visited before the waiting Agent despite its later workspace
-    // position.
-    await pressFocusCycle(page, "ArrowRight");
-
-    // Activation is asynchronous. Do not focus/frame with hidden layout
-    // metrics; wait until the backend projection mounts the selected tab.
-    await expect
-      .poll(async () =>
-        (await sentMessages(page))
-          .filter((message) => message.kind === "activate_window_tab")
-          .map((message) => message.id),
-      )
-      .toEqual(["agent-starting-hidden"]);
-    await page.evaluate(() => {
-      (window as any).__emitAgentFocusCycleUnrelatedWorkspace();
-    });
-    await expect.poll(() => focusTargets(page)).toEqual(["agent-running"]);
-    await expect(hiddenStartingAgent).toBeHidden();
-
-    await page.evaluate(() => {
-      (window as any).__releaseAgentFocusCycleActivation();
-    });
-    await expect.poll(() => focusTargets(page)).toEqual([
-      "agent-running",
-      "agent-starting-hidden",
-    ]);
-
-    const hiddenSelectionMessages = await sentMessages(page);
-    const activationIndex = hiddenSelectionMessages.findIndex(
-      (message) =>
-        message.kind === "activate_window_tab" &&
-        message.id === "agent-starting-hidden",
-    );
-    const focusIndex = hiddenSelectionMessages.findIndex(
-      (message) =>
-        message.kind === "focus_window" &&
-        message.id === "agent-starting-hidden",
-    );
-    expect(activationIndex).toBeGreaterThanOrEqual(0);
-    expect(focusIndex).toBeGreaterThan(activationIndex);
-    await expect(hiddenStartingAgent).toBeVisible();
-    await expect(hiddenStartingAgent).toHaveClass(/focused/);
-    await expect(stoppedTabPeer).toBeHidden();
-
-    await pressFocusCycle(page, "ArrowRight");
-    await expect.poll(() => focusTargets(page)).toEqual([
-      "agent-running",
-      "agent-starting-hidden",
-      "agent-waiting",
-    ]);
-
-    // Backward traversal uses the same prioritized list. It returns through
-    // starting and running, then wraps to the final Agent without ever landing
-    // on the Shell that remains between those Agents in workspace order.
-    await pressFocusCycle(page, "ArrowLeft");
-    await pressFocusCycle(page, "ArrowLeft");
-    await pressFocusCycle(page, "ArrowLeft");
-    await expect.poll(() => focusTargets(page)).toEqual([
-      "agent-running",
-      "agent-starting-hidden",
-      "agent-waiting",
-      "agent-starting-hidden",
-      "agent-running",
-      "agent-stopped-tab-peer",
-    ]);
-
-    const messages = await sentMessages(page);
-    expect(focusTargetsFrom(messages)).not.toContain("shell-topmost");
-
-    // Focus cycling is navigation-only. The existing frameWindow path may
-    // persist its camera and frame-clamp geometry, but it must not emit any
-    // Agent/process/window lifecycle command. Startup telemetry (#3808) is an
-    // observation, not a command: activating a hidden tab fits its terminal
-    // for the first time, which reports input readiness once per terminal.
-    const navigationKinds = new Set([
-      "activate_window_tab",
-      "focus_window",
-      "update_viewport",
-      "update_window_geometry",
-      "startup_first_frame",
-      "startup_terminal_ready",
-    ]);
-    expect(
-      messages
-        .map((message) => message.kind ?? "")
-        .filter((kind) => !navigationKinds.has(kind)),
-    ).toEqual([]);
-
-    expect(pageErrors).toEqual([]);
-    expect(consoleErrors).toEqual([]);
+    const catalogVersion = await right.locator(".works-surface").getAttribute("data-catalog-version");
+    await page.evaluate(() => (window as any).__emitAgentFocusCycleFutureState("running"));
+    await expect(right.locator(".works-surface")).not.toHaveAttribute("data-catalog-version", catalogVersion!);
+    await expect(page.locator("#split-surfaces")).toBeVisible();
+    await expect(left).toHaveAttribute("data-surface", "issues");
+    await expect(right).toHaveAttribute("data-surface", "works");
+    await expect(right).toHaveAttribute("data-active", "true");
+    await expectAgentWorkFocus(page, "agent-waiting");
+    await expect.poll(() => focusTargets(page)).toEqual(["agent-waiting"]);
+    expectNavigationOnly(await sentMessages(page));
+    await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
+    expect(problems).toEqual([]);
   });
 });
+
+async function openFixture(page: Page): Promise<void> {
+  if (!process.env.GWT_PLAYWRIGHT_BASE_URL) await installEmbeddedRoutes(page);
+  await installFocusCycleBackend(page);
+  await page.goto(focusAppUrl);
+}
+
+function recordErrors(page: Page): string[] {
+  const problems: string[] = [];
+  page.on("console", message => { if (message.type() === "error") problems.push(message.text()); });
+  page.on("pageerror", error => problems.push(String(error)));
+  return problems;
+}
 
 function windowById(page: Page, id: string) {
   return page.locator(`.workspace-window[data-id='${id}']`);
 }
 
-async function pressFocusCycle(
-  page: Page,
-  key: "ArrowRight" | "ArrowLeft",
-): Promise<void> {
-  // Control is accepted on every platform (`event.metaKey || event.ctrlKey`)
-  // and, unlike Meta+Arrow which xterm.js drops everywhere, Ctrl+Shift+Arrow
-  // is exactly the chord xterm.js would translate into CSI input if the
-  // shortcut ever reached the focused terminal (Issue #4069 CI failure on
-  // Linux). Pressing it on macOS too keeps that leak path covered locally.
-  await page.keyboard.press(`Control+Shift+${key}`);
+function agentTile(page: Page, id: string) {
+  return page.locator(`.works-surface:not(.works-surface--preview) .works-terminal[data-window-id='${id}']`);
+}
+
+async function expectAgentWorkFocus(page: Page, id: string): Promise<void> {
+  await expect(page.locator(".works-full-name")).toHaveText(agentNames[id]);
+  await expect(agentTile(page, id)).toBeVisible();
+  await expect(agentTile(page, id).locator(".xterm-helper-textarea")).toBeFocused();
+}
+
+async function pressFocusCycle(page: Page, key: "ArrowRight" | "ArrowLeft", modifier: "Control" | "Meta"): Promise<void> {
+  // Control exercises the xterm CSI leak path on every platform; Meta covers
+  // the actual macOS shortcut without synthesizing a DOM-only key event.
+  await page.keyboard.press(`${modifier}+Shift+${key}`);
 }
 
 async function sentMessages(page: Page): Promise<SentMessage[]> {
-  return page.evaluate(
-    () => [...(((window as any).__agentFocusCycleSent ?? []) as SentMessage[])],
-  );
-}
-
-function focusTargetsFrom(messages: SentMessage[]): string[] {
-  return messages
-    .filter((message) => message.kind === "focus_window")
-    .map((message) => message.id)
-    .filter((id): id is string => typeof id === "string");
+  return page.evaluate(() => [...(((window as any).__agentFocusCycleSent ?? []) as SentMessage[])]);
 }
 
 async function focusTargets(page: Page): Promise<string[]> {
-  return focusTargetsFrom(await sentMessages(page));
+  return (await sentMessages(page)).filter(message => message.kind === "focus_window")
+    .map(message => message.id ?? "");
+}
+
+function expectNavigationOnly(messages: SentMessage[]): void {
+  const forbidden = new Set([
+    "activate_window_tab", "update_viewport", "update_window_geometry", "cycle_focus",
+    "dock_window_tab", "detach_window_tab", "place_agent_window_in_kanban",
+    "move_agent_kanban_card", "undock_agent_window", "dock_agent_window_to_issue",
+    "create_window", "close_window", "stop_window", "stop_all_windows", "restart_window",
+    "open_pm_agent", "arrange_windows",
+  ]);
+  expect(messages.filter(message => forbidden.has(message.kind ?? "")
+    || /(?:save.*group|placement|launch_wizard)/.test(message.kind ?? ""))).toEqual([]);
 }
 
 async function settleAndClearMessages(page: Page): Promise<void> {
   await page.evaluate(async () => {
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-    );
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     (window as any).__agentFocusCycleSent.length = 0;
   });
 }
 
 async function installFocusCycleBackend(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    const canvasWindow = (id: string, overrides: Record<string, unknown>) => ({
+  await page.addInitScript(names => {
+    const surfaceWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
       title: id,
       preset: "agent",
@@ -217,6 +193,8 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       dynamic_title: null,
       dynamic_title_detail: null,
       agent_id: id,
+      agent_name: names[id] || null,
+      session_id: `${id}-session`,
       agent_color: "cyan",
       tab_group_id: null,
       tab_group_active: false,
@@ -224,11 +202,10 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
       ...overrides,
     });
 
-    // Workspace order is deliberate: from the initially focused Shell, the
-    // old visible-window cycle chooses agent-waiting. Runtime-priority order is
-    // running -> hidden starting -> waiting -> stopped tab peer.
+    // Workspace order deliberately differs from runtime rank. The running
+    // Agent is off-canvas; the PM and Shell must never become candidates.
     const windows = [
-      canvasWindow("shell-topmost", {
+      surfaceWindow("shell-topmost", {
         title: "Shell",
         preset: "shell",
         agent_id: null,
@@ -236,29 +213,46 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
         geometry: { x: 80, y: 80, width: 560, height: 340 },
         z_index: 40,
       }),
-      canvasWindow("agent-waiting", {
+      surfaceWindow("pm-window", {
+        preset: "claude",
+        is_pm: true,
+        status: "running",
+        z_index: 2,
+      }),
+      surfaceWindow("issue-window", {
+        preset: "issue",
+        agent_id: null,
+        z_index: 3,
+      }),
+      surfaceWindow("board-window", {
+        preset: "board",
+        agent_id: null,
+        z_index: 4,
+      }),
+      surfaceWindow("agent-waiting", {
         status: "waiting",
         geometry: { x: 700, y: 80, width: 560, height: 340 },
         z_index: 10,
       }),
-      canvasWindow("agent-live-future", {
+      surfaceWindow("agent-live-future", {
         status: "idle",
         geometry: { x: 1010, y: 460, width: 560, height: 340 },
         z_index: 15,
       }),
-      canvasWindow("agent-running", {
+      surfaceWindow("agent-running", {
         status: "running",
+        placement: { kind: "issue_preview", issue_window_id: "issue-window", issue_number: 4777 },
         geometry: { x: 1320, y: 80, width: 560, height: 340 },
         z_index: 20,
       }),
-      canvasWindow("agent-stopped-tab-peer", {
+      surfaceWindow("agent-stopped-tab-peer", {
         status: "stopped",
         geometry: { x: 1940, y: 80, width: 560, height: 340 },
         z_index: 30,
         tab_group_id: "agent-tabs",
         tab_group_active: true,
       }),
-      canvasWindow("agent-starting-hidden", {
+      surfaceWindow("agent-starting-hidden", {
         status: "starting",
         geometry: { x: 1940, y: 80, width: 560, height: 340 },
         z_index: 5,
@@ -290,23 +284,30 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
         recent_projects: [],
       },
     });
-    const inactiveTabWorkspaceState = workspaceState();
-
     (window as any).__agentFocusCycleActivationReleased = false;
-    (window as any).__emitAgentFocusCycleFutureState = () => {
-      socket?.emit({
+    (window as any).__emitAgentFocusCycleFutureState = async (status = "future-state") => {
+      const target = windows.find(windowData => windowData.id === "agent-live-future")!;
+      target.status = status;
+      await socket?.emit({
         kind: "terminal_status",
         id: "agent-live-future",
-        status: "future-state",
-        detail: "future runtime fixture",
+        status,
+        detail: `focus-cycle runtime ${status}`,
       });
-    };
-    (window as any).__emitAgentFocusCycleUnrelatedWorkspace = () => {
-      socket?.emit(inactiveTabWorkspaceState);
+      // Focus echoes must agree with this runtime update, including when the
+      // receive dispatcher coalesces an earlier workspace snapshot.
+      target.dynamic_title_detail = `focus-cycle snapshot ${status}`;
+      return socket?.emit(workspaceState());
     };
     (window as any).__releaseAgentFocusCycleActivation = () => {
       (window as any).__agentFocusCycleActivationReleased = true;
-      socket?.emit(workspaceState());
+      // Keep focus echoes on the old group selection until this publication.
+      for (const candidate of windows) {
+        if (candidate.tab_group_id === "agent-tabs") {
+          candidate.tab_group_active = candidate.id === "agent-starting-hidden";
+        }
+      }
+      return socket?.emit(workspaceState());
     };
 
     (window as any).__agentFocusCycleSent = [];
@@ -328,6 +329,14 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(workspaceState());
+          this.emit({ kind: "active_work_projection", projection: { id: "focus-fixture-local-live", active_works: [], local_agent_activity: {
+            project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "focus-fixture", observed_at: new Date().toISOString(), agents: [
+              { window_id: "pm-window", session_id: "pm-window-session", runtime_incarnation: 1, is_pm: true, issue_number: null },
+              { window_id: "agent-running", session_id: "agent-running-session", runtime_incarnation: 1, is_pm: false, issue_number: 4777 },
+              { window_id: "agent-waiting", session_id: "agent-waiting-session", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-live-future", session_id: "agent-live-future-session", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-starting-hidden", session_id: "agent-starting-hidden-session", runtime_incarnation: 1, is_pm: false, issue_number: null }
+            ] } } });
         }, 0);
       }
 
@@ -345,16 +354,16 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
             (windowData) => windowData.id === message.id,
           );
           if (target?.tab_group_id) {
-            for (const candidate of windows) {
-              if (candidate.tab_group_id === target.tab_group_id) {
-                candidate.tab_group_active = candidate.id === target.id;
-              }
-            }
             if (
               target.id === "agent-starting-hidden" &&
               !(window as any).__agentFocusCycleActivationReleased
             ) {
               return;
+            }
+            for (const candidate of windows) {
+              if (candidate.tab_group_id === target.tab_group_id) {
+                candidate.tab_group_active = candidate.id === target.id;
+              }
             }
             this.emit(workspaceState());
           }
@@ -378,12 +387,13 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
         this.dispatchEvent(new CloseEvent("close"));
       }
 
-      emit(payload: unknown): void {
-        setTimeout(() => {
+      emit(payload: unknown): Promise<void> {
+        return new Promise((resolve) => setTimeout(() => {
           this.dispatchEvent(
             new MessageEvent("message", { data: JSON.stringify(payload) }),
           );
-        }, 0);
+          resolve();
+        }, 0));
       }
     }
 
@@ -395,5 +405,5 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
     // Retain a reference so the fixture socket is not eligible for collection
     // in engines that aggressively collect detached EventTargets.
     (window as any).__agentFocusCycleSocket = () => socket;
-  });
+  }, agentNames);
 }

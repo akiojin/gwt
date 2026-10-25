@@ -259,6 +259,88 @@ fn discussion_update_imports_repo_local_work_file_and_keeps_source() {
     );
 }
 
+/// Issue #4434: proposals live as `### Proposal ...` blocks inside the same
+/// `## <date> — <title>` entry the discussion fields occupy. Replacing the
+/// entry on update must not take the proposals down with it.
+#[test]
+fn discussion_update_preserves_existing_proposal_blocks() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+
+    let payload = |summary: &str| {
+        serde_json::json!({
+            "schema_version": 1,
+            "operation": "discussion.update",
+            "params": {
+                "date": "2026-09-16",
+                "title": "Proposal survival across updates",
+                "status": "active",
+                "summary": summary,
+                "next": "Continue"
+            }
+        })
+    };
+
+    let first = run_gwtd_json(repo.path(), home.path(), payload("Initial summary"));
+    assert!(
+        first.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let path = home_discussions_path(home.path());
+    let mut seeded = fs::read_to_string(&path).expect("read discussions");
+    seeded.push_str(
+        "\n### Proposal A - Preserve proposals on update [active]\n\
+         - Implementation Proof: pending\n\
+         - Next Question: Keep this proposal while refreshing the summary?\n",
+    );
+    fs::write(&path, seeded).expect("append proposal");
+
+    let second = run_gwtd_json(repo.path(), home.path(), payload("Updated summary"));
+    assert!(
+        second.status.success(),
+        "discussion update should succeed, stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let updated = fs::read_to_string(&path).expect("read discussions");
+    assert!(
+        updated.contains("Updated summary"),
+        "the refreshed entry fields must land, got: {updated}"
+    );
+    assert!(
+        !updated.contains("Initial summary"),
+        "the entry must still be replaced in place, got: {updated}"
+    );
+    assert!(
+        updated.contains("### Proposal A - Preserve proposals on update [active]"),
+        "the proposal heading must survive the entry replacement, got: {updated}"
+    );
+    assert!(
+        updated.contains("Keep this proposal while refreshing the summary?"),
+        "the proposal body must survive the entry replacement, got: {updated}"
+    );
+    assert_eq!(
+        updated
+            .matches("### Proposal A - Preserve proposals on update [active]")
+            .count(),
+        1,
+        "the proposal must be preserved once, not duplicated, got: {updated}"
+    );
+
+    // The proposal has to stay *inside* the entry it belongs to, otherwise
+    // `discussion_resume` attributes it to the wrong discussion.
+    let entry = updated
+        .split("## 2026-09-16 — Proposal survival across updates")
+        .nth(1)
+        .expect("updated entry");
+    assert!(
+        !entry.contains("\n## "),
+        "the proposal must stay inside its own entry, got: {entry}"
+    );
+}
+
 /// Issue #3465: `discussion.update` records the owning session so the Stop
 /// gate can scope itself to the session that opened the entry. Without a
 /// session id the field is omitted and the entry stays unattributed.

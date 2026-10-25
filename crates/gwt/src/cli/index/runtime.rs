@@ -70,6 +70,8 @@ pub(crate) fn run_runner_status(
         .arg(context.repo_hash.as_str())
         .arg("--worktree-hash")
         .arg(&context.worktree_hash)
+        .arg("--file-index-protocol")
+        .arg("v2")
         .current_dir(&context.project_root)
         .output()
         .map_err(io_error)
@@ -92,12 +94,6 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
             needs_worktree_hash: false,
         },
         RebuildAction {
-            label: "specs",
-            action: "index-specs",
-            scope: None,
-            needs_worktree_hash: false,
-        },
-        RebuildAction {
             label: "memory",
             action: "index-memory",
             scope: None,
@@ -112,6 +108,18 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
         RebuildAction {
             label: "board",
             action: "index-board",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
+            label: "works",
+            action: "index-works",
+            scope: None,
+            needs_worktree_hash: false,
+        },
+        RebuildAction {
+            label: "reports",
+            action: "index-reports",
             scope: None,
             needs_worktree_hash: false,
         },
@@ -131,13 +139,15 @@ pub(crate) fn rebuild_actions(scope: IndexScope) -> Vec<RebuildAction> {
     match scope {
         IndexScope::All => all,
         IndexScope::Issues => all.into_iter().filter(|a| a.label == "issues").collect(),
-        IndexScope::Specs => all.into_iter().filter(|a| a.label == "specs").collect(),
+        IndexScope::Specs => all.into_iter().filter(|a| a.label == "issues").collect(),
         IndexScope::Memory => all.into_iter().filter(|a| a.label == "memory").collect(),
         IndexScope::Discussions => all
             .into_iter()
             .filter(|a| a.label == "discussions")
             .collect(),
         IndexScope::Board => all.into_iter().filter(|a| a.label == "board").collect(),
+        IndexScope::Works => all.into_iter().filter(|a| a.label == "works").collect(),
+        IndexScope::Reports => all.into_iter().filter(|a| a.label == "reports").collect(),
         IndexScope::Files => all.into_iter().filter(|a| a.label == "files").collect(),
         IndexScope::FilesDocs => all
             .into_iter()
@@ -163,6 +173,8 @@ pub(crate) fn run_runner_rebuild_with_repair(
     #[cfg(test)]
     LEGACY_REBUILD_RUNNER_CALLS.fetch_add(1, Ordering::Relaxed);
     let args = rebuild_runner_args(context, action, qos);
+    #[cfg(test)]
+    let args = rebuild_runner_fixture_args().unwrap_or(args);
     let mut command = gwt_core::process::hidden_command(&context.python);
     command.args(args).current_dir(&context.project_root);
     if repair && action.label == "issues" {
@@ -175,33 +187,37 @@ pub(crate) fn run_runner_rebuild_with_repair(
     }
 }
 
+// Fixture selection belongs to process execution, never canonical argv generation.
+#[cfg(test)]
+pub(crate) fn rebuild_runner_fixture_args() -> Option<Vec<OsString>> {
+    if std::env::var_os("GWT_INDEX_TEST_REBUILD_FAILURE").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        return Some(vec![
+            OsString::from("--ignored"),
+            OsString::from("--exact"),
+            OsString::from("index_worker::tests::rebuild_runner_failure_fixture"),
+            OsString::from("--nocapture"),
+        ]);
+    }
+    if std::env::var_os("GWT_INDEX_TEST_REBUILD_HANG").as_deref() == Some(std::ffi::OsStr::new("1"))
+    {
+        return Some(vec![
+            OsString::from("--ignored"),
+            OsString::from("--exact"),
+            OsString::from("index_worker::tests::rebuild_runner_hang_fixture"),
+            OsString::from("--nocapture"),
+        ]);
+    }
+
+    None
+}
+
 pub(crate) fn rebuild_runner_args(
     context: &IndexContext,
     action: RebuildAction,
     qos: &str,
 ) -> Vec<OsString> {
-    #[cfg(test)]
-    if std::env::var_os("GWT_INDEX_TEST_REBUILD_FAILURE").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
-    {
-        return vec![
-            OsString::from("--ignored"),
-            OsString::from("--exact"),
-            OsString::from("index_worker::tests::rebuild_runner_failure_fixture"),
-            OsString::from("--nocapture"),
-        ];
-    }
-    #[cfg(test)]
-    if std::env::var_os("GWT_INDEX_TEST_REBUILD_HANG").as_deref() == Some(std::ffi::OsStr::new("1"))
-    {
-        return vec![
-            OsString::from("--ignored"),
-            OsString::from("--exact"),
-            OsString::from("index_worker::tests::rebuild_runner_hang_fixture"),
-            OsString::from("--nocapture"),
-        ];
-    }
-
     let mut args = vec![
         context.runner.clone().into_os_string(),
         OsString::from("--action"),
@@ -216,6 +232,8 @@ pub(crate) fn rebuild_runner_args(
                 &gwt_core::index::paths::gwt_index_root(),
                 context.repo_hash.as_str(),
             )
+        } else if qos == "background" && !action.needs_worktree_hash {
+            "incremental"
         } else {
             "full"
         }),
@@ -295,6 +313,8 @@ pub fn render_index_status(
             "memory",
             "discussions",
             "board",
+            "works",
+            "reports",
             "files",
             "files-docs",
         ] {
@@ -319,6 +339,24 @@ pub fn render_index_status(
                     "{scope}: {} reason={reason} documents={count} repair_required={repair}\n",
                     if healthy { "ready" } else { "unhealthy" }
                 ));
+                if let Some(progress) = scope_status
+                    .get("build_progress")
+                    .and_then(Value::as_object)
+                {
+                    out.push_str(&format!(
+                        "{scope}: build phase={} done={} total={} resumable={}\n",
+                        progress
+                            .get("phase")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown"),
+                        progress.get("done").and_then(Value::as_u64).unwrap_or(0),
+                        progress.get("total").and_then(Value::as_u64).unwrap_or(0),
+                        progress
+                            .get("resumable")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    ));
+                }
                 if scope == "issues" {
                     let mode = scope_status
                         .get("mode")
@@ -370,7 +408,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_runner_selects_the_v2_file_index_protocol() {
+        let source = include_str!("runtime.rs");
+        let status = source
+            .split("pub(crate) fn run_runner_status(")
+            .nth(1)
+            .unwrap()
+            .split("#[derive(Debug, Clone, Copy)]")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect::<String>();
+
+        assert!(
+            status.contains(".arg(\"--file-index-protocol\").arg(\"v2\")"),
+            "status must inspect the v2 file index instead of absent legacy collections"
+        );
+    }
+
+    #[test]
     fn issues_rebuild_selects_incremental_only_with_a_healthy_manifest() {
+        assert_eq!(rebuild_actions(IndexScope::Specs)[0].action, "index-issues");
+        assert_eq!(
+            crate::index_worker::rebuild_action_for_scope(
+                crate::index_worker::IndexRebuildScope::Specs
+            )
+            .label,
+            "issues"
+        );
+        assert!(!rebuild_actions(IndexScope::All)
+            .iter()
+            .any(|action| action.label == "specs"));
         use gwt_core::test_support::ScopedEnvVar;
         let _lock = crate::env_test_lock()
             .lock()
@@ -409,9 +477,6 @@ mod tests {
 
     #[test]
     fn rebuild_runner_args_are_shared_for_worktree_scoped_actions() {
-        let _lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let context = IndexContext {
             project_root: PathBuf::from("project-root"),
             repo_hash: gwt_core::repo_hash::compute_repo_hash(

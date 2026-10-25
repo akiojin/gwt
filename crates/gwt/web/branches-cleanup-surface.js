@@ -1,19 +1,7 @@
-// SPEC-3064 Phase 3 (E6b) — Branches window & branch cleanup surface
-// extracted from app.js. Owns the per-window branch list state map, the
-// branch rows / list rendering, the branch cleanup modal flow (selection,
-// confirm/running/result stages, progress), the Workspace Overview
-// cleanup entry (openWorkspaceCleanup + the synthetic
-// __workspace_cleanup__ window id), the Branches window mount, and the
-// branch_cleanup_* / branch_error receive() bodies. Pure movement from
-// app.js: behavior, DOM output, and WS protocol are unchanged; the moved
-// code keeps its original app.js indentation. Textual changes are limited
-// to: in-module self-references through
-// `*` became direct local calls,
-// `workspaceOverviewSurface.renderWindows()` became the injected
-// renderWorkspaceWindows dep (that surface is constructed after this
-// factory), `activeWorkProjection` reads go through the injected
-// getActiveWorkProjection accessor, and the mount's focus_window send goes
-// through sendWindowFocus.
+// Branches keeps list controls local; cleanup lifecycle data and its active
+// owner live in one immutable shared model. The modal and owner views subscribe
+// independently. WebSocket operation IDs, reconnect sync and cleanup actions
+// retain their existing contracts.
 //
 // deps:
 // - send(message): forward a frontend event over the WebSocket bridge.
@@ -23,10 +11,11 @@
 // - branchCleanupModal / branchCleanupDialog: modal chrome elements owned
 //   by app.js (its Esc handler and backdrop click also reference them).
 // - launchPending: shared Resume/Launch pending controller instance.
-// - visibleBounds(): canvas bounds payload helper.
+
 // - getActiveWorkProjection(): read accessor for the active Work
 //   projection (app.js owns the let).
 // - renderWorkspaceWindows(): late-bound Workspace Overview re-render.
+import { createUiStateStore } from "/ui-state-store.js";
 import { renderBranchCleanupModal as renderBranchCleanupModalView } from "/branch-cleanup-modal.js";
 import {
   markBranchDetailInterrupted,
@@ -42,13 +31,54 @@ export function createBranchesCleanupSurface({
   branchCleanupModal,
   branchCleanupDialog,
   launchPending,
-  visibleBounds,
   getActiveWorkProjection,
   renderWorkspaceWindows,
 }) {
       const branchListStateMap = new Map();
-      let branchCleanupWindowId = null;
+      const cleanupModel = createUiStateStore({ owner: null, byWindowId: {} });
+      const branchErrorModel = createUiStateStore(null);
+
+      function readBranchCleanupState(windowId) {
+        return cleanupModel.read().byWindowId[windowId]?.modal || null;
+      }
+
+      function updateCleanupState(windowId, changes) {
+        cleanupModel.update(current => ({
+          owner: windowId,
+          byWindowId: {
+            ...current.byWindowId,
+            [windowId]: {
+              windowId,
+              modal: { ...idleBranchCleanupModalState(), ...current.byWindowId[windowId]?.modal, ...changes },
+            },
+          },
+        }));
+      }
       const WORKSPACE_CLEANUP_WINDOW_ID = "__workspace_cleanup__";
+      // Issue #4433: every cleanup run carries an id the backend echoes on
+      // progress / result, so a client that reconnects mid-cleanup can
+      // re-subscribe to the run it started and drop a superseded run's events.
+      let branchCleanupOperationSequence = 0;
+
+      function newBranchCleanupOperationId(windowId) {
+        branchCleanupOperationSequence += 1;
+        const safeWindowId = String(windowId || "cleanup").replace(
+          /[^a-zA-Z0-9_-]/g,
+          "-",
+        );
+        return `${safeWindowId}-${Date.now()}-${branchCleanupOperationSequence}`;
+      }
+
+      function idleBranchCleanupModalState() {
+        return {
+          open: false,
+          stage: "confirm",
+          progress: null,
+          results: [],
+          operationId: null,
+          connectionInterrupted: false,
+        };
+      }
 
       function workspaceCleanupEntry(candidate) {
         return {
@@ -87,18 +117,9 @@ export function createBranchesCleanupSurface({
         state.entries = candidates.map((candidate) => workspaceCleanupEntry(candidate));
         state.cleanupSelected = new Set(candidates.map((candidate) => candidate.branch));
         state.notice = "";
-        state.cleanupModal = {
-          open: true,
-          stage: "confirm",
-          // Workspace cleanup is local-only by default even when
-          // cleanup_candidate.default_delete_remote is present on the wire.
-          deleteRemote: false,
-          forceFilesystemDelete: false,
-          progress: null,
-          results: [],
-        };
-        branchCleanupWindowId = cleanupWindowId;
-        renderBranchCleanupModal();
+        // Workspace cleanup is local-only even when the wire has default_delete_remote.
+        state.cleanupOptions = { deleteRemote: false, forceFilesystemDelete: false };
+        updateCleanupState(cleanupWindowId, { ...idleBranchCleanupModalState(), open: true });
       }
 
       function ensureBranchListState(windowId) {
@@ -118,14 +139,7 @@ export function createBranchesCleanupSurface({
             lastLoadId: 0,
             detailCheckStale: false,
             needsResync: false,
-            cleanupModal: {
-              open: false,
-              stage: "confirm",
-              deleteRemote: false,
-              forceFilesystemDelete: false,
-              progress: null,
-              results: [],
-            },
+            cleanupOptions: { deleteRemote: false, forceFilesystemDelete: false },
           });
         }
         return branchListStateMap.get(windowId);
@@ -142,6 +156,20 @@ export function createBranchesCleanupSurface({
           kind: "load_branches",
           id: windowId,
         });
+      }
+
+      function resyncBranches(windowIds) {
+        const ids = [...windowIds];
+        for (const windowId of ids) {
+          const state = branchListStateMap.get(windowId);
+          if (!state) continue;
+          state.loading = false;
+          // Cleanup owners can be hosted in an Issue window without a list.
+          if (windowMap.get(windowId)?.querySelector(".branch-list-root")) {
+            requestBranches(windowId);
+          }
+        }
+        syncRunningBranchCleanups(ids);
       }
 
       function createBranchRow(windowId, branchName) {
@@ -261,7 +289,6 @@ export function createBranchesCleanupSurface({
             kind: "resume_branch_latest_agent",
             id: windowId,
             branch_name: branchName,
-            bounds: visibleBounds(),
           });
         };
         resumeButton.addEventListener("click", (event) => {
@@ -377,7 +404,7 @@ export function createBranchesCleanupSurface({
         placeholder.textContent = text;
       }
 
-      function renderBranches(windowId) {
+      function renderBranches(windowId, renderCleanup = true) {
         const element = windowMap.get(windowId);
         if (!element) {
           return;
@@ -404,13 +431,13 @@ export function createBranchesCleanupSurface({
 
         if (state.error) {
           setBranchListPlaceholder(list, state.error);
-          renderBranchCleanupModal();
+          if (renderCleanup) renderBranchCleanupModal();
           return;
         }
 
         if (state.loading && state.entries.length === 0) {
           setBranchListPlaceholder(list, "Loading branches");
-          renderBranchCleanupModal();
+          if (renderCleanup) renderBranchCleanupModal();
           return;
         }
 
@@ -420,7 +447,7 @@ export function createBranchesCleanupSurface({
             list,
             state.entries.length === 0 ? "No branches" : "No branches in this filter",
           );
-          renderBranchCleanupModal();
+          if (renderCleanup) renderBranchCleanupModal();
           return;
         }
 
@@ -455,7 +482,7 @@ export function createBranchesCleanupSurface({
           }
         }
 
-        renderBranchCleanupModal();
+        if (renderCleanup) renderBranchCleanupModal();
       }
 
       function filteredBranchEntries(state) {
@@ -518,41 +545,96 @@ export function createBranchesCleanupSurface({
 
       function updateBranchCleanupProgress(windowId, event) {
         const state = ensureBranchListState(windowId);
+        const modal = readBranchCleanupState(windowId) || idleBranchCleanupModalState();
         const branches = Array.from(state.cleanupSelected);
-        if (!state.cleanupModal.progress) {
-          state.cleanupModal.progress = initialBranchCleanupProgress(
-            branches.length > 0 ? branches : [event.branch],
-          );
-        }
-        const progress = state.cleanupModal.progress;
-        progress.current = {
+        const progress = modal.progress || initialBranchCleanupProgress(
+          branches.length > 0 ? branches : [event.branch],
+        );
+        const item = {
           branch: event.branch,
           executionBranch: event.execution_branch || null,
-          index: event.index,
-          total: event.total,
-          phase: event.phase,
+          status: event.phase || "running",
           message: event.message || "",
         };
-        let item = progress.items.find((candidate) => candidate.branch === event.branch);
-        if (!item) {
-          item = { branch: event.branch, status: "pending", message: "" };
-          progress.items.push(item);
-        }
-        item.executionBranch = event.execution_branch || null;
-        item.status = event.phase || "running";
-        item.message = event.message || "";
+        const items = progress.items.some(candidate => candidate.branch === event.branch)
+          ? progress.items.map(candidate => candidate.branch === event.branch ? item : candidate)
+          : [...progress.items, item];
+        updateCleanupState(windowId, {
+          open: true,
+          stage: "running",
+          operationId: event.operation_id || modal.operationId,
+          connectionInterrupted: false,
+          progress: {
+            current: {
+              branch: event.branch,
+              executionBranch: event.execution_branch || null,
+              index: event.index,
+              total: event.total,
+              phase: event.phase,
+              message: event.message || "",
+            },
+            items,
+          },
+        });
       }
 
       function failRunningBranchCleanup(windowId, message) {
-        const state = ensureBranchListState(windowId);
-        if (state.cleanupModal.stage !== "running") {
+        const modal = readBranchCleanupState(windowId);
+        if (modal?.stage !== "running") return false;
+        updateCleanupState(windowId, {
+          open: true,
+          stage: "result",
+          results: branchCleanupFailureResults(ensureBranchListState(windowId), message),
+          connectionInterrupted: false,
+        });
+        return true;
+      }
+
+      // Issue #4433: losing the WebSocket says nothing about the cleanup, which
+      // keeps running on the backend. Mark the status feed as interrupted
+      // instead of inventing a failure the user would act on. Repaints through
+      // the owner dispatcher because a Workspace-hosted cleanup has no
+      // `.branch-list` for `renderBranches` to paint into.
+      function markRunningBranchCleanupConnectionInterrupted(windowId) {
+        if (readBranchCleanupState(windowId)?.stage !== "running") return false;
+        updateCleanupState(windowId, { open: true, connectionInterrupted: true });
+        return true;
+      }
+
+      // Issue #4433 AC-2: after reconnecting, re-subscribe to every cleanup
+      // this client still shows as running. The backend replies with the
+      // operation's latest progress or its final result.
+      function syncRunningBranchCleanups(windowIds = Object.keys(cleanupModel.read().byWindowId)) {
+        for (const windowId of windowIds) {
+          const modal = readBranchCleanupState(windowId);
+          if (modal?.stage !== "running" || !modal.operationId) continue;
+          send({ kind: "sync_branch_cleanup", id: windowId, operation_id: modal.operationId });
+        }
+      }
+
+      // Issue #4433: progress is broadcast now, so it can land on a client that
+      // never started the run — a reloaded page, or a second window. Adopt it
+      // into the running view, except when it would rewind a cleanup that has
+      // already reported its result or interrupt a confirm dialog the user is
+      // still filling in.
+      function branchCleanupProgressIsAdoptable(modal, event) {
+        if (modal.stage === "running") {
+          return true;
+        }
+        if (modal.stage === "result") {
           return false;
         }
-        state.cleanupModal.open = true;
-        state.cleanupModal.stage = "result";
-        state.cleanupModal.results = branchCleanupFailureResults(state, message);
-        branchCleanupWindowId = windowId;
-        return true;
+        return !modal.open && Boolean(event.operation_id);
+      }
+
+      // Issue #4433: a tagged event from any run other than the one this
+      // window is showing belongs to a superseded cleanup and is dropped.
+      function branchCleanupEventIsStale(modal, event) {
+        return Boolean(
+          event.operation_id &&
+            modal.operationId &&
+            modal.operationId !== event.operation_id,
+        );
       }
 
       function cleanupToggleClass(entry, state) {
@@ -768,36 +850,24 @@ export function createBranchesCleanupSurface({
           return;
         }
         state.notice = "";
-        state.cleanupModal.open = true;
-        state.cleanupModal.stage = "confirm";
-        state.cleanupModal.deleteRemote = false;
-        state.cleanupModal.forceFilesystemDelete = false;
-        state.cleanupModal.progress = null;
-        state.cleanupModal.results = [];
-        branchCleanupWindowId = windowId;
-        renderBranches(windowId);
+        state.cleanupOptions = { deleteRemote: false, forceFilesystemDelete: false };
+        updateCleanupState(windowId, { ...idleBranchCleanupModalState(), open: true });
       }
 
-      function closeBranchCleanupModal(windowId = branchCleanupWindowId) {
-        if (!windowId) {
-          branchCleanupWindowId = null;
-          renderBranchCleanupModal();
-          return;
+      function closeBranchCleanupModal(windowId = cleanupModel.read().owner) {
+        const modal = readBranchCleanupState(windowId);
+        if (modal?.stage === "running" && !modal.connectionInterrupted) return;
+        const operationId = modal?.operationId;
+        cleanupModel.update(current => ({
+          owner: current.owner === windowId ? null : current.owner,
+          byWindowId: {
+            ...current.byWindowId,
+            ...(windowId ? { [windowId]: { windowId, modal: idleBranchCleanupModalState() } } : {}),
+          },
+        }));
+        if (operationId) {
+          send({ kind: "clear_branch_cleanup_status", id: windowId, operation_id: operationId });
         }
-        const state = ensureBranchListState(windowId);
-        if (state.cleanupModal.stage === "running") {
-          return;
-        }
-        state.cleanupModal.open = false;
-        state.cleanupModal.stage = "confirm";
-        state.cleanupModal.deleteRemote = false;
-        state.cleanupModal.forceFilesystemDelete = false;
-        state.cleanupModal.progress = null;
-        state.cleanupModal.results = [];
-        if (branchCleanupWindowId === windowId) {
-          branchCleanupWindowId = null;
-        }
-        renderBranchCleanupModal();
       }
 
       function runBranchCleanup(windowId) {
@@ -809,26 +879,24 @@ export function createBranchesCleanupSurface({
           return;
         }
         state.notice = "";
-        state.cleanupModal.stage = "running";
-        state.cleanupModal.progress = initialBranchCleanupProgress(branches);
-        state.cleanupModal.results = [];
-        renderBranchCleanupModal();
-        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
-          send({
-            kind: "run_workspace_cleanup",
-            branch: branches[0],
-            delete_remote: state.cleanupModal.deleteRemote,
-            force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
-          });
-          return;
-        }
-        send({
-          kind: "run_branch_cleanup",
-          id: windowId,
-          branches,
-          delete_remote: state.cleanupModal.deleteRemote,
-          force_filesystem_delete: state.cleanupModal.forceFilesystemDelete,
+        const operationId = newBranchCleanupOperationId(windowId);
+        updateCleanupState(windowId, {
+          stage: "running",
+          progress: initialBranchCleanupProgress(branches),
+          results: [],
+          operationId,
+          connectionInterrupted: false,
         });
+        const options = {
+          delete_remote: state.cleanupOptions.deleteRemote,
+          force_filesystem_delete: state.cleanupOptions.forceFilesystemDelete,
+          operation_id: operationId,
+        };
+        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
+          send({ kind: "run_workspace_cleanup", branch: branches[0], ...options });
+        } else {
+          send({ kind: "run_branch_cleanup", id: windowId, branches, ...options });
+        }
       }
 
       function branchCleanupResultSummary(results) {
@@ -840,8 +908,19 @@ export function createBranchesCleanupSurface({
       }
 
       function renderBranchCleanupModal() {
-        const windowId = branchCleanupWindowId;
-        const state = windowId ? ensureBranchListState(windowId) : null;
+        const windowId = cleanupModel.read().owner;
+        const local = windowId ? ensureBranchListState(windowId) : null;
+        const state = local ? {
+          ...local,
+          cleanupModal: {
+            ...readBranchCleanupState(windowId),
+            // These controls remain local and do not trigger lifecycle renders.
+            get deleteRemote() { return local.cleanupOptions.deleteRemote; },
+            set deleteRemote(value) { local.cleanupOptions.deleteRemote = value; },
+            get forceFilesystemDelete() { return local.cleanupOptions.forceFilesystemDelete; },
+            set forceFilesystemDelete(value) { local.cleanupOptions.forceFilesystemDelete = value; },
+          },
+        } : null;
         const selectedEntries = windowId
           ? selectedBranchCleanupEntries(windowId)
           : [];
@@ -871,18 +950,18 @@ export function createBranchesCleanupSurface({
       }
 
       function renderBranchCleanupOwner(windowId) {
-        if (windowId === WORKSPACE_CLEANUP_WINDOW_ID) {
-          renderBranchCleanupModal();
-          renderWorkspaceWindows();
-          return;
-        }
         const element = windowMap.get(windowId);
         if (element?.querySelector(".branch-list")) {
-          renderBranches(windowId);
+          renderBranches(windowId, false);
           return;
         }
-        renderBranchCleanupModal();
-        renderWorkspaceWindows();
+        const modal = readBranchCleanupState(windowId);
+        // Opening/starting locally must retain the trigger node for Cancel's
+        // focus restoration. Backend progress, results and interruptions keep
+        // the existing Workspace refresh behavior.
+        if (modal?.stage === "result" || modal?.progress?.current || modal?.connectionInterrupted) {
+          renderWorkspaceWindows();
+        }
       }
       // SPEC-3064 Phase 3 (E6b): Branches window mount moved verbatim from
       // app.js mountWindowBody (surface === "branches" branch).
@@ -955,62 +1034,43 @@ export function createBranchesCleanupSurface({
           return;
       }
 
-      // SPEC-3064 Phase 3 (E6b): window-cleanup hook — branchCleanupWindowId
-      // is a module-level let now, so app.js delegates the reset.
+      // Window removal releases the canonical cleanup snapshot and active owner.
       function clearBranchCleanupForWindow(windowId) {
-        if (branchCleanupWindowId === windowId) {
-          branchCleanupWindowId = null;
-          renderBranchCleanupModal();
-        }
+        cleanupModel.update(current => {
+          if (!current.byWindowId[windowId]) return current;
+          const byWindowId = { ...current.byWindowId };
+          delete byWindowId[windowId];
+          return { owner: current.owner === windowId ? null : current.owner, byWindowId };
+        });
       }
 
-      // SPEC-3064 Phase 3 (E6b): receive() bodies for branch_cleanup_* /
-      // branch_error moved verbatim from app.js; the case arms in app.js
-      // delegate here. (branch_entries stays in app.js because it feeds the
-      // operator telemetry helper that lives there.)
+      // Cleanup lifecycle and branch errors commit shared data; branch list
+      // inventory/telemetry remain on their existing migration boundary.
       function applyBranchCleanupReceiveEvent(event) {
         switch (event.kind) {
           case "branch_cleanup_result": {
-            const state = ensureBranchListState(
-              event.id,
-            );
+            const state = ensureBranchListState(event.id);
+            const modal = readBranchCleanupState(event.id) || idleBranchCleanupModalState();
+            if (branchCleanupEventIsStale(modal, event)) break;
             state.cleanupSelected.clear();
-            state.cleanupModal.open = true;
-            state.cleanupModal.stage = "result";
-            state.cleanupModal.results = event.results || [];
-            branchCleanupWindowId = event.id;
-            renderBranchCleanupOwner(event.id);
+            updateCleanupState(event.id, {
+              open: true,
+              stage: "result",
+              results: event.results || [],
+              connectionInterrupted: false,
+              operationId: event.operation_id || modal.operationId,
+            });
             break;
           }
           case "branch_cleanup_progress": {
-            updateBranchCleanupProgress(
-              event.id,
-              event,
-            );
-            branchCleanupWindowId = event.id;
-            renderBranchCleanupOwner(event.id);
+            const modal = readBranchCleanupState(event.id) || idleBranchCleanupModalState();
+            if (branchCleanupEventIsStale(modal, event) ||
+                !branchCleanupProgressIsAdoptable(modal, event)) break;
+            updateBranchCleanupProgress(event.id, event);
             break;
           }
           case "branch_error": {
-            // SPEC-2359 W-17 (FR-398): a failed branch resume must re-enable
-            // its pending Resume control immediately (not via timeout).
-            launchPending.settleWhere("branch:");
-            const state = ensureBranchListState(
-              event.id,
-            );
-            state.loading = false;
-            if (state.cleanupModal.stage === "running") {
-              failRunningBranchCleanup(event.id, event.message);
-              renderBranchCleanupOwner(event.id);
-              break;
-            }
-            if (state.receivedFreshEntries) {
-              state.notice = event.message;
-              state.error = "";
-            } else {
-              state.error = event.message;
-            }
-            renderBranches(event.id);
+            branchErrorModel.update(() => ({ windowId: event.id, message: event.message }));
             break;
           }
           default:
@@ -1018,10 +1078,40 @@ export function createBranchesCleanupSurface({
         }
       }
 
+      // Synchronous notification preserves Resume settlement and cleanup priority.
+      // Only the latest receipt is retained; a repeated message still notifies.
+      branchErrorModel.subscribe(state => state, error => {
+        if (!error) return;
+        launchPending.settleWhere("branch:");
+        const state = ensureBranchListState(error.windowId);
+        state.loading = false;
+        if (failRunningBranchCleanup(error.windowId, error.message)) return;
+        if (state.receivedFreshEntries) {
+          state.notice = error.message;
+          state.error = "";
+        } else {
+          state.error = error.message;
+        }
+        renderBranches(error.windowId);
+      });
+
+      // Stable active-window selectors isolate unrelated changes. Separate
+      // subscribers keep one view's failure from preventing the other update.
+      cleanupModel.subscribe(
+        state => state.byWindowId[state.owner] || null,
+        () => renderBranchCleanupModal(),
+      );
+      cleanupModel.subscribe(
+        state => state.byWindowId[state.owner] || null,
+        owner => { if (owner) renderBranchCleanupOwner(owner.windowId); },
+      );
+
       return {
         branchListStateMap,
+        readBranchCleanupState,
         ensureBranchListState,
         requestBranches,
+        resyncBranches,
         renderBranches,
         syncBranchSelectionState,
         openBranchCleanupModal,
@@ -1029,6 +1119,8 @@ export function createBranchesCleanupSurface({
         renderBranchCleanupModal,
         updateBranchCleanupProgress,
         failRunningBranchCleanup,
+        markRunningBranchCleanupConnectionInterrupted,
+        syncRunningBranchCleanups,
         failLoadingBranchesOnConnectionLoss,
         openWorkspaceCleanup,
         mountBranchesWindow,

@@ -112,6 +112,42 @@ test("update_apply_error reuses the same CTA and allows retry", () => {
   ]);
 });
 
+test("issue #4933: a newer release removes the stale ready modal before offering its download", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateProgress({ downloaded: 100, total: 100 });
+  controller.handleUpdateReady({ version: "9.26.0" });
+
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "available");
+  assert.match(cta.textContent, /v9\.27\.0/);
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "downloading");
+  assert.equal(modal.dataset.version, "9.27.0");
+  assert.equal(modal.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }, { kind: "apply_update_start" }]);
+});
+
+test("issue #4933: a newer release removes the failed update modal", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateApplyError({ reason: "Install failed" });
+
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+
+  assert.equal(Boolean(fixture.document.getElementById("update-modal")), false);
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "available");
+  assert.match(fixture.document.getElementById("update-cta").textContent, /v9\.27\.0/);
+});
+
 test("update CTA dismiss hides available state without applying", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
@@ -187,15 +223,17 @@ test("update_state removes stale split toast and button DOM before showing CTA",
 
 test("app.js delegates update handling to the unified update CTA controller", () => {
   assert.match(appSource, /createUpdateCtaController/);
-  assert.match(appSource, /updateCtaController\.handleUpdateState\(event\)/);
+  assert.match(appSource, /handleUpdateState: applyUpdateState/);
+  assert.match(appSource, /applyUpdateState\(event\)/);
   // Phase 19 replaces showError() with handleUpdateApplyError().
-  assert.match(appSource, /updateCtaController\.handleUpdateApplyError\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateProgress\(/);
-  assert.match(appSource, /updateCtaController\.handleUpdateReady\(/);
-  assert.match(
-    appSource,
-    /updateCtaController\.handleUpdateApplyPendingPersisted\(/,
-  );
+  assert.match(appSource, /handleUpdateApplyError: applyUpdateApplyError/);
+  assert.match(appSource, /applyUpdateApplyError\(/);
+  assert.match(appSource, /handleUpdateProgress: applyUpdateProgress/);
+  assert.match(appSource, /applyUpdateProgress\(/);
+  assert.match(appSource, /handleUpdateReady: applyUpdateReady/);
+  assert.match(appSource, /applyUpdateReady\(/);
+  assert.match(appSource, /handleUpdateApplyPendingPersisted: applyUpdateApplyPendingPersisted/);
+  assert.match(appSource, /applyUpdateApplyPendingPersisted\(/);
 });
 
 test("legacy split update toast and button surfaces are removed", () => {
@@ -249,7 +287,7 @@ test("update CTA shell mounts in the shared notice host", () => {
   );
 });
 
-function createFixture({ confirmResult = true, now } = {}) {
+function createFixture({ confirmResult = true, now, scheduleFrame = callback => { callback(); return () => {}; } } = {}) {
   const { document } = parseHTML(
     '<!doctype html><html><body><div id="operator-notice-stack"></div></body></html>',
   );
@@ -263,6 +301,7 @@ function createFixture({ confirmResult = true, now } = {}) {
     versionUpdates,
     options: {
       document,
+      scheduleFrame,
       ...(now ? { now } : {}),
       send(message) {
         sent.push(message);
@@ -314,32 +353,79 @@ test("phase19: click no longer uses window.confirm and instead opens #update-mod
   );
 });
 
-test("phase19: update_progress events update modal progress bar and byte counter", () => {
+test("update progress retains an immutable snapshot before the modal mounts", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.26.0");
+  const payload = { downloaded: 1024 * 1024, total: 4 * 1024 * 1024 };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = payload.total;
+
   fixture.document.getElementById("update-cta").click();
+  const progress = fixture.document.querySelector("[data-update-modal-progress]");
+  const counter = fixture.document.querySelector("[data-update-modal-byte-counter]");
+  assert.equal(progress.getAttribute("aria-valuenow"), "25");
+  assert.equal(counter.textContent, "1.0 MB / 4.0 MB");
 
-  controller.handleUpdateProgress({
-    downloaded: 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
-  controller.handleUpdateProgress({
-    downloaded: 3 * 1024 * 1024,
-    total: 4 * 1024 * 1024,
-    asset: "gwt-macos-arm64.tar.gz",
-    version: "9.26.0",
-  });
+  controller.handleUpdateProgress({ downloaded: 3 * 1024 * 1024, total: payload.total });
+  assert.equal(progress.getAttribute("aria-valuenow"), "75");
+  assert.equal(counter.textContent, "3.0 MB / 4.0 MB");
+});
 
+test("update progress batches the latest snapshot without delaying mount, cancel, or lifecycle transitions", () => {
+  const frames = [];
+  const fixture = createFixture({ scheduleFrame: callback => { frames.push(callback); return () => {}; } });
+  const flush = () => { for (const callback of frames.splice(0)) callback(); };
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.26.0");
+  const mb = 1024 * 1024;
+  const payload = { downloaded: mb, total: 4 * mb };
+  controller.handleUpdateProgress(payload);
+  payload.downloaded = 0;
+  fixture.document.getElementById("update-cta").click();
   const modal = fixture.document.getElementById("update-modal");
   const progress = modal.querySelector("[data-update-modal-progress]");
   const counter = modal.querySelector("[data-update-modal-byte-counter]");
-  assert.ok(progress, "expected progress bar element");
-  assert.ok(counter, "expected byte counter element");
-  assert.equal(progress.getAttribute("aria-valuenow"), "75");
-  assert.match(counter.textContent, /3.0\s*MB\s*\/\s*4.0\s*MB/);
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "mount reads the immutable model synchronously");
+  flush();
+  let renders = 0;
+  const setAttribute = progress.setAttribute.bind(progress);
+  progress.setAttribute = (name, value) => {
+    if (name === "aria-valuenow") renders++;
+    setAttribute(name, value);
+  };
+  for (let index = 1; index <= 50; index++) {
+    controller.handleUpdateProgress({ downloaded: index * mb, total: 100 * mb });
+  }
+  assert.equal(progress.getAttribute("aria-valuenow"), "25", "existing DOM waits for the frame");
+  assert.equal(frames.length, 1);
+  assert.equal(renders, 0);
+  flush();
+  assert.equal(renders, 1);
+  assert.equal(progress.getAttribute("aria-valuenow"), "50");
+  assert.equal(counter.textContent, "50.0 MB / 100.0 MB");
+
+  controller.handleUpdateProgress({ downloaded: 75 * mb, total: 100 * mb });
+  controller.handleUpdateReady({ version: "9.26.0" });
+  flush();
+  assert.equal(modal.dataset.state, "ready", "pending progress cannot replace the ready modal");
+  controller.beginDownloadingFor("9.26.0");
+  controller.handleUpdateProgress({ downloaded: 80 * mb, total: 100 * mb });
+  fixture.document.querySelector("[data-update-modal-cancel]").click();
+  assert.deepEqual(fixture.sent.at(-1), { kind: "cancel_update_download" }, "cancel sends synchronously");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal"), null, "pending progress cannot reopen the modal");
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "0");
+
+  controller.handleUpdateProgress({ downloaded: 90 * mb, total: 100 * mb });
+  controller.handleUpdateApplyError({ reason: "Fixture failure" });
+  flush();
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "failed");
+  fixture.document.querySelector("[data-update-modal-close]").click();
+  fixture.document.getElementById("update-cta").click();
+  assert.equal(fixture.document.querySelector("[data-update-modal-progress]").getAttribute("aria-valuenow"), "90");
 });
 
 test("phase19: cancel during download sends cancel_update_download and returns CTA to available", () => {
@@ -484,14 +570,14 @@ test("phase20: ready modal copy names gwt and keeps release notes out of the act
   );
 });
 
-test("phase20: update modal css defines compact panel and link-style release notes action", () => {
+test("phase20: update modal composes shared primitives with compact Operator styling", () => {
   const modalRule = cssRule(".update-modal");
   const panelRule = cssRule(".update-modal__panel");
   const actionRule = cssRule(".update-modal__actions");
   const buttonRule = cssRule(".update-modal__btn");
   const linkRule = cssRule(".update-modal__link");
 
-  assert.match(modalRule, /background:\s*var\(--color-scrim/);
+  assert.doesNotMatch(modalRule, /position:\s*fixed|inset:|display:\s*flex/);
   assert.match(panelRule, /width:\s*min\(420px,\s*calc\(100vw - 32px\)\)/);
   assert.match(panelRule, /padding:\s*var\(--space-6\)/);
   assert.match(actionRule, /align-items:\s*center/);
@@ -515,7 +601,7 @@ test("SPEC-2780: ready modal omits release notes link when openReleaseNotes is a
   assert.equal(link, null);
 });
 
-test("phase19: [Restart now] sends apply_update_restart_now without confirmation", () => {
+test("issue #5646: Restart now previews typed impact and requires an explicit confirmation", () => {
   const fixture = createFixture();
   const controller = createUpdateCtaController(fixture.options);
   controller.showAvailable("9.26.0");
@@ -526,15 +612,123 @@ test("phase19: [Restart now] sends apply_update_restart_now without confirmation
     .querySelector("[data-update-modal-restart-now]")
     .click();
 
-  assert.deepEqual(fixture.sent, [
-    { kind: "apply_update_start" },
-    { kind: "apply_update_restart_now" },
-  ]);
+  const request = fixture.sent.at(-1);
+  assert.equal(request.kind, "get_update_restart_impact");
+  assert.equal(typeof request.request_id, "string");
+  const preview = fixture.document.getElementById("update-modal");
+  assert.equal(preview.dataset.state, "restart-preview");
+  assert.equal(preview.querySelector("[data-update-modal-confirm-restart]").disabled, true);
+  const focused = [];
+  const prototype = Object.getPrototypeOf(preview.querySelector("button"));
+  const originalFocus = prototype.focus;
+  prototype.focus = function () { focused.push(this); };
+  try {
+    controller.handleUpdateRestartImpact({
+      request_id: request.request_id,
+      blocking: [
+        { kind: "active_pane", label: "agent-one", state: "running" },
+        { kind: "active_pane", label: "agent-two", state: "starting" },
+        { kind: "pending_acquire_claim", issue_number: 42 },
+        { kind: "held_verification_lease", lease_id: "lease" },
+      ],
+      issue_numbers: [42, 43],
+    });
+  } finally {
+    prototype.focus = originalFocus;
+  }
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "restart-confirm");
+  assert.match(modal.textContent, /Running \/ Starting agents: 2/);
+  assert.match(modal.textContent, /Pending claims: 1/);
+  assert.match(modal.textContent, /Verification leases: 1/);
+  assert.match(modal.textContent, /Affected Issues: #42, #43/);
+  assert.equal(focused.at(-1), modal.querySelector("[data-update-modal-wait-for-idle]"));
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+  assert.ok(modal.classList.contains("modal-backdrop"));
+  const panel = modal.querySelector(".modal-shell");
+  assert.equal(panel.getAttribute("role"), "dialog");
+  assert.equal(panel.getAttribute("aria-modal"), "true");
+  assert.ok(panel.querySelector(".modal-header"));
+  assert.ok(panel.querySelector(".modal-body"));
+  assert.ok(panel.querySelector(".modal-footer"));
+  modal.querySelector("[data-update-modal-confirm-restart]").click();
+  modal.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.filter((event) => event.kind === "apply_update_restart_now").length, 1);
   assert.equal(
     fixture.confirmCalls.length,
     0,
     "Restart now must not gate behind window.confirm",
   );
+});
+
+test("issue #5646: waiting for all agents uses the idle apply route", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  controller.handleUpdateRestartImpact({
+    request_id: fixture.sent.at(-1).request_id,
+    blocking: [{ kind: "pending_acquire_claim", issue_number: 42 }],
+    issue_numbers: [42],
+  });
+  fixture.document.querySelector("[data-update-modal-wait-for-idle]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_when_idle");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  controller.handleIssueMonitorStatus({
+    update_drain: { reason: "auto", version: "9.26.0", blocking: [], since: "2026-10-16T00:00:00Z" },
+  });
+  controller.handleUpdateApplyError({ stage: "Apply after agents finish", reason: "Could not save every project drain" });
+  assert.equal(fixture.document.getElementById("update-modal")?.dataset.state, "failed");
+  assert.match(fixture.document.getElementById("update-modal").textContent, /Could not save every project drain/);
+});
+
+test("issue #5646: zero impact still confirms and missing, cancelled or obsolete previews never restart", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const firstRequest = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id });
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]").disabled, true);
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.length, 1, "missing impact cannot submit a restart");
+  fixture.document.querySelector("[data-update-modal-cancel-restart]").click();
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, error: "Late failure", blocking: [], issue_numbers: [] });
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const secondRequest = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: firstRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "restart-preview");
+  controller.handleUpdateRestartImpact({ request_id: secondRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal-title").textContent, "Restart gwt?");
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]").disabled, false);
+  controller.handleUpdateState({ state: "available", latest: "9.27.0" });
+  controller.handleUpdateRestartImpact({ request_id: secondRequest.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+});
+
+test("issue #5646: a failed impact request removes restart confirmation and ignores its late response", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showReadyPending("9.26.0");
+  fixture.document.getElementById("update-cta").click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  const request = fixture.sent.at(-1);
+  controller.handleUpdateRestartImpact({ request_id: request.request_id, error: "Unable to read active work", blocking: [], issue_numbers: [] });
+  controller.handleUpdateRestartImpact({ request_id: request.request_id, blocking: [], issue_numbers: [] });
+  assert.equal(fixture.document.getElementById("update-modal").dataset.state, "failed");
+  assert.equal(fixture.document.querySelector("[data-update-modal-confirm-restart]"), null);
+  assert.equal(fixture.sent.some((event) => event.kind === "apply_update_restart_now"), false);
+});
+
+test("issue #5646: app routes restart impact to the controller", () => {
+  assert.match(appSource, /case "update_restart_impact":[\s\S]{0,100}updateRestartImpactModel\.update\(\(\) => event\)/);
+  assert.match(appSource, /updateRestartImpactModel\.subscribe\(impact => impact, impact => \{\s*if \(impact\) updateCtaController\.handleUpdateRestartImpact\(impact\)/);
 });
 
 test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to ready state", () => {
@@ -557,6 +751,14 @@ test("phase19: [Later] closes modal, sends apply_update_later, and morphs CTA to
   assert.equal(cta.dataset.status, "ready");
   assert.match(cta.textContent, /Update v9.26.0 ready\s*[—-]\s*Restart now/);
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
+
+  // Issue #4933 AC-5: periodic polls must not undo Later for this release.
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.26.0" });
+  assert.equal(cta.dataset.status, "ready");
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  controller.handleUpdateState({ state: "available", current: "9.25.0", latest: "9.27.0" });
+  assert.equal(cta.dataset.status, "available");
+  assert.match(cta.textContent, /v9\.27\.0/);
 });
 
 test("phase19: re-clicking CTA in ready state opens modal at ready (no re-download)", () => {
@@ -765,8 +967,8 @@ test("phase19: controller exposes the Phase 19 event handlers required by app.js
   assert.equal(typeof controller.handleIssueMonitorStatus, "function");
   assert.match(
     appSource,
-    /case "issue_monitor_status":[\s\S]{0,400}updateCtaController\.handleIssueMonitorStatus\(event\.status \|\| \{\}\)/,
-    "app.js must hand issue_monitor_status to the update CTA controller",
+    /issueMonitorModel\.subscribe\(model => model\.status, status =>\s*updateCtaController\.handleIssueMonitorStatus\(status\)\)/,
+    "update CTA must subscribe independently to the committed Monitor status",
   );
 });
 
@@ -793,7 +995,8 @@ test("issue #3906: update_drain in issue_monitor_status renders the draining CTA
   assert.equal(cta.dataset.status, "draining");
   assert.equal(cta.className, "update-cta is-draining");
   assert.equal(cta.textContent, "Update v9.91.0 pending — draining 2 agents (12 min)");
-  assert.equal(cta.title, "Update v9.91.0 pending — draining 2 agents (12 min)");
+  // Issue #4376 AC-5: the title carries the blockers and the exits.
+  assert.match(cta.title, /^Update v9\.91\.0 pending — draining 2 agents \(12 min\)\. Waiting for: /);
   assert.equal(cta.disabled, false, "draining is informational; the user may still act");
   assert.ok(fixture.document.querySelector("[data-update-cta-dismiss]"));
 
@@ -911,7 +1114,60 @@ test("issue #3906: clicking the draining CTA offers Apply now anyway through app
   assert.equal(anyway.textContent, "Apply now anyway");
   assert.match(modal.textContent, /draining/);
   anyway.click();
-  assert.deepEqual(fixture.sent, [{ kind: "apply_update_restart_now" }]);
+  assert.equal(fixture.sent.at(-1).kind, "get_update_restart_impact");
+  controller.handleUpdateRestartImpact({ request_id: fixture.sent.at(-1).request_id, blocking: [], issue_numbers: [] });
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_restart_now");
+});
+
+// Issue #4376 AC-5 / AC-6: a manual Update click that is waiting for agents
+// must read, from the CTA alone, that it is waiting, what it is waiting for
+// (the blocking agents and their Issues) and how to stop waiting. The
+// draining modal lists the blockers and offers Stop waiting, which releases
+// the drain through the existing cancel_update_auto_apply control.
+test("issue #4376: the draining CTA names its blockers and the modal offers Stop waiting", () => {
+  const fixture = createFixture({ now: () => Date.parse("2026-09-15T00:12:00Z") });
+  const controller = createUpdateCtaController(fixture.options);
+  controller.showAvailable("9.99.0");
+  fixture.document.getElementById("update-cta").click();
+  controller.handleUpdateReady({ version: "9.99.0", asset_path: "/x" });
+  controller.handleIssueMonitorStatus({
+    update_drain: {
+      version: "9.99.0",
+      since: "2026-09-15T00:00:00Z",
+      reason: "auto",
+      blocking: [
+        { kind: "active_pane", window_id: "w1", label: "work/issue-4376", state: "running" },
+        { kind: "pending_acquire_claim", issue_number: 42 },
+      ],
+    },
+  });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "draining");
+  assert.equal(cta.textContent, "Update v9.99.0 pending — draining 2 agents (12 min)");
+  assert.equal(
+    cta.title,
+    "Update v9.99.0 pending — draining 2 agents (12 min). Waiting for: work/issue-4376 (running), claim for #42. New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.",
+  );
+
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  assert.equal(modal.dataset.variant, "anyway");
+  assert.match(modal.textContent, /Waiting for: work\/issue-4376 \(running\), claim for #42/);
+  assert.equal(modal.querySelector("[data-update-modal-later]"), null, "Later is not offered while draining");
+  const stopWaiting = modal.querySelector("[data-update-modal-stop-waiting]");
+  assert.equal(stopWaiting.textContent, "Stop waiting");
+  assert.equal(modal.querySelector("[data-update-modal-restart-now]").textContent, "Apply now anyway");
+
+  stopWaiting.click();
+  assert.deepEqual(fixture.sent, [{ kind: "apply_update_start" }, { kind: "cancel_update_auto_apply" }]);
+  assert.equal(fixture.document.getElementById("update-modal"), null, "the modal closes");
+  assert.equal(fixture.document.getElementById("update-cta").textContent, "Stopping the wait…");
+
+  controller.handleUpdateAutoApply({ version: "9.99.0", phase: "cancelled" });
+  assert.equal(fixture.document.getElementById("update-cta").dataset.status, "ready");
+  assert.equal(fixture.document.getElementById("update-cta").textContent, "Update v9.99.0 ready — Restart now");
 });
 
 // Issue #3906 AC-7 / #4076 AC-5: the backend announces the cancel grace; the
@@ -957,7 +1213,63 @@ test("issue #4076: update_auto_apply phases drive the CTA and the cancel sends c
   assert.match(cssRule(".update-cta.is-scheduled"), /var\(--color-state-needs-input\)/);
   assert.match(
     appSource,
-    /case "update_auto_apply":[\s\S]{0,200}updateCtaController\.handleUpdateAutoApply\(/,
+    /case "update_auto_apply":[\s\S]{0,200}applyUpdateAutoApply\(/,
     "app.js must hand update_auto_apply to the update CTA controller",
   );
+});
+
+test("issue #5343: elevation_required keeps the staged update manual and explains why", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "scheduled", grace_secs: 60 });
+
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "elevation_required" });
+  controller.handleUpdateState({ state: "available", current: "9.105.0", latest: "9.106.0" });
+  controller.handleIssueMonitorStatus({ enabled: true, state: "idle" });
+
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Update v9\.106\.0 ready/);
+  assert.match(cta.textContent, /Administrator privileges required/);
+  assert.match(cta.textContent, /Restart now/);
+  assert.equal(cta.title, cta.textContent);
+  assert.equal(cta.getAttribute("aria-label"), cta.textContent);
+  assert.equal(cta.disabled, false);
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.deepEqual(fixture.sent, []);
+
+  cta.click();
+  const modal = fixture.document.getElementById("update-modal");
+  assert.equal(modal.dataset.state, "ready");
+  assert.equal(modal.dataset.version, "9.106.0");
+  assert.deepEqual(fixture.sent, []);
+  modal.querySelector("[data-update-modal-later]").click();
+  assert.equal(fixture.document.getElementById("update-modal"), null);
+  assert.equal(cta.dataset.status, "ready");
+  assert.match(cta.textContent, /Administrator privileges required/);
+
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.match(cta.textContent, /Administrator privileges required/);
+  assert.equal(cta.title, cta.textContent);
+  assert.equal(cta.getAttribute("aria-label"), cta.textContent);
+  cta.click();
+  fixture.document.querySelector("[data-update-modal-restart-now]").click();
+  assert.equal(fixture.sent.at(-1).kind, "get_update_restart_impact");
+  controller.handleUpdateRestartImpact({ request_id: fixture.sent.at(-1).request_id, blocking: [], issue_numbers: [] });
+  fixture.document.querySelector("[data-update-modal-confirm-restart]").click();
+  assert.equal(fixture.sent.at(-1).kind, "apply_update_restart_now");
+});
+
+test("issue #5343: a different ready target clears the administrator reason", () => {
+  const fixture = createFixture();
+  const controller = createUpdateCtaController(fixture.options);
+  controller.handleUpdateAutoApply({ version: "9.106.0", phase: "elevation_required" });
+
+  // cancelled assigns pendingVersion before asking showReadyPending to render.
+  controller.handleUpdateAutoApply({ version: "9.107.0", phase: "cancelled" });
+  const cta = fixture.document.getElementById("update-cta");
+  assert.equal(cta.textContent, "Update v9.107.0 ready — Restart now");
+  controller.handleUpdateApplyPendingPersisted({ version: "9.106.0" });
+  assert.equal(cta.textContent, "Update v9.106.0 ready — Restart now");
 });

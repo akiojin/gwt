@@ -1,0 +1,20 @@
+{
+  "id": "retired-identity-fixture",
+  "project_root": "__CHECKOUT_ROOT__",
+  "title": "Work",
+  "status_category": "unknown",
+  "status_text": "No active work",
+  "agents": [
+    {
+      "session_id": "saved-identity",
+      "agent_id": "codex",
+      "display_name": "Codex",
+      "status_category": "unknown",
+      "title_summary": "Saved purpose",
+      "current_focus": "Saved progress",
+      "updated_at": "2026-06-02T00:00:00Z"
+    }
+  ],
+  "board_refs": [],
+  "updated_at": "2026-06-02T00:00:00Z"
+}

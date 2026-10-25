@@ -4,10 +4,174 @@
 //! charged in points that grow with the page size, so one `--limit 999` list
 //! can burn hundreds of points. The REST `core` budget is charged per request
 //! regardless of size (one page of 100 rows = one request), and it is a
-//! separate 5,000/h pool. Every Issue Monitor hot path reads through here so
-//! its cost per scan is a bounded number of REST requests and zero GraphQL.
+//! separate 5,000/h pool. Ordinary lists retain a bounded REST request cost;
+//! the queue label collection opts into complete pagination (#5080 AC-1).
+//! Both paths spend zero GraphQL points.
 
+use std::{
+    collections::{hash_map::DefaultHasher, HashSet},
+    hash::{Hash, Hasher},
+    path::Path,
+};
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Bound unchanged Monitor inventories to one live read per four 30s scans.
+/// Queue-labelled Issue pages and authoritative per-resource reads bypass it.
+const LIST_CACHE_TTL_SECS: i64 = 120;
+
+#[derive(Serialize, Deserialize)]
+struct CachedListResponse {
+    key: String,
+    fetched_at: DateTime<Utc>,
+    stdout: String,
+}
+
+pub(crate) fn cached_list_response_with(
+    cache_dir: &Path,
+    key: &str,
+    now: DateTime<Utc>,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    cached_list_response_at_with(cache_dir, key, now, LIST_CACHE_TTL_SECS, fetch)
+        .map(|(_, stdout)| stdout)
+}
+
+/// Cache a list within the caller's freshness limit and return its acquisition
+/// time, so a failed full refresh cannot renew the age of reused pages.
+pub fn cached_list_response_at_with(
+    cache_dir: &Path,
+    key: &str,
+    now: DateTime<Utc>,
+    ttl_secs: i64,
+    fetch: impl FnOnce() -> Result<String, String>,
+) -> Result<(DateTime<Utc>, String), String> {
+    // A short common lock prevents cleanup from deleting a concurrently
+    // refreshed page. Never hold it across the live fetch.
+    if let Some(_lock) = list_cache_lock(cache_dir) {
+        reclaim_expired_list_pages(cache_dir, now, ttl_secs);
+    }
+    let path = cache_dir.join(list_cache_file_name(key));
+    if let Some(cached) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CachedListResponse>(&bytes).ok())
+    {
+        let age = now.signed_duration_since(cached.fetched_at).num_seconds();
+        if cached.key == key && (0..ttl_secs).contains(&age) && valid_list_response(&cached.stdout)
+        {
+            return Ok((cached.fetched_at, cached.stdout));
+        }
+    }
+    // Expired or unreadable entries never hide a failed live read. Cache only
+    // valid array payloads, with or without the `gh api --include` headers.
+    let stdout = fetch()?;
+    if valid_list_response(&stdout) {
+        let cached = CachedListResponse {
+            key: key.to_string(),
+            fetched_at: now,
+            stdout: stdout.clone(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&cached) {
+            if let Some(_lock) = list_cache_lock(cache_dir) {
+                let _ = gwt_core::atomic_file::write_atomic(&path, &bytes);
+            }
+        }
+    }
+    Ok((now, stdout))
+}
+
+fn list_cache_file_name(key: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("{:016x}.json", hasher.finish())
+}
+
+struct ListCacheLock {
+    file: std::fs::File,
+}
+
+impl Drop for ListCacheLock {
+    fn drop(&mut self) {
+        // A fork/dup can retain the open file description after our File closes.
+        // Release the lock when this critical section ends, before closing it.
+        let _ = self.file.unlock();
+    }
+}
+
+fn list_cache_lock(cache_dir: &Path) -> Option<ListCacheLock> {
+    std::fs::create_dir_all(cache_dir).ok()?;
+    // Do not create diagnostic sidecars that could replace unknown files.
+    let file = std::fs::File::options()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache_dir.join(".cache.lock"))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(ListCacheLock { file })
+}
+
+/// Called only under the same lock as publication. Unrecognized files and
+/// unreadable entries stay untouched; cleanup failures never affect reads.
+fn reclaim_expired_list_pages(cache_dir: &Path, now: DateTime<Utc>, ttl_secs: i64) {
+    // Readers tolerate extra fields for compatibility; reclamation must not
+    // assume that a future format has the same expiry contract.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct KnownPage {
+        key: String,
+        fetched_at: DateTime<Utc>,
+        stdout: String,
+    }
+
+    let Ok(entries) = std::fs::read_dir(cache_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(cached) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<KnownPage>(&bytes).ok())
+        else {
+            continue;
+        };
+        if entry.file_name() == std::ffi::OsStr::new(&list_cache_file_name(&cached.key))
+            && now.signed_duration_since(cached.fetched_at).num_seconds() >= ttl_secs
+            && valid_list_response(&cached.stdout)
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn valid_list_response(stdout: &str) -> bool {
+    let body = match stdout
+        .split_once("\n\r\n")
+        .or_else(|| stdout.split_once("\n\n"))
+    {
+        Some((headers, body)) => {
+            let status = headers.lines().next().unwrap_or_default();
+            if !status.starts_with("HTTP/")
+                || status
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|code| code.parse::<u16>().ok())
+                    .is_none_or(|code| !(200..300).contains(&code))
+            {
+                return false;
+            }
+            body
+        }
+        None => stdout,
+    };
+    serde_json::from_str::<Value>(body).is_ok_and(|value| value.is_array())
+}
 
 /// Rows per REST page (GitHub's maximum).
 pub const REST_PAGE_SIZE: usize = 100;
@@ -23,8 +187,7 @@ pub struct RestPages {
     pub rows: Vec<Value>,
     /// REST requests spent.
     pub requests: usize,
-    /// `true` when the page budget ran out while pages were still full, so
-    /// rows beyond the ceiling were not read.
+    /// `true` when the page budget ran out with a continuation still unread.
     pub capped: bool,
 }
 
@@ -34,35 +197,121 @@ pub fn page_endpoint(endpoint: &str, page: usize) -> String {
     format!("{endpoint}{separator}per_page={REST_PAGE_SIZE}&page={page}")
 }
 
-/// Read `endpoint` page by page until a short page or the page budget.
-/// `fetch` runs one `gh api <path>` and answers its stdout, or the failure
+/// Read `endpoint` until there is no HTTP Link continuation or the page budget.
+/// `fetch` runs one `gh api <path> --include` and answers its stdout, or the failure
 /// text; a failed page fails the whole read so a partial list never looks
 /// complete.
-pub fn read_pages_with<F>(endpoint: &str, mut fetch: F) -> Result<RestPages, String>
+pub fn read_pages_with<F>(endpoint: &str, fetch: F) -> Result<RestPages, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    read_pages_with_budget(endpoint, Some(REST_MAX_PAGES_PER_READ), fetch)
+}
+
+/// Read a label-scoped collection to its final Link page. This opt-in reader
+/// does not change the request cap of ordinary lists. A failed page or repeated
+/// continuation fails the whole read rather than returning a partial collection.
+pub fn read_complete_pages_with<F>(endpoint: &str, fetch: F) -> Result<RestPages, String>
+where
+    F: FnMut(&str) -> Result<String, String>,
+{
+    read_pages_with_budget(endpoint, None, fetch)
+}
+
+fn read_pages_with_budget<F>(
+    endpoint: &str,
+    max_pages: Option<usize>,
+    mut fetch: F,
+) -> Result<RestPages, String>
 where
     F: FnMut(&str) -> Result<String, String>,
 {
     let mut rows = Vec::new();
     let mut requests = 0;
-    let mut capped = true;
-    for page in 1..=REST_MAX_PAGES_PER_READ {
-        let path = page_endpoint(endpoint, page);
+    let mut next = Some(page_endpoint(endpoint, 1));
+    let mut seen = HashSet::new();
+    while let Some(path) = next.take() {
+        if max_pages.is_none() && !seen.insert(path.clone()) {
+            return Err(format!("gh api {path}: repeated HTTP Link continuation"));
+        }
         let stdout = fetch(&path)?;
         requests += 1;
+        let (headers, body) = stdout
+            .split_once("\n\r\n")
+            .or_else(|| stdout.split_once("\n\n"))
+            .ok_or_else(|| format!("gh api {path}: missing HTTP headers"))?;
+        let mut lines = headers.lines();
+        let status = lines.next().unwrap_or_default();
+        if !status.starts_with("HTTP/")
+            || status
+                .split_whitespace()
+                .nth(1)
+                .and_then(|code| code.parse::<u16>().ok())
+                .is_none_or(|code| !(200..300).contains(&code))
+        {
+            return Err(format!("gh api {path}: invalid HTTP status {status}"));
+        }
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("link") {
+                    next = next_link(value)?.or(next);
+                }
+            }
+        }
         let page_rows: Vec<Value> =
-            serde_json::from_str(&stdout).map_err(|e| format!("gh api {endpoint} JSON: {e}"))?;
-        let count = page_rows.len();
+            serde_json::from_str(body).map_err(|e| format!("gh api {path} JSON: {e}"))?;
         rows.extend(page_rows);
-        if count < REST_PAGE_SIZE {
-            capped = false;
+        if max_pages == Some(requests) {
             break;
         }
     }
     Ok(RestPages {
         rows,
         requests,
-        capped,
+        capped: next.is_some(),
     })
+}
+
+fn next_link(value: &str) -> Result<Option<String>, String> {
+    for link in value.split(',') {
+        let (target, parameters) = link
+            .trim()
+            .split_once(';')
+            .ok_or_else(|| "gh api: invalid HTTP Link header".to_string())?;
+        let target = target
+            .trim()
+            .strip_prefix('<')
+            .and_then(|target| target.strip_suffix('>'))
+            .filter(|target| !target.is_empty())
+            .ok_or_else(|| "gh api: invalid HTTP Link target".to_string())?;
+        let mut has_relation = false;
+        for parameter in parameters.split(';') {
+            let (name, value) = parameter
+                .trim()
+                .split_once('=')
+                .unwrap_or((parameter.trim(), ""));
+            if !name.trim().eq_ignore_ascii_case("rel") {
+                continue;
+            }
+            has_relation = true;
+            let value = value.trim();
+            let relation = if let Some(quoted) = value.strip_prefix('"') {
+                quoted.strip_suffix('"').unwrap_or_default()
+            } else {
+                value
+            };
+            if relation.is_empty() {
+                return Err("gh api: invalid HTTP Link relation".to_string());
+            }
+            if relation.split_ascii_whitespace().any(|rel| rel == "next") {
+                return Ok(Some(target.to_string()));
+            }
+        }
+        if !has_relation {
+            return Err("gh api: missing HTTP Link relation".to_string());
+        }
+    }
+    Ok(None)
 }
 
 /// One Issue as `GET /repos/{owner}/{repo}/issues` returns it, reduced to the
@@ -70,6 +319,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestIssueRow {
     pub number: u64,
+    pub author_login: Option<String>,
     pub title: String,
     /// `OPEN` / `CLOSED`, normalized to the casing the GraphQL list used.
     pub state: String,
@@ -91,6 +341,12 @@ pub fn parse_issue_rows(rows: &[Value]) -> Vec<RestIssueRow> {
             let number = row.get("number")?.as_u64()?;
             Some(RestIssueRow {
                 number,
+                author_login: row
+                    .pointer("/user/login")
+                    .or_else(|| row.pointer("/author/login"))
+                    .and_then(Value::as_str)
+                    .filter(|login| !login.is_empty())
+                    .map(str::to_string),
                 title: text(row, &["title"]).unwrap_or_default(),
                 state: text(row, &["state"])
                     .map(|state| state.to_ascii_uppercase())
@@ -132,6 +388,268 @@ fn text(row: &Value, keys: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn write_cached_page(
+        cache_dir: &Path,
+        key: &str,
+        fetched_at: DateTime<Utc>,
+    ) -> std::path::PathBuf {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let path = cache_dir.join(format!("{:016x}.json", hasher.finish()));
+        let bytes = serde_json::to_vec(&CachedListResponse {
+            key: key.into(),
+            fetched_at,
+            stdout: "HTTP/2.0 200 OK\n\r\n[]".into(),
+        })
+        .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn issue_5738_reclaims_only_expired_known_cache_pages_on_a_cache_hit() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-10-19T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let expired_at = now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS);
+        let expired = write_cached_page(cache.path(), "issues?since=old-cursor", expired_at);
+        let fresh = write_cached_page(cache.path(), "issues?since=current-cursor", now);
+        let future = write_cached_page(cache.path(), "future", now + chrono::Duration::seconds(1));
+        let unrelated = cache.path().join("unrelated.json");
+        std::fs::copy(&expired, &unrelated).unwrap();
+        let mismatch = write_cached_page(cache.path(), "wrong-key", expired_at);
+        std::fs::copy(&expired, &mismatch).unwrap();
+        let malformed = cache.path().join("0000000000000000.json");
+        std::fs::write(&malformed, "not json").unwrap();
+        let unknown = write_cached_page(cache.path(), "future-schema", expired_at);
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&unknown).unwrap()).unwrap();
+        value["version"] = 2.into();
+        std::fs::write(&unknown, serde_json::to_vec(&value).unwrap()).unwrap();
+        let lock_metadata = cache.path().join(".cache.lock.holder.json");
+        std::fs::write(&lock_metadata, "unknown metadata").unwrap();
+        let nested = cache.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let nested_page = write_cached_page(&nested, "nested-old-cursor", expired_at);
+        #[cfg(unix)]
+        let (_outside, symlink) = {
+            let outside = tempfile::tempdir().unwrap();
+            let target = write_cached_page(outside.path(), "symlink-old-cursor", expired_at);
+            let path = cache.path().join(target.file_name().unwrap());
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            (outside, path)
+        };
+
+        let response =
+            cached_list_response_with(cache.path(), "issues?since=current-cursor", now, || {
+                panic!("valid TTL page must remain a cache hit")
+            })
+            .unwrap();
+        assert!(response.ends_with("[]"));
+        assert!(
+            !expired.exists(),
+            "old cursor at the TTL boundary must be reclaimed"
+        );
+        for path in [
+            fresh,
+            future,
+            unrelated,
+            mismatch,
+            malformed,
+            unknown,
+            lock_metadata.clone(),
+            nested_page,
+        ] {
+            assert!(path.exists(), "must preserve {}", path.display());
+        }
+        assert_eq!(
+            std::fs::read_to_string(lock_metadata).unwrap(),
+            "unknown metadata"
+        );
+        #[cfg(unix)]
+        assert!(symlink.is_symlink());
+    }
+
+    #[test]
+    fn issue_5738_contended_cleanup_preserves_fetch_results_and_skips_publication() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = Utc::now();
+        let expired = write_cached_page(
+            cache.path(),
+            "old-cursor",
+            now - chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+        );
+        let new_page = write_cached_page(cache.path(), "new-cursor", now);
+        std::fs::remove_file(&new_page).unwrap();
+        let _lock = gwt_core::operation_deadline::NamedFileLock::try_acquire(
+            &cache.path().join(".cache.lock"),
+            "held cache publication",
+        )
+        .unwrap();
+
+        assert_eq!(
+            cached_list_response_with(cache.path(), "new-cursor", now, || Ok("[]".into())).unwrap(),
+            "[]"
+        );
+        assert!(expired.exists(), "contended cleanup must be skipped");
+        assert!(
+            !new_page.exists(),
+            "publication must honor the cleanup lock"
+        );
+    }
+
+    #[test]
+    fn issue_5730_failed_refresh_pages_keep_their_original_freshness() {
+        let cache = tempfile::tempdir().unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut calls = 0;
+        // Two readers retry the same ten-page refresh every 30 seconds after
+        // downstream work fails. Nine continuation pages caused `https:` spend.
+        for tick in 0..120 {
+            let now = start + chrono::Duration::seconds(tick * 30);
+            for _reader in 0..2 {
+                for page in 1..=10 {
+                    let (fetched_at, _) = cached_list_response_at_with(
+                        cache.path(),
+                        &format!("page-{page}"),
+                        now,
+                        900,
+                        || {
+                            calls += 1;
+                            Ok("HTTP/2.0 200 OK\n\r\n[]".into())
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fetched_at,
+                        start + chrono::Duration::seconds(tick / 30 * 900)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            calls, 40,
+            "four acquisitions per page per hour, shared by readers"
+        );
+        println!("Issue #5730 replay: 2 readers, 120 scans/hour, 10 general pages: 2400 -> {calls} fetches; https continuations 2160 -> 36");
+
+        let failure = cached_list_response_at_with(
+            cache.path(),
+            "page-1",
+            start + chrono::Duration::seconds(3600),
+            900,
+            || Err("live failure".into()),
+        );
+        assert_eq!(
+            failure.unwrap_err(),
+            "live failure",
+            "expiry must not hide a failed refresh"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn list_cache_lock_releases_while_an_inherited_descriptor_remains_open() {
+        let cache = tempfile::tempdir().unwrap();
+        let lock = list_cache_lock(cache.path()).unwrap();
+        // dup models a parallel fork retaining the same open file description.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(list_cache_lock(cache.path()).is_none());
+        drop(lock);
+        let reacquired = list_cache_lock(cache.path());
+        drop(inherited);
+        assert!(
+            reacquired.is_some(),
+            "a completed cache operation must unlock"
+        );
+    }
+
+    #[test]
+    fn issue_5603_unchanged_lists_halve_hourly_rest_consumption() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-10-16T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for implementing in [false, true] {
+            let cache = tempfile::tempdir().unwrap();
+            let mut calls = 0;
+            for tick in 0..120 {
+                let now = start + chrono::Duration::seconds(tick * 30);
+                for key in ["general-issues", "closed-pulls"]
+                    .into_iter()
+                    .chain(implementing.then_some("open-pulls"))
+                {
+                    let response = cached_list_response_with(cache.path(), key, now, || {
+                        calls += 1;
+                        Ok("[]".to_string())
+                    })
+                    .unwrap();
+                    assert_eq!(response, "[]");
+                }
+                // Queue membership and payloads remain live on every scan.
+                calls += 1;
+            }
+            let baseline = if implementing { 480 } else { 360 };
+            assert_eq!(calls, if implementing { 210 } else { 180 });
+            assert!(calls <= baseline / 2);
+            println!("unchanged Monitor lists: implementing={implementing}, {baseline} -> {calls} requests/hour");
+
+            // HTTP Link continuations are distinct cached pages too.
+            let mut continuation_calls = 0;
+            for tick in 0..120 {
+                cached_list_response_with(
+                    cache.path(),
+                    "https://api.github.com/repos/o/r/issues?per_page=100&page=2",
+                    start + chrono::Duration::seconds(tick * 30),
+                    || {
+                        continuation_calls += 1;
+                        Ok("HTTP/2.0 200 OK\n\r\n[]".into())
+                    },
+                )
+                .unwrap();
+            }
+            assert_eq!(continuation_calls, 30);
+            assert!(calls + continuation_calls <= (baseline + 120) / 2);
+        }
+    }
+
+    #[test]
+    fn issue_5603_expired_list_cache_does_not_hide_a_failed_refresh() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        cached_list_response_with(cache.path(), "issues", now, || Ok("[]".into())).unwrap();
+        let fresh = cached_list_response_with(cache.path(), "issues", now, || {
+            Err("cache should answer".to_string())
+        });
+        assert_eq!(fresh.unwrap(), "[]");
+        let expired = cached_list_response_with(
+            cache.path(),
+            "issues",
+            now + chrono::Duration::seconds(LIST_CACHE_TTL_SECS),
+            || Err("live read failed".to_string()),
+        );
+        assert_eq!(expired.unwrap_err(), "live read failed");
+    }
+
+    #[test]
+    fn issue_5603_invalid_http_response_never_enters_list_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let now = chrono::Utc::now();
+        let mut calls = 0;
+        for _ in 0..2 {
+            cached_list_response_with(cache.path(), "issues", now, || {
+                calls += 1;
+                Ok("HTTP/2.0 503 Service Unavailable\n\r\n[]".into())
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            calls, 2,
+            "an invalid HTTP status cannot become a cached observation"
+        );
+    }
+
     fn rows(count: usize, offset: usize) -> String {
         let rows = (0..count)
             .map(|i| serde_json::json!({"number": offset + i, "title": format!("#{}", offset + i)}))
@@ -152,21 +670,24 @@ mod tests {
     }
 
     #[test]
-    fn read_pages_stops_at_the_first_short_page() {
+    fn read_pages_follows_next_through_short_and_empty_pages() {
         let mut calls = Vec::new();
+        let next = "https://api.github.com/repos/o/r/issues?state=open&per_page=30&page=2";
+        let last = "https://api.github.com/repos/o/r/issues?state=open&per_page=30&page=3";
         let pages = read_pages_with("repos/o/r/issues?state=open", |path| {
             calls.push(path.to_string());
             Ok(match calls.len() {
-                1 => rows(REST_PAGE_SIZE, 0),
-                2 => rows(REST_PAGE_SIZE, 100),
-                _ => rows(7, 200),
+                1 => format!("HTTP/2.0 200 OK\nLink: <{next}>; rel=\"next\", <{last}>; rel=\"last\"\r\n\r\n{}", rows(1, 0)),
+                2 => format!("HTTP/2.0 200 OK\nlInK: <{last}>; rel=\"next\"\r\n\r\n[]"),
+                // A full final page without next is still complete.
+                _ => format!("HTTP/2.0 200 OK\n\r\n{}", rows(REST_PAGE_SIZE, 1)),
             })
         })
         .unwrap();
         assert_eq!(pages.requests, 3);
-        assert_eq!(pages.rows.len(), 207);
+        assert_eq!(pages.rows.len(), 101);
         assert!(!pages.capped);
-        assert_eq!(calls[2], "repos/o/r/issues?state=open&per_page=100&page=3");
+        assert_eq!(&calls[1..], &[next, last]);
     }
 
     #[test]
@@ -176,13 +697,61 @@ mod tests {
         let mut calls = 0;
         let pages = read_pages_with("repos/o/r/issues?state=all", |_| {
             calls += 1;
-            Ok(rows(REST_PAGE_SIZE, (calls - 1) * 100))
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n\r\n{}", calls + 1, rows(REST_PAGE_SIZE, (calls - 1) * 100)))
         })
         .unwrap();
         assert_eq!(calls, REST_MAX_PAGES_PER_READ);
         assert_eq!(pages.requests, REST_MAX_PAGES_PER_READ);
         assert_eq!(pages.rows.len(), REST_MAX_PAGES_PER_READ * REST_PAGE_SIZE);
-        assert!(pages.capped, "a full last page means more may exist");
+        assert!(pages.capped, "next remains after the request budget");
+    }
+
+    #[test]
+    fn queue_label_complete_pages_read_past_the_regular_page_budget() {
+        let mut calls = 0;
+        let pages = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            let link = if calls <= REST_MAX_PAGES_PER_READ {
+                format!(
+                    "Link: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n",
+                    calls + 1
+                )
+            } else {
+                String::new()
+            };
+            Ok(format!("HTTP/2.0 200 OK\n{link}\r\n{}", rows(1, calls)))
+        })
+        .unwrap();
+        assert_eq!(calls, REST_MAX_PAGES_PER_READ + 1);
+        assert_eq!(pages.rows.len(), REST_MAX_PAGES_PER_READ + 1);
+        assert!(!pages.capped);
+    }
+
+    #[test]
+    fn queue_label_complete_pages_reject_a_repeated_continuation() {
+        let mut calls = 0;
+        let error = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            Ok("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel=\"next\"\r\n\r\n[]".to_string())
+        })
+        .unwrap_err();
+        assert!(error.contains("repeated"), "{error}");
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn queue_label_complete_pages_fail_on_an_error_after_the_regular_budget() {
+        let mut calls = 0;
+        let error = read_complete_pages_with("repos/o/r/issues?labels=gwt-queued", |_| {
+            calls += 1;
+            if calls > REST_MAX_PAGES_PER_READ {
+                return Err("HTTP 502 on the queued continuation".to_string());
+            }
+            Ok(format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page={}>; rel=\"next\"\r\n\r\n[]", calls + 1))
+        })
+        .unwrap_err();
+        assert!(error.contains("HTTP 502"), "{error}");
+        assert_eq!(calls, REST_MAX_PAGES_PER_READ + 1);
     }
 
     #[test]
@@ -195,13 +764,25 @@ mod tests {
         let failure = read_pages_with("repos/o/r/issues", |_| {
             calls += 1;
             Ok(if calls == 1 {
-                rows(REST_PAGE_SIZE, 0)
+                format!("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel=\"next\"\r\n\r\n{}", rows(1, 0))
             } else {
-                "not json".to_string()
+                "HTTP/2.0 200 OK\n\r\nnot json".to_string()
             })
         })
         .unwrap_err();
         assert!(failure.contains("JSON"), "{failure}");
+        assert_eq!(calls, 2, "a bad continuation fails the whole read");
+
+        let failure = read_pages_with("repos/o/r/issues", |_| Ok("[]".to_string())).unwrap_err();
+        assert!(failure.contains("HTTP"), "headers are required: {failure}");
+
+        let failure = read_pages_with("repos/o/r/issues", |_| {
+            Ok("HTTP/2.0 200 OK\nLink: <https://api.github.com/repos/o/r/issues?page=2>; rel\r\n\r\n[]".to_string())
+        }).unwrap_err();
+        assert!(
+            failure.contains("Link"),
+            "invalid continuation must fail: {failure}"
+        );
     }
 
     #[test]
@@ -209,11 +790,11 @@ mod tests {
         let rows: Vec<Value> = serde_json::from_str(
             r#"[
               {"number": 1, "title": "Bug", "state": "open", "labels": [{"name": "bug"}],
-               "assignees": [{"login": "alice"}], "body": "b", "html_url": "https://github.com/o/r/issues/1",
+               "assignees": [{"login": "alice"}], "user": {"login": "OriginalCreator"}, "body": "b", "html_url": "https://github.com/o/r/issues/1",
                "url": "https://api.github.com/repos/o/r/issues/1", "updated_at": "2026-09-01T00:00:00Z"},
               {"number": 2, "title": "PR", "state": "open", "pull_request": {"url": "x"}},
               {"number": 3, "title": "Legacy", "state": "CLOSED", "url": "https://github.com/o/r/issues/3",
-               "updatedAt": "2026-09-02T00:00:00Z"},
+               "updatedAt": "2026-09-02T00:00:00Z", "author": {"login": ""}},
               {"title": "no number"}
             ]"#,
         )
@@ -224,6 +805,7 @@ mod tests {
         assert_eq!(parsed[0].state, "OPEN");
         assert_eq!(parsed[0].labels, ["bug"]);
         assert_eq!(parsed[0].assignee.as_deref(), Some("alice"));
+        assert_eq!(parsed[0].author_login.as_deref(), Some("OriginalCreator"));
         assert_eq!(parsed[0].url, "https://github.com/o/r/issues/1");
         assert_eq!(
             parsed[0].updated_at.as_deref(),
@@ -237,5 +819,6 @@ mod tests {
             Some("2026-09-02T00:00:00Z")
         );
         assert!(parsed[1].body.is_none());
+        assert!(parsed[1].author_login.is_none());
     }
 }

@@ -2,7 +2,7 @@
 
 use std::{
     collections::HashSet,
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +16,23 @@ const TRACKED_ROOTS: &[&str] = &[
     ".claude/commands",
     ".codex/skills",
     ".gwt/hermes/skills",
+];
+
+/// PM capabilities and the search/registration dependencies of discussion.
+/// Implementation worktrees continue to receive the complete bundled set.
+/// The generated gwt-pm skill is added by the caller after distribution.
+const PM_SHARED_SKILLS: &[&str] = &[
+    "gwt-agent",
+    "gwt-coordination",
+    "gwt-discussion",
+    "gwt-feedback",
+    "gwt-issue-search",
+    "gwt-plan-spec",
+    "gwt-project-search",
+    "gwt-register-issue",
+    "gwt-register-spec",
+    "gwt-search",
+    "gwt-spec-search",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,54 +120,186 @@ pub fn distribute_to_worktree_for_targets_with_policy(
     targets: &[ManagedAssetTarget],
     policy: TrackedAssetWritePolicy,
 ) -> io::Result<DistributeReport> {
-    let mut report = DistributeReport::default();
+    plan_distribution_to_worktree_for_targets(worktree, targets, policy)?.apply()
+}
+
+/// A distribution's writes and removals, resolved before mutation.
+#[derive(Default)]
+pub struct DistributePlan {
+    operations: Vec<DistributionOperation>,
+}
+
+enum DistributionOperation {
+    Write(PathBuf, Vec<u8>),
+    Remove(PathBuf),
+    RemoveIfEmpty(PathBuf),
+}
+
+impl DistributePlan {
+    fn removes_existing_path(&self, target: &Path) -> io::Result<bool> {
+        let canonical_target = dunce::canonicalize(target)?;
+        Ok(self.operations.iter().any(|operation| {
+            matches!(operation, DistributionOperation::Remove(path)
+                if dunce::canonicalize(path)
+                    .is_ok_and(|path| canonical_target.starts_with(path)))
+        }))
+    }
+
+    /// Owned write leaves and prune subtrees; never shared parent directories.
+    pub fn mutation_paths(&self) -> impl Iterator<Item = &Path> {
+        self.operations
+            .iter()
+            .filter_map(|operation| match operation {
+                DistributionOperation::Write(path, _) | DistributionOperation::Remove(path) => {
+                    Some(path.as_path())
+                }
+                DistributionOperation::RemoveIfEmpty(_) => None,
+            })
+    }
+
+    /// Apply the same decisions exposed to transaction preflight and snapshot.
+    pub fn apply(self) -> io::Result<DistributeReport> {
+        let mut report = DistributeReport::default();
+        for operation in self.operations {
+            match operation {
+                DistributionOperation::Write(path, contents) => {
+                    if let Some(parent) = path.parent() {
+                        if !parent.exists() {
+                            crate::asset_io::create_dir_all(parent)?;
+                            report.dirs_created += 1;
+                        }
+                    }
+                    crate::asset_io::write(path, contents)?;
+                    report.files_written += 1;
+                }
+                DistributionOperation::Remove(path) => {
+                    remove_path(&path)?;
+                    report.paths_removed += 1;
+                }
+                DistributionOperation::RemoveIfEmpty(path) => {
+                    if path.exists() && crate::asset_io::read_dir(&path)?.next().is_none() {
+                        crate::asset_io::remove_dir(path)?;
+                        report.paths_removed += 1;
+                    }
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// Resolve distribution ownership using the writer's tracked-file policy.
+pub fn plan_distribution_to_worktree_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
+) -> io::Result<DistributePlan> {
+    plan_distribution(worktree, targets, policy, &CLAUDE_SKILLS, &CLAUDE_COMMANDS)
+}
+
+/// Select the PM's bundled skills and their gwt-* command aliases before
+/// planning either writes or stale-asset removal. Preserve non-gwt commands
+/// and the same tracked-file protections as ordinary distribution.
+pub fn plan_pm_distribution_to_worktree_for_targets(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
+) -> io::Result<DistributePlan> {
+    let skills: Vec<_> = CLAUDE_SKILLS
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| PM_SHARED_SKILLS.contains(&name))
+        })
+        .cloned()
+        .collect();
+    let commands: Vec<_> = CLAUDE_COMMANDS
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.starts_with("gwt-") || PM_SHARED_SKILLS.contains(&name))
+        })
+        .cloned()
+        .collect();
+    plan_distribution(
+        worktree,
+        targets,
+        policy,
+        &Dir::new("", &skills),
+        &Dir::new("", &commands),
+    )
+}
+
+fn plan_distribution(
+    worktree: &Path,
+    targets: &[ManagedAssetTarget],
+    policy: TrackedAssetWritePolicy,
+    skills: &Dir<'_>,
+    commands: &Dir<'_>,
+) -> io::Result<DistributePlan> {
+    let mut plan = DistributePlan::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
     let targets = normalize_targets(targets);
 
-    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut report)?;
+    prune_managed_asset_roots_for_targets(
+        worktree,
+        &tracked_paths,
+        &targets,
+        skills,
+        commands,
+        &mut plan,
+    )?;
 
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".claude/skills"),
             &tracked_paths,
             policy,
-            &mut report,
+            &mut plan,
         )?;
         write_dir_assets(
-            &CLAUDE_COMMANDS,
+            commands,
             worktree,
             &worktree.join(".claude/commands"),
             &tracked_paths,
             policy,
-            &mut report,
+            &mut plan,
         )?;
     }
 
     if targets.contains(&ManagedAssetTarget::Codex) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".codex/skills"),
             &tracked_paths,
             policy,
-            &mut report,
+            &mut plan,
         )?;
     }
 
     if targets.contains(&ManagedAssetTarget::Hermes) {
         write_gwt_skill_dir_assets(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".gwt/hermes/skills"),
             &tracked_paths,
             policy,
-            &mut report,
+            &mut plan,
         )?;
     }
 
-    Ok(report)
+    Ok(plan)
 }
 
 /// Remove stale gwt-managed asset paths from the target worktree without
@@ -163,63 +312,72 @@ pub fn prune_stale_gwt_assets_for_targets(
     worktree: &Path,
     targets: &[ManagedAssetTarget],
 ) -> io::Result<usize> {
-    let mut report = DistributeReport::default();
+    let mut plan = DistributePlan::default();
     let tracked_paths = tracked_gwt_asset_paths(worktree);
     let targets = normalize_targets(targets);
-    prune_managed_asset_roots_for_targets(worktree, &tracked_paths, &targets, &mut report)?;
-    Ok(report.paths_removed)
+    prune_managed_asset_roots_for_targets(
+        worktree,
+        &tracked_paths,
+        &targets,
+        &CLAUDE_SKILLS,
+        &CLAUDE_COMMANDS,
+        &mut plan,
+    )?;
+    Ok(plan.apply()?.paths_removed)
 }
 
 fn prune_managed_asset_roots_for_targets(
     worktree: &Path,
     tracked_paths: &HashSet<PathBuf>,
     targets: &[ManagedAssetTarget],
-    report: &mut DistributeReport,
+    skills: &Dir<'_>,
+    commands: &Dir<'_>,
+    plan: &mut DistributePlan,
 ) -> io::Result<()> {
     if targets.contains(&ManagedAssetTarget::ClaudeCode) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".claude/skills"),
             Some(RootEntryKind::Directories),
             true,
             tracked_paths,
-            report,
+            plan,
         )?;
         prune_dir_against_source(
-            &CLAUDE_COMMANDS,
+            commands,
             worktree,
             &worktree.join(".claude/commands"),
             Some(RootEntryKind::Files),
             false,
             tracked_paths,
-            report,
+            plan,
         )?;
-        prune_retired_hook_scripts(&worktree.join(".claude/hooks/scripts"), report)?;
+        prune_retired_hook_scripts(&worktree.join(".claude/hooks/scripts"), plan)?;
     }
 
     if targets.contains(&ManagedAssetTarget::Codex) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".codex/skills"),
             Some(RootEntryKind::Directories),
             true,
             tracked_paths,
-            report,
+            plan,
         )?;
-        prune_retired_hook_scripts(&worktree.join(".codex/hooks/scripts"), report)?;
+        prune_retired_hook_scripts(&worktree.join(".codex/hooks/scripts"), plan)?;
     }
 
     if targets.contains(&ManagedAssetTarget::Hermes) {
         prune_dir_against_source(
-            &CLAUDE_SKILLS,
+            skills,
             worktree,
             &worktree.join(".gwt/hermes/skills"),
             Some(RootEntryKind::Directories),
             true,
             tracked_paths,
-            report,
+            plan,
         )?;
     }
 
@@ -236,32 +394,28 @@ fn normalize_targets(targets: &[ManagedAssetTarget]) -> Vec<ManagedAssetTarget> 
     normalized
 }
 
-fn prune_retired_hook_scripts(dest: &Path, report: &mut DistributeReport) -> io::Result<()> {
+fn prune_retired_hook_scripts(dest: &Path, plan: &mut DistributePlan) -> io::Result<()> {
     if dest.exists() {
-        for entry in fs::read_dir(dest)? {
+        for entry in crate::asset_io::read_dir(dest)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if !name.starts_with("gwt-") {
                 continue;
             }
-            remove_path(&entry.path())?;
-            report.paths_removed += 1;
+            plan.operations
+                .push(DistributionOperation::Remove(entry.path()));
         }
 
-        if fs::read_dir(dest)?.next().is_none() {
-            fs::remove_dir(dest)?;
-            report.paths_removed += 1;
-        }
+        plan.operations
+            .push(DistributionOperation::RemoveIfEmpty(dest.to_path_buf()));
     }
 
     let Some(parent) = dest.parent() else {
         return Ok(());
     };
-    if parent.exists() && fs::read_dir(parent)?.next().is_none() {
-        fs::remove_dir(parent)?;
-        report.paths_removed += 1;
-    }
+    plan.operations
+        .push(DistributionOperation::RemoveIfEmpty(parent.to_path_buf()));
 
     Ok(())
 }
@@ -272,9 +426,9 @@ fn write_dir_assets(
     dest: &Path,
     tracked_paths: &HashSet<PathBuf>,
     policy: TrackedAssetWritePolicy,
-    report: &mut DistributeReport,
+    plan: &mut DistributePlan,
 ) -> io::Result<()> {
-    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, false, report)
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, false, plan)
 }
 
 fn write_gwt_skill_dir_assets(
@@ -283,9 +437,9 @@ fn write_gwt_skill_dir_assets(
     dest: &Path,
     tracked_paths: &HashSet<PathBuf>,
     policy: TrackedAssetWritePolicy,
-    report: &mut DistributeReport,
+    plan: &mut DistributePlan,
 ) -> io::Result<()> {
-    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, true, report)
+    write_dir_assets_inner(source, worktree, dest, tracked_paths, policy, true, plan)
 }
 
 fn write_dir_assets_inner(
@@ -295,7 +449,7 @@ fn write_dir_assets_inner(
     tracked_paths: &HashSet<PathBuf>,
     policy: TrackedAssetWritePolicy,
     root_gwt_only: bool,
-    report: &mut DistributeReport,
+    plan: &mut DistributePlan,
 ) -> io::Result<()> {
     for file in source.files() {
         let target = dest.join(file.path().file_name().unwrap_or_default());
@@ -307,19 +461,18 @@ fn write_dir_assets_inner(
         // not user content, and the embedded bundle wins.
         if target.exists()
             && should_skip_tracked_path(worktree, &target, tracked_paths)
+            // Eager distribution pruned first, so a tracked file beneath a
+            // removed case alias was missing and had to be recreated.
+            && !plan.removes_existing_path(&target)?
             && !(policy == TrackedAssetWritePolicy::OverrideGwtManaged
                 && is_gwt_managed_override_path(worktree, &target))
         {
             continue;
         }
-        if let Some(parent) = target.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-                report.dirs_created += 1;
-            }
-        }
-        fs::write(&target, file.contents())?;
-        report.files_written += 1;
+        plan.operations.push(DistributionOperation::Write(
+            target,
+            file.contents().to_vec(),
+        ));
     }
 
     for subdir in source.dirs() {
@@ -333,7 +486,7 @@ fn write_dir_assets_inner(
             &dest.join(subdir_name),
             tracked_paths,
             policy,
-            report,
+            plan,
         )?;
     }
 
@@ -347,9 +500,15 @@ fn prune_dir_against_source(
     root_kind: Option<RootEntryKind>,
     root_gwt_only: bool,
     tracked_paths: &HashSet<PathBuf>,
-    report: &mut DistributeReport,
+    plan: &mut DistributePlan,
 ) -> io::Result<()> {
     if !dest.exists() {
+        return Ok(());
+    }
+    // A differently-cased bundle directory can resolve to a subtree already
+    // scheduled for removal. The old eager prune had removed it before this
+    // recursion; planning must likewise avoid scheduling its children twice.
+    if plan.removes_existing_path(dest)? {
         return Ok(());
     }
 
@@ -365,7 +524,7 @@ fn prune_dir_against_source(
         .map(str::to_string)
         .collect();
 
-    for entry in fs::read_dir(dest)? {
+    for entry in crate::asset_io::read_dir(dest)? {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -392,8 +551,8 @@ fn prune_dir_against_source(
             if should_skip_tracked_path(worktree, &entry.path(), tracked_paths) {
                 continue;
             }
-            remove_path(&entry.path())?;
-            report.paths_removed += 1;
+            plan.operations
+                .push(DistributionOperation::Remove(entry.path()));
         }
     }
 
@@ -409,7 +568,7 @@ fn prune_dir_against_source(
             None,
             false,
             tracked_paths,
-            report,
+            plan,
         )?;
     }
 
@@ -417,12 +576,13 @@ fn prune_dir_against_source(
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
+    let metadata = crate::asset_io::symlink_metadata(path)?;
     if metadata.is_dir() {
-        fs::remove_dir_all(path)
+        crate::asset_io::remove_dir_all(path)?;
     } else {
-        fs::remove_file(path)
+        crate::asset_io::remove_file(path)?;
     }
+    Ok(())
 }
 
 /// gwt-managed namespaces the intake override may refresh even when tracked
@@ -462,7 +622,7 @@ pub fn is_gwt_managed_skill_or_command_path(relative: &Path) -> bool {
         .any(|prefix| relative.starts_with(prefix))
 }
 
-fn should_skip_tracked_path(
+pub fn should_skip_tracked_path(
     worktree: &Path,
     target: &Path,
     tracked_paths: &HashSet<PathBuf>,
@@ -480,7 +640,7 @@ fn should_skip_tracked_path(
         .unwrap_or(false)
 }
 
-fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
+pub fn tracked_gwt_asset_paths(worktree: &Path) -> HashSet<PathBuf> {
     match hidden_command("git")
         .arg("-C")
         .arg(worktree)
@@ -521,7 +681,83 @@ fn is_git_worktree(worktree: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    // Production code reaches the filesystem through `crate::asset_io`, which
+    // tags every failure with its route and path (#4486 AC-6). Fixtures do not.
     use super::*;
+    use std::fs;
+
+    #[test]
+    fn distribution_plan_restores_tracked_file_after_case_variant_prune() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        let canonical = dir.path().join(".claude/skills/gwt-execute");
+        let case_variant = dir.path().join(".claude/skills/gwt-EXECUTE");
+        fs::create_dir_all(&canonical).unwrap();
+        fs::write(canonical.join("SKILL.md"), "tracked").unwrap();
+        track_path(dir.path(), ".claude/skills/gwt-execute/SKILL.md");
+        let temporary = dir.path().join("renaming");
+        fs::rename(&canonical, &temporary).unwrap();
+        fs::rename(&temporary, &case_variant).unwrap();
+
+        let plan = plan_distribution_to_worktree_for_targets(
+            dir.path(),
+            &[ManagedAssetTarget::ClaudeCode],
+            TrackedAssetWritePolicy::PreserveTracked,
+        )
+        .unwrap();
+        let tracked_file = canonical.join("SKILL.md");
+        assert!(plan.mutation_paths().any(|path| path == tracked_file));
+        plan.apply().unwrap();
+        assert!(tracked_file.exists());
+    }
+
+    #[test]
+    fn distribution_plan_lists_mutations_without_owning_project_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(".claude/skills/gwt-retired");
+        let user = dir.path().join(".claude/skills/project");
+        let scripts = dir.path().join(".claude/hooks/scripts");
+        fs::create_dir_all(&stale).unwrap();
+        fs::create_dir_all(&user).unwrap();
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(stale.join("old.md"), "old").unwrap();
+        fs::write(user.join("SKILL.md"), "project").unwrap();
+        let retired = scripts.join("gwt-old.sh");
+        fs::write(&retired, "old").unwrap();
+        let case_variant = dir.path().join(".claude/skills/gwt-EXECUTE");
+        fs::create_dir_all(&case_variant).unwrap();
+        fs::write(case_variant.join("old.md"), "old").unwrap();
+
+        let plan = plan_distribution_to_worktree_for_targets(
+            dir.path(),
+            &[ManagedAssetTarget::ClaudeCode],
+            TrackedAssetWritePolicy::PreserveTracked,
+        )
+        .unwrap();
+        let paths: Vec<_> = plan.mutation_paths().collect();
+        assert!(paths.contains(&stale.as_path()));
+        assert!(paths.contains(&retired.as_path()));
+        let command = dir.path().join(".claude/commands/release.md");
+        assert!(paths.contains(&command.as_path()));
+        assert!(!paths.contains(&scripts.as_path()));
+        assert!(!paths.iter().any(|path| path.starts_with(&user)));
+        assert!(stale.exists(), "planning must not mutate the checkout");
+        assert!(!command.exists());
+
+        plan.apply().unwrap();
+        assert!(!stale.exists());
+        assert!(!scripts.exists());
+        assert!(command.exists());
+        assert!(!case_variant.join("old.md").exists());
+        assert!(dir
+            .path()
+            .join(".claude/skills/gwt-execute/SKILL.md")
+            .exists());
+        assert_eq!(
+            fs::read_to_string(user.join("SKILL.md")).unwrap(),
+            "project"
+        );
+    }
 
     #[test]
     fn managed_skill_namespace_rejects_user_and_noncanonical_paths() {

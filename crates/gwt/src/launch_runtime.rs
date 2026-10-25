@@ -1,5 +1,7 @@
 use super::*;
 
+mod base_freshness;
+
 fn normalize_child_process_path(path: &Path) -> PathBuf {
     gwt_core::paths::normalize_windows_child_process_path(path)
 }
@@ -47,6 +49,32 @@ fn launch_worktree_materialization_lock_path(main_repo_path: &Path, branch_name:
         .join(format!("{repo_hash}-{}.lock", &branch_digest[..16]))
 }
 
+/// Causal test boundary: reports each lock path a resolver found contended,
+/// so a test can wait for "the resolver is blocked on this lock" instead of
+/// inferring it from elapsed time (SPEC #4740).
+#[cfg(test)]
+mod materialization_lock_contention {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{mpsc, Mutex},
+    };
+
+    static OBSERVERS: Mutex<Vec<mpsc::Sender<PathBuf>>> = Mutex::new(Vec::new());
+
+    pub(super) fn observe() -> mpsc::Receiver<PathBuf> {
+        let (tx, rx) = mpsc::channel();
+        OBSERVERS.lock().unwrap_or_else(|e| e.into_inner()).push(tx);
+        rx
+    }
+
+    pub(super) fn notify(lock_path: &Path) {
+        OBSERVERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|tx| tx.send(lock_path.to_path_buf()).is_ok());
+    }
+}
+
 fn with_launch_worktree_materialization_lock<T>(
     main_repo_path: &Path,
     branch_name: &str,
@@ -77,7 +105,11 @@ fn with_launch_worktree_materialization_lock<T>(
                 lock_path.display()
             )
         })?;
-    gwt_core::operation_deadline::lock_exclusive(&lock).map_err(|error| {
+    gwt_core::operation_deadline::lock_exclusive_with_observer(&lock, || {
+        #[cfg(test)]
+        materialization_lock_contention::notify(&lock_path);
+    })
+    .map_err(|error| {
         format!(
             "failed to acquire launch materialization lock {} for branch {branch_name}: {error}",
             lock_path.display()
@@ -107,7 +139,8 @@ pub fn resolve_launch_worktree_request(
     let Some(branch_name) = branch_name.map(str::to_string) else {
         return Ok(());
     };
-    if working_dir.is_some() {
+    let inspect_base = branch_name.starts_with("work/issue-");
+    if working_dir.is_some() && !inspect_base {
         return Ok(());
     }
 
@@ -126,13 +159,21 @@ pub fn resolve_launch_worktree_request(
         }
     };
     with_launch_worktree_materialization_lock(&main_repo_path, &branch_name, || {
-        resolve_launch_worktree_request_locked(
-            &main_repo_path,
-            &branch_name,
-            base_branch,
-            working_dir,
-            env_vars,
-        )
+        if working_dir.is_none() {
+            resolve_launch_worktree_request_locked(
+                &main_repo_path,
+                &branch_name,
+                base_branch,
+                working_dir,
+                env_vars,
+            )?;
+        }
+        if inspect_base {
+            if let Some(worktree) = working_dir.as_deref() {
+                base_freshness::refresh_and_record(&main_repo_path, &branch_name, worktree);
+            }
+        }
+        Ok(())
     })
 }
 
@@ -435,14 +476,7 @@ fn fast_forward_stale_launch_ref(
 /// A surviving GUI Host alone must not keep an exited agent's worktree held.
 fn live_session_holding_worktree(sessions_dir: &Path, worktree: &Path) -> Option<String> {
     let target = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
-    for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-            continue;
-        }
-        let Ok(session) = gwt_agent::Session::load_and_migrate(&path) else {
-            continue;
-        };
+    for session in gwt_agent::session_ledger::load_sessions(sessions_dir).ok()? {
         let session_worktree = dunce::canonicalize(&session.worktree_path)
             .unwrap_or_else(|_| session.worktree_path.clone());
         if session_worktree != target {
@@ -529,22 +563,48 @@ impl OrphanIntakePrunePlan {
 }
 
 pub fn plan_orphan_intake_worktree_prune(repo_path: &Path) -> Option<OrphanIntakePrunePlan> {
-    let Ok(main_repo_path) = gwt_git::worktree::main_worktree_root(repo_path) else {
-        return None;
-    };
-    let manager = gwt_git::WorktreeManager::new(&main_repo_path);
-    let Ok(worktrees) = manager.list() else {
-        return None;
-    };
+    let main_repo_path = gwt_git::worktree::main_worktree_root(repo_path).ok()?;
+    let worktrees = gwt_git::WorktreeManager::new(&main_repo_path).list().ok()?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        worktrees
+            .into_iter()
+            .map(|worktree| (worktree.path, worktree.branch)),
+    ))
+}
+
+/// Issue #4378 AC-1: the same plan from a worktree listing the caller holds,
+/// so startup does not list the worktrees a second time. The listing omits
+/// prunable entries; their directory is gone, so the prune always kept them.
+pub fn plan_orphan_intake_worktree_prune_from_inventory(
+    repo_path: &Path,
+    inventory: &[gwt::worktree_inventory::WorktreeEntry],
+) -> Option<OrphanIntakePrunePlan> {
+    let main_repo_path = inventory
+        .iter()
+        .find(|entry| entry.kind == gwt::worktree_inventory::WorktreeEntryKind::BareMain)
+        .map(|entry| entry.path.clone())
+        .or_else(|| gwt_git::worktree::main_worktree_root(repo_path).ok())?;
+    Some(orphan_intake_prune_plan(
+        main_repo_path,
+        inventory
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.branch.clone())),
+    ))
+}
+
+fn orphan_intake_prune_plan(
+    main_repo_path: PathBuf,
+    worktrees: impl Iterator<Item = (PathBuf, Option<String>)>,
+) -> OrphanIntakePrunePlan {
     let worktree_paths = worktrees
-        .into_iter()
-        .filter(|worktree| is_ephemeral_worktree_path(&worktree.path) && worktree.branch.is_none())
-        .map(|worktree| worktree.path)
+        .filter(|(path, branch)| is_ephemeral_worktree_path(path) && branch.is_none())
+        .map(|(path, _)| path)
         .collect();
-    Some(OrphanIntakePrunePlan {
+    OrphanIntakePrunePlan {
         main_repo_path,
         worktree_paths,
-    })
+    }
 }
 
 pub fn execute_orphan_intake_worktree_prune(
@@ -693,12 +753,12 @@ pub fn build_shell_process_launch(
         install_launch_gwt_bin_env(&mut env, gwt_agent::LaunchRuntimeTarget::Host)?;
         config.env_vars = env.clone();
         return Ok(ProcessLaunch {
+            initial_prompt_file: None,
             command: shell.command,
             args: shell.args,
             env,
             remove_env,
             cwd: Some(worktree),
-            pending_tool_runtime_migration: None,
             // Shell panes keep the direct spawn route (SPEC #1921 FR-237).
             resource_policy: None,
         });
@@ -729,12 +789,12 @@ pub fn build_shell_process_launch(
     args.push(shell_command);
 
     Ok(ProcessLaunch {
+        initial_prompt_file: None,
         command: runtime.binary().to_string(),
         args,
         env,
         remove_env: Vec::new(),
         cwd: Some(worktree),
-        pending_tool_runtime_migration: None,
         resource_policy: None,
     })
 }
@@ -790,6 +850,40 @@ pub fn apply_windows_host_shell_wrapper(
     config.command = command;
     config.args = args;
     Ok(())
+}
+
+/// Move the long task out of argv only after the actual worktree is known.
+/// The returned guard follows the launch into its runtime, including failures.
+pub fn prepare_initial_prompt(
+    config: &mut gwt_agent::LaunchConfig,
+    worktree: &Path,
+) -> Result<Option<std::sync::Arc<tempfile::TempPath>>, String> {
+    use std::io::Write as _;
+
+    let Some(prompt) = config.pending_initial_prompt.as_deref() else {
+        return Ok(None);
+    };
+    let directory = worktree.join(".gwt").join("tmp");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create initial prompt directory: {error}"))?;
+    let mut file = tempfile::Builder::new()
+        .prefix("initial-prompt-")
+        .suffix(".txt")
+        .tempfile_in(&directory)
+        .map_err(|error| format!("create initial prompt file: {error}"))?;
+    file.write_all(prompt.as_bytes())
+        .map_err(|error| format!("write initial prompt file: {error}"))?;
+    let file = std::sync::Arc::new(file.into_temp_path());
+    let path = if config.runtime_target == gwt_agent::LaunchRuntimeTarget::Docker {
+        // The resolved worktree is mounted at the container's working directory.
+        format!(".gwt/tmp/{}", file.file_name().unwrap().to_string_lossy())
+    } else {
+        file.display().to_string()
+    };
+    config.args.push(format!(
+        "Read the complete initial task from the UTF-8 file `{path}`, then follow its instructions."
+    ));
+    Ok(Some(file))
 }
 
 fn wrap_windows_host_shell_command(
@@ -878,7 +972,19 @@ fn launch_display_command(command: &str, args: &[String]) -> String {
     let tokens = sanitize_launch_display_tokens(command, args);
     tokens
         .iter()
-        .map(|token| quote_display_token_if_needed(&gwt_core::process_console::redact_line(token)))
+        .map(|token| {
+            let token = gwt_core::process_console::redact_line(token);
+            let chars = token.chars().count();
+            let token = if chars > 200 {
+                format!(
+                    "{}...({chars} chars)",
+                    token.chars().take(200).collect::<String>()
+                )
+            } else {
+                token
+            };
+            quote_display_token_if_needed(&token)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -1033,41 +1139,6 @@ fn build_powershell_command_script(command: &str, args: &[String], cwd: Option<&
 }
 
 #[cfg(test)]
-pub fn apply_host_package_runner_fallback_with_probe<F>(
-    config: &mut gwt_agent::LaunchConfig,
-    fallback_executable: String,
-    probe: F,
-) -> bool
-where
-    F: FnMut(&str, Vec<String>, &HashMap<String, String>, &[String], Option<PathBuf>) -> bool,
-{
-    gwt_agent::apply_host_package_runner_fallback_with_probe(config, fallback_executable, probe)
-}
-
-#[cfg(test)]
-pub fn probe_host_package_runner_with_timeout(
-    command: &str,
-    args: Vec<String>,
-    env_vars: &HashMap<String, String>,
-    remove_env: &[String],
-    cwd: Option<PathBuf>,
-    timeout: Duration,
-    poll_interval: Duration,
-) -> bool {
-    gwt_agent::prepare::probe_host_runner_with_timeout(
-        gwt_agent::HostRunnerProbeKind::Runner,
-        command,
-        args,
-        env_vars,
-        remove_env,
-        cwd,
-        timeout,
-        poll_interval,
-    )
-    .success
-}
-
-#[cfg(test)]
 pub fn command_matches_runner(command: &str, runner: &str) -> bool {
     let path = Path::new(command);
     path.file_stem()
@@ -1188,10 +1259,10 @@ mod tests {
         path.split(':').collect()
     }
 
-    fn sample_versioned_launch_config() -> gwt_agent::LaunchConfig {
+    #[cfg(windows)]
+    fn sample_windows_shell_launch_config() -> gwt_agent::LaunchConfig {
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir("E:/gwt/develop")
-            .version("latest")
             .build();
         config.command = "bunx".to_string();
         config.args = vec![
@@ -1202,36 +1273,6 @@ mod tests {
         config.working_dir = Some(PathBuf::from("E:/gwt/develop"));
         config.runtime_target = gwt_agent::LaunchRuntimeTarget::Host;
         config.docker_lifecycle_intent = gwt_agent::DockerLifecycleIntent::Connect;
-        config
-    }
-
-    #[cfg(windows)]
-    fn sample_exact_windows_npx_launch_config() -> gwt_agent::LaunchConfig {
-        let mut config = sample_versioned_launch_config();
-        config.tool_version = Some("2.1.210".to_string());
-        config.args = vec![
-            "@anthropic-ai/claude-code@2.1.210".to_string(),
-            "--print".to_string(),
-        ];
-        config
-    }
-
-    #[cfg(not(windows))]
-    fn sample_direct_codex_launch_config(bin_dir: &Path) -> gwt_agent::LaunchConfig {
-        write_executable(&bin_dir.join("bunx"));
-        write_executable(&bin_dir.join("npx"));
-        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-            .working_dir(bin_dir)
-            .model("gpt-5.6-codex")
-            .session_mode(gwt_agent::SessionMode::Continue)
-            .skip_permissions(true)
-            .extra_arg("--search")
-            .build();
-        config.command = "/opt/homebrew/bin/codex".to_string();
-        config.env_vars = HashMap::from([
-            ("PATH".to_string(), bin_dir.display().to_string()),
-            ("HOME".to_string(), bin_dir.display().to_string()),
-        ]);
         config
     }
 
@@ -1247,140 +1288,6 @@ mod tests {
         }
     }
 
-    // Only the `#[cfg(not(windows))]` fallback tests build failing probes.
-    #[cfg_attr(windows, allow(dead_code))]
-    fn probe_failure(detail: &str) -> gwt_agent::HostRunnerProbeOutcome {
-        gwt_agent::HostRunnerProbeOutcome {
-            success: false,
-            exit_code: Some(1),
-            stdout: String::new(),
-            stderr: detail.to_string(),
-            timed_out: false,
-            error: None,
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn checked_host_runner_falls_back_from_broken_direct_to_healthy_bunx() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let mut config = sample_direct_codex_launch_config(temp.path());
-        let original_args = config.args.clone();
-        let mut probes = Vec::new();
-
-        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            temp.path().join("npx").display().to_string(),
-            None,
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probes.push((command.to_string(), args));
-                match probes.len() {
-                    1 => probe_failure("direct wrapper vendor binary missing"),
-                    2 => probe_success(),
-                    _ => panic!("unexpected probe sequence: {probes:?}"),
-                }
-            },
-            |_candidate| panic!("cache repair must not run"),
-        )
-        .expect("healthy bunx fallback");
-
-        assert!(report.switched_to_fallback);
-        assert_eq!(probes[0].0, "/opt/homebrew/bin/codex");
-        assert_eq!(probes[0].1, vec!["--version".to_string()]);
-        assert_eq!(probes[1].0, temp.path().join("bunx").display().to_string());
-        assert_eq!(probes[1].1, vec!["--version".to_string()]);
-        assert_eq!(config.command, probes[1].0);
-        let package_index = config
-            .args
-            .iter()
-            .position(|arg| arg == "@openai/codex@latest")
-            .expect("latest package prefix");
-        assert_eq!(&config.args[package_index + 1..], original_args.as_slice());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn checked_host_runner_falls_back_from_broken_bunx_to_healthy_npx() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let mut config = sample_direct_codex_launch_config(temp.path());
-        let original_args = config.args.clone();
-        let mut probes = Vec::new();
-
-        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            temp.path().join("npx").display().to_string(),
-            None,
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probes.push((command.to_string(), args));
-                match probes.len() {
-                    1 => probe_failure("direct wrapper vendor binary missing"),
-                    2 => probe_failure("bunx unavailable"),
-                    3 => probe_success(),
-                    _ => panic!("unexpected probe sequence: {probes:?}"),
-                }
-            },
-            |_candidate| panic!("cache repair must not run"),
-        )
-        .expect("healthy npx fallback");
-
-        assert!(report.switched_to_fallback);
-        assert_eq!(probes.len(), 3);
-        assert_eq!(probes[0].1, vec!["--version".to_string()]);
-        assert_eq!(probes[1].1, vec!["--version".to_string()]);
-        assert_eq!(probes[2].0, temp.path().join("npx").display().to_string());
-        assert_eq!(probes[2].1, vec!["--version".to_string()]);
-        assert_eq!(config.command, probes[2].0);
-        assert_eq!(config.args[0], "--yes");
-        let package_index = config
-            .args
-            .iter()
-            .position(|arg| arg == "@openai/codex@latest")
-            .expect("latest package prefix");
-        assert_eq!(&config.args[package_index + 1..], original_args.as_slice());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn checked_host_runner_rejects_broken_direct_bunx_and_npx_without_mutating_launch() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let mut config = sample_direct_codex_launch_config(temp.path());
-        config
-            .env_vars
-            .insert("RUNNER_SENTINEL".into(), "keep".into());
-        config.remove_env.push("REMOVE_SENTINEL".into());
-        let original_command = config.command.clone();
-        let original_args = config.args.clone();
-        let original_config = format!("{config:?}");
-        let mut probes = Vec::new();
-
-        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            temp.path().join("npx").display().to_string(),
-            None,
-            |_kind, command, args, _env, _remove_env, _cwd| {
-                probes.push((command.to_string(), args));
-                probe_failure(match probes.len() {
-                    1 => "direct wrapper vendor binary missing",
-                    2 => "bunx unavailable",
-                    3 => "npx unavailable",
-                    _ => panic!("unexpected probe sequence: {probes:?}"),
-                })
-            },
-            |_candidate| panic!("cache repair must not run"),
-        )
-        .expect_err("all broken runners must stop before dispatch");
-
-        assert_eq!(probes.len(), 3);
-        assert_eq!(config.command, original_command);
-        assert_eq!(config.args, original_args);
-        assert_eq!(format!("{config:?}"), original_config);
-        assert!(error.contains("direct wrapper vendor binary missing"));
-        assert!(error.contains("npx unavailable"));
-    }
-
     #[cfg(not(windows))]
     #[test]
     fn checked_host_runner_uses_descriptor_version_argv_for_copilot() {
@@ -1389,19 +1296,16 @@ mod tests {
         let original_args = config.args.clone();
         let mut probes = Vec::new();
 
-        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
+        let report = gwt_agent::resolve_host_runner_health_checked_with_probe(
             &mut config,
-            "npx".to_string(),
-            None,
             |_kind, command, args, _env, _remove_env, _cwd| {
                 probes.push((command.to_string(), args));
                 probe_success()
             },
-            |_candidate| panic!("cache repair must not run"),
         )
         .expect("healthy Copilot direct runner");
 
-        assert!(!report.switched_to_fallback);
+        assert_eq!(report.version_output, None);
         assert_eq!(probes.len(), 1);
         assert_eq!(probes[0].0, "/usr/local/bin/gh");
         assert_eq!(
@@ -1411,7 +1315,7 @@ mod tests {
         assert_eq!(config.args, original_args);
     }
 
-    fn run_git(repo: &Path, args: &[&str]) {
+    pub(super) fn run_git(repo: &Path, args: &[&str]) {
         let output = gwt_core::process::hidden_command("git")
             .args(args)
             .current_dir(repo)
@@ -1434,7 +1338,7 @@ mod tests {
             .success()
     }
 
-    fn init_launch_test_repo(root: &Path) -> PathBuf {
+    pub(super) fn init_launch_test_repo(root: &Path) -> PathBuf {
         let origin = root.join("origin.git");
         let repo = root.join("repo");
         run_git(root, &["init", "--bare", origin.to_str().unwrap()]);
@@ -1461,6 +1365,84 @@ mod tests {
     }
 
     #[test]
+    fn monitor_review_isolated_during_wait_and_merge_idle() {
+        let temp = tempdir().expect("tempdir");
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let repo = init_launch_test_repo(temp.path());
+        let head_sha = |path: &Path| {
+            let head = gwt_core::process::hidden_command("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(path)
+                .output()
+                .unwrap();
+            assert!(head.status.success());
+            String::from_utf8(head.stdout).unwrap().trim().to_string()
+        };
+        let reviewed_sha = head_sha(&repo);
+        // The owner moves on while the review remains bound to the PR head.
+        run_git(
+            &repo,
+            &[
+                "commit",
+                "--allow-empty",
+                "-m",
+                "owner delivery bookkeeping",
+            ],
+        );
+        let owner_event = repo.join(".gwt/work/events/owner.jsonl");
+        fs::create_dir_all(owner_event.parent().unwrap()).unwrap();
+        fs::write(&owner_event, "owner event\n").unwrap();
+        let before = fs::read(&owner_event).unwrap();
+        for phase in [
+            gwt::AutonomousPhase::Delivering,
+            gwt::AutonomousPhase::Merged,
+        ] {
+            let mut record = gwt::AutonomousIssueRecord::new(42);
+            record.phase = phase;
+            let mut monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::IssueMonitorPrefs {
+                    autonomous_records: vec![record],
+                    launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+                        issue_number: 42,
+                        window_id: "owner".to_string(),
+                    }],
+                    ..Default::default()
+                },
+            );
+            if phase == gwt::AutonomousPhase::Delivering {
+                let now = chrono::Utc::now().to_rfc3339();
+                assert!(matches!(
+                    monitor.declare_autonomous_wait(42, "CI", "PR merged", &now),
+                    gwt::AutonomousWaitOutcome::Declared { .. }
+                ));
+            }
+            let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+            gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+            let prefs_before = fs::read(&prefs_path).unwrap();
+            let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                .working_dir(&repo)
+                .branch("work/issue-42")
+                .build();
+            let mut request = gwt::LaunchWizardLaunchRequest::Agent(Box::new(config));
+            request.set_review_dispatch_context(&reviewed_sha);
+            let gwt::LaunchWizardLaunchRequest::Agent(mut config) = request else {
+                unreachable!()
+            };
+            resolve_launch_worktree(&repo, &mut config).expect("review never waits on the owner");
+            let review_path = config.working_dir.as_ref().unwrap();
+            assert!(!crate::same_worktree_path(review_path, &repo));
+            let review_repo = gwt_git::Repository::discover(review_path).unwrap();
+            assert_eq!(review_repo.current_branch().unwrap(), None);
+            assert_eq!(head_sha(review_path), reviewed_sha);
+            assert!(git_status(review_path, &["diff", "--quiet"]));
+            assert_eq!(fs::read(&owner_event).unwrap(), before);
+            assert_eq!(fs::read(&prefs_path).unwrap(), prefs_before);
+            assert!(!review_path.join(".gwt/work/events/owner.jsonl").exists());
+        }
+    }
+
+    #[test]
     fn launch_worktree_materialization_waits_for_same_branch_lock() {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
@@ -1480,20 +1462,31 @@ mod tests {
 
         let main_repo = gwt_git::worktree::main_worktree_root(&repo).expect("main repo");
         let repo_hash = gwt_core::repo_hash::compute_path_hash(&main_repo);
+        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
+        fs::create_dir_all(&lock_dir).expect("lock dir");
         let branch_digest = format!(
             "{:x}",
             <sha2::Sha256 as sha2::Digest>::digest(branch.as_bytes())
         );
-        let lock_dir = gwt_core::paths::gwt_home().join("locks/launch-worktree-materialization");
-        fs::create_dir_all(&lock_dir).expect("lock dir");
+        let lock_path = lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16]));
+        assert_eq!(
+            launch_worktree_materialization_lock_path(&main_repo, branch),
+            lock_path
+        );
+        assert_ne!(
+            launch_worktree_materialization_lock_path(&main_repo, "work/issue-other"),
+            lock_path,
+            "different branches must not share the materialization lock"
+        );
         let lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(lock_dir.join(format!("{repo_hash}-{}.lock", &branch_digest[..16])))
+            .open(&lock_path)
             .expect("lock file");
         gwt_core::operation_deadline::lock_exclusive(&lock).expect("hold materialization lock");
+        let contention = materialization_lock_contention::observe();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let repo_for_thread = repo.clone();
@@ -1514,13 +1507,33 @@ mod tests {
             tx.send((result, working_dir)).expect("send result");
         });
 
-        match rx.recv_timeout(Duration::from_millis(500)) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            other => panic!("resolver ignored the same-branch materialization lock: {other:?}"),
+        // Wait for the causal event "the resolver found our lock contended",
+        // not for an elapsed time (SPEC #4740). A resolver that finishes
+        // first ignored the lock. HANG_GUARD only bounds a wedged test.
+        let guard_expiry = std::time::Instant::now() + gwt_core::deadline_budget::HANG_GUARD;
+        loop {
+            if contention.try_iter().any(|path| path == lock_path) {
+                break;
+            }
+            if let Ok(outcome) = rx.try_recv() {
+                panic!("resolver ignored the same branch materialization lock: {outcome:?}");
+            }
+            assert!(
+                std::time::Instant::now() < guard_expiry,
+                "resolver never reached the materialization lock"
+            );
+            // test-hygiene: allow-short-duration polling interval; ordering comes from the contention event
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            rx.try_recv().is_err(),
+            "resolver must stay blocked while the lock is held"
+        );
         fs2::FileExt::unlock(&lock).expect("release materialization lock");
+        // The resolver's post-lock work (origin fetch, base freshness) is real
+        // git I/O, so completion is bounded only by HANG_GUARD.
         let (result, working_dir) = rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(gwt_core::deadline_budget::HANG_GUARD)
             .expect("resolver completes after lock release");
         result.expect("existing worktree is reusable");
         assert!(working_dir
@@ -1977,6 +1990,88 @@ mod tests {
     }
 
     #[test]
+    fn long_initial_prompt_file_preserves_bytes_and_lives_until_last_owner_drops() {
+        let worktree = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(worktree.path());
+        let prompt = "a\"'\\é".repeat(8_000);
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        config.pending_initial_prompt = Some(prompt.clone());
+        let file = prepare_initial_prompt(&mut config, worktree.path())
+            .unwrap()
+            .expect("long prompt file");
+        let path = file.to_path_buf();
+        assert!(path.starts_with(worktree.path().join(".gwt/tmp")));
+        assert_eq!(fs::read(&path).unwrap(), prompt.as_bytes());
+        assert!(config.args.iter().all(|arg| arg.chars().count() <= 4_096));
+        assert!(config.args.last().unwrap().contains(path.to_str().unwrap()));
+        let runtime_owner = file.clone();
+        drop(file);
+        assert!(path.exists());
+        drop(runtime_owner);
+        assert!(!path.exists(), "session end must remove its prompt file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn long_initial_prompt_roundtrips_through_powershell() {
+        let root = tempdir().unwrap();
+        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(root.path());
+        let worktree = root.path().join("space ' worktree");
+        fs::create_dir(&worktree).unwrap();
+        let prompt = "a\"'\\é".repeat(8_000);
+        assert_eq!(prompt.chars().count(), 40_000);
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex).build();
+        config.pending_initial_prompt = Some(prompt.clone());
+        let file = prepare_initial_prompt(&mut config, &worktree)
+            .unwrap()
+            .unwrap();
+        let probe = worktree.join("read-prompt.ps1");
+        fs::write(
+            &probe,
+            r#"param([string]$Prompt)
+$ErrorActionPreference = 'Stop'
+$path = $Prompt.Split('`')[1]
+[System.IO.File]::WriteAllBytes((Join-Path $PWD 'received.txt'), [System.IO.File]::ReadAllBytes($path))
+"#,
+        )
+        .unwrap();
+        let args = vec![
+            "-NoLogo".into(),
+            "-NoProfile".into(),
+            "-File".into(),
+            probe.to_string_lossy().into_owned(),
+            config.args.last().unwrap().clone(),
+        ];
+        let (command, args) = wrap_windows_host_shell_command(
+            gwt_agent::WindowsShellKind::PowerShell7,
+            "pwsh",
+            &args,
+            &mut HashMap::new(),
+        );
+        assert!(args.iter().all(|arg| arg.chars().count() <= 4_096));
+        let output = gwt_core::process::hidden_command(command)
+            .args(args)
+            .current_dir(&worktree)
+            .output()
+            .expect("run real pwsh wrapper");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(worktree.join("received.txt")).unwrap(),
+            prompt.as_bytes()
+        );
+        drop(file);
+    }
+
+    #[test]
+    fn long_prompt_banner_is_bounded() {
+        let prompt = "a".repeat(40_000);
+        let lines = launch_banner_lines("codex", &[prompt], None);
+        let banner = lines.last().unwrap();
+        assert!(banner.len() < 1_000, "banner length: {}", banner.len());
+        assert!(banner.contains("...(40000 chars)"));
+    }
+
+    #[test]
     fn powershell_agent_wrapper_prints_terminal_launch_banner_and_exit_status() {
         let mut env = HashMap::from([(
             "GWT_PROJECT_ROOT".to_string(),
@@ -2168,7 +2263,7 @@ mod tests {
         )
         .expect("copy real node PE fixture");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = "claude".to_string();
         config.args = vec!["--print".to_string()];
         config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
@@ -2222,7 +2317,7 @@ mod tests {
         let shim = bin.join("npx.cmd");
         fs::write(&shim, "@echo off\r\n").expect("cmd shim");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = "npx".to_string();
         config.args = vec!["a&b".to_string()];
         config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
@@ -2274,7 +2369,7 @@ mod tests {
         )
         .expect("package.json");
 
-        let mut config = sample_versioned_launch_config();
+        let mut config = sample_windows_shell_launch_config();
         config.command = placeholder_stub.display().to_string();
         config.windows_shell = Some(gwt_agent::WindowsShellKind::CommandPrompt);
         config
@@ -2295,344 +2390,9 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn windows_npx_cache_corruption_detection_requires_verified_old_binary_signature() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx_base = temp
-            .path()
-            .join("Local Cache With Spaces")
-            .join("npm-cache")
-            .join("_npx");
-        let npx_root = npx_base.join("97540b0888a2deac");
-        let bin_dir = npx_root
-            .join("node_modules")
-            .join("@anthropic-ai")
-            .join("claude-code")
-            .join("bin");
-        fs::create_dir_all(&bin_dir).expect("create bin dir");
-        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
-            .expect("write old binary marker");
-        let missing_binary = bin_dir.join("claude.exe");
-        let stderr = format!(
-            "'\"{}\"' is not recognized as an internal or external command",
-            missing_binary.display()
-        );
-
-        let candidate = gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base)
-            .expect("corrupt npx cache should be detected");
-
-        assert_eq!(candidate.npx_root, npx_root);
-        assert_eq!(candidate.missing_binary, missing_binary);
-
-        fs::write(&candidate.missing_binary, "restored binary").expect("write expected binary");
-        assert!(
-            gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
-            "existing expected binary must not be treated as repairable",
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_npx_cache_corruption_detection_rejects_paths_outside_local_npx_root() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx_base = temp.path().join("npm-cache").join("_npx");
-        let outside_root = temp.path().join("other-cache").join("_npx").join("abc");
-        let bin_dir = outside_root
-            .join("node_modules")
-            .join("@anthropic-ai")
-            .join("claude-code")
-            .join("bin");
-        fs::create_dir_all(&bin_dir).expect("create bin dir");
-        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
-            .expect("write old binary marker");
-        let stderr = format!(
-            "'\"{}\"' is not recognized as an internal or external command",
-            bin_dir.join("claude.exe").display()
-        );
-
-        assert!(
-            gwt_agent::prepare::detect_windows_npx_cache_corruption(&stderr, &npx_base).is_none(),
-            "paths outside the verified npm _npx root must never be repaired",
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn checked_host_package_runner_fallback_repairs_corrupt_npx_cache_once_before_switching() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx = temp.path().join("node").join("npx.cmd");
-        let npx_base = temp.path().join("npm-cache").join("_npx");
-        let npx_root = npx_base.join("97540b0888a2deac");
-        let bin_dir = npx_root
-            .join("node_modules")
-            .join("@anthropic-ai")
-            .join("claude-code")
-            .join("bin");
-        fs::create_dir_all(&bin_dir).expect("create bin dir");
-        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
-            .expect("write old binary marker");
-        let stderr = format!(
-            "'\"{}\"' is not recognized as an internal or external command",
-            bin_dir.join("claude.exe").display()
-        );
-        let mut config = sample_exact_windows_npx_launch_config();
-        let mut probe_calls = Vec::new();
-        let mut repair_calls = Vec::new();
-
-        let report = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            npx.display().to_string(),
-            Some(npx_base.clone()),
-            |kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((kind, command.to_string(), args.clone()));
-                match probe_calls.len() {
-                    1 => gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr),
-                    2 => gwt_agent::HostRunnerProbeOutcome::success(),
-                    _ => panic!("unexpected extra probe call: {probe_calls:?}"),
-                }
-            },
-            |candidate| {
-                repair_calls.push(candidate.npx_root.clone());
-                fs::remove_dir_all(&candidate.npx_root).expect("remove corrupt npx root");
-                Ok(())
-            },
-        )
-        .expect("corrupt npx cache should be repaired");
-
-        assert!(report.switched_to_fallback);
-        assert!(report.repaired_npx_cache);
-        assert_eq!(repair_calls, vec![npx_root]);
-        assert_eq!(probe_calls.len(), 2);
-        for (kind, command, args) in &probe_calls {
-            assert_eq!(*kind, gwt_agent::HostRunnerProbeKind::Package);
-            assert_eq!(command, &npx.display().to_string());
-            assert_eq!(
-                args,
-                &vec![
-                    "--yes".to_string(),
-                    "@anthropic-ai/claude-code@2.1.210".to_string(),
-                    "--version".to_string(),
-                ]
-            );
-        }
-        assert_eq!(config.command, npx.display().to_string());
-        assert_eq!(
-            config.args,
-            vec![
-                "--yes".to_string(),
-                "@anthropic-ai/claude-code@2.1.210".to_string(),
-                "--print".to_string(),
-            ],
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn checked_host_package_runner_fallback_fails_before_spawn_when_npx_repair_fails() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx = temp.path().join("node").join("npx.cmd");
-        let npx_base = temp.path().join("npm-cache").join("_npx");
-        let npx_root = npx_base.join("97540b0888a2deac");
-        let bin_dir = npx_root
-            .join("node_modules")
-            .join("@anthropic-ai")
-            .join("claude-code")
-            .join("bin");
-        fs::create_dir_all(&bin_dir).expect("create bin dir");
-        fs::write(bin_dir.join("claude.exe.old.1779939935247"), "binary")
-            .expect("write old binary marker");
-        let stderr = format!(
-            "'\"{}\"' is not recognized as an internal or external command",
-            bin_dir.join("claude.exe").display()
-        );
-        let mut config = sample_exact_windows_npx_launch_config();
-        let original = format!("{config:?}");
-        let mut repair_calls = 0;
-
-        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            npx.display().to_string(),
-            Some(npx_base),
-            |kind, command, args, _env, _remove_env, _cwd| {
-                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
-                assert_eq!(command, npx.display().to_string());
-                assert_eq!(args.last().map(String::as_str), Some("--version"));
-                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr(&stderr)
-            },
-            |_candidate| {
-                repair_calls += 1;
-                Err("access denied".to_string())
-            },
-        )
-        .expect_err("repair failure should stop before agent spawn");
-
-        assert_eq!(repair_calls, 1);
-        assert_eq!(format!("{config:?}"), original);
-        assert!(error.contains("Failed to repair npm npx cache"));
-        assert!(error.contains("access denied"));
-        assert!(error.contains(&npx_root.display().to_string()));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn checked_host_package_runner_fallback_does_not_repair_unrelated_npx_failure() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx = temp.path().join("node").join("npx.cmd");
-        let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_exact_windows_npx_launch_config();
-        let original = format!("{config:?}");
-        let mut repair_calls = 0;
-
-        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            npx.display().to_string(),
-            Some(npx_base),
-            |kind, command, args, _env, _remove_env, _cwd| {
-                assert_eq!(kind, gwt_agent::HostRunnerProbeKind::Package);
-                assert_eq!(command, npx.display().to_string());
-                assert_eq!(args.last().map(String::as_str), Some("--version"));
-                gwt_agent::HostRunnerProbeOutcome::failure_with_stderr("registry timeout")
-            },
-            |_candidate| {
-                repair_calls += 1;
-                Ok(())
-            },
-        )
-        .expect_err("unrelated npx failure should fail before agent spawn");
-
-        assert_eq!(repair_calls, 0);
-        assert_eq!(format!("{config:?}"), original);
-        assert!(error.contains("exact npx package probe failed"));
-        assert!(error.contains("registry timeout"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn checked_host_package_runner_fallback_rejects_npx_timeout_without_mutating_launch() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let npx = temp.path().join("node").join("npx.cmd");
-        let npx_base = temp.path().join("npm-cache").join("_npx");
-        let mut config = sample_exact_windows_npx_launch_config();
-        config
-            .env_vars
-            .insert("RUNNER_API_TOKEN".to_string(), "must-not-leak".to_string());
-        // Issue #3941: pin the package caches to this fixture so a version
-        // cached on the developer machine cannot turn the timeout into a launch.
-        config.env_vars.insert(
-            "npm_config_cache".to_string(),
-            temp.path().join("npm-cache").display().to_string(),
-        );
-        config.env_vars.insert(
-            "BUN_INSTALL_CACHE_DIR".to_string(),
-            temp.path().join("bun-cache").display().to_string(),
-        );
-        config.remove_env.push("REMOVE_SENTINEL".to_string());
-        let original = format!("{config:?}");
-        let mut probe_calls = Vec::new();
-        let mut repair_calls = 0;
-
-        let error = gwt_agent::resolve_host_runner_health_checked_with_probe_and_repair(
-            &mut config,
-            npx.display().to_string(),
-            Some(npx_base),
-            |kind, command, args, _env, _remove_env, _cwd| {
-                probe_calls.push((kind, command.to_string(), args.clone()));
-                gwt_agent::HostRunnerProbeOutcome::timeout()
-            },
-            |_candidate| {
-                repair_calls += 1;
-                Ok(())
-            },
-        )
-        .expect_err("npx probe timeout must stop before PTY spawn");
-
-        assert_eq!(repair_calls, 0);
-        assert_eq!(probe_calls.len(), 1);
-        assert_eq!(probe_calls[0].0, gwt_agent::HostRunnerProbeKind::Package);
-        assert_eq!(probe_calls[0].1, npx.display().to_string());
-        assert_eq!(format!("{config:?}"), original);
-        assert!(error.contains("npx"));
-        assert!(error.contains("@anthropic-ai/claude-code@2.1.210"));
-        assert!(error.contains("probe timed out"));
-        assert!(!error.contains("must-not-leak"));
-    }
-
     // Issue #2948 reconciliation — non-Windows host launches execute only the
     // package runner's own bounded `--version` probe. They must never execute
     // `<runner> <pkg> --version`, which can trigger a cold package download.
-
-    #[cfg(not(windows))]
-    fn write_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::write(
-            path,
-            "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf '1.2.3\\n'\n",
-        )
-        .expect("write executable");
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod +x");
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_launch_keeps_bunx_when_runner_version_probe_succeeds() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let bunx = temp.path().join("bunx");
-        write_executable(&bunx);
-        let mut config = sample_versioned_launch_config();
-        config.command = bunx.display().to_string();
-        config.env_vars = HashMap::from([
-            ("PATH".to_string(), temp.path().display().to_string()),
-            (
-                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
-                "1".to_string(),
-            ),
-        ]);
-        config.working_dir = Some(temp.path().to_path_buf());
-
-        let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
-            .expect("runner version probe should keep bunx healthy");
-
-        assert!(!report.switched_to_fallback);
-        assert_eq!(config.command, bunx.display().to_string());
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn host_launch_switches_to_npx_when_bunx_absent_but_npx_present() {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        write_executable(&temp.path().join("npx"));
-        let mut config = sample_versioned_launch_config();
-        config.command = "bunx".to_string(); // bunx is NOT in the temp PATH
-        config.env_vars = HashMap::from([
-            ("PATH".to_string(), temp.path().display().to_string()),
-            (
-                gwt_core::process_console::RUNNER_PROBE_SANDBOX_MARKER.to_string(),
-                "1".to_string(),
-            ),
-        ]);
-        config.working_dir = Some(temp.path().to_path_buf());
-
-        let report = gwt_agent::resolve_host_runner_health_checked(&mut config)
-            .expect("healthy npx version probe should select the fallback");
-
-        assert!(report.switched_to_fallback);
-        // Issue #2981: the fallback now resolves the npx executable on PATH
-        // (mirroring the primary runner) instead of emitting a bare `"npx"`.
-        assert_eq!(
-            config.command,
-            temp.path().join("npx").display().to_string()
-        );
-        assert_eq!(config.args.first().map(String::as_str), Some("--yes"));
-    }
 
     // SPEC-2077 Phase I1 (US-7 / FR-020 / FR-021 / FR-022 / SC-010):
     // launch_runtime mirror of install_launch_gwt_bin_env_with_lookup must

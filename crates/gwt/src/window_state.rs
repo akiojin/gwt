@@ -369,6 +369,33 @@ pub fn apply_provider_quota_block(composed: WindowState, quota_blocked: bool) ->
     }
 }
 
+/// Issue #4584: present a pane whose turn died on a provider API error as
+/// waiting.
+///
+/// The failure leaves no trace in anything else the runtime watches. The
+/// process is still alive, so no exit or status event fires; the hook state
+/// stays on whatever the turn was last doing, because the turn ended without
+/// reaching its `Stop` hook. The pane therefore keeps reporting `running`
+/// while it sits at its prompt — which is how two windows in this Issue's
+/// report burned twenty minutes each before anyone read them.
+///
+/// `Waiting` is reused rather than given a new value: it already means "this
+/// pane needs something from outside before it can continue", which is
+/// exactly true here, and the PM contract already routes it.
+///
+/// Unlike [`apply_provider_quota_block`] this does not override `Stopped` or
+/// `Error`. A quota hold has to, because the account is out for hours whether
+/// or not the process survived. Here the process surviving *is* the observed
+/// shape, and a pane that genuinely ended is better described by its own
+/// terminal state than by a projection guessing at it.
+pub fn apply_provider_api_error_block(composed: WindowState, api_error: bool) -> WindowState {
+    if api_error && !matches!(composed, WindowState::Stopped | WindowState::Error) {
+        WindowState::Waiting
+    } else {
+        composed
+    }
+}
+
 pub fn is_live_agent_hook_state(state: WindowState) -> bool {
     matches!(
         state,
@@ -531,6 +558,23 @@ mod tests {
             .unwrap(),
             "\"idle\""
         );
+    }
+
+    #[test]
+    fn model_response_wait_stays_running_until_turn_returns_to_prompt() {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"] {
+            let hook = runtime_hook_window_state(&runtime_event(None, Some(event)));
+            let state = compose_window_state(WindowState::Running, WindowPreset::Codex, hook);
+            assert_eq!(
+                state,
+                if event == "Stop" {
+                    WindowState::Idle
+                } else {
+                    WindowState::Running
+                },
+                "only a completed turn returning to its prompt is idle: {event}"
+            );
+        }
     }
 
     #[test]
@@ -975,6 +1019,45 @@ Press enter to confirm or esc to cancel
             ),
             WindowState::Error
         );
+    }
+
+    /// Issue #4584 AC-1: the whole defect is that this pane reads `running`.
+    /// A turn that died on a provider API error left an agent sitting at its
+    /// prompt, so every live state it could otherwise compose to is a claim
+    /// that work is still happening.
+    #[test]
+    fn provider_api_error_projects_a_live_pane_as_waiting() {
+        for live in [
+            WindowState::Running,
+            WindowState::Idle,
+            WindowState::Starting,
+            WindowState::Waiting,
+        ] {
+            assert_eq!(
+                super::apply_provider_api_error_block(live, true),
+                WindowState::Waiting,
+                "{live:?} must not keep reading as work in progress"
+            );
+            assert_eq!(
+                super::apply_provider_api_error_block(live, false),
+                live,
+                "{live:?} must be untouched with no error"
+            );
+        }
+    }
+
+    /// Unlike a quota hold, this does not override a terminal state. A pane
+    /// whose process actually ended is reporting something this projection
+    /// does not know better than, and the observed shape of this failure is a
+    /// live pane back at its prompt.
+    #[test]
+    fn provider_api_error_leaves_a_terminal_pane_alone() {
+        for terminal in [WindowState::Stopped, WindowState::Error] {
+            assert_eq!(
+                super::apply_provider_api_error_block(terminal, true),
+                terminal
+            );
+        }
     }
 
     #[test]

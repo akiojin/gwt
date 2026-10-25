@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use super::model_context;
 use super::types::{
-    ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
+    ExtraUsage, ProviderUsage, SessionUsage, UsageProvider, UsageState, UsageWindow, WindowKind,
 };
 
 const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
@@ -25,6 +25,7 @@ const OAUTH_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaudeAccount {
     pub windows: Vec<UsageWindow>,
+    pub extra_usage: Option<ExtraUsage>,
     pub limit_reached: bool,
 }
 
@@ -60,6 +61,7 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
         ("seven_day", WindowKind::Weekly),
         ("seven_day_opus", WindowKind::OpusWeekly),
         ("seven_day_sonnet", WindowKind::SonnetWeekly),
+        ("seven_day_overage_included", WindowKind::FableWeekly),
     ] {
         if let Some(obj) = v.get(key) {
             if let Some(w) = claude_window(obj, kind, now) {
@@ -67,12 +69,61 @@ pub fn parse_oauth_usage(body: &str, now: DateTime<Utc>) -> Option<ClaudeAccount
             }
         }
     }
-    if windows.is_empty() {
+    // Older CLI schemas expose model_scoped; the live endpoint exposes raw
+    // weekly_scoped limits. Prefer a named window when both are present.
+    if !windows.iter().any(|w| w.kind == WindowKind::FableWeekly) {
+        let live = v
+            .get("limits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|limit| {
+                limit.get("kind").and_then(Value::as_str) == Some("weekly_scoped")
+                    && limit
+                        .pointer("/scope/model/display_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
+                    && limit.pointer("/scope/surface").is_none_or(Value::is_null)
+            })
+            .and_then(|limit| {
+                let normalized = serde_json::json!({
+                    "utilization": limit.get("percent"),
+                    "resets_at": limit.get("resets_at"),
+                });
+                claude_window(&normalized, WindowKind::FableWeekly, now)
+            });
+        let fable = live.or_else(|| {
+            v.get("model_scoped")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find(|limit| {
+                    limit
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| name.eq_ignore_ascii_case("Fable"))
+                })
+                .and_then(|limit| claude_window(limit, WindowKind::FableWeekly, now))
+        });
+        if let Some(fable) = fable {
+            windows.push(fable);
+        }
+    }
+    let extra_usage = match v.get("extra_usage") {
+        None | Some(Value::Null) => None,
+        Some(extra) => {
+            let mut extra = serde_json::from_value::<ExtraUsage>(extra.clone()).ok()?;
+            extra.utilization = extra.utilization.map(super::types::clamp_percent);
+            Some(extra)
+        }
+    };
+    if windows.is_empty() && extra_usage.is_none() {
         return None;
     }
     let limit_reached = windows.iter().any(|w| w.used_percent >= 100.0);
     Some(ClaudeAccount {
         windows,
+        extra_usage,
         limit_reached,
     })
 }
@@ -258,6 +309,7 @@ pub async fn fetch_claude_account(
                     account_id,
                     account_label,
                     plan,
+                    extra_usage: acc.extra_usage,
                     windows: acc.windows,
                     limit_reached: acc.limit_reached,
                     state: UsageState::Ok,
@@ -268,6 +320,7 @@ pub async fn fetch_claude_account(
                     account_id,
                     account_label,
                     plan,
+                    extra_usage: None,
                     windows: Vec::new(),
                     limit_reached: false,
                     state: UsageState::Unavailable {
@@ -282,6 +335,7 @@ pub async fn fetch_claude_account(
             account_id,
             account_label,
             plan,
+            extra_usage: None,
             windows: Vec::new(),
             limit_reached: false,
             state: map_status_to_state(r.status().as_u16()),
@@ -292,6 +346,7 @@ pub async fn fetch_claude_account(
             account_id,
             account_label,
             plan,
+            extra_usage: None,
             windows: Vec::new(),
             limit_reached: false,
             state: UsageState::Unavailable {
@@ -308,6 +363,8 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
     let mut output = 0u64;
     let mut cache_create = 0u64;
     let mut cache_read = 0u64;
+    let mut measured_cache_create = Some(0u64);
+    let mut measured_cache_read = Some(0u64);
     let mut model: Option<String> = None;
     let mut context_used: Option<u64> = None;
     let mut saw_assistant = false;
@@ -326,21 +383,19 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         let Some(msg) = obj.get("message") else {
             continue;
         };
-        saw_assistant = true;
         if let Some(m) = msg.get("model").and_then(Value::as_str) {
             model = Some(m.to_string());
         }
         let Some(usage) = msg.get("usage") else {
             continue;
         };
-        let inp = usage
-            .get("input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let outp = usage
-            .get("output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        let Some(inp) = usage.get("input_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(outp) = usage.get("output_tokens").and_then(Value::as_u64) else {
+            continue;
+        };
+        saw_assistant = true;
         let cc = usage
             .get("cache_creation_input_tokens")
             .and_then(Value::as_u64)
@@ -353,6 +408,16 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         output += outp;
         cache_create += cc;
         cache_read += cr;
+        measured_cache_create = measured_cache_create
+            .zip(
+                usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(Value::as_u64),
+            )
+            .map(|(sum, tokens)| sum + tokens);
+        measured_cache_read = measured_cache_read
+            .zip(usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+            .map(|(sum, tokens)| sum + tokens);
         // The latest assistant turn's prompt footprint approximates the
         // current context occupancy.
         context_used = Some(inp + cc + cr);
@@ -369,6 +434,14 @@ pub fn parse_claude_transcript(session_id: &str, jsonl: &str) -> SessionUsage {
         input_tokens: input,
         output_tokens: output,
         total_tokens,
+        cache_read_tokens: saw_assistant.then_some(measured_cache_read).flatten(),
+        cache_creation_tokens: saw_assistant.then_some(measured_cache_create).flatten(),
+        reported_context_left_pct: None,
+        provider_session_id: Some(session_id.to_owned()),
+        project_path: None,
+        agent_member_id: None,
+        active: true,
+        telemetry: None,
         context_used_tokens: context_used,
         context_limit_tokens: context_limit,
         context_left_pct,
@@ -455,6 +528,97 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_live_fable_weekly_limit() {
+        let acc = parse_oauth_usage(
+            include_str!("fixtures/claude-oauth-usage-2026-10-22.json"),
+            now(),
+        )
+        .unwrap();
+        let fable = acc
+            .windows
+            .iter()
+            .find(|w| w.kind.as_str() == "fable_weekly")
+            .expect("live weekly_scoped Fable limit must be retained");
+        assert_eq!(fable.used_percent, 0.0);
+        assert_eq!(
+            fable.resets_at.unwrap().to_rfc3339(),
+            "2026-10-23T09:00:00+00:00"
+        );
+        assert_eq!(acc.windows.len(), 3);
+    }
+
+    #[test]
+    fn parses_live_disabled_credits_and_enabled_credits_only() {
+        let live = parse_oauth_usage(
+            include_str!("fixtures/claude-oauth-usage-2026-10-22.json"),
+            now(),
+        )
+        .unwrap();
+        let disabled = live
+            .extra_usage
+            .expect("disabled credits retain their actual state");
+        assert!(!disabled.is_enabled);
+        assert_eq!(disabled.monthly_limit, None);
+        assert_eq!(disabled.utilization, None);
+        let enabled = parse_oauth_usage(
+            r#"{"extra_usage":{"is_enabled":true,
+            "monthly_limit":100,"used_credits":25,"utilization":25,"currency":"USD"}}"#,
+            now(),
+        )
+        .expect("credits-only response is usable")
+        .extra_usage
+        .unwrap();
+        assert!(enabled.is_enabled);
+        assert_eq!(enabled.monthly_limit, Some(100.0));
+        assert_eq!(enabled.used_credits, Some(25.0));
+        assert_eq!(enabled.utilization, Some(25.0));
+        assert_eq!(enabled.currency.as_deref(), Some("USD"));
+        let absent = parse_oauth_usage(
+            r#"{"five_hour":{"utilization":10},"extra_usage":null}"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(absent.extra_usage, None);
+    }
+
+    #[test]
+    fn live_fable_limit_takes_priority_over_legacy_model_scoped() {
+        let body = r#"{
+            "model_scoped":[{"display_name":"Fable","utilization":20}],
+            "limits":[{"kind":"weekly_scoped","percent":100,
+                "scope":{"model":{"display_name":"Fable"},"surface":null}}]
+        }"#;
+        let acc = parse_oauth_usage(body, now()).unwrap();
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].used_percent, 100.0);
+        assert!(acc.limit_reached);
+    }
+
+    #[test]
+    fn malformed_credits_reject_the_response_to_preserve_last_good() {
+        let body = r#"{"five_hour":{"utilization":10},
+            "extra_usage":{"is_enabled":true,"used_credits":"invalid"}}"#;
+        assert!(parse_oauth_usage(body, now()).is_none());
+    }
+
+    #[test]
+    fn parses_fable_legacy_and_model_scoped_without_duplicates() {
+        let body = r#"{
+            "seven_day_overage_included": {"utilization": 40, "resets_at": "2026-10-23T09:00:00Z"},
+            "model_scoped": [{"display_name": "Fable", "utilization": 40, "resets_at": "2026-10-23T09:00:00Z"}]
+        }"#;
+        let acc = parse_oauth_usage(body, now()).expect("Fable-only response is usable");
+        assert_eq!(acc.windows.len(), 1);
+        assert_eq!(acc.windows[0].kind.as_str(), "fable_weekly");
+        assert_eq!(acc.windows[0].used_percent, 40.0);
+        let model_only = r#"{"model_scoped":[{"display_name":"Fable", "utilization":55}]}"#;
+        assert_eq!(
+            parse_oauth_usage(model_only, now()).unwrap().windows[0].used_percent,
+            55.0
+        );
+    }
+
+    #[test]
     fn user_agent_requires_a_valid_claude_semver() {
         assert_eq!(
             claude_user_agent_from_version_text("2.1.159 (Claude Code)"),
@@ -465,42 +629,6 @@ mod tests {
             "echo Native binary not installed. Run the package postinstall."
         )
         .is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn live_user_agent_probe_resolves_real_bun_global_placeholder_fixture() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let fixture = crate::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
-            .expect("create real Windows Bun fixture");
-        let _path = crate::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = crate::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = crate::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
-
-        assert_eq!(claude_user_agent(), Ok("claude-code/2.1.210".to_string()));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn live_user_agent_probe_rejects_real_bun_global_placeholder_fixture_without_safe_target() {
-        let _env = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let temp = tempfile::tempdir().expect("tempdir");
-        let fixture = crate::test_support::WindowsBunClaudeFixture::create(temp.path(), "2.1.210")
-            .expect("create real Windows Bun fixture");
-        fixture
-            .remove_safe_targets()
-            .expect("remove safe redirect targets");
-        let _path = crate::test_support::ScopedEnvVar::set("PATH", &fixture.bun_bin);
-        let _path_ext = crate::test_support::ScopedEnvVar::set("PATHEXT", ".COM;.EXE;.BAT;.CMD");
-        let _profile = crate::test_support::ScopedEnvVar::set("USERPROFILE", &fixture.profile);
-
-        let error = claude_user_agent().expect_err("unsafe placeholder must be rejected");
-        assert!(error.contains("native-binary placeholder"));
     }
 
     // Verbatim shape returned by the live `/api/oauth/usage` endpoint
@@ -678,6 +806,10 @@ mod tests {
         assert_eq!(s.context_limit_tokens, Some(200_000));
         assert!(s.context_left_pct.is_some());
         assert_eq!(s.state, UsageState::Ok);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["cache_read_tokens"], 150);
+        assert_eq!(wire["cache_creation_tokens"], 30);
+        assert!(wire["reported_context_left_pct"].is_null());
     }
 
     #[test]

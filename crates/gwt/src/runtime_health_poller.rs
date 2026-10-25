@@ -6,7 +6,9 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use gwt::protocol::{RuntimeHealthProcessView, RuntimeHealthQueueView, RuntimeHealthSnapshotView};
 use gwt::BackendEvent;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{
+    CpuRefreshKind, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind,
+};
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::embedded_server::{ClientHub, ClientHubHealthStats};
@@ -112,6 +114,7 @@ impl PollBudget {
 
 struct Poller {
     system: System,
+    logical_cpu_count: usize,
     root_pid: u32,
     sample_count: u64,
     last_dropped_lossy: u64,
@@ -123,8 +126,12 @@ struct Poller {
 
 impl Poller {
     fn new(pty_writers: PtyWriterRegistry) -> Self {
+        let system =
+            System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));
+        let logical_cpu_count = system.cpus().len().max(1);
         Self {
-            system: System::new(),
+            system,
+            logical_cpu_count,
             root_pid: std::process::id(),
             sample_count: 0,
             last_dropped_lossy: 0,
@@ -148,10 +155,11 @@ impl Poller {
             .with_exe(UpdateKind::OnlyIfNotSet)
             .with_cwd(UpdateKind::OnlyIfNotSet)
             .without_tasks();
-        match scope {
+        let observed = match scope {
             RefreshScope::FullReconcile => {
                 self.system
                     .refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
+                observe_processes(self.system.processes().values())
             }
             RefreshScope::KnownPids => {
                 // FR-396: normal ticks only refresh the runtime PIDs selected
@@ -167,16 +175,17 @@ impl Poller {
                     true,
                     refresh_kind,
                 );
+                observe_processes(pids.iter().filter_map(|pid| self.system.process(*pid)))
             }
-        }
-        let observed = observe_processes(&self.system);
+        };
         let parent_by_pid = parent_by_pid(&observed);
         let direct_focus_windows = focus_window_ids_by_pty_pid(&self.pty_writers);
         let mut selected = select_runtime_processes(self.root_pid, &observed);
-        let cpu_percent = selected
+        let raw_cpu_percent = selected
             .iter()
             .map(|process| process.cpu_percent)
             .reduce(|acc, value| acc + value);
+        let cpu_percent = normalize_runtime_cpu_percent(raw_cpu_percent, self.logical_cpu_count);
         let memory_bytes = selected
             .iter()
             .map(|process| process.memory_bytes)
@@ -247,6 +256,18 @@ impl Poller {
             classified.as_wire().to_string()
         }
     }
+}
+
+fn normalize_runtime_cpu_percent(
+    raw_cpu_percent: Option<f32>,
+    logical_cpu_count: usize,
+) -> Option<f32> {
+    raw_cpu_percent.and_then(|raw| {
+        raw.is_finite().then(|| {
+            let capacity = logical_cpu_count.max(1) as f32;
+            (raw / capacity).clamp(0.0, 100.0)
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -400,29 +421,38 @@ impl ObservedProcess {
     }
 }
 
-fn observe_processes(system: &System) -> Vec<ObservedProcess> {
-    system
-        .processes()
-        .values()
-        .map(|process| ObservedProcess {
-            pid: process.pid().as_u32(),
-            parent_pid: process.parent().map(sysinfo::Pid::as_u32),
-            name: process.name().to_string_lossy().into_owned(),
-            command_line: process
-                .cmd()
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join(" "),
-            executable_path: process
-                .exe()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            current_dir: process
-                .cwd()
-                .map(|path| path.to_string_lossy().into_owned()),
-            cpu_percent: process.cpu_usage(),
-            memory_bytes: process.memory(),
+#[cfg(test)]
+thread_local! {
+    static OBSERVED_PROCESS_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn observe_processes<'a>(
+    processes: impl Iterator<Item = &'a sysinfo::Process>,
+) -> Vec<ObservedProcess> {
+    processes
+        .map(|process| {
+            #[cfg(test)]
+            OBSERVED_PROCESS_COUNT.set(OBSERVED_PROCESS_COUNT.get() + 1);
+            ObservedProcess {
+                pid: process.pid().as_u32(),
+                parent_pid: process.parent().map(sysinfo::Pid::as_u32),
+                name: process.name().to_string_lossy().into_owned(),
+                command_line: process
+                    .cmd()
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                executable_path: process
+                    .exe()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                current_dir: process
+                    .cwd()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                cpu_percent: process.cpu_usage(),
+                memory_bytes: process.memory(),
+            }
         })
         .collect()
 }
@@ -480,7 +510,12 @@ fn focus_window_ids_by_pty_pid(pty_writers: &PtyWriterRegistry) -> HashMap<u32, 
     };
     guard
         .iter()
-        .filter_map(|(window_id, pty)| pty.process_id().map(|pid| (pid, window_id.clone())))
+        .filter_map(|(window_id, entry)| {
+            entry
+                .handle
+                .process_id()
+                .map(|pid| (pid, window_id.clone()))
+        })
         .collect()
 }
 
@@ -779,7 +814,7 @@ mod tests {
 
     #[test]
     fn detail_includes_all_selected_processes_and_focus_rows() {
-        let mut processes = vec![ObservedProcess::new(10, None, "gwt", 1.0, 100)];
+        let mut processes = vec![ObservedProcess::new(10, None, "gwt", 118.4, 100)];
         processes.extend((0..24).map(|index| {
             ObservedProcess::new(
                 200 + index as u32,
@@ -816,6 +851,14 @@ mod tests {
             .expect("expected low-CPU docker row to remain visible");
         assert_eq!(docker.role, "docker");
         assert_eq!(
+            detail
+                .iter()
+                .find(|process| process.pid == 10)
+                .and_then(|process| process.cpu_percent),
+            Some(118.4),
+            "process detail keeps the 1 logical core = 100% unit without aggregate clamping"
+        );
+        assert_eq!(
             docker.focus_window_id.as_deref(),
             Some("docker-agent-window")
         );
@@ -840,6 +883,36 @@ mod tests {
             dropped_lossy_delta: 0,
         };
         assert_eq!(tracker.classify(cool_sample), RuntimeHealthState::Ok);
+    }
+
+    #[test]
+    fn normalizes_runtime_cpu_total_by_logical_cpu_count() {
+        assert_eq!(normalize_runtime_cpu_percent(Some(400.0), 8), Some(50.0));
+        assert_eq!(normalize_runtime_cpu_percent(Some(900.0), 8), Some(100.0));
+        assert_eq!(normalize_runtime_cpu_percent(None, 8), None);
+        assert_eq!(normalize_runtime_cpu_percent(Some(120.0), 0), Some(100.0));
+        assert_eq!(normalize_runtime_cpu_percent(Some(-10.0), 8), Some(0.0));
+        assert_eq!(normalize_runtime_cpu_percent(Some(f32::NAN), 8), None);
+        assert_eq!(normalize_runtime_cpu_percent(Some(f32::INFINITY), 8), None);
+        assert_eq!(
+            normalize_runtime_cpu_percent(Some(f32::NEG_INFINITY), 8),
+            None
+        );
+    }
+
+    #[test]
+    fn sustained_severity_uses_normalized_runtime_cpu_total() {
+        let mut tracker = SeverityTracker::default();
+        let normalized = normalize_runtime_cpu_percent(Some(400.0), 8);
+        let half_host_sample = SeverityInput {
+            cpu_percent: normalized,
+            memory_bytes: 128 * 1024 * 1024,
+            dropped_lossy_delta: 0,
+        };
+
+        assert_eq!(tracker.classify(half_host_sample), RuntimeHealthState::Ok);
+        assert_eq!(tracker.classify(half_host_sample), RuntimeHealthState::Ok);
+        assert_eq!(tracker.classify(half_host_sample), RuntimeHealthState::Warn);
     }
 
     #[test]
@@ -914,9 +987,14 @@ mod tests {
     #[test]
     fn poll_once_refreshes_full_and_known_pid_scopes() {
         // FR-396: the full reconciliation discovers the runtime PID set; the
-        // known-PID refresh reuses it without a full OS scan.
+        // known-PID refresh reuses it without projecting unrelated processes.
         let clients = crate::embedded_server::ClientHub::default();
         let mut poller = Poller::new(crate::PtyWriterRegistry::default());
+        assert_eq!(
+            poller.logical_cpu_count,
+            poller.system.cpus().len().max(1),
+            "the cached normalization capacity must come from the initialized logical CPU list"
+        );
         let full = poller.poll_once(Utc::now(), &clients, RefreshScope::FullReconcile);
         assert!(
             full.process_count >= 1,
@@ -930,6 +1008,15 @@ mod tests {
         assert!(
             known.process_count >= 1,
             "known-PID refresh keeps reporting the runtime set: {known:?}"
+        );
+        poller.known_pids.clear();
+        OBSERVED_PROCESS_COUNT.set(0);
+        let root_only = poller.poll_once(Utc::now(), &clients, RefreshScope::KnownPids);
+        assert_eq!(root_only.process_count, 1);
+        assert_eq!(
+            OBSERVED_PROCESS_COUNT.get(),
+            1,
+            "known-PID ticks must only project the refreshed runtime PIDs and root"
         );
     }
 }

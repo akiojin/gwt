@@ -85,7 +85,11 @@
 #   GWT_APT_ACQUIRE_RETRIES  apt's own per-item retries (default: 3)
 #   GWT_APT_CONF_DIR         apt drop-in directory (default: /etc/apt/apt.conf.d)
 #   GWT_APT_CACHE_DIR        .deb archive dir reused across CI runs
+#   GWT_APT_OFFLINE_CACHE    1 enables complete GTK cache replay (exact runner image key only)
+#   GWT_APT_ETC_DIR          apt source root (default: /etc/apt; test override)
 #   GWT_APT_GET              apt-get binary (default: apt-get)
+#   GWT_APT_DPKG             dpkg binary (default: dpkg)
+#   GWT_APT_DPKG_QUERY       dpkg-query binary (default: dpkg-query)
 #   GWT_APT_LOCK_PROBE       test-only command; exit 0 means the lock is held
 
 set -euo pipefail
@@ -100,7 +104,10 @@ ACQUIRE_TIMEOUT="${GWT_APT_ACQUIRE_TIMEOUT:-30}"
 ACQUIRE_RETRIES="${GWT_APT_ACQUIRE_RETRIES:-3}"
 APT_CONF_DIR="${GWT_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
 CACHE_DIR="${GWT_APT_CACHE_DIR:-}"
+OFFLINE_CACHE="${GWT_APT_OFFLINE_CACHE:-0}"
 APT_GET="${GWT_APT_GET:-apt-get}"
+DPKG="${GWT_APT_DPKG:-dpkg}"
+DPKG_QUERY="${GWT_APT_DPKG_QUERY:-dpkg-query}"
 
 # The tray + WebView build dependencies every Linux job installs. This is the
 # one home for the set: the workflows key their actions/cache entry on a hash
@@ -118,6 +125,7 @@ GTK_PACKAGES=(
 # in the reason line the job summary quotes.
 DEADLINE_EXHAUSTED=199
 LOCK_CONTENTION=198
+APT_UNAVAILABLE=197
 
 LAST_REASON="unknown"
 LAST_ATTEMPT_BUDGET="${ATTEMPT_TIMEOUT}"
@@ -215,6 +223,56 @@ CONF
   log "apt-hardening=applied conf=${conf} acquire_timeout=${ACQUIRE_TIMEOUT}s acquire_retries=${ACQUIRE_RETRIES}"
 }
 
+# GitHub's runner includes unrelated Microsoft feeds that can return 403 or
+# expired signatures. Keep Ubuntu entries, including mixed .list files and
+# deb822 files. Local installs do not modify the user's source configuration.
+# Issue #6080: the runner's Azure HTTP mirror can trickle data without hitting
+# the per-connection timeout, then lose all three install attempts. Cold caches
+# must bypass that route too: use Ubuntu's direct HTTPS archives in CI, keeping
+# the suites, components and signing keys from the runner image.
+sanitize_ci_sources() {
+  # An injected apt binary is a test fixture and must not edit host sources.
+  [[ ( "${GITHUB_ACTIONS:-}" == "true" && -z "${GWT_APT_GET:-}" ) || -n "${GWT_APT_ETC_DIR:-}" ]] || return 0
+  local apt_dir="${GWT_APT_ETC_DIR:-/etc/apt}"
+  local source filtered
+  for source in "${apt_dir}/sources.list" "${apt_dir}/sources.list.d/"*.list "${apt_dir}/sources.list.d/"*.sources; do
+    [[ -f "${source}" ]] || continue
+    filtered="$(mktemp)"
+    if ! grep -qi 'packages\.microsoft\.com' "${source}"; then
+      cat "${source}" >"${filtered}"
+    elif [[ "${source}" == *.sources ]]; then
+      awk 'BEGIN { RS=""; ORS="\n\n" } tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
+    else
+      awk 'tolower($0) !~ /packages[.]microsoft[.]com/' "${source}" >"${filtered}"
+    fi
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+      sed -i \
+        -e 's|mirror+file:/etc/apt/apt-mirrors-security.txt|https://security.ubuntu.com/ubuntu/|g' \
+        -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu/|g' \
+        -e 's|http[s]\?://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security\.ubuntu\.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        "${filtered}"
+    fi
+    if cmp -s "${source}" "${filtered}"; then
+      rm -f "${filtered}"
+      continue
+    fi
+    if grep -qi 'packages\.microsoft\.com' "${source}"; then
+      log "source-filter=removed-microsoft source=${source}"
+    fi
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && grep -q 'https://.*ubuntu.com/ubuntu' "${filtered}"; then
+      log "source-mirror=ubuntu-https source=${source}"
+    fi
+    if [[ -w "${source}" ]]; then
+      cat "${filtered}" >"${source}"
+    else
+      run_as_root tee "${source}" <"${filtered}" >/dev/null
+    fi
+    rm -f "${filtered}"
+  done
+}
+
 lock_is_held() {
   if [[ -n "${GWT_APT_LOCK_PROBE:-}" ]]; then
     held_lock_path="probe"
@@ -290,6 +348,9 @@ apt_options() {
   if [[ -n "${CACHE_DIR}" ]]; then
     APT_OPTIONS+=(-o "Dir::Cache::archives=${CACHE_DIR}")
   fi
+  if [[ "${OFFLINE_CACHE}" == 1 ]]; then
+    APT_OPTIONS+=(-o APT::Keep-Downloaded-Packages=true)
+  fi
 }
 
 count_archives() {
@@ -328,6 +389,42 @@ publish_cache_dir() {
   log "cache=${CACHE_DIR} cache_state=saved archives=${saved} fetched=$((saved - CACHE_ARCHIVES))"
 }
 
+# A complete cache is valid only for the exact runner image and package set.
+# CI keys include ImageOS/ImageVersion/arch and this script, with no fallback.
+# Never restore a filesystem tree or dpkg database: apt still configures every
+# package normally, but --no-download refuses any missing dependency.
+prepare_offline_cache() {
+  [[ "${OFFLINE_CACHE}" == 1 && "${MODE}" == gtk-deps ]] || return 0
+  if [[ -z "${CACHE_DIR}" ]]; then
+    log "offline-cache=refused reason=GWT_APT_CACHE_DIR is required"
+    return 1
+  fi
+  OFFLINE_ARCHIVES=()
+  [[ -f "${CACHE_DIR}/.gwt-complete" ]] || return 0
+  if ! (cd "${CACHE_DIR}" && sha256sum --check .gwt-complete) ||
+    [[ "$(cat "${CACHE_DIR}/.gwt-packages")" != "${PACKAGES[*]}" ]]; then
+    log "offline-cache=invalid reason=incomplete or changed contents; rebuilding online"
+    rm -f "${CACHE_DIR}/.gwt-complete"
+    return 0
+  fi
+  local checksum archive
+  while read -r checksum archive; do
+    [[ "${archive}" == *.deb ]] && OFFLINE_ARCHIVES+=("${CACHE_DIR}/${archive}")
+  done <"${CACHE_DIR}/.gwt-complete"
+  CACHE_STATE=offline
+  log "cache=${CACHE_DIR} cache_state=offline archives=${#OFFLINE_ARCHIVES[@]}"
+}
+
+save_complete_cache() {
+  [[ "${OFFLINE_CACHE}" == 1 && "${MODE}" == gtk-deps && "${CACHE_STATE}" != offline ]] || return 0
+  (
+    cd "${CACHE_DIR}"
+    printf '%s\n' "${PACKAGES[*]}" >.gwt-packages
+    shopt -s nullglob
+    sha256sum .gwt-packages *.deb >.gwt-complete
+  )
+}
+
 # Issue #4268 AC-1: turns the captured apt output into the one line a reviewer
 # needs. `timed out after 240s` says nothing about which mirror, which package
 # or whether anything was downloaded at all; these fields do. `stalled_after`
@@ -354,7 +451,18 @@ summarize_attempt() {
 
 run_apt_get() {
   LAST_STEP="$1"
+  LAST_ELAPSED=0
+  : >"${ATTEMPT_LOG}"
   wait_for_apt_lock || return "${LOCK_CONTENTION}"
+  if ! command -v "${APT_GET}" >/dev/null 2>&1; then
+    log "apt-start=refused reason=command unavailable: ${APT_GET}"
+    return "${APT_UNAVAILABLE}"
+  fi
+  # Preserve apt's resumable partial downloads, but recreate the directory
+  # before every call (including recovery), not only before attempt one.
+  if [[ -n "${CACHE_DIR}" ]]; then
+    mkdir -p "${CACHE_DIR}/partial" || return "${APT_UNAVAILABLE}"
+  fi
   # The last attempt before the total deadline is truncated to whatever is
   # left, so the reason line has to quote the budget actually applied rather
   # than the configured one.
@@ -367,10 +475,54 @@ run_apt_get() {
   # the kill with everything apt managed to print already written.
   local started="${SECONDS}"
   local status=0
-  : >"${ATTEMPT_LOG}"
-  run_with_timeout "${LAST_ATTEMPT_BUDGET}" "${APT_GET}" "${APT_OPTIONS[@]}" "$@" 2>&1 |
+  # State-refusal diagnostics below must be independent of the runner locale.
+  LC_ALL=C run_with_timeout "${LAST_ATTEMPT_BUDGET}" "${APT_GET}" "${APT_OPTIONS[@]}" "$@" 2>&1 |
     tee "${ATTEMPT_LOG}" || status=$?
   LAST_ELAPSED=$((SECONDS - started))
+  log "step=${LAST_STEP} apt_exit=${status}"
+  return "${status}"
+}
+
+# #4883: timeout can interrupt dpkg after downloading, while unpacking. The
+# kernel releases its locks when the process exits; deleting lock files or
+# partial downloads cannot repair the package database journal.
+recover_interrupted_install() {
+  LAST_STEP="dpkg-recovery"
+  LAST_ELAPSED=0
+  wait_for_apt_lock || return "${LOCK_CONTENTION}"
+  LAST_ATTEMPT_BUDGET="$(smaller "${ATTEMPT_TIMEOUT}" "$(remaining_seconds)")"
+  log "recovery=configure cmd=${DPKG} --configure -a timeout=${LAST_ATTEMPT_BUDGET}s"
+  local started="${SECONDS}" status=0
+  run_with_timeout "${LAST_ATTEMPT_BUDGET}" "${DPKG}" --configure -a 2>&1 |
+    tee "${ATTEMPT_LOG}" || status=$?
+  LAST_ELAPSED=$((SECONDS - started))
+  ((status == 0)) && return 0
+  # A timeout or fatal dpkg error must not turn into a fresh apt transaction.
+  ((status == 1)) || return "${status}"
+
+  # configure cannot finish dependencies whose unpack was interrupted. Ask
+  # dpkg which packages require reinstallation; never guess from stderr or
+  # reinstall every cached archive. Pin the recorded version and prohibit
+  # removals. With no unambiguous target, leave the error visible and stop.
+  local snapshot state package version
+  local reinstall=()
+  LAST_STEP="dpkg-query"
+  LAST_ATTEMPT_BUDGET="$(smaller "${ATTEMPT_TIMEOUT}" "$(remaining_seconds)")"
+  snapshot="$(run_with_timeout "${LAST_ATTEMPT_BUDGET}" "${DPKG_QUERY}" -W \
+    '--showformat=${db:Status-Abbrev}\t${binary:Package}\t${Version}\n')" || return $?
+  while IFS=$'\t' read -r state package version; do
+    if [[ "${state}" == i?R && -n "${package}" && -n "${version}" ]]; then
+      reinstall+=("${package}=${version}")
+    fi
+  done <<<"${snapshot}"
+  if ((${#reinstall[@]} == 0)); then
+    log "recovery=failed reason=no install-selected reinstreq packages; refusing an untargeted repair"
+    return 1
+  fi
+  log "recovery=reinstall packages=${reinstall[*]} removals=forbidden"
+  status=0
+  run_apt_get install --fix-broken --no-remove --reinstall -y "${reinstall[@]}" || status=$?
+  LAST_STEP="dpkg-reinstall"
   return "${status}"
 }
 
@@ -380,6 +532,17 @@ run_apt_get() {
 run_once() {
   local status=0
   if [[ "${MODE}" == "gtk-deps" ]]; then
+    if [[ "${CACHE_STATE}" == offline ]]; then
+      run_apt_get install -y --no-download --no-remove "${OFFLINE_ARCHIVES[@]}" "${PACKAGES[@]}" || status=$?
+      if ((status != 0)); then
+        # Background runner upgrades can change the package baseline. Let the
+        # existing retry/recovery loop rebuild instead of replaying it again.
+        CACHE_STATE=warm
+        rm -f "${CACHE_DIR}/.gwt-complete"
+        log "offline-cache=incompatible status=${status}; next attempt rebuilds online"
+      fi
+      return "${status}"
+    fi
     run_apt_get update || return $?
     run_apt_get install -y "${PACKAGES[@]}" || return $?
     return 0
@@ -396,6 +559,8 @@ describe_failure() {
     printf 'total deadline of %ss exhausted' "${TOTAL_DEADLINE}"
   elif ((status == LOCK_CONTENTION)); then
     printf 'dpkg lock contention'
+  elif ((status == APT_UNAVAILABLE)); then
+    printf 'apt could not start; inspect preparation diagnostics'
   else
     printf 'apt-get exited %s' "${status}"
   fi
@@ -408,20 +573,30 @@ run_with_retries() {
     log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} elapsed=${SECONDS}s deadline=${TOTAL_DEADLINE}s"
     status=0
     run_once || status=$?
+    # A refused start is not an installation attempt. Use explicit launch
+    # failures and apt's state diagnostics, never elapsed time: a warm cache
+    # can legitimately finish in zero seconds. Stop on a state refusal rather
+    # than retrying a permanent error forever without spending the budget.
+    if ((status == LOCK_CONTENTION || status == APT_UNAVAILABLE || status == DEADLINE_EXHAUSTED || status == 126 || status == 127)) ||
+      { ((status == 100)) && grep -aqE '^E: (dpkg was interrupted|Could not get lock |Could not open lock file |Unable to acquire the dpkg frontend lock|Unable to lock directory )' "${ATTEMPT_LOG}"; }; then
+      LAST_REASON="apt state refusal (attempt not consumed): $(describe_failure "${status}")"
+      log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=refused exit=${status} reason=${LAST_REASON}"
+      summarize_attempt
+      break
+    fi
     ATTEMPTS_USED="${attempt}"
     if ((status == 0)); then
-      log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=ok"
+      log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=ok exit=0"
+      summarize_attempt
+      log "diagnosis attempt=${attempt}/${ATTEMPTS} ${LAST_DIAGNOSIS}"
       return 0
     fi
 
     LAST_REASON="$(describe_failure "${status}")"
-    log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=failed reason=${LAST_REASON}"
+    log "phase=${MODE} attempt=${attempt}/${ATTEMPTS} status=failed exit=${status} reason=${LAST_REASON}"
     summarize_attempt
     log "diagnosis attempt=${attempt}/${ATTEMPTS} ${LAST_DIAGNOSIS}"
 
-    if ((status == DEADLINE_EXHAUSTED)); then
-      break
-    fi
     attempt=$((attempt + 1))
     if ((attempt <= ATTEMPTS)); then
       if (($(remaining_seconds) <= RETRY_DELAY)); then
@@ -430,6 +605,15 @@ run_with_retries() {
       fi
       log "phase=${MODE} status=retrying in ${RETRY_DELAY}s"
       sleep "${RETRY_DELAY}"
+      if ((status == 124 || status == 137)) && [[ "${LAST_STEP}" == "install" ]]; then
+        local recovery_status=0
+        recover_interrupted_install || recovery_status=$?
+        if ((recovery_status != 0)); then
+          LAST_REASON="interrupted dpkg recovery failed at ${LAST_STEP} (exit ${recovery_status})"
+          summarize_attempt
+          break
+        fi
+      fi
     fi
   done
   return 1
@@ -469,6 +653,7 @@ fi
 # Exposed on its own so a caller that spawns apt-get itself can still get the
 # acquire bounds without routing the install through this script.
 if [[ "${MODE}" == "harden" ]]; then
+  sanitize_ci_sources
   harden_apt
   exit 0
 fi
@@ -487,10 +672,13 @@ fi
 
 ATTEMPT_LOG="$(mktemp "${TMPDIR:-/tmp}/ci-apt-attempt.XXXXXX")"
 apt_options
+sanitize_ci_sources
 harden_apt
 prepare_cache_dir
+prepare_offline_cache
 
 if run_with_retries; then
+  save_complete_cache
   publish_cache_dir
   exit 0
 fi

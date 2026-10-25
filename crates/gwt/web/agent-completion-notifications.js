@@ -1,6 +1,3 @@
-const COMPLETION_STATES = new Set(["idle"]);
-const STOP_STATES = new Set(["stopped", "exited"]);
-
 function normalizeState(value) {
   return String(value || "").toLowerCase();
 }
@@ -27,31 +24,23 @@ function projectLabel(projectTab) {
   return "Project";
 }
 
-function defaultAttentionAway(documentRef) {
-  const hidden = documentRef?.visibilityState === "hidden";
-  const focused =
-    typeof documentRef?.hasFocus === "function" ? documentRef.hasFocus() : false;
-  return hidden || !focused;
-}
-
 function defaultDesktopPermission(windowRef) {
-  const notificationApi =
-    windowRef?.Notification ||
-    (typeof globalThis !== "undefined" ? globalThis.Notification : null);
-  return notificationApi?.permission || "unsupported";
+  return windowRef?.Notification?.permission || "unsupported";
 }
 
-function defaultDesktopNotification(windowRef, notice) {
-  const notificationApi =
-    windowRef?.Notification ||
-    (typeof globalThis !== "undefined" ? globalThis.Notification : null);
-  if (!notificationApi) {
-    return;
-  }
-  new notificationApi(notice.title, {
+function defaultDesktopNotification(windowRef, notice, onActivate) {
+  const notification = new windowRef.Notification(notice.title, {
     body: notice.body,
-    tag: `gwt-agent-${notice.windowId}`,
+    tag: `gwt-notification-${notice.transition_id}`,
   });
+  notification.onclick = () => {
+    try {
+      windowRef.focus?.();
+      onActivate(notice);
+    } finally {
+      notification.close();
+    }
+  };
 }
 
 function appendStatusDetail(body, detail) {
@@ -61,145 +50,66 @@ function appendStatusDetail(body, detail) {
   return `${base}: ${trimmed}`;
 }
 
-function noticeForState({ state, windowData, projectTab, windowId }) {
-  const agentName = windowLabel(windowData);
-  const projectName = projectLabel(projectTab);
-  if (COMPLETION_STATES.has(state)) {
-    return {
-      kind: "turn_complete",
-      title: "Turn complete",
-      body: `${agentName} completed a turn in ${projectName}.`,
-    };
+/**
+ * Source-tagged notification inputs. Runtime states come from WindowProcessStatus;
+ * NeedsHuman comes only from the Monitor's typed transition, never Waiting/text.
+ * @typedef {{source: "runtime", state: "stopped" | "error", windowData?: object,
+ * projectTab?: object} | {source: "monitor", state: "needs_human", issueNumber: number}} NotificationTransition
+ */
+export function notificationForTransition(input) {
+  if (input?.source === "monitor") {
+    if (input.state !== "needs_human" || !Number.isSafeInteger(input.issueNumber) || input.issueNumber <= 0) return null;
+    return { kind: "needs_human", title: "Needs human", body: `Issue #${input.issueNumber} needs human attention.` };
   }
-  if (STOP_STATES.has(state)) {
-    return {
-      kind: "agent_stopped",
-      title: "Agent stopped",
-      body: `${agentName} stopped in ${projectName}.`,
-    };
+  if (input?.source !== "runtime") return null;
+  const agentName = windowLabel(input.windowData);
+  const projectName = projectLabel(input.projectTab);
+  if (input.state === "stopped") {
+    return { kind: "agent_stopped", title: "Agent stopped", body: `${agentName} stopped in ${projectName}.` };
   }
-  if (state === "error") {
-    return {
-      kind: "agent_error",
-      title: "Agent error",
-      body: `${agentName} hit an error in ${projectName}.`,
-    };
+  if (input.state === "error") {
+    return { kind: "agent_error", title: "Agent error", body: `${agentName} hit an error in ${projectName}.` };
   }
   return null;
 }
 
+// The server owns runtime timing, attention suppression, and recipient election.
+// This desktop-only sink never derives notifications from runtime snapshots.
 export function createAgentCompletionNotifier({
-  document: documentRef = typeof document !== "undefined" ? document : null,
   window: windowRef = typeof window !== "undefined" ? window : null,
-  now = () => Date.now(),
-  minRunningMs = 5 * 60 * 1000,
-  isAttentionAway = () => defaultAttentionAway(documentRef),
   getDesktopNotificationPermission = () => defaultDesktopPermission(windowRef),
-  showDesktopNotification = (notice) =>
-    defaultDesktopNotification(windowRef, notice),
-  showToast = () => {},
-  onProjectUnread = () => {},
+  onActivate = () => {},
+  showDesktopNotification = (notice) => defaultDesktopNotification(windowRef, notice, onActivate),
 } = {}) {
-  const entries = new Map();
+  // Page-lifetime dedupe survives socket reconnects and window removal.
+  const seenTransitions = new Set();
 
-  function publish(notice) {
-    showToast(notice);
-    if (getDesktopNotificationPermission() === "granted") {
+  function handleIntent(notice) {
+    if (!notice || typeof notice.transition_id !== "string" || !notice.transition_id.trim()
+      || !["stopped", "error", "needs_human"].includes(notice.category)
+      || seenTransitions.has(notice.transition_id)) return null;
+    seenTransitions.add(notice.transition_id);
+    if (getDesktopNotificationPermission() !== "granted") return null;
+    try {
       showDesktopNotification(notice);
-    }
-    if (notice.projectId) {
-      onProjectUnread(notice.projectId, notice);
+      return notice;
+    } catch {
+      // A browser can expose granted permission while its OS API is unavailable.
+      windowRef?.console?.warn?.("gwt: desktop notification delivery failed");
+      return null;
     }
   }
 
-  function handleRuntimeState({
-    windowId,
-    runtimeState,
-    windowData = null,
-    projectTab = null,
-    statusDetail = "",
-  }) {
-    if (!windowId) {
-      return null;
-    }
-    const state = normalizeState(runtimeState);
-    const previous = entries.get(windowId);
-    const timestamp = now();
-
-    if (state === "running") {
-      entries.set(windowId, {
-        state,
-        runningStartedAt:
-          previous?.state === "running" && Number.isFinite(previous.runningStartedAt)
-            ? previous.runningStartedAt
-            : timestamp,
-        windowData,
-        projectTab,
-      });
-      return null;
-    }
-
-    entries.set(windowId, {
-      state,
-      runningStartedAt: null,
-      windowData,
-      projectTab,
-    });
-
-    if (previous?.state !== "running") {
-      return null;
-    }
-
-    const elapsedMs = timestamp - previous.runningStartedAt;
-    if (!Number.isFinite(elapsedMs) || elapsedMs < minRunningMs) {
-      return null;
-    }
-    if (!isAttentionAway()) {
-      return null;
-    }
-
-    const noticeBase = noticeForState({
-      state,
-      windowData: windowData || previous.windowData,
-      projectTab: projectTab || previous.projectTab,
-      windowId,
-    });
-    if (!noticeBase) {
-      return null;
-    }
-    const project = projectTab || previous.projectTab || null;
-    const notice = {
-      ...noticeBase,
-      windowId,
-      projectId: project?.id || null,
-      projectTitle: projectLabel(project),
-      createdAt: timestamp,
-    };
-    if (notice.kind === "agent_error") {
-      notice.body = appendStatusDetail(notice.body, statusDetail);
-    }
-    publish(notice);
-    return notice;
-  }
-
-  function forgetWindow(windowId) {
-    entries.delete(windowId);
-  }
-
-  return {
-    handleRuntimeState,
-    forgetWindow,
-  };
+  return { handleIntent };
 }
 
 // SPEC-2356 Anshin Addendum (FR-040) — in-app attention toaster.
 //
-// Distinct from createAgentCompletionNotifier above, which only fires DESKTOP
-// notifications when the operator is AWAY for a sustained run. This is the
+// Distinct from the server-intent desktop sink above. This is the
 // in-app, always-on counterpart: the moment an agent transitions into a state
 // that wants the operator's eyes (needs_input / blocked / error / done), a
 // quiet in-app toast appears even while the operator is present. Clicking a
-// toast flies the camera to that window (frameWindow), so attention is one
+// toast selects that window in its surface (frameWindow), so attention is one
 // click from action. Pure controller: DOM rendering is injected via
 // `showToast`. The mapping keys off the runtime wire state, not the Living
 // Telemetry projection, so this stays independent of CSS state names.
@@ -230,7 +140,7 @@ function attentionNoticeForFlavor({ flavor, windowData, windowId, statusDetail =
     case "done":
       return {
         flavor,
-        title: "Agent finished",
+        title: "Agent stopped",
         body: `${agentName} stopped.`,
         windowId,
       };

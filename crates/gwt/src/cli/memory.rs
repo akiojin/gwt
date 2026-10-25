@@ -143,6 +143,16 @@ pub fn migrate_legacy_memory_file(repo_root: &Path) -> std::io::Result<bool> {
     crate::work_notes::migrate_memory_into_home(repo_root)
 }
 
+/// Append one work-notes memory entry from inside gwt.
+///
+/// Issue #4544 AC-6: the dedicated self-improvement capture CLI was retired
+/// (SPEC #3164), so this log is the surviving capture path. A dropped
+/// skip-permissions flag is a machine fault the next generation would repeat
+/// without a note, which is exactly what this file exists to prevent.
+pub(crate) fn capture(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Result<PathBuf> {
+    append_memory_entry(repo_root, add)
+}
+
 fn append_memory_entry(repo_root: &Path, add: &MemoryAddCommand) -> std::io::Result<PathBuf> {
     let path = gwt_core::paths::gwt_work_notes_memory_path(repo_root);
     crate::work_notes::with_work_notes_lock(repo_root, || {

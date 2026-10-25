@@ -136,6 +136,9 @@ pub(super) fn plan_event(output: &HookOutput) -> IntentBoundaryEvent {
     match output {
         HookOutput::HookSpecificAdditionalContext { event, .. } => *event,
         HookOutput::SystemMessage(_) => IntentBoundaryEvent::Stop,
+        HookOutput::PreToolUseAdditionalContext(_) => {
+            unreachable!("tool advisories are not Board intent-boundary plans")
+        }
         HookOutput::PreToolUsePermission { .. }
         | HookOutput::Silent
         | HookOutput::StopBlock { .. } => {

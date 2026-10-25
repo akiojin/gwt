@@ -1,5 +1,6 @@
 //! gwt-skills: Embedded skill bundling, distribution, and hooks management for gwt.
 
+pub mod asset_io;
 pub mod assets;
 pub mod codex_home;
 pub mod codex_hook_trust;
@@ -8,21 +9,26 @@ pub mod coordination_guidance;
 pub mod distribute;
 pub mod git_exclude;
 pub mod git_hooks;
+mod guidance;
 pub mod hooks;
+pub mod inspection_guidance;
 pub mod pm_guidance;
 pub mod provider_hooks;
 pub mod registry;
 pub mod settings_local;
 pub mod validate;
 
+pub use asset_io::{AssetIoError, AssetRoute};
 pub use codex_home::{
     codex_env_key, codex_home_for_worktree, codex_provider_id,
     materialize as materialize_codex_home, render_config_toml as render_codex_config_toml,
     CodexHomeConfig, DEFAULT_WIRE_API, RESERVED_PROVIDER_IDS,
 };
 pub use codex_hook_trust::{
-    collect_codex_managed_hook_trust_entries, collect_codex_managed_hook_trust_entries_for_mode,
-    register_codex_managed_hook_trust, register_codex_managed_hook_trust_for_mode,
+    codex_hook_trust_key_path, collect_codex_managed_hook_trust_entries,
+    collect_codex_managed_hook_trust_entries_for_mode,
+    inspect_codex_managed_hook_trust_for_mode_with_expected_bin, register_codex_managed_hook_trust,
+    register_codex_managed_hook_trust_for_mode,
     register_codex_managed_hook_trust_for_mode_with_expected_bin,
     register_codex_managed_project_trust, revoke_codex_managed_project_trust,
     revoke_codex_managed_project_trust_with_cleanup, CodexHookTrustEntry,
@@ -60,8 +66,9 @@ pub use provider_hooks::{
 };
 pub use registry::{EmbeddedSkill, RegistryError, SkillRegistry};
 pub use settings_local::{
-    build_output_owner_root, codex_hooks_paths_for_codex_discovery, generate_codex_hooks,
-    generate_codex_hooks_for_mode, generate_settings_local, managed_hook_config_has_user_content,
+    build_output_owner_root, codex_hooks_paths_for_codex_discovery,
+    decode_powershell_encoded_command, generate_codex_hooks, generate_codex_hooks_for_mode,
+    generate_settings_local, managed_hook_config_has_user_content,
     managed_hook_config_is_git_tracked, CodexHookDiscoveryMode, CANONICAL_HOOK_BIN,
 };
 
@@ -73,6 +80,29 @@ mod tests {
     use gwt_core::process::hidden_command;
 
     use super::*;
+
+    // Read the complete packaged contract while keeping SKILL.md a lazy router.
+    // Non-entrypoint assets retain their existing single-file behavior.
+    fn read_asset_contract(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+        let path = path.as_ref();
+        let mut content = std::fs::read_to_string(path)?;
+        if path.file_name().is_some_and(|name| name == "SKILL.md") {
+            let references = path.parent().unwrap().join("references");
+            if references.is_dir() {
+                let mut paths = std::fs::read_dir(references)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<std::io::Result<Vec<_>>>()?;
+                paths.sort();
+                for reference in paths {
+                    if reference.extension().is_some_and(|ext| ext == "md") {
+                        content.push_str("\n\n");
+                        content.push_str(&std::fs::read_to_string(reference)?);
+                    }
+                }
+            }
+        }
+        Ok(content)
+    }
 
     // ── SkillRegistry tests ──
 
@@ -746,7 +776,7 @@ mod tests {
             ".claude/skills/gwt-register-issue/SKILL.md",
             ".codex/skills/gwt-register-issue/SKILL.md",
         ] {
-            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let issue_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 issue_skill.contains("## Acceptance Criteria"),
@@ -794,7 +824,7 @@ mod tests {
             ".claude/skills/gwt-register-issue/SKILL.md",
             ".codex/skills/gwt-register-issue/SKILL.md",
         ] {
-            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let issue_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 issue_skill.contains("JSON operation `issue.create`"),
@@ -856,7 +886,7 @@ mod tests {
             ".claude/skills/gwt-register-spec/SKILL.md",
             ".codex/skills/gwt-register-spec/SKILL.md",
         ] {
-            let register_spec = std::fs::read_to_string(workspace_root.join(relative))
+            let register_spec = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 register_spec.contains("Transition alias")
@@ -879,7 +909,7 @@ mod tests {
             ".claude/skills/gwt-fix-issue/SKILL.md",
             ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
-            let issue_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let issue_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 issue_skill.contains("JSON operations `issue.view` and `issue.comments`"),
@@ -917,7 +947,7 @@ mod tests {
             ".claude/skills/gwt-execute/SKILL.md",
             ".codex/skills/gwt-execute/SKILL.md",
         ] {
-            let execute_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let execute_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 "design-gated mode",
@@ -940,6 +970,13 @@ mod tests {
                 "do not require a verification lease",
                 "max_wait_secs",
                 "deferred",
+                // SPEC #3248 FR-243 (Issue #4545 AC-4): the guidance has to
+                // separate a trusted No Action from both terminal outcomes,
+                // or a delivered owner keeps getting filed as Blocked.
+                "execution.no_action",
+                "delivered owner",
+                "neither Completed nor Blocked",
+                "A delivered owner is not a blocker",
             ] {
                 assert!(
                     execute_skill.contains(required),
@@ -957,7 +994,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let verify_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let verify_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 "## Heavy verification serialization",
@@ -990,7 +1027,7 @@ mod tests {
             ".claude/skills/gwt-fix-issue/SKILL.md",
             ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
-            let alias_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let alias_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 alias_skill.contains("Transition alias") && alias_skill.contains("gwt-execute"),
@@ -1002,7 +1039,7 @@ mod tests {
             ".claude/commands/gwt-build-spec.md",
             ".claude/commands/gwt-fix-issue.md",
         ] {
-            let alias_command = std::fs::read_to_string(workspace_root.join(relative))
+            let alias_command = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 alias_command.contains("/gwt:gwt-execute"),
@@ -1014,7 +1051,7 @@ mod tests {
             ".claude/skills/gwt-discussion/SKILL.md",
             ".codex/skills/gwt-discussion/SKILL.md",
         ] {
-            let discussion_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let discussion_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 discussion_skill
@@ -1130,11 +1167,11 @@ mod tests {
             ".claude/skills/gwt-issue-search/SKILL.md",
             ".codex/skills/gwt-issue-search/SKILL.md",
         ] {
-            let issue_search_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let issue_search_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
-                issue_search_skill.contains("manual `issue.view` JSON reads"),
-                "expected issue search skill to steer users away from direct issue reads in {relative}"
+                issue_search_skill.contains("Direct `issue.view` reads are appropriate for a known candidate"),
+                "known candidates must allow direct reads without compulsory semantic discovery in {relative}"
             );
             assert!(
                 !issue_search_skill.contains("before manual `gh issue list`"),
@@ -1150,7 +1187,7 @@ mod tests {
         );
         {
             let relative = ".claude/commands/gwt-discussion.md";
-            let discussion_command = std::fs::read_to_string(workspace_root.join(relative))
+            let discussion_command = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 discussion_command.contains("selection UI")
@@ -1198,7 +1235,7 @@ mod tests {
             ".claude/skills/gwt-discussion/references/clarification.md",
             ".codex/skills/gwt-discussion/references/clarification.md",
         ] {
-            let clarification = std::fs::read_to_string(workspace_root.join(relative))
+            let clarification = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 clarification.contains("Do not stop because a fixed question count was reached.")
@@ -1218,7 +1255,7 @@ mod tests {
             ".claude/skills/gwt-discussion/references/deepening.md",
             ".codex/skills/gwt-discussion/references/deepening.md",
         ] {
-            let deepening = std::fs::read_to_string(workspace_root.join(relative))
+            let deepening = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 deepening.contains("Escalate from the normal discussion flow into deepening")
@@ -1232,7 +1269,7 @@ mod tests {
             ".claude/skills/gwt-discussion/references/intake.md",
             ".codex/skills/gwt-discussion/references/intake.md",
         ] {
-            let intake = std::fs::read_to_string(workspace_root.join(relative))
+            let intake = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 intake.contains("Do not stop after the first slice success condition alone.")
@@ -1249,7 +1286,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let pr_skill = std::fs::read_to_string(workspace_root.join(relative))
+            let pr_skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 pr_skill.contains("JSON operation `pr.current`"),
@@ -1310,7 +1347,7 @@ mod tests {
 
         {
             let relative = ".claude/skills/gwt-manage-pr/references/check-flow.md";
-            let check_flow = std::fs::read_to_string(workspace_root.join(relative))
+            let check_flow = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 check_flow.contains("JSON operation `pr.current`"),
@@ -1339,7 +1376,7 @@ mod tests {
 
         {
             let relative = ".claude/skills/gwt-manage-pr/references/create-flow.md";
-            let create_flow = std::fs::read_to_string(workspace_root.join(relative))
+            let create_flow = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 create_flow.contains("Create: JSON operation `pr.create`"),
@@ -1376,7 +1413,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/references/fix-flow.md",
             ".codex/skills/gwt-manage-pr/references/fix-flow.md",
         ] {
-            let fix_flow = std::fs::read_to_string(workspace_root.join(relative))
+            let fix_flow = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 fix_flow.contains("JSON operation `pr.review_threads.reply_and_resolve`"),
@@ -1400,8 +1437,8 @@ mod tests {
             );
             assert!(
                 fix_flow.contains("CI pending/queued --> check at most 3 times")
-                    && fix_flow.contains("`board.post` with `params.kind:\"blocked\"`")
-                    && fix_flow.contains("stop instead of sleeping indefinitely"),
+                    && fix_flow.contains("`params.kind:\"status\"`")
+                    && fix_flow.contains("`issue.monitor.wait`"),
                 "expected bounded CI wait handoff guidance in {relative}"
             );
             assert!(
@@ -1432,19 +1469,11 @@ mod tests {
             "expected release command to use the canonical issue.comment JSON operation"
         );
         assert!(
-            release_command.contains("\"operation\":\"pr.current\"")
-                || release_command.contains("\"operation\": \"pr.current\""),
-            "expected release command to use the canonical pr.current JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.create\"")
-                || release_command.contains("\"operation\": \"pr.create\""),
-            "expected release command to use the canonical pr.create JSON operation"
-        );
-        assert!(
-            release_command.contains("\"operation\":\"pr.edit\"")
-                || release_command.contains("\"operation\": \"pr.edit\""),
-            "expected release command to use the canonical pr.edit JSON operation"
+            release_command.contains("\"operation\":\"release.status\"")
+                && release_command.contains("\"release_branch\":\"release/v{NEW_VERSION}\"")
+                && release_command.contains("\"base_branch\":\"main\"")
+                && release_command.contains("\"ensure_release_pr\":true"),
+            "expected release command to recover the explicit frozen snapshot through release.status"
         );
         assert!(
             !release_command.contains("gh issue comment"),
@@ -1456,7 +1485,9 @@ mod tests {
                 && release_command.contains("\"mode\":\"off\""),
             "expected release command to arm and disarm the workflow.bypass owner-guard exemption (Issue #3267)"
         );
-        let codex_release_skill = include_str!("../../../.codex/skills/release/SKILL.md");
+        let codex_release_skill =
+            read_asset_contract(workspace_root.join(".codex/skills/release/SKILL.md"))
+                .expect("read repository-local release skill");
         assert!(
             codex_release_skill.contains("workflow.bypass")
                 && codex_release_skill.contains("\"mode\":\"release\"")
@@ -1489,7 +1520,7 @@ mod tests {
             ".claude/skills/gwt-fix-issue/scripts/inspect_issue.py",
             ".codex/skills/gwt-fix-issue/scripts/inspect_issue.py",
         ] {
-            let inspect_issue_script = std::fs::read_to_string(workspace_root.join(relative))
+            let inspect_issue_script = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 !inspect_issue_script.contains("Fetch issue metadata via gh issue view."),
@@ -1499,14 +1530,61 @@ mod tests {
     }
 
     #[test]
-    fn gwt_execute_documents_abort_before_blocked_for_active_build() {
+    fn issue_4359_autonomous_guidance_continues_after_reversible_rulings() {
+        use crate::coordination_guidance::{SKILL_BODY_EN, SKILL_BODY_JA};
+
+        for body in [SKILL_BODY_EN, SKILL_BODY_JA] {
+            assert!(body.contains("PM default ruling (override available)"));
+            assert!(body.contains("needs_human"));
+        }
+        let materialized = tempfile::tempdir().unwrap();
+        generate_coordination_guidance(materialized.path()).unwrap();
+        let claude = read_asset_contract(
+            materialized
+                .path()
+                .join(".claude/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        let codex = read_asset_contract(
+            materialized
+                .path()
+                .join(".codex/skills/gwt-coordination/SKILL.md"),
+        )
+        .unwrap();
+        assert_eq!(claude, codex);
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut execute_mirrors = Vec::new();
+        for provider in [".claude", ".codex"] {
+            let execute = std::fs::read_to_string(
+                workspace_root.join(format!("{provider}/skills/gwt-execute/SKILL.md")),
+            )
+            .unwrap();
+            for body in [&claude, &execute] {
+                for phrase in [
+                    "PM default ruling (override available)",
+                    "Do not stop to wait for a PM reply",
+                    "After receiving a Board ruling, resume",
+                    "irreversible decisions",
+                    "needs_human",
+                ] {
+                    assert!(body.contains(phrase), "{provider}: missing {phrase}");
+                }
+            }
+            execute_mirrors.push(execute);
+        }
+        assert_eq!(execute_mirrors[0], execute_mirrors[1]);
+    }
+
+    #[test]
+    fn gwt_execute_documents_issue_bound_build_lifecycle() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().expect("materialization target");
+        distribute_to_worktree(materialized.path()).expect("materialize managed skills");
         let claude =
-            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
+            read_asset_contract(workspace_root.join(".claude/skills/gwt-execute/SKILL.md"))
                 .expect("read Claude gwt-execute skill");
-        let codex =
-            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-execute/SKILL.md"))
-                .expect("read Codex gwt-execute skill");
+        let codex = read_asset_contract(workspace_root.join(".codex/skills/gwt-execute/SKILL.md"))
+            .expect("read Codex gwt-execute skill");
 
         assert_eq!(
             claude, codex,
@@ -1516,12 +1594,58 @@ mod tests {
             (".claude/skills/gwt-execute/SKILL.md", claude.as_str()),
             (".codex/skills/gwt-execute/SKILL.md", codex.as_str()),
         ] {
+            assert_eq!(
+                read_asset_contract(materialized.path().join(relative)).unwrap(),
+                guidance,
+                "{relative} must distribute the current lifecycle contract"
+            );
+            for required in [
+                "`build.start` with `params.spec:<n>` for every Issue owner",
+                "`build.phase` with the same `params.spec:<n>`",
+                "`build.complete` with the same `params.spec:<n>`",
+                "`build.abort` with the same `params.spec:<n>`",
+                "Without an owner Issue, do not call `build.*`",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{relative} must document the accepted lifecycle params: {required}"
+                );
+            }
+            assert!(
+                !guidance.contains("params.task"),
+                "{relative} must not recommend the unsupported task parameter"
+            );
             assert!(
                 guidance.contains(
                     "If an active build lifecycle exists, run `build.abort` with the same owner and a non-empty reason before `execution.blocked`."
                 ),
                 "{relative} must require scoped abort-before-blocked order"
             );
+        }
+    }
+
+    #[test]
+    fn issue_4157_execute_preflight_checks_remote_work_before_implementation() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let guidance = read_asset_contract(
+                materialized
+                    .path()
+                    .join(format!("{provider}/skills/gwt-execute/SKILL.md")),
+            )
+            .unwrap();
+            for required in [
+                "git fetch origin",
+                "git log HEAD..origin/<head>",
+                "`issue.linked_prs`",
+                "Do not infer missing implementation from `origin/develop..HEAD` alone",
+            ] {
+                assert!(
+                    guidance.contains(required),
+                    "{provider} missing: {required}"
+                );
+            }
         }
     }
 
@@ -1547,7 +1671,7 @@ mod tests {
             ".claude/skills/gwt-search/SKILL.md",
             ".codex/skills/gwt-search/SKILL.md",
         ] {
-            let skill = std::fs::read_to_string(workspace_root.join(relative))
+            let skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in shared.iter().chain(["lease-free bootstrap step"].iter()) {
                 assert!(
@@ -1566,8 +1690,8 @@ mod tests {
                 ".codex/skills/gwt-search/SKILL.md",
             ),
         ] {
-            let claude = std::fs::read_to_string(workspace_root.join(pair.0)).unwrap();
-            let codex = std::fs::read_to_string(workspace_root.join(pair.1)).unwrap();
+            let claude = read_asset_contract(workspace_root.join(pair.0)).unwrap();
+            let codex = read_asset_contract(workspace_root.join(pair.1)).unwrap();
             assert_eq!(
                 claude, codex,
                 "{} and {} must be byte-identical",
@@ -1667,7 +1791,7 @@ mod tests {
             ".claude/skills/gwt-arch-review/SKILL.md",
             ".codex/skills/gwt-arch-review/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("gwt-plan-spec") && content.contains("gwt-build-spec"),
@@ -1688,7 +1812,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Single skill for the full PR lifecycle")
@@ -1701,7 +1825,7 @@ mod tests {
             ".claude/skills/gwt-search/SKILL.md",
             ".codex/skills/gwt-search/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Mandatory preflight")
@@ -1717,7 +1841,7 @@ mod tests {
             ".claude/skills/gwt-agent/SKILL.md",
             ".codex/skills/gwt-agent/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Auto-detect the operation mode from arguments")
@@ -1772,7 +1896,7 @@ mod tests {
         );
 
         for relative in ["README.md", "README.ja.md"] {
-            let readme = std::fs::read_to_string(workspace_root.join(relative))
+            let readme = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for operation in [
                 "issue.monitor.status",
@@ -1825,7 +1949,7 @@ mod tests {
             ".claude/skills/gwt-arch-review/SKILL.md",
             ".codex/skills/gwt-arch-review/SKILL.md",
         ] {
-            let skill = std::fs::read_to_string(workspace_root.join(relative))
+            let skill = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 skill.contains("`--scope repo`")
@@ -1837,9 +1961,9 @@ mod tests {
                 "expected changed-files scope wording in {relative}"
             );
             assert!(
-                skill.contains("If the caller omits scope arguments")
+                skill.contains("If scope is not explicit or inferable")
                     && skill.contains("Non-interactive runs must pass `--base`"),
-                "expected prompt and non-interactive base rules in {relative}"
+                "expected conditional scope clarification and non-interactive base rules in {relative}"
             );
             assert!(
                 !skill.contains("Crate/package subset")
@@ -1864,7 +1988,7 @@ mod tests {
             ".claude/skills/gwt-build-spec/references/completion-gate.md",
             ".claude/skills/gwt-plan-spec/references/quality-gate.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("current user's language"),
@@ -1877,7 +2001,7 @@ mod tests {
             ".codex/skills/gwt-discussion/SKILL.md",
             ".claude/skills/gwt-discussion/references/registration.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 !content.contains("short English imperative"),
@@ -1909,19 +2033,18 @@ mod tests {
         for skill in ["gwt-plan-spec", "gwt-verify"] {
             let source_relative = format!(".claude/skills/{skill}/SKILL.md");
             let generated_relative = format!(".codex/skills/{skill}/SKILL.md");
-            let source = std::fs::read_to_string(workspace_root.join(&source_relative))
+            let source = read_asset_contract(workspace_root.join(&source_relative))
                 .unwrap_or_else(|err| panic!("failed to read {source_relative}: {err}"));
-            let generated = std::fs::read_to_string(workspace_root.join(&generated_relative))
+            let generated = read_asset_contract(workspace_root.join(&generated_relative))
                 .unwrap_or_else(|err| panic!("failed to read {generated_relative}: {err}"));
-            let materialized_claude = std::fs::read_to_string(
+            let materialized_claude = read_asset_contract(
                 materialized.path().join(&source_relative),
             )
             .unwrap_or_else(|err| panic!("failed to read materialized {source_relative}: {err}"));
             let materialized_codex =
-                std::fs::read_to_string(materialized.path().join(&generated_relative))
-                    .unwrap_or_else(|err| {
-                        panic!("failed to read materialized {generated_relative}: {err}")
-                    });
+                read_asset_contract(materialized.path().join(&generated_relative)).unwrap_or_else(
+                    |err| panic!("failed to read materialized {generated_relative}: {err}"),
+                );
 
             for phrase in required {
                 assert!(
@@ -1970,7 +2093,7 @@ mod tests {
         assert!(report.files_written > 0);
 
         update_git_exclude(wt).unwrap();
-        let exclude = std::fs::read_to_string(git_resolved_exclude_path(wt)).unwrap();
+        let exclude = read_asset_contract(git_resolved_exclude_path(wt)).unwrap();
         assert!(exclude.contains("gwt-managed-begin"));
 
         generate_settings_local(wt).unwrap();
@@ -2201,7 +2324,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 crate::validate::validate_frontmatter(&content).is_ok(),
@@ -2253,6 +2376,31 @@ mod tests {
     }
 
     #[test]
+    fn materialized_pre_pr_guidance_requires_required_ci_contexts_and_ac_tests() {
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for provider in [".claude", ".codex"] {
+            let content = read_asset_contract(
+                materialized
+                    .path()
+                    .join(provider)
+                    .join("skills/gwt-verify/SKILL.md"),
+            )
+            .unwrap();
+            for phrase in [
+                "acceptance_commands",
+                "required_status_checks.contexts",
+                "\"mode\":\"pre-pr\"",
+            ] {
+                assert!(
+                    content.contains(phrase),
+                    "{provider} pre-pr guidance is missing {phrase}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gwt_verify_references_are_bundled() {
         use crate::assets::CLAUDE_SKILLS;
 
@@ -2296,7 +2444,7 @@ mod tests {
             ".claude/skills/gwt-build-spec/SKILL.md",
             ".codex/skills/gwt-build-spec/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             // FR-127: Phase 3 must delegate to `gwt-verify --mode full`.
             assert!(
@@ -2332,7 +2480,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             // FR-127: manage-pr must require `gwt-verify --mode pre-pr`.
             assert!(
@@ -2368,7 +2516,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Test Inventory"),
@@ -2388,7 +2536,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("User Verification"),
@@ -2419,7 +2567,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 // The environment is a legacy signal; execution.status owns
@@ -2467,7 +2615,7 @@ mod tests {
             ".claude/skills/gwt-fix-issue/SKILL.md",
             ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("n/a (autonomous)"),
@@ -2508,7 +2656,7 @@ mod tests {
             ".claude/skills/gwt-execute/SKILL.md",
             ".codex/skills/gwt-execute/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in ["execution.status", "launch_route"] {
                 assert!(
@@ -2546,7 +2694,7 @@ mod tests {
             ".claude/skills/gwt-fix-issue/SKILL.md",
             ".codex/skills/gwt-fix-issue/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred (autonomous execution)"),
@@ -2568,7 +2716,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in ["Ready PR", "CI auto-merge", "fresh", "legacy"] {
                 assert!(
@@ -2598,7 +2746,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("deferred_user_verification"),
@@ -2636,7 +2784,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("導線") || content.contains("How to access"),
@@ -2658,7 +2806,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("Check Items"),
@@ -2674,7 +2822,7 @@ mod tests {
             ".claude/skills/gwt-verify/SKILL.md",
             ".codex/skills/gwt-verify/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("project-agnostic")
@@ -2745,7 +2893,7 @@ mod tests {
             ".claude/skills/gwt-build-spec/SKILL.md",
             ".codex/skills/gwt-build-spec/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("User Verification Result"),
@@ -2761,7 +2909,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             assert!(
                 content.contains("User Verification Result"),
@@ -2776,11 +2924,16 @@ mod tests {
 
         let agents = std::fs::read_to_string(workspace_root.join("AGENTS.md"))
             .unwrap_or_else(|err| panic!("failed to read AGENTS.md: {err}"));
+        // `Ready PR 禁止` used to be required here. That phrase encoded the
+        // retired rule "incomplete work may only be a Draft PR"; keeping it
+        // would pin AGENTS.md to a policy this repository no longer has.
+        // The gate still exists — it moved from "Ready vs Draft" to
+        // "PR vs no PR" — so assert the phrase that carries it now.
         for required in [
             "Ready PR Gate",
             "Draft PR",
             "単独で配信可能",
-            "Ready PR 禁止",
+            "Draft PR を作成しない",
         ] {
             assert!(
                 agents.contains(required),
@@ -2792,7 +2945,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 "Ready PR Gate",
@@ -2813,10 +2966,10 @@ mod tests {
     fn gwt_manage_pr_documents_drive_to_merge_delivery() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let claude =
-            std::fs::read_to_string(workspace_root.join(".claude/skills/gwt-manage-pr/SKILL.md"))
+            read_asset_contract(workspace_root.join(".claude/skills/gwt-manage-pr/SKILL.md"))
                 .expect("read .claude gwt-manage-pr SKILL.md");
         let codex =
-            std::fs::read_to_string(workspace_root.join(".codex/skills/gwt-manage-pr/SKILL.md"))
+            read_asset_contract(workspace_root.join(".codex/skills/gwt-manage-pr/SKILL.md"))
                 .expect("read .codex gwt-manage-pr SKILL.md");
         // Managed skill parity: the Codex mirror must match the canonical
         // `.claude` source byte-for-byte (assets.rs include_dir! + verbatim
@@ -2828,10 +2981,12 @@ mod tests {
         // SPEC #3197: gwt-manage-pr must document the drive-to-merge delivery
         // loop (auto-merge + CI/review fix loop + watch until merged), gated by
         // the Ready PR Gate.
+        // Issue #4396: gwtd has no merge operation, so the skill must say who
+        // merges instead of naming one.
         for required in [
             "Deliver",
             "drive to merge",
-            "JSON operation `pr.merge`",
+            "gwtd has no merge operation",
             "merged_at",
             "Ready PR Gate",
             "Loop Safety Guard",
@@ -2843,6 +2998,86 @@ mod tests {
         }
     }
 
+    /// Issue #5414 AC-1: distributed delivery entrypoints persist only proven
+    /// owner acceptance before Ready and retain post-merge settlement.
+    #[test]
+    fn delivery_skills_materialize_verified_owner_ac_before_ready() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for skill in ["gwt-execute", "gwt-manage-pr"] {
+            let source = read_asset_contract(
+                workspace_root.join(format!(".claude/skills/{skill}/SKILL.md")),
+            )
+            .unwrap();
+            for provider in [".claude", ".codex"] {
+                let relative = format!("{provider}/skills/{skill}/SKILL.md");
+                let checked_in = read_asset_contract(workspace_root.join(&relative)).unwrap();
+                let generated = read_asset_contract(materialized.path().join(&relative)).unwrap();
+                assert_eq!(checked_in, source, "provider mirror drift: {relative}");
+                assert_eq!(generated, source, "materialization drift: {relative}");
+                let prose = generated.split_whitespace().collect::<Vec<_>>().join(" ");
+                for required in [
+                    "Before Ready PR creation or enabling auto-merge",
+                    "fresh `verify.run` evidence",
+                    "only proven AC checkboxes through `issue.edit`",
+                    "`issue.spec.edit` for a `gwt-spec` owner",
+                    "read the owner back",
+                    "Leave unproven criteria unchecked",
+                    "same launch active through merge and post-merge settlement",
+                    "delivery complete only after confirming `origin/develop` contains the source",
+                ] {
+                    assert!(prose.contains(required), "{relative} missing: {required}");
+                }
+            }
+        }
+    }
+
+    /// Issue #5128 AC-1/2/3: pending-only CI waits must not become human
+    /// escalations, including in the materialized Fix and Deliver references.
+    #[test]
+    fn manage_pr_materializes_pending_wait_without_blocked_escalation() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let materialized = tempfile::tempdir().unwrap();
+        distribute_to_worktree(materialized.path()).unwrap();
+        for file in [
+            "SKILL.md",
+            "references/fix-flow.md",
+            "references/deliver-flow.md",
+        ] {
+            let source = read_asset_contract(
+                workspace_root.join(format!(".claude/skills/gwt-manage-pr/{file}")),
+            )
+            .unwrap();
+            for provider in [".claude", ".codex"] {
+                let relative = format!("{provider}/skills/gwt-manage-pr/{file}");
+                let checked_in = read_asset_contract(workspace_root.join(&relative)).unwrap();
+                let generated = read_asset_contract(materialized.path().join(&relative)).unwrap();
+                assert_eq!(checked_in, source, "provider mirror drift: {relative}");
+                assert_eq!(generated, source, "materialization drift: {relative}");
+                let prose = generated.split_whitespace().collect::<Vec<_>>().join(" ");
+                for required in [
+                    "pending alone never counts",
+                    "`params.kind:\"status\"`",
+                    "`issue.monitor.wait`",
+                    "owner Issue number",
+                    "`params.number`",
+                    "`resume_condition`",
+                    "`params.clear:true`",
+                    "Do not emit `params.kind:\"blocked\"` or NeedsHuman",
+                    "A human decision, unsafe operation, or actual tool refusal still follows the existing blocked escalation contract",
+                ] {
+                    assert!(prose.contains(required), "{relative} missing: {required}");
+                }
+                assert!(
+                    !generated.contains("(`params.kind:\"blocked\"`) when CI stays pending")
+                        && !generated.contains("then stop instead of sleeping indefinitely"),
+                    "{relative} must retire pending-only blocked handoffs"
+                );
+            }
+        }
+    }
+
     #[test]
     fn build_spec_does_not_treat_draft_pr_as_completion() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2850,7 +3085,7 @@ mod tests {
             ".claude/skills/gwt-build-spec/SKILL.md",
             ".codex/skills/gwt-build-spec/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 "Draft PR",
@@ -2873,7 +3108,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/references/pr-body-template.md",
             ".codex/skills/gwt-manage-pr/references/pr-body-template.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 "PR Readiness",
@@ -2903,7 +3138,7 @@ mod tests {
             ".claude/skills/gwt-manage-pr/SKILL.md",
             ".codex/skills/gwt-manage-pr/SKILL.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
 
             // The Deliver mode must be a first-class documented mode that points
@@ -2931,13 +3166,14 @@ mod tests {
 
             for required in [
                 "drive-to-merge",
-                "JSON operation `pr.merge`",
+                "gwtd has no merge operation",
+                "JSON\noperation `pr.ready`",
                 "merged_at",
                 "Loop Safety Guard",
-                // Re-gate invariant: never keep auto-merge armed across a
-                // code-changing push.
-                "disable auto-merge through `pr.merge`",
-                "re-arm",
+                // Keep the repository's existing auto-merge delivery policy.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     deliver.contains(required),
@@ -2963,18 +3199,19 @@ mod tests {
             ".claude/skills/gwt-manage-pr/references/deliver-flow.md",
             ".codex/skills/gwt-manage-pr/references/deliver-flow.md",
         ] {
-            let content = std::fs::read_to_string(workspace_root.join(relative))
+            let content = read_asset_contract(workspace_root.join(relative))
                 .unwrap_or_else(|err| panic!("failed to read {relative}: {err}"));
             for required in [
                 // Composes the existing Fix flow rather than reimplementing it.
                 "fix-flow.md",
-                // Hard PR gate before enabling auto-merge.
+                // Hard PR gate before handing the PR to merge automation.
                 "Ready PR Gate",
                 "pending",
-                // Auto-merge enablement via the canonical JSON operation.
-                "JSON operation `pr.merge`",
-                // Project-agnostic merge-method selection (no hardcoded method).
-                "viewerDefaultMergeMethod",
+                // Issue #4396: gwtd cannot merge; `pr.ready` hands the PR to
+                // the repository's merge automation, which must exist.
+                "gwtd has no merge operation",
+                "`pr.ready` hands the PR to that automation",
+                "Confirm the PR has merge automation",
                 // Merged-state watch surface and completion signal.
                 "pr.view",
                 "merged_at",
@@ -2983,11 +3220,10 @@ mod tests {
                 "`actions.rerun`",
                 // Bounded drive loop.
                 "Loop Safety Guard",
-                // Safety invariant: auto-merge must never stay armed across a
-                // code-changing push. Disable, re-gate, and re-arm per push so
-                // GitHub only ever merges a verified, gated snapshot.
-                "**disable auto-merge** through JSON operation",
-                "re-arm",
+                // Routine pushes and base updates do not suspend auto-merge.
+                "Keep auto-merge enabled",
+                "pr.update_branch",
+                "pr.draft",
             ] {
                 assert!(
                     content.contains(required),

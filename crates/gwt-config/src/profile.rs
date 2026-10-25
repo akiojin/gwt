@@ -156,12 +156,6 @@ impl ProfilesConfig {
             .and_then(|name| self.profiles.iter().find(|p| p.name == *name))
     }
 
-    /// Get a mutable reference to the active profile.
-    pub fn active_profile_mut(&mut self) -> Option<&mut Profile> {
-        let name = self.active.clone();
-        name.and_then(move |n| self.profiles.iter_mut().find(|p| p.name == n))
-    }
-
     /// Find a profile by name.
     pub fn get(&self, name: &str) -> Option<&Profile> {
         self.profiles.iter().find(|p| p.name == name)
@@ -295,15 +289,6 @@ impl ProfilesConfig {
         Ok(())
     }
 
-    /// Remove an environment variable from a profile.
-    pub fn remove_env_var(&mut self, profile_name: &str, key: &str) -> Result<(), String> {
-        let profile = self
-            .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
-        profile.env_vars.remove(key);
-        Ok(())
-    }
-
     /// Add an OS environment variable to the disabled list.
     pub fn add_disabled_env(&mut self, profile_name: &str, key: &str) -> Result<(), String> {
         let key = key.trim();
@@ -317,47 +302,6 @@ impl ProfilesConfig {
             profile.disabled_env.push(key.to_string());
             profile.disabled_env.sort();
         }
-        Ok(())
-    }
-
-    /// Update a disabled OS environment variable entry.
-    pub fn update_disabled_env(
-        &mut self,
-        profile_name: &str,
-        current_key: &str,
-        new_key: &str,
-    ) -> Result<(), String> {
-        let new_key = new_key.trim();
-        if new_key.is_empty() {
-            return Err("disabled environment variable key cannot be empty".to_string());
-        }
-        let profile = self
-            .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
-        if current_key != new_key && profile.disabled_env.iter().any(|item| item == new_key) {
-            return Err(format!(
-                "disabled environment variable '{new_key}' already exists"
-            ));
-        }
-        if let Some(item) = profile
-            .disabled_env
-            .iter_mut()
-            .find(|item| item.as_str() == current_key)
-        {
-            *item = new_key.to_string();
-        } else {
-            profile.disabled_env.push(new_key.to_string());
-        }
-        profile.disabled_env.sort();
-        Ok(())
-    }
-
-    /// Remove a disabled OS environment variable entry.
-    pub fn remove_disabled_env(&mut self, profile_name: &str, key: &str) -> Result<(), String> {
-        let profile = self
-            .profile_mut(profile_name)
-            .ok_or_else(|| format!("profile '{profile_name}' not found"))?;
-        profile.disabled_env.retain(|item| item != key);
         Ok(())
     }
 }

@@ -92,7 +92,6 @@ pub fn current_app_version() -> &'static str {
 #[cfg(test)]
 pub fn workspace_view_for_tab(tab: &ProjectTabRuntime) -> gwt::WorkspaceView {
     gwt::WorkspaceView {
-        viewport: tab.workspace.persisted().viewport.clone(),
         windows: tab
             .workspace
             .persisted()
@@ -122,8 +121,13 @@ pub fn app_state_view_from_parts(
                 let running_agents = collect_running_agents(&tab.workspace.persisted().windows);
                 gwt::ProjectTabView {
                     id: tab.id.clone(),
+                    project_key: gwt_core::paths::resolve_project_scope(&tab.project_root)
+                        .hash
+                        .to_string(),
                     title: tab.title.clone(),
                     project_root: tab.project_root.display().to_string(),
+                    project_scope: gwt_core::paths::project_scope_hash(&tab.project_root)
+                        .to_string(),
                     kind: tab.kind,
                     workspace: workspace_view_for_tab(tab),
                     running_agent_count: running_agents.len() as u32,
@@ -138,11 +142,13 @@ pub fn app_state_view_from_parts(
                 path: project.path.display().to_string(),
                 title: project.title.clone(),
                 kind: project.kind,
+                project_key: None,
             })
             .collect(),
     }
 }
 
+#[cfg(test)]
 pub fn normalize_active_tab_id(
     tabs: &[ProjectTabRuntime],
     active_tab_id: Option<String>,
@@ -316,9 +322,10 @@ pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
 
 pub fn knowledge_kind_for_preset(preset: WindowPreset) -> Option<KnowledgeKind> {
     match preset {
-        WindowPreset::Issue | WindowPreset::IssueMonitor => Some(KnowledgeKind::Issue),
+        WindowPreset::Settings | WindowPreset::Issue | WindowPreset::IssueMonitor => {
+            Some(KnowledgeKind::Issue)
+        }
         WindowPreset::Spec => Some(KnowledgeKind::Issue),
-        WindowPreset::Pr => Some(KnowledgeKind::Pr),
         _ => None,
     }
 }
@@ -508,23 +515,11 @@ pub fn spawn_env() -> HashMap<String, String> {
     env
 }
 
-pub fn geometry_to_pty_size(geometry: &WindowGeometry) -> (u16, u16) {
-    let cols = ((geometry.width.max(420.0) - 26.0) / 8.4).floor() as u16;
-    let rows = ((geometry.height.max(260.0) - 58.0) / 18.0).floor() as u16;
-    (cols.max(20), rows.max(6))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrontDoorRoute {
     Gui,
     RepoBackedCli,
     DetachedCli,
-    /// SPEC #2920: tray-resident process route. Phase 4 will wire `main()`
-    /// to dispatch this variant to `gwt::cli::tray::run`. Until then it is
-    /// reachable only from tests and reserves the routing slot so the
-    /// public enum API stays stable across Phase 2〜4 commits.
-    #[allow(dead_code)]
-    Tray,
     /// SPEC #2920 Q9: `gwt serve` / `gwt --headless` verbs were removed in
     /// v10.0.0 (supersede of SPEC-1942 US-14). `main()` matches this
     /// variant first, writes the usage hint, and exits with code 2 — no
@@ -598,10 +593,10 @@ pub fn run_cli(argv: &[String]) -> io::Result<()> {
             let mut env = gwt::cli::DefaultCliEnv::new_for_hooks();
             std::process::exit(gwt::cli::dispatch(&mut env, argv));
         }
-        // Gui, Tray, and LegacyServeUsageHint are all handled by `main()`
+        // Gui and LegacyServeUsageHint are handled by `main()`
         // after `run_cli` returns; `run_cli` itself only dispatches verbs
         // that exit the process.
-        FrontDoorRoute::Gui | FrontDoorRoute::Tray | FrontDoorRoute::LegacyServeUsageHint => Ok(()),
+        FrontDoorRoute::Gui | FrontDoorRoute::LegacyServeUsageHint => Ok(()),
     }
 }
 
@@ -957,6 +952,14 @@ mod tests {
     }
 
     #[test]
+    fn settings_preset_hosts_issue_knowledge() {
+        assert_eq!(
+            knowledge_kind_for_preset(WindowPreset::Settings),
+            Some(gwt::KnowledgeKind::Issue)
+        );
+    }
+
+    #[test]
     fn legacy_issue_monitor_preset_uses_unified_issue_knowledge_kind() {
         assert_eq!(
             knowledge_kind_for_preset(WindowPreset::IssueMonitor),
@@ -1279,6 +1282,44 @@ mod tests {
             &super::RepoEnvOverrides::default(),
         );
         assert_eq!(coords, None);
+    }
+
+    /// Issue #4535 AC-5: startup restores every unique project workspace, so
+    /// the auto-start rule is what keeps that from spawning one agent process
+    /// per restored project. Agent panes stay dormant and are revived only by
+    /// the resume path; a Shell pane the user never closed still comes back.
+    #[test]
+    fn restored_agent_panes_never_auto_start_while_shell_panes_do() {
+        let restored = |preset: WindowPreset, agent_id: Option<&str>| {
+            let mut window = gwt::default_workspace_state().windows.remove(0);
+            window.preset = preset;
+            window.agent_id = agent_id.map(str::to_string);
+            // Exactly what `pause_process_windows_for_restore` leaves behind.
+            window.status = gwt::WindowState::Stopped;
+            window
+        };
+
+        for preset in [
+            WindowPreset::Agent,
+            WindowPreset::Claude,
+            WindowPreset::Codex,
+        ] {
+            assert!(
+                !super::should_auto_start_restored_window(&restored(preset, None)),
+                "a restored {preset:?} pane must not spawn its agent process at startup"
+            );
+        }
+        assert!(
+            !super::should_auto_start_restored_window(&restored(
+                WindowPreset::Shell,
+                Some("agent-1")
+            )),
+            "an agent-occupied pane is an agent pane whatever its preset says"
+        );
+        assert!(
+            super::should_auto_start_restored_window(&restored(WindowPreset::Shell, None)),
+            "a Shell pane the user never closed must still come back"
+        );
     }
 
     #[test]

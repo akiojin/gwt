@@ -1,16 +1,14 @@
-//! Recognize a provider's own "you are out of quota" notice on an agent's
-//! final terminal screen (Issue #3616).
+//! Recognize a provider's own quota or reauthentication notice on an agent's
+//! final terminal screen (Issues #3616 and #4224).
 //!
 //! Running out of quota is neither success nor failure of the work: the
 //! account ran out, the branch did not. The providers state this outright and
 //! also state when access returns, so this is the one stall whose cause and
 //! duration can be read directly instead of inferred from elapsed time.
 //!
-//! Detection is deliberately conservative. An agent transcript can legitimately
-//! *contain* the sentence (an agent working on this very Issue prints it), so a
-//! match requires the provider's distinctive phrase plus a corroborating clause,
-//! and only within the tail of the screen — the notice is the last thing a
-//! quota-exhausted CLI writes before exiting.
+//! Detection requires the CLI's refusal response or rate-limit-options menu.
+//! A quotation anywhere in an agent transcript is not refusal evidence, even
+//! when it persists at the bottom of the screen (Issue #5037).
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, TimeZone, Utc};
 
@@ -34,6 +32,14 @@ pub struct ProviderLimitNotice {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// A native screen match and the structural evidence that authenticated it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderLimitScreenMatch {
+    pub notice: ProviderLimitNotice,
+    pub region: &'static str,
+    pub pattern: &'static str,
+}
+
 /// Classify the tail of `screen` as a provider usage-limit notice.
 ///
 /// `now` supplies both the reference instant and the offset that bare
@@ -43,24 +49,138 @@ pub fn detect_provider_limit_notice<Tz: TimeZone>(
     screen: &str,
     now: &DateTime<Tz>,
 ) -> Option<ProviderLimitNotice> {
-    let tail = normalize_tail(screen);
-    // ASCII lowercasing preserves byte length, so offsets found in `haystack`
-    // index `tail` correctly. `to_lowercase` would not, and the reset clause is
-    // sliced out of `tail` to keep its original casing for month names.
-    let haystack = tail.to_ascii_lowercase();
+    detect_provider_limit_screen_match(screen, now).map(|matched| matched.notice)
+}
 
-    if !states_a_limit_was_reached(&haystack) {
-        return None;
+/// Resolve the caller's clock only after recognizing a native quota notice.
+pub fn detect_provider_limit_notice_with_clock<Tz: TimeZone>(
+    screen: &str,
+    now: impl FnOnce() -> DateTime<Tz>,
+) -> Option<ProviderLimitNotice> {
+    detect_provider_limit_screen_match_with_clock(screen, now).map(|matched| matched.notice)
+}
+
+/// Preserve the whole rendered screen when calling this: leading indentation
+/// and Markdown fences distinguish tool/code quotations from native responses.
+pub fn detect_provider_limit_screen_match<Tz: TimeZone>(
+    screen: &str,
+    now: &DateTime<Tz>,
+) -> Option<ProviderLimitScreenMatch> {
+    detect_provider_limit_screen_match_with_clock(screen, || now.clone())
+}
+
+fn detect_provider_limit_screen_match_with_clock<Tz: TimeZone>(
+    screen: &str,
+    now: impl FnOnce() -> DateTime<Tz>,
+) -> Option<ProviderLimitScreenMatch> {
+    let lines: Vec<&str> = screen.lines().collect();
+    for response in native_screen_responses(&lines) {
+        let trimmed = response[0].trim();
+        let text = normalize_tail(&response.join("\n"));
+        let haystack = text.to_ascii_lowercase();
+        let (provider, region, pattern) = if trimmed == "What do you want to do?"
+            && response[1..].iter().any(|line| {
+                let option = line.trim();
+                option.starts_with("❯ ") && option.contains("Wait for limit to reset")
+            }) {
+            (
+                UsageProvider::ClaudeCode,
+                "rate_limit_options",
+                "claude_wait_for_reset",
+            )
+        } else {
+            let heading = &text;
+            let native = if heading.starts_with("■ You've hit your usage limit.") {
+                Some((UsageProvider::Codex, "codex_usage_limit"))
+            } else if heading.starts_with("Claude usage limit reached.") {
+                Some((UsageProvider::ClaudeCode, "claude_usage_limit"))
+            } else if heading.starts_with("You've hit your ")
+                && response[1..]
+                    .iter()
+                    .any(|line| line.trim_start().starts_with("/usage-credits "))
+            {
+                Some((UsageProvider::ClaudeCode, "claude_usage_credits"))
+            } else {
+                None
+            };
+            let Some((provider, pattern)) = native else {
+                continue;
+            };
+            if !states_a_limit_was_reached(&haystack)
+                || !states_a_consequence(&haystack)
+                || is_model_fallback(&haystack)
+            {
+                continue;
+            }
+            (provider, "provider_response", pattern)
+        };
+        return Some(ProviderLimitScreenMatch {
+            notice: ProviderLimitNotice {
+                provider: Some(provider),
+                resets_at: parse_reset(&text, &haystack, &now()),
+            },
+            region,
+            pattern,
+        });
     }
-    if is_model_fallback(&haystack) {
-        return None;
-    }
-    if !states_a_consequence(&haystack) {
-        return None;
-    }
-    Some(ProviderLimitNotice {
-        provider: provider_hint(&haystack),
-        resets_at: parse_reset(&tail, &haystack, now),
+    None
+}
+
+/// Recognize a native request to sign in again without treating a quota reset,
+/// model fallback, or a generic HTTP authorization failure as reauthentication.
+pub fn detect_provider_auth_notice(screen: &str) -> Option<UsageProvider> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let detected = native_screen_responses(&lines).find_map(|response| {
+        let text = normalize_tail(&response.join("\n"));
+        let haystack = text.to_ascii_lowercase();
+        if states_a_limit_was_reached(&haystack) || is_model_fallback(&haystack) {
+            return None;
+        }
+        if text.starts_with("■ Your access token could not be refreshed")
+            && (haystack.contains("please log out and sign in again")
+                || haystack.contains("please sign in again"))
+        {
+            Some(UsageProvider::Codex)
+        } else if text.starts_with("API Error: 401 ")
+            && (haystack.contains("oauth access token has expired")
+                || haystack.contains("oauth token has expired"))
+            && (haystack.contains("re-authenticate to continue")
+                || haystack.contains("please run /login"))
+        {
+            Some(UsageProvider::ClaudeCode)
+        } else {
+            None
+        }
+    });
+    detected
+}
+
+/// Shared tail boundary and quotation protection for provider-native notices.
+fn native_screen_responses<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a [&'a str]> {
+    let start = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .unwrap_or(0)
+        .saturating_sub(TAIL_LINES - 1);
+    let mut fenced = false;
+    lines.iter().enumerate().filter_map(move |(index, line)| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+            return None;
+        }
+        if fenced || index < start || *line != line.trim_start() {
+            return None;
+        }
+        // Corroboration must belong to this response, never a later code quote.
+        let end = lines[index..]
+            .iter()
+            .position(|line| {
+                let trimmed = line.trim();
+                trimmed.starts_with("```") || trimmed.starts_with("~~~")
+            })
+            .map_or(lines.len(), |offset| index + offset);
+        Some(&lines[index..end])
     })
 }
 
@@ -102,18 +222,6 @@ fn states_a_consequence(haystack: &str) -> bool {
         || haystack.contains("usage-credits")
         || haystack.contains("purchase more credits")
         || haystack.contains("upgrade to")
-}
-
-/// Which account the notice is about, when its own wording says so. Callers
-/// with a pane in hand should prefer that pane's agent id.
-fn provider_hint(haystack: &str) -> Option<UsageProvider> {
-    if haystack.contains("chatgpt.com") || haystack.contains("codex") {
-        return Some(UsageProvider::Codex);
-    }
-    if haystack.contains("claude") || haystack.contains("usage-credits") {
-        return Some(UsageProvider::ClaudeCode);
-    }
-    None
 }
 
 /// Join the trailing non-empty lines into one whitespace-collapsed string so a
@@ -353,6 +461,102 @@ mod tests {
     }
 
     #[test]
+    fn a_clock_is_resolved_only_for_a_native_notice() {
+        let calls = std::cell::Cell::new(0);
+        let clock = || {
+            calls.set(calls.get() + 1);
+            jst("2026-08-16T11:26:00+09:00")
+        };
+        assert_eq!(
+            detect_provider_limit_notice_with_clock("ordinary output", clock),
+            None
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "ordinary output must not resolve the local clock"
+        );
+
+        let notice = detect_provider_limit_notice_with_clock(
+            "Claude usage limit reached. Your limit will reset at 3pm.",
+            clock,
+        )
+        .expect("native notice");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            notice.resets_at,
+            Some(jst("2026-08-16T06:00:00+00:00").with_timezone(&Utc))
+        );
+    }
+
+    #[test]
+    fn quota_auth_and_model_fallback_notices_have_distinct_classifications() {
+        let now = jst("2026-10-22T11:26:00+09:00");
+        for (screen, quota, auth) in [
+            (
+                "Claude usage limit reached. Your limit will reset at 3pm.",
+                Some(UsageProvider::ClaudeCode),
+                None,
+            ),
+            (
+                "API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+                None,
+                Some(UsageProvider::ClaudeCode),
+            ),
+            ("Opus limit reached, now using Sonnet", None, None),
+            ("Opus limit reached, falling back to Sonnet", None, None),
+        ] {
+            assert_eq!(
+                detect_provider_limit_notice(screen, &now).and_then(|notice| notice.provider),
+                quota,
+                "quota classification for {screen}"
+            );
+            assert_eq!(
+                detect_provider_auth_notice(screen),
+                auth,
+                "auth classification for {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_reauthentication_notices_identify_the_provider_after_soft_wrapping() {
+        // Codex's REFRESH_TOKEN_EXPIRED_MESSAGE in login/src/auth/manager.rs;
+        // Claude's observed 401 wording is also in usage/api_error.rs.
+        for (screen, provider) in [
+            (
+                "■ Your access token could not be refreshed because your refresh token has expired.\n  Please log out and sign in again.",
+                UsageProvider::Codex,
+            ),
+            (
+                "API Error: 401 OAuth access token has expired.\nRe-authenticate to continue.",
+                UsageProvider::ClaudeCode,
+            ),
+        ] {
+            assert_eq!(detect_provider_auth_notice(screen), Some(provider), "{screen}");
+        }
+    }
+
+    #[test]
+    fn quoted_stale_or_unrecognized_auth_text_does_not_create_a_notice() {
+        let native = "API Error: 401 OAuth access token has expired. Re-authenticate to continue.";
+        for screen in [
+            format!("```text\n{native}\n```"),
+            format!("    {native}"),
+            format!("⏺ {native}"),
+            format!("> {native}"),
+            format!("- {native}"),
+            format!("The earlier pane displayed {native}"),
+            format!("{native}\n{}", "ordinary output\n".repeat(TAIL_LINES)),
+            "API Error: 401 Unauthorized".to_string(),
+            "API Error: 529 Overloaded. Please try again later.".to_string(),
+            "All tests passed.\n› ".to_string(),
+        ] {
+            assert_eq!(detect_provider_auth_notice(&screen), None, "{screen}");
+        }
+    }
+
+    #[test]
     fn codex_notice_is_detected_with_its_absolute_reset() {
         let screen = "\
 Running cargo test -p gwt
@@ -451,7 +655,8 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
     /// read in January does not schedule a hold eleven months in the past.
     #[test]
     fn a_year_less_date_rolls_into_the_next_year_when_it_has_already_passed() {
-        let screen = "You've hit your weekly limit · resets Jan 2 at 6am";
+        let screen =
+            "You've hit your weekly limit · resets Jan 2 at 6am\n/usage-credits to continue.";
 
         let notice = detect_provider_limit_notice(screen, &jst("2026-12-30T09:00:00+09:00"))
             .expect("claude weekly notice");
@@ -492,6 +697,49 @@ You've hit your weekly limit · resets Aug 20 at 6am (Asia/Tokyo)
                 None,
                 "false positive for: {screen}"
             );
+        }
+    }
+
+    /// Issue #5037: terminal persistence and full telemetry do not turn quoted
+    /// agent/tool output into the provider's own refusal.
+    #[test]
+    fn quoted_provider_refusals_are_not_notices() {
+        for screen in [
+            r#"{"body":"旧 Claude PM pane: You've hit your weekly limit · resets Oct 8, 6am"}"#,
+            "• The Board quoted \"You've hit your weekly limit · resets Oct 8, 6am\".",
+            "```text\n■ You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage\n  to purchase more credits or try again at Oct 8, 2026 6am.\n```",
+            "⏺ Read(log.txt)\n  ⎿ You've hit your weekly limit · resets Oct 8, 6am\n    /usage-credits to finish what you're working on.\n❯",
+            "What do you want to do?\n```text\n❯ 1. Wait for limit to reset\n```",
+            "You've hit your weekly limit · resets Oct 8, 6am\n~~~text\n/usage-credits to finish what you're working on.\n~~~",
+        ] {
+            assert_eq!(
+                detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00")),
+                None,
+                "quoted output is not a native refusal: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_native_rate_limit_options_identify_the_waiting_provider() {
+        // Wording read from the installed Claude Code 2.1.291 menu.
+        let screen =
+            "What do you want to do?\n❯ 1. Wait for limit to reset\n  2. Upgrade to Max 20x";
+        let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+            .expect("the CLI's rate-limit-options menu is a structural refusal");
+        assert_eq!(notice.provider, Some(UsageProvider::ClaudeCode));
+        assert_eq!(notice.resets_at, None);
+    }
+
+    #[test]
+    fn native_refusals_remain_recognizable_when_the_pane_soft_wraps() {
+        for (screen, provider) in [
+            ("■ You've hit your\nusage limit. Visit https://chatgpt.com/codex/settings/usage\nto purchase more credits or try again at Oct 8, 2026 6am.", UsageProvider::Codex),
+            ("You've hit your weekly limit · resets Aug 20 at\n6am (Asia/Tokyo)\n/usage-credits to finish what you're working on.", UsageProvider::ClaudeCode),
+        ] {
+            let notice = detect_provider_limit_notice(screen, &jst("2026-10-05T14:31:32+09:00"))
+                .expect("wrapping preserves the native refusal region");
+            assert_eq!(notice.provider, Some(provider));
         }
     }
 

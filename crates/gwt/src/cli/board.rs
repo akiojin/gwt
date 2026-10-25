@@ -25,16 +25,28 @@ use crate::{
 /// SPEC-1942 command model for `board.*` JSON operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoardCommand {
-    /// `board.show` with optional `params.workspace` / `params.all`.
+    /// Best-effort Discussion synchronization, independent of local reads/writes.
+    Sync,
+    /// `board.show` with optional audience filters and latest-entry limit.
+    /// `unresolved` keeps only `blocked` entries whose escalation is still open
+    /// (Issue #4609).
     Show {
         json: bool,
         workspace: Option<String>,
         all: bool,
+        limit: Option<usize>,
+        unresolved: bool,
     },
     /// `board.post` with `params.kind`, `params.body`, and optional audience
     /// fields such as `params.targets`, `params.mentions`, and
     /// `params.broadcast`.
     Post(Box<BoardPostCommand>),
+    /// `board.post` with an explicit stable `intent_id`. This selects the
+    /// durable exact-delivery path without changing ordinary post semantics.
+    RecoveryPost {
+        intent_id: String,
+        command: Box<BoardPostCommand>,
+    },
     /// `board.config.show` — print this repo's resolved Board routing (provider /
     /// channel / tenant) so per-project separation can be confirmed by running
     /// it in two repos and seeing two different channels (SPEC-2963 FR-026).
@@ -70,10 +82,21 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
             let mut json = false;
             let mut workspace: Option<String> = None;
             let mut all = false;
+            let mut limit = None;
+            let mut unresolved = false;
             while let Some(arg) = it.next() {
                 match arg.as_str() {
                     "--json" => json = true,
                     "--all" => all = true,
+                    "--unresolved" => unresolved = true,
+                    "--limit" => {
+                        let value = it.next().ok_or(CliParseError::MissingFlag("--limit"))?;
+                        limit = Some(
+                            value
+                                .parse::<usize>()
+                                .map_err(|_| CliParseError::InvalidNumber(value.clone()))?,
+                        );
+                    }
                     "--workspace" => {
                         let Some(value) = it.next() else {
                             return Err(CliParseError::MissingFlag("--workspace"));
@@ -87,9 +110,12 @@ pub fn parse(args: &[String]) -> Result<BoardCommand, CliParseError> {
                 json,
                 workspace,
                 all,
+                limit,
+                unresolved,
             })
         }
         Some("post") => parse_post_args(it.collect::<Vec<_>>().as_slice()),
+        Some("sync") => Ok(BoardCommand::Sync),
         Some("config") => match it.next().map(String::as_str) {
             Some("show") | None => Ok(BoardCommand::ConfigShow),
             Some(other) => Err(CliParseError::UnknownSubcommand(other.to_string())),
@@ -105,10 +131,22 @@ pub(super) fn run<E: CliEnv>(
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
     let code = match cmd {
+        BoardCommand::Sync => {
+            let report = crate::board_discussion_sync::sync_now(env.repo_path())
+                .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?;
+            out.push_str(
+                &serde_json::to_string_pretty(&report)
+                    .map_err(|error| io_as_spec_ops_error(io::Error::other(error)))?,
+            );
+            out.push('\n');
+            0
+        }
         BoardCommand::Show {
             json,
             workspace,
             all,
+            limit,
+            unresolved,
         } => {
             let current_session = current_session_from_env().ok().flatten();
             let scope = if all {
@@ -127,19 +165,91 @@ pub(super) fn run<E: CliEnv>(
                     session_scope
                 }
             };
-            let snapshot = if matches!(scope, BoardAudienceScope::All) {
+            let mut snapshot = if matches!(scope, BoardAudienceScope::All) {
                 load_snapshot(env.repo_path()).map_err(gwt_error_to_spec_ops_error)?
             } else {
                 load_snapshot_for_scope(env.repo_path(), &scope)
                     .map_err(gwt_error_to_spec_ops_error)?
             };
+            let complete_read = (all && limit.is_none() && !unresolved)
+                .then(|| (chrono::Utc::now(), snapshot.board.clone()));
+            // all:true is the recovery path for unread posts older than the hot projection.
+            if all {
+                snapshot.board.entries = crate::board_provider::load_entries_since(
+                    env.repo_path(),
+                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                )
+                .map_err(gwt_error_to_spec_ops_error)?;
+                snapshot.board.has_more_before = false;
+            }
+            snapshot.board.entries.retain(|entry| {
+                gwt_core::coordination::board_entry_visible_for_scope(entry, &scope)
+            });
+            // The unresolved filter cannot answer without the index; a plain
+            // read degrades to `indexed: false` rather than failing the page.
+            let escalations = match gwt_core::coordination::load_escalation_store(env.repo_path()) {
+                Ok(store) => store,
+                Err(error) if unresolved => return Err(gwt_error_to_spec_ops_error(error)),
+                Err(_) => Default::default(),
+            };
+            if unresolved {
+                snapshot.board.entries.retain(|entry| {
+                    entry.kind == gwt_core::coordination::BoardEntryKind::Blocked
+                        && escalations
+                            .open()
+                            .any(|escalation| escalation.entry_id == entry.id)
+                });
+            }
+            let total_entries = snapshot.board.entries.len();
+            let limit = limit.unwrap_or(if all { total_entries } else { 20 });
+            let omitted = total_entries.saturating_sub(limit);
+            snapshot.board.entries.drain(..omitted);
+            snapshot.board.has_more_before |= omitted > 0;
+            snapshot.board.oldest_entry_id = snapshot.board.entries.first().map(|e| e.id.clone());
+            snapshot.board.newest_entry_id = snapshot.board.entries.last().map(|e| e.id.clone());
+            let returned_entries = snapshot.board.entries.len();
             if json {
-                let rendered = serde_json::to_string_pretty(&snapshot)
+                let mut board = serde_json::to_value(&snapshot.board)
+                    .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+                annotate_escalations(&mut board, &snapshot.board.entries, &escalations);
+                let response = serde_json::json!({
+                    "board": board,
+                    "page": {
+                        "total_entries": total_entries,
+                        "returned_entries": returned_entries,
+                        "truncated": omitted > 0,
+                    },
+                });
+                let rendered = serde_json::to_string_pretty(&response)
                     .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
                 out.push_str(&rendered);
                 out.push('\n');
             } else {
+                out.push_str(&format!(
+                    "Board snapshot: {returned_entries}/{total_entries} entries\n"
+                ));
                 render_snapshot(out, &snapshot);
+            }
+            if let Some(session_id) = crate::board_read_receipts::caller_session_from_env() {
+                let recorded = match complete_read {
+                    Some((started_at, hot)) => crate::board_read_receipts::record_complete_read(
+                        env.repo_path(),
+                        &session_id,
+                        &snapshot.board.entries,
+                        started_at,
+                        &hot,
+                    ),
+                    None => crate::board_read_receipts::record_returned_entries(
+                        env.repo_path(),
+                        &session_id,
+                        &snapshot.board.entries,
+                    ),
+                };
+                if let Err(error) = recorded {
+                    let warning = crate::board_read_receipts::warning(error);
+                    tracing::warn!(%warning, "explicit Board read receipt was not recorded");
+                    let _ = writeln!(env.stderr(), "{warning}");
+                }
             }
             0
         }
@@ -193,6 +303,7 @@ pub(super) fn run<E: CliEnv>(
             let mentions = normalize_board_mentions(
                 &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
             );
+            validate_agent_user_mentions(env.repo_path(), &mentions)?;
             let mut audience = Vec::new();
             if !broadcast {
                 if let BoardAudienceScope::Workspace(workspace_id) = current_session_board_scope(
@@ -238,10 +349,22 @@ pub(super) fn run<E: CliEnv>(
             draft.mentions = mentions;
             draft.audience = audience;
             if let Some(session) = current_session.as_ref() {
+                // SPEC-1974 FR-063: record which *form* of worktree the post
+                // came from, so a branchless ephemeral session stays
+                // identifiable on the Board once its worktree is pruned. This
+                // is provenance only — the retired Intake / Execution action
+                // lanes are not coming back through it.
                 draft.origin = BoardOrigin::new(
                     session.branch.clone(),
                     session.id.clone(),
                     session.display_name.clone(),
+                )
+                .with_agent_name(session.agent_name.clone())
+                .with_worktree_form(
+                    crate::worktree_form::board_origin_worktree_form(
+                        env.repo_path(),
+                        Some(session.branch.as_str()),
+                    ),
                 );
             }
             let entry = draft
@@ -278,6 +401,64 @@ pub(super) fn run<E: CliEnv>(
             if let Some(entry) = escalation {
                 report_escalation(env, &entry, out);
             }
+            0
+        }
+        BoardCommand::RecoveryPost { intent_id, command } => {
+            let BoardPostCommand {
+                kind,
+                body,
+                file,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                resolves,
+                broadcast,
+            } = *command;
+            if !resolves.is_empty() {
+                return Err(io_as_spec_ops_error(io::Error::other(
+                    "recovery posts do not support escalation resolution",
+                )));
+            }
+            let body = match (body, file) {
+                (Some(body), None) => body,
+                (None, Some(file)) => env.read_file(&file).map_err(io_as_spec_ops_error)?,
+                _ => {
+                    return Err(io_as_spec_ops_error(io::Error::other(
+                        "board post requires exactly one of --body or -f",
+                    )));
+                }
+            };
+            let (workspace_audience, other_mention_args) = split_workspace_mentions(&mentions);
+            let mentions = normalize_board_mentions(
+                &parse_mentions(&other_mention_args).map_err(gwt_error_to_spec_ops_error)?,
+            );
+            validate_agent_user_mentions(env.repo_path(), &mentions)?;
+            let input = crate::recovery_delivery::RecoveryDeliveryInput {
+                kind: kind.parse().map_err(gwt_error_to_spec_ops_error)?,
+                body,
+                title,
+                title_summary,
+                parent,
+                topics,
+                owners,
+                targets,
+                mentions,
+                workspace_audience,
+                broadcast,
+            };
+            let report = crate::recovery_delivery::deliver_board_recovery(
+                env.repo_path(),
+                &intent_id,
+                input,
+            );
+            let rendered = serde_json::to_string(&report)
+                .map_err(|err| io_as_spec_ops_error(io::Error::other(err.to_string())))?;
+            out.push_str(&rendered);
+            out.push('\n');
             0
         }
         BoardCommand::ConfigShow => {
@@ -332,6 +513,56 @@ pub(super) fn auto_file_operation_refusal<E: CliEnv>(env: &mut E, operation: &st
     );
 }
 
+/// File an escalation from operation-local refusal facts.
+///
+/// The display text is retained as evidence, but never participates in the
+/// disposition decision. Agent-recoverable refusals have no escalation kind
+/// and therefore stay on the caller's normal retry path.
+pub(super) fn auto_file_structured_operation_refusal<E: CliEnv>(
+    env: &mut E,
+    operation: &str,
+    display: &str,
+    refusal: &super::governance::OperationRefusal,
+) {
+    if operation.starts_with("board.") {
+        return;
+    }
+    if !gwt_core::board_escalation::structured_refusal_eligible_operation(operation) {
+        return;
+    }
+    let session = current_session_from_env().ok().flatten();
+    if crate::pm_registry::pane_is_pm(
+        env.repo_path(),
+        Some(
+            session
+                .as_ref()
+                .map_or(env.repo_path(), |session| session.worktree_path.as_path()),
+        ),
+        session.as_ref().map(|session| session.id.as_str()),
+    ) {
+        return;
+    }
+    let Some(kind) = refusal.escalation_kind() else {
+        return;
+    };
+    let Some(cause) = refusal.governance.cause else {
+        return;
+    };
+    file_escalation_for_owner(
+        env,
+        operation,
+        gwt_core::board_escalation::render_structured_operation_refusal_body(
+            operation,
+            display,
+            kind,
+            &refusal.reason_code,
+            cause.as_str(),
+            refusal.recovery_action.as_deref(),
+        ),
+        refusal.owner_number,
+    );
+}
+
 /// Escalate an agent's own `execution.blocked` declaration (Issue #3655 AC-1).
 ///
 /// `execution.blocked` is the exact moment an agent concludes it cannot
@@ -361,11 +592,27 @@ pub(super) fn auto_file_declared_block<E: CliEnv>(
 /// Issue-comment mirror, and the escalation index all stay on one code path, so
 /// a hand-written escalation and an auto-filed one cannot drift apart.
 fn file_escalation<E: CliEnv>(env: &mut E, operation: &str, body: String) {
+    file_escalation_for_owner(env, operation, body, None)
+}
+
+/// File an escalation, preferring an owner the refusal itself supplied.
+///
+/// The Session is the usual source of the owning Issue, but the refusals that
+/// most need an owner are the ones where the Session identity is missing or
+/// unreadable. Without a fallback those escalations land ownerless, which
+/// means no Issue comment and no `needs_human` — visible nowhere the PM looks.
+fn file_escalation_for_owner<E: CliEnv>(
+    env: &mut E,
+    operation: &str,
+    body: String,
+    fallback_owner: Option<u64>,
+) {
     let owner = current_session_from_env()
         .ok()
         .flatten()
         .as_ref()
-        .and_then(super::hook::coordination_event::linked_issue_number);
+        .and_then(super::hook::coordination_event::linked_issue_number)
+        .or(fallback_owner);
     if already_escalated(env.repo_path(), owner, operation) {
         tracing::debug!(
             operation,
@@ -419,6 +666,48 @@ fn already_escalated(repo_path: &std::path::Path, owner: Option<u64>, operation:
     }
 }
 
+/// Attach the durable escalation state to every `blocked` entry of a
+/// serialized Board projection (Issue #4609).
+///
+/// `BoardEntry.state` is the agent lifecycle label written by hook posts
+/// (`started` / `ready`) and is unrelated to escalations, so resolution lives
+/// in its own `escalation` object read from the escalation index. A blocked
+/// entry the index does not hold reports `indexed: false` and `resolved: null`
+/// rather than a guess.
+fn annotate_escalations(
+    board: &mut serde_json::Value,
+    entries: &[gwt_core::coordination::BoardEntry],
+    escalations: &gwt_core::board_escalation::BoardEscalationStore,
+) {
+    let Some(rendered) = board
+        .get_mut("entries")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for (entry, rendered) in entries.iter().zip(rendered.iter_mut()) {
+        if entry.kind != gwt_core::coordination::BoardEntryKind::Blocked {
+            continue;
+        }
+        let escalation = escalations
+            .escalations
+            .iter()
+            .find(|escalation| escalation.entry_id == entry.id);
+        let value = match escalation {
+            Some(escalation) => serde_json::json!({
+                "indexed": true,
+                "resolved": !escalation.is_open(),
+                "resolved_at": escalation.resolved_at,
+                "resolved_by_entry_id": escalation.resolved_by_entry_id,
+            }),
+            None => serde_json::json!({ "indexed": false, "resolved": null }),
+        };
+        if let Some(object) = rendered.as_object_mut() {
+            object.insert("escalation".to_string(), value);
+        }
+    }
+}
+
 /// Say which of the named escalations this post actually closed.
 ///
 /// A mistyped or already-closed id is silent otherwise, and the poster walks
@@ -444,6 +733,7 @@ fn report_resolutions(
     let mut already_closed = Vec::new();
     let mut still_open = Vec::new();
     let mut in_history = Vec::new();
+    let mut not_escalations = Vec::new();
     let mut unknown = Vec::new();
     for id in requested {
         let id = id.trim();
@@ -460,13 +750,20 @@ fn report_resolutions(
             }
             Some(escalation) if !escalation.is_open() => already_closed.push(id),
             Some(_) => still_open.push(id),
-            None => {
-                if gwt_core::coordination::board_entry_exists(repo_path, id).unwrap_or(false) {
-                    in_history.push(id);
-                } else {
-                    unknown.push(id);
+            // Only a `blocked` post opens an escalation, so any other kind
+            // found in history can never be folded and closed by a retry
+            // (Issue #4626).
+            None => match gwt_core::coordination::load_board_entry(repo_path, id) {
+                Ok(Some(entry))
+                    if entry.kind == gwt_core::coordination::BoardEntryKind::Blocked =>
+                {
+                    in_history.push(id)
                 }
-            }
+                Ok(Some(entry)) => {
+                    not_escalations.push(format!("{id} (kind: {})", entry.kind.as_str()))
+                }
+                _ => unknown.push(id),
+            },
         }
     }
     if !resolved.is_empty() {
@@ -495,11 +792,19 @@ fn report_resolutions(
             in_history.join(", ")
         ));
     }
+    if !not_escalations.is_empty() {
+        out.push_str(&format!(
+            "board entries named for resolution are not escalations: {}\n\
+             Only a `blocked` post opens an escalation, and resolving any other kind never closes anything. \
+             Name the blocked post's id instead; copy it from the wake prompt or issue.monitor.status.\n",
+            not_escalations.join(", ")
+        ));
+    }
     if !unknown.is_empty() {
         out.push_str(&format!(
             "board escalations not found: {}\n\
              Copy the exact id from the wake prompt or issue.monitor.status. \
-             board.show only lists the latest 500 posts, so a missing Board card does not mean the id is invalid.\n",
+             board.show is bounded (20 posts by default, within the provider retention window), so a missing Board card does not mean the id is invalid.\n",
             unknown.join(", ")
         ));
     }
@@ -612,6 +917,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
     let mut mentions = Vec::new();
     let mut resolves = Vec::new();
     let mut broadcast = false;
+    let mut intent_id: Option<String> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -696,6 +1002,13 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
             "--broadcast" => {
                 broadcast = true;
             }
+            "--intent-id" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err(CliParseError::MissingFlag("--intent-id"));
+                }
+                intent_id = Some(args[i].clone());
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -704,7 +1017,7 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         super::validate_title_summary_work_name("--title-summary", value)?;
     }
 
-    Ok(BoardCommand::Post(Box::new(BoardPostCommand {
+    let command = Box::new(BoardPostCommand {
         kind: kind.ok_or(CliParseError::MissingFlag("--kind"))?,
         body,
         file,
@@ -717,7 +1030,11 @@ fn parse_post_args(args: &[&String]) -> Result<BoardCommand, CliParseError> {
         mentions,
         resolves,
         broadcast,
-    })))
+    });
+    Ok(match intent_id {
+        Some(intent_id) => BoardCommand::RecoveryPost { intent_id, command },
+        None => BoardCommand::Post(command),
+    })
 }
 
 fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
@@ -726,6 +1043,35 @@ fn parse_mentions(values: &[String]) -> gwt_core::Result<Vec<BoardMention>> {
         mentions.push(value.parse::<BoardMention>()?);
     }
     Ok(normalize_board_mentions(&mentions))
+}
+
+/// Human GUI posts use a separate path. Every CLI post is agent-authored,
+/// including the sessionless compatibility identity, so only the exact
+/// registered PM may address a human here. Recovery delivery shares this rule.
+fn validate_agent_user_mentions(
+    repo_path: &std::path::Path,
+    mentions: &[BoardMention],
+) -> Result<(), SpecOpsError> {
+    if !mentions
+        .iter()
+        .any(|mention| mention.target_kind == gwt_core::coordination::BoardMentionTargetKind::User)
+    {
+        return Ok(());
+    }
+    let registered_pm = current_session_from_env()
+        .ok()
+        .flatten()
+        .is_some_and(|session| {
+            std::env::var(GWT_SESSION_ID_ENV).ok().as_deref() == Some(session.id.as_str())
+                && crate::board_read_receipts::registered_pm(repo_path, &session.id)
+        });
+    if registered_pm {
+        Ok(())
+    } else {
+        Err(io_as_spec_ops_error(io::Error::other(
+            "Only the registered PM session may mention a user. Address the PM with params.mentions:[\"agent:pm\"] (or its exact session:<id>) and retry board.post; the PM handles human decisions.",
+        )))
+    }
 }
 
 /// SPEC-2359 FR-096: `--mention workspace:<id>` routes to BoardEntry.audience,
@@ -799,13 +1145,14 @@ fn format_author(entry: &BoardEntry) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let author = entry.author_display_name();
     match (branch, session) {
         (Some(branch), Some(session)) => {
-            format!("{} @ {} / {}", entry.author, branch, session)
+            format!("{} @ {} / {}", author, branch, session)
         }
-        (Some(branch), None) => format!("{} @ {}", entry.author, branch),
-        (None, Some(session)) => format!("{} / {}", entry.author, session),
-        (None, None) => entry.author.clone(),
+        (Some(branch), None) => format!("{} @ {}", author, branch),
+        (None, Some(session)) => format!("{} / {}", author, session),
+        (None, None) => author,
     }
 }
 
@@ -836,6 +1183,255 @@ mod tests {
 
     fn s(value: &str) -> String {
         value.to_string()
+    }
+
+    #[test]
+    fn issue_3713_show_records_only_returned_entries_for_the_calling_session() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/reader", gwt_agent::AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut entries = Vec::new();
+        for workspace in ["workspace-current", "workspace-current", "workspace-other"] {
+            let entry = BoardEntry::new(
+                AuthorKind::Agent,
+                "Peer",
+                "status".parse().unwrap(),
+                "read the actual body",
+                None,
+                None,
+                vec![],
+                vec![],
+            )
+            .with_audience(vec![workspace]);
+            post_entry(tmp.path(), entry.clone()).unwrap();
+            entries.push(entry);
+        }
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        assert_eq!(
+            run(
+                &mut env,
+                BoardCommand::Show {
+                    json: true,
+                    workspace: Some("workspace-current".into()),
+                    all: false,
+                    limit: Some(1),
+                    unresolved: false,
+                },
+                &mut out
+            )
+            .unwrap(),
+            0
+        );
+        let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(page["board"]["entries"][0]["id"], entries[1].id);
+        let receipt = gwt_core::paths::gwt_project_dir_for_repo_path(tmp.path())
+            .join("project-state/board-read-receipts")
+            .join(format!(
+                "{}.json",
+                crate::pm_registry::pm_delivery_prompt_sha256(&session.id)
+            ));
+        let bytes = std::fs::read_to_string(receipt)
+            .expect("successful explicit show must persist a session-local read receipt");
+        assert!(bytes.contains(&entries[1].id));
+        assert!(!bytes.contains(&entries[0].id));
+        assert!(!bytes.contains(&entries[2].id));
+    }
+
+    #[test]
+    fn issue_3713_show_all_returns_critical_evidence_older_than_the_hot_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let first = BoardEntry::new(
+            AuthorKind::Agent,
+            "Owner",
+            "handoff".parse().unwrap(),
+            "old but unread evidence",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        post_entry(tmp.path(), first.clone()).unwrap();
+        for index in 0..gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT {
+            post_entry(
+                tmp.path(),
+                BoardEntry::new(
+                    AuthorKind::Agent,
+                    "Peer",
+                    "status".parse().unwrap(),
+                    format!("later post {index}"),
+                    None,
+                    None,
+                    vec![],
+                    vec![],
+                ),
+            )
+            .unwrap();
+        }
+        assert!(!load_snapshot(tmp.path())
+            .unwrap()
+            .board
+            .entries
+            .iter()
+            .any(|entry| entry.id == first.id));
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            BoardCommand::Show {
+                json: true,
+                workspace: None,
+                all: true,
+                limit: None,
+                unresolved: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(page["board"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == first.id));
+        assert_eq!(
+            page["page"]["returned_entries"],
+            gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT + 1
+        );
+    }
+
+    fn issue_3713_agent_post(recovery: bool) -> BoardCommand {
+        let post = Box::new(BoardPostCommand {
+            kind: "question".into(),
+            body: Some("Need a product decision".into()),
+            mentions: vec!["user:akiojin".into()],
+            ..BoardPostCommand::default()
+        });
+        if recovery {
+            BoardCommand::RecoveryPost {
+                intent_id: "test-intent".into(),
+                command: post,
+            }
+        } else {
+            BoardCommand::Post(post)
+        }
+    }
+
+    fn issue_3713_rejects_agent_user_mention(recovery: bool) {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/agent", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let error = run(
+            &mut env,
+            issue_3713_agent_post(recovery),
+            &mut String::new(),
+        )
+        .expect_err("non-PM must address PM instead of the user");
+        assert!(error.to_string().contains("agent:pm"), "{error}");
+        assert!(load_snapshot(tmp.path()).unwrap().board.entries.is_empty());
+    }
+
+    #[test]
+    fn issue_3713_ordinary_post_rejects_non_pm_user_mention_with_recovery() {
+        issue_3713_rejects_agent_user_mention(false);
+    }
+
+    #[test]
+    fn issue_3713_recovery_post_cannot_bypass_non_pm_user_mention() {
+        issue_3713_rejects_agent_user_mention(true);
+    }
+
+    fn issue_3713_register_pm(repo: &std::path::Path, session: &Session) {
+        let prefs = crate::pm_registry::PmPrefs {
+            registration: Some(crate::pm_registry::PmRegistration {
+                session_id: session.id.clone(),
+                agent_id: "codex".into(),
+                worktree_path: repo.to_string_lossy().into_owned(),
+                created_at: None,
+                consecutive_crashes: 0,
+                next_not_before: None,
+            }),
+            ..Default::default()
+        };
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(repo),
+            &prefs,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn issue_3713_registered_pm_can_address_user_and_replacement_loses_privilege() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        issue_3713_register_pm(tmp.path(), &session);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        assert_eq!(
+            run(&mut env, issue_3713_agent_post(false), &mut String::new()).unwrap(),
+            0
+        );
+        let replacement = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        issue_3713_register_pm(tmp.path(), &replacement);
+        for recovery in [false, true] {
+            assert!(run(
+                &mut env,
+                issue_3713_agent_post(recovery),
+                &mut String::new()
+            )
+            .is_err());
+        }
+        assert_eq!(load_snapshot(tmp.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn issue_3713_sessionless_agent_routes_to_pm_without_human_impersonation() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        assert!(run(&mut env, issue_3713_agent_post(false), &mut String::new()).is_err());
+        let routed = BoardCommand::Post(Box::new(BoardPostCommand {
+            kind: "handoff".into(),
+            body: Some("PM decision requested".into()),
+            mentions: vec!["agent:pm".into()],
+            ..BoardPostCommand::default()
+        }));
+        assert_eq!(run(&mut env, routed, &mut String::new()).unwrap(), 0);
+    }
+
+    fn immutable_execution_refusal() -> crate::cli::governance::OperationRefusal {
+        crate::cli::governance::OperationRefusal::human_required(
+            "execution_record_terminal",
+            gwt_core::board_escalation::OperationRefusalKind::Immutability,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::DomainInvalid),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        )
     }
 
     fn workspace_agent(
@@ -950,6 +1546,7 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.client.seed(gwt_github::IssueSnapshot {
+            author_login: None,
             number: gwt_github::IssueNumber(2338),
             title: "launch rebinds dead sessions".to_string(),
             body: String::new(),
@@ -1133,6 +1730,80 @@ mod tests {
             !out.contains("already closed"),
             "an unknown id is not an already-closed one: {out}"
         );
+    }
+
+    #[test]
+    fn board_family_run_post_says_a_non_escalation_entry_cannot_be_resolved() {
+        // Issue #4626: a `decision` id exists in Board history but was never an
+        // escalation. Telling the PM to retry would never close anything.
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path());
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("担当が自発的に投稿した判断"),
+                s("--owner"),
+                s("2338"),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        let decision_id = gwt_core::coordination::load_snapshot(tmp.path())
+            .unwrap()
+            .board
+            .entries
+            .last()
+            .unwrap()
+            .id
+            .clone();
+
+        let mut out = String::new();
+        run(
+            &mut env,
+            parse(&[
+                s("post"),
+                s("--kind"),
+                s("decision"),
+                s("--body"),
+                s("解消したつもり"),
+                s("--owner"),
+                s("2338"),
+                s("--resolves"),
+                s(&decision_id),
+            ])
+            .unwrap(),
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains(&format!(
+                "board entries named for resolution are not escalations: {decision_id} (kind: decision)"
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains("blocked"),
+            "the PM must be told what a resolvable id is: {out}"
+        );
+        assert!(
+            !out.contains("Retry"),
+            "a non-escalation id never folds, so retry must not be suggested: {out}"
+        );
+        assert!(!out.contains("missing from the index"), "{out}");
+        assert!(!out.contains("board escalations not found:"), "{out}");
+        assert!(!out.contains("board escalations resolved:"), "{out}");
     }
 
     #[test]
@@ -1334,16 +2005,56 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable; use a fresh launch for new work",
+            &immutable_execution_refusal(),
         );
 
         let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
         assert_eq!(open.len(), 1);
         assert!(open[0].body.contains("execution.reopen"), "{:?}", open[0]);
         assert!(open[0].body.contains("is immutable"), "{:?}", open[0]);
+    }
+
+    #[test]
+    fn a_typed_authority_refusal_escalates_independently_of_display_wording() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = ScopedEnvVar::unset(GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
+        let refusal = crate::cli::governance::OperationRefusal::human_required(
+            "execution_owner_mismatch",
+            gwt_core::board_escalation::OperationRefusalKind::Authority,
+            crate::cli::governance::GovernanceMetadata {
+                effect: Some(crate::cli::governance::GovernanceEffect::Protected),
+                cause: Some(crate::cli::governance::GovernanceCause::Authority),
+                retryable: Some(false),
+                ..crate::cli::governance::GovernanceMetadata::default()
+            },
+            None,
+        );
+
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "execution.complete",
+            "display wording with no classifier keywords",
+            &refusal,
+        );
+
+        let open = gwt_core::coordination::load_open_escalations(tmp.path()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert!(open[0].body.contains("原因: authority"), "{:?}", open[0]);
+        assert!(
+            open[0]
+                .body
+                .contains("display wording with no classifier keywords"),
+            "the display still travels as evidence without deciding the cause: {:?}",
+            open[0]
+        );
     }
 
     #[test]
@@ -1359,10 +2070,11 @@ mod tests {
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         for _ in 0..3 {
-            auto_file_operation_refusal(
+            auto_file_structured_operation_refusal(
                 &mut env,
                 "execution.reopen",
                 "Completed issue #2338 is immutable; use a fresh launch for new work",
+                &immutable_execution_refusal(),
             );
         }
 
@@ -1387,10 +2099,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
-        auto_file_operation_refusal(
+        auto_file_structured_operation_refusal(
             &mut env,
             "execution.reopen",
             "Completed issue #2338 is immutable",
+            &immutable_execution_refusal(),
         );
         auto_file_operation_refusal(
             &mut env,
@@ -1423,6 +2136,12 @@ mod tests {
             &mut env,
             "execution.blocked",
             "missing required flag: reason",
+        );
+        auto_file_structured_operation_refusal(
+            &mut env,
+            "issue.view",
+            "display wording is irrelevant",
+            &immutable_execution_refusal(),
         );
 
         assert!(gwt_core::coordination::load_open_escalations(tmp.path())
@@ -1478,6 +2197,8 @@ mod tests {
                 json: true,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1498,6 +2219,8 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: true,
+                limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1536,6 +2259,8 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -1580,6 +2305,8 @@ mod tests {
                 json: true,
                 workspace: Some("ws-1".into()),
                 all: true,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -1697,6 +2424,8 @@ mod tests {
                 json: false,
                 workspace: Some("workspace-a".into()),
                 all: false,
+                limit: None,
+                unresolved: false,
             }
         );
 
@@ -1707,6 +2436,8 @@ mod tests {
                 json: true,
                 workspace: None,
                 all: true,
+                limit: None,
+                unresolved: false,
             }
         );
     }
@@ -1872,8 +2603,15 @@ mod tests {
 
     #[test]
     fn board_family_run_post_persists_typed_mentions() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
+        let session = Session::new(tmp.path(), "work/pm", AgentId::Codex);
+        session.save(&gwt_sessions_dir()).unwrap();
+        let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
+        issue_3713_register_pm(tmp.path(), &session);
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
 
         let mut out = String::new();
@@ -2044,7 +2782,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let _home = ScopedGwtHome::set(tmp.path());
         let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-        let session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        let mut session = Session::new(tmp.path(), "work/20260506-1706", AgentId::Codex);
+        session.agent_name = Some("ミオ".into());
         session.save(&sessions_dir).unwrap();
         let _session_env = ScopedEnvVar::set(GWT_SESSION_ID_ENV, &session.id);
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
@@ -2085,6 +2824,7 @@ mod tests {
         );
         assert_eq!(entry.origin_branch.as_deref(), Some("work/20260506-1706"));
         assert_eq!(entry.origin_agent_id.as_deref(), Some("Codex"));
+        assert_eq!(entry.origin_agent_name.as_deref(), Some("ミオ"));
     }
 
     #[test]
@@ -2407,7 +3147,7 @@ mod tests {
                     "session:session-target".into(),
                     "agent:reviewer".into(),
                     "agent:observer".into(),
-                    "user:akiojin".into(),
+                    "agent:pm".into(),
                 ],
                 resolves: Vec::new(),
                 broadcast: false,
@@ -2631,6 +3371,8 @@ mod tests {
                 json: false,
                 workspace: Some("workspace-a".into()),
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut workspace_out,
         )
@@ -2652,6 +3394,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: true,
+                limit: None,
+                unresolved: false,
             },
             &mut all_out,
         )
@@ -2720,6 +3464,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2761,6 +3507,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2771,6 +3519,22 @@ mod tests {
             out.contains("Claude @ feature/foo / sess-a3f2"),
             "expected origin metadata suffix, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn board_author_format_prefers_the_captured_agent_name() {
+        let entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "body",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_agent_name("ミオ");
+        assert_eq!(format_author(&entry), "ミオ (Codex)");
     }
 
     #[test]
@@ -2800,6 +3564,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2839,6 +3605,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2880,6 +3648,8 @@ mod tests {
                 json: false,
                 workspace: None,
                 all: false,
+                limit: None,
+                unresolved: false,
             },
             &mut out,
         )
@@ -2898,5 +3668,60 @@ mod tests {
             !out.contains("Codex @ work/readable-board / sess-readable: Current state"),
             "body must not be collapsed into the header, got:\n{out}"
         );
+    }
+
+    #[test]
+    fn recovery_post_rejects_escalation_resolution_before_storage() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut env = crate::cli::TestEnv::new(temp.path().to_path_buf());
+        let mut out = String::new();
+        let result = run(
+            &mut env,
+            BoardCommand::RecoveryPost {
+                intent_id: "intent-1974".to_string(),
+                command: Box::new(BoardPostCommand {
+                    kind: "status".to_string(),
+                    body: Some("safe status".to_string()),
+                    resolves: vec!["blocked-entry-1974".to_string()],
+                    ..Default::default()
+                }),
+            },
+            &mut out,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("do not support escalation resolution"));
+        assert!(out.is_empty());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn board_family_parse_intent_id_selects_recovery_without_changing_normal_post() {
+        let normal = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("normal"),
+        ])
+        .expect("normal board post");
+        assert!(matches!(normal, BoardCommand::Post(_)));
+
+        let recovery = parse(&[
+            s("post"),
+            s("--kind"),
+            s("status"),
+            s("--body"),
+            s("recover"),
+            s("--intent-id"),
+            s("stable-intent-1"),
+        ])
+        .expect("recovery board post");
+        let BoardCommand::RecoveryPost { intent_id, command } = recovery else {
+            panic!("--intent-id must select the recovery route");
+        };
+        assert_eq!(intent_id, "stable-intent-1");
+        assert_eq!(command.body.as_deref(), Some("recover"));
     }
 }

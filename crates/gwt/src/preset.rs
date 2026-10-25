@@ -10,7 +10,10 @@ pub enum WindowPreset {
     Codex,
     Agent,
     AgentKanban,
+    /// Legacy-only value retained to deserialize old workspace files.
+    /// Hidden from [`Self::ALL`] and dropped during workspace load.
     FileTree,
+    /// Legacy Issue-family alias restored into Settings Issues.
     Branches,
     Settings,
     /// Legacy-only value accepted so old workspace files containing
@@ -19,26 +22,30 @@ pub enum WindowPreset {
     Memo,
     Profile,
     Logs,
+    /// Legacy-only value accepted so persisted Issue windows restore into
+    /// Settings Issues. It is not exposed in [`Self::ALL`].
     Issue,
     /// Legacy-only value accepted so persisted Issue Monitor windows restore
-    /// into the canonical Issue surface. It is not exposed in [`Self::ALL`].
+    /// into Settings Issues. It is not exposed in [`Self::ALL`].
     IssueMonitor,
+    /// Legacy Issue-family alias restored into Settings Issues.
     Spec,
+    /// Legacy Issue-family alias, including the old `workspace` spelling.
     #[serde(alias = "workspace")]
     Work,
     Index,
     Board,
+    /// Legacy-only value retained to deserialize old workspace files.
+    /// Hidden from [`Self::ALL`] and dropped during workspace load.
     Pr,
-    /// SPEC-2809 — independent Console window surface for external
-    /// process (gh / git / docker / agent / runner) stdout/stderr live
-    /// tail. Reads from `ProcessConsoleHub` (SPEC-1924 domain).
+    /// Legacy-only value retained to deserialize old workspace files.
+    /// Hidden from [`Self::ALL`] and dropped during workspace load.
     Console,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowSurface {
     Terminal,
-    FileTree,
     Branches,
     Profile,
     Board,
@@ -47,7 +54,6 @@ pub enum WindowSurface {
     Index,
     Work,
     AgentKanban,
-    Console,
     Mock,
 }
 
@@ -59,7 +65,6 @@ impl WindowSurface {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Terminal => "terminal",
-            Self::FileTree => "file-tree",
             Self::Branches => "branches",
             Self::Profile => "profile",
             Self::Board => "board",
@@ -68,30 +73,22 @@ impl WindowSurface {
             Self::Index => "index",
             Self::Work => "work",
             Self::AgentKanban => "agent-kanban",
-            Self::Console => "console",
             Self::Mock => "mock",
         }
     }
 }
 
 impl WindowPreset {
-    pub const ALL: [WindowPreset; 16] = [
+    pub const ALL: [WindowPreset; 9] = [
         WindowPreset::Shell,
         WindowPreset::Claude,
         WindowPreset::Codex,
         WindowPreset::AgentKanban,
-        WindowPreset::FileTree,
-        WindowPreset::Branches,
         WindowPreset::Settings,
         WindowPreset::Profile,
         WindowPreset::Logs,
-        WindowPreset::Issue,
-        WindowPreset::Spec,
-        WindowPreset::Work,
         WindowPreset::Index,
         WindowPreset::Board,
-        WindowPreset::Pr,
-        WindowPreset::Console,
     ];
 
     pub fn title(self) -> &'static str {
@@ -153,6 +150,7 @@ impl WindowPreset {
             Self::Agent => "agent",
             Self::AgentKanban => "agent-kanban",
             Self::FileTree => "file-tree",
+            Self::Console => "console",
             Self::Branches => "branches",
             Self::Settings => "settings",
             Self::Memo => "memo",
@@ -165,7 +163,6 @@ impl WindowPreset {
             Self::Index => "index",
             Self::Board => "board",
             Self::Pr => "pr",
-            Self::Console => "console",
         }
     }
 
@@ -173,16 +170,15 @@ impl WindowPreset {
         match self {
             Self::Shell | Self::Claude | Self::Codex | Self::Agent => WindowSurface::Terminal,
             Self::AgentKanban => WindowSurface::AgentKanban,
-            Self::FileTree => WindowSurface::FileTree,
+            Self::FileTree | Self::Console | Self::Pr => WindowSurface::Mock,
             Self::Branches => WindowSurface::Branches,
             Self::Memo => WindowSurface::Mock,
             Self::Profile => WindowSurface::Profile,
             Self::Logs => WindowSurface::Logs,
             Self::Board => WindowSurface::Board,
-            Self::Issue | Self::IssueMonitor | Self::Spec | Self::Pr => WindowSurface::Knowledge,
+            Self::Issue | Self::IssueMonitor | Self::Spec => WindowSurface::Knowledge,
             Self::Work => WindowSurface::Work,
             Self::Index => WindowSurface::Index,
-            Self::Console => WindowSurface::Console,
             Self::Settings => WindowSurface::Mock,
         }
     }
@@ -191,35 +187,24 @@ impl WindowPreset {
         matches!(self.surface(), WindowSurface::Terminal)
     }
 
-    /// SPEC-3671: the Issue window is the surface that mirrors auto-launched
-    /// agents in its preview pane. `Spec` and `Pr` share the Knowledge surface
-    /// but are different faces, so they never host a preview.
+    /// Retired Issue-family entrypoints share the Settings Issues surface.
+    pub fn canonical_surface_preset(self) -> Self {
+        match self {
+            Self::Issue | Self::IssueMonitor | Self::Spec | Self::Work | Self::Branches => {
+                Self::Settings
+            }
+            preset => preset,
+        }
+    }
+
+    /// Settings Issues mirrors auto-launched agents in its preview pane.
+    /// Legacy Issue hosts remain readable until workspace load migrates them.
     pub fn hosts_issue_preview(self) -> bool {
-        matches!(self, Self::Issue | Self::IssueMonitor)
+        matches!(self, Self::Settings | Self::Issue | Self::IssueMonitor)
     }
 
     pub fn is_agent_terminal(self) -> bool {
         matches!(self, Self::Agent | Self::Claude | Self::Codex)
-    }
-
-    /// Default open size for a fresh window of this preset.
-    ///
-    /// SPEC-2008 camera-focus: terminal-surface presets (Shell / Claude /
-    /// Codex / Agent) open work-area large (1280×800) so that flying the camera
-    /// to frame a single terminal at zoom 1.0 fills the viewport crisply — the
-    /// camera no longer maximizes, it frames the window's own world geometry.
-    /// Non-terminal panels keep the compact 720×420 footprint.
-    pub fn default_size(self) -> (f64, f64) {
-        if self.surface() == WindowSurface::Terminal {
-            (1280.0, 800.0)
-        } else {
-            (720.0, 420.0)
-        }
-    }
-
-    pub fn opens_maximized_by_default(self) -> bool {
-        let _ = self;
-        false
     }
 
     pub fn command_name(self) -> Option<&'static str> {
@@ -247,7 +232,7 @@ impl WindowPreset {
     }
 
     pub fn is_removed_legacy(self) -> bool {
-        matches!(self, Self::Memo)
+        matches!(self, Self::Memo | Self::FileTree | Self::Console | Self::Pr)
     }
 }
 
@@ -407,13 +392,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_tree_preset_is_non_process_file_tree_surface() {
-        assert_eq!(WindowPreset::FileTree.surface(), WindowSurface::FileTree);
-        assert!(!WindowPreset::FileTree.requires_process());
-        assert_eq!(WindowPreset::FileTree.title(), "File Tree");
-    }
-
-    #[test]
     fn branches_preset_is_non_process_branch_surface() {
         assert_eq!(WindowPreset::Branches.surface(), WindowSurface::Branches);
         assert!(!WindowPreset::Branches.requires_process());
@@ -509,7 +487,12 @@ mod tests {
 
     #[test]
     fn preset_metadata_exposes_titles_prefixes_and_defaults() {
-        assert_eq!(WindowPreset::ALL.len(), 16);
+        assert_eq!(WindowPreset::ALL.len(), 9);
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Spec));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Branches));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::Issue));
+        assert!(!WindowPreset::ALL.contains(&WindowPreset::IssueMonitor));
         // SPEC-3671 FR-014 / FR-015: each face is identifiable from its title.
         assert_eq!(WindowPreset::Issue.title(), "Issue");
         assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
@@ -539,27 +522,7 @@ mod tests {
         assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
         assert_eq!(WindowPreset::Index.surface(), WindowSurface::Index);
-        assert_eq!(WindowPreset::Pr.surface(), WindowSurface::Knowledge);
         assert_eq!(WindowPreset::Settings.surface(), WindowSurface::Mock);
-        // SPEC-2008 camera-focus: terminal-surface presets open work-area large
-        // (1280×800) so that flying the camera to frame one at zoom 1.0 fills
-        // the viewport crisply; non-terminal panels keep the compact 720×420.
-        for preset in WindowPreset::ALL {
-            let expected = if preset.surface() == WindowSurface::Terminal {
-                (1280.0, 800.0)
-            } else {
-                (720.0, 420.0)
-            };
-            assert_eq!(
-                preset.default_size(),
-                expected,
-                "{preset:?} default size must match its surface class",
-            );
-            assert!(
-                !preset.opens_maximized_by_default(),
-                "{preset:?} should not open maximized by default",
-            );
-        }
         assert_eq!(WindowPreset::Shell.command_name(), None);
         assert_eq!(WindowPreset::Claude.command_name(), Some("claude"));
         assert_eq!(WindowPreset::Codex.command_name(), Some("codex"));
@@ -622,15 +585,6 @@ mod tests {
             assert!(!preset.title().is_empty());
             assert!(!preset.subtitle().is_empty());
 
-            // SPEC-2008 camera-focus: terminal-surface presets open work-area
-            // large (1280×800) for crisp zoom-1.0 framing; panels stay 720×420.
-            let (width, height) = preset.default_size();
-            if preset.surface() == WindowSurface::Terminal {
-                assert_eq!((width, height), (1280.0, 800.0));
-            } else {
-                assert_eq!((width, height), (720.0, 420.0));
-            }
-
             match preset {
                 WindowPreset::Shell => {
                     assert_eq!(preset.surface(), WindowSurface::Terminal);
@@ -651,10 +605,6 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::AgentKanban);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
-                }
-                WindowPreset::FileTree => {
-                    assert_eq!(preset.surface(), WindowSurface::FileTree);
-                    assert!(!preset.requires_process());
                 }
                 WindowPreset::Branches => {
                     assert_eq!(preset.surface(), WindowSurface::Branches);
@@ -680,10 +630,7 @@ mod tests {
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
                 }
-                WindowPreset::Issue
-                | WindowPreset::IssueMonitor
-                | WindowPreset::Spec
-                | WindowPreset::Pr => {
+                WindowPreset::Issue | WindowPreset::IssueMonitor | WindowPreset::Spec => {
                     assert_eq!(preset.surface(), WindowSurface::Knowledge);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
@@ -697,12 +644,6 @@ mod tests {
                     assert_eq!(preset.surface(), WindowSurface::Index);
                     assert!(!preset.requires_process());
                     assert_eq!(preset.command_name(), None);
-                }
-                WindowPreset::Console => {
-                    assert_eq!(preset.surface(), WindowSurface::Console);
-                    assert!(!preset.requires_process());
-                    assert_eq!(preset.command_name(), None);
-                    assert_eq!(preset.default_size(), (720.0, 420.0));
                 }
                 WindowPreset::Agent => unreachable!("WindowPreset::ALL excludes Agent"),
                 other => {
@@ -718,9 +659,6 @@ mod tests {
         assert!(WindowPreset::Codex.is_agent_terminal());
         assert!(!WindowPreset::Shell.is_agent_terminal());
         assert_eq!(WindowPreset::Agent.command_name(), None);
-        // SPEC-2008 camera-focus: Agent is a terminal-surface preset, so it
-        // opens work-area large for crisp zoom-1.0 camera framing.
-        assert_eq!(WindowPreset::Agent.default_size(), (1280.0, 800.0));
     }
 
     #[test]
@@ -733,6 +671,9 @@ mod tests {
             resolve_launch_spec_with(WindowPreset::Codex, &shell, |command| command == "codex")
                 .expect("codex preset should resolve");
         assert_eq!(result.command, "codex");
+        assert!(result
+            .args
+            .contains(&"--config=suppress_unstable_features_warning=true".to_string()));
         assert!(
             result.args.iter().any(|arg| arg == "--no-alt-screen"),
             "Codex preset must launch with --no-alt-screen so inline scrollback survives \

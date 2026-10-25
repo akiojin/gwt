@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -12,6 +10,7 @@ use gwt_core::{
     github_budget::{BudgetLedger, ThrottlePolicy},
     github_quota::GitHubQuota,
     paths::gwt_cache_dir,
+    process_console::{capture_gh_blocking, SpawnOptions},
     repo_hash::{compute_repo_hash, RepoHash},
 };
 use gwt_github::{
@@ -32,6 +31,7 @@ const SPEC_LABEL: &str = "gwt-spec";
 /// [`gwt_github::body::SpecBody::parse`].
 const SPEC_BODY_HEADER_MARKER: &str = "<!-- gwt-spec id=";
 const ISSUE_CACHE_REFRESH_META_FILE: &str = "refresh-meta.json";
+#[cfg(test)]
 const ISSUE_CACHE_REFRESH_LIMIT: &str = "1000";
 pub const ISSUE_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -124,6 +124,24 @@ pub fn load_issue_title_from_cache(cache_root: &Path, issue_number: u64) -> Opti
     }
 }
 
+/// Whether `issue_number` is OPEN according to `<cache_root>/<n>/meta.json`.
+///
+/// `None` means the cache cannot answer — no entry, unreadable, or an
+/// unrecognized `state`. Callers that use this to decide whether to *surface*
+/// an Issue (Issue #4542's denial advisory) must treat `None` as "do not
+/// surface": the cache is the only local source of Issue state, and reaching
+/// GitHub to settle it is not available on a latency-bound path.
+pub fn issue_is_open_in_cache(cache_root: &Path, issue_number: u64) -> Option<bool> {
+    let path = cache_root.join(issue_number.to_string()).join("meta.json");
+    let bytes = fs::read(&path).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    match value.get("state")?.as_str()?.trim() {
+        "open" => Some(true),
+        "closed" => Some(false),
+        _ => None,
+    }
+}
+
 pub fn issue_cache_source_fingerprint(
     cache_root: &Path,
 ) -> Result<Option<IssueCacheSourceFingerprint>, String> {
@@ -159,7 +177,12 @@ pub fn issue_cache_source_fingerprint(
             Ok(value) => value,
             Err(_) => continue,
         };
-        let body = fs::read_to_string(issue_dir.join("body.md")).unwrap_or_default();
+        // Match Python Path.read_text's universal-newline decoding before
+        // truncation; otherwise a successful index of a CRLF body looks stale.
+        let body = fs::read_to_string(issue_dir.join("body.md"))
+            .unwrap_or_default()
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
         let mut labels = match meta.get("labels") {
             Some(Value::String(label)) => vec![label.clone()],
             Some(Value::Array(values)) => values
@@ -312,7 +335,8 @@ pub fn sync_issue_cache_from_remote(repo_path: &Path, cache_root: &Path) -> Resu
 /// Two things keep it under the per-minute burst limit now:
 ///
 /// - a SPEC whose cached generation (`updated_at`) still matches the live list
-///   is not viewed again, so a warm cache costs one list call;
+///   is not viewed again, so a warm cache costs the general and queue label
+///   REST lists without any SPEC views;
 /// - every remaining view first asks the machine-local ledger how long to wait
 ///   for the shared window to free ([`BudgetLedger::burst_wait`]), so the
 ///   resync shares the budget with the Monitor scan instead of adding to it.
@@ -324,36 +348,172 @@ pub fn sync_issue_cache_from_remote_with_wait(
     cache_root: &Path,
     wait: &mut dyn FnMut(Duration),
 ) -> Result<(), String> {
-    let snapshots = fetch_issue_list_snapshots(repo_path)?;
-    if snapshots.is_empty() {
-        fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
-        write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
-        return Ok(());
-    }
+    sync_issue_cache_from_remote_with_page_cache(repo_path, cache_root, wait, false)
+}
 
+/// Scan-owned retries reuse general pages without extending their freshness.
+/// Explicit refreshes retain the live path above; queue pages always stay live.
+pub fn sync_issue_cache_from_remote_for_monitor(
+    repo_path: &Path,
+    cache_root: &Path,
+) -> Result<(), String> {
+    sync_issue_cache_from_remote_with_page_cache(
+        repo_path,
+        cache_root,
+        &mut std::thread::sleep,
+        true,
+    )
+    .map_err(|error| {
+        gwt_core::error_ledger::record_fail_open(
+            gwt_core::error_ledger::ErrorKind::CacheRefreshFailure,
+            format!("issue cache full refresh: {error}"),
+            gwt_core::error_ledger::ErrorTarget {
+                project_root: Some(repo_path.display().to_string()),
+                ..gwt_core::error_ledger::ErrorTarget::default()
+            },
+        );
+        error
+    })
+}
+
+fn sync_issue_cache_from_remote_with_page_cache(
+    repo_path: &Path,
+    cache_root: &Path,
+    wait: &mut dyn FnMut(Duration),
+    reuse_pages: bool,
+) -> Result<(), String> {
+    gwt_core::operation_deadline::ensure_remaining("Issue cache refresh")
+        .map_err(|error| error.to_string())?;
+    let (snapshots, fetched_at) = fetch_issue_list_snapshots(
+        repo_path,
+        reuse_pages
+            .then(|| cache_root.join("refresh-list-pages"))
+            .as_deref(),
+    )?;
+    fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
     let cache = Cache::new(cache_root.to_path_buf());
     let ledger = BudgetLedger::global();
     let policy = ThrottlePolicy::current();
     for listed_snapshot in &snapshots {
+        gwt_core::operation_deadline::ensure_remaining("Issue cache entry")
+            .map_err(|error| error.to_string())?;
+        // A targeted read may be newer than a page retained by a failed scan.
+        // Bind the comparison to this generation so a concurrent writer wins.
+        let generation = cache
+            .current_generation(listed_snapshot.number)
+            .map_err(|error| error.to_string())?;
+        let cached = cache.load_entry(listed_snapshot.number);
+        if cached.as_ref().is_some_and(|entry| {
+            DateTime::parse_from_rfc3339(&entry.snapshot.updated_at.0)
+                .ok()
+                .zip(DateTime::parse_from_rfc3339(&listed_snapshot.updated_at.0).ok())
+                .is_some_and(|(cached, listed)| cached > listed)
+        }) {
+            continue;
+        }
         let snapshot = if is_spec_issue(listed_snapshot) {
-            if cache
-                .load_entry(listed_snapshot.number)
-                .is_some_and(|entry| entry.snapshot.updated_at == listed_snapshot.updated_at)
-            {
+            if cached.is_some_and(|entry| {
+                entry.snapshot.updated_at == listed_snapshot.updated_at
+                    && entry.snapshot.author_login.is_some()
+            }) {
                 continue;
             }
             if let Some(delay) = ledger.burst_wait(GitHubQuota::GraphQl, &policy, Utc::now()) {
+                if gwt_core::operation_deadline::ensure_remaining("issue cache pacing")
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|deadline| {
+                        delay >= deadline.saturating_duration_since(std::time::Instant::now())
+                    })
+                {
+                    return Err("operation deadline expired during issue cache pacing".into());
+                }
                 wait(delay);
+                gwt_core::operation_deadline::ensure_remaining("Issue cache quota wait")
+                    .map_err(|error| error.to_string())?;
             }
             fetch_issue_snapshot(repo_path, listed_snapshot.number)?
         } else {
             listed_snapshot.clone()
         };
         cache
-            .write_snapshot(&snapshot)
-            .map_err(|err| format!("write issue cache: {err}"))?;
+            .write_snapshot_if_generation(&snapshot, generation.as_ref())
+            .map_err(|err| format!("write issue cache: {err}"))?
+            .ok_or_else(|| format!("cached Issue #{} changed during refresh", snapshot.number.0))?;
     }
-    write_issue_cache_refresh_meta(cache_root, ISSUE_CACHE_TTL)?;
+    // The complete queue census also synchronizes cached membership, including
+    // generation-matched SPECs skipped above. Queue rows are open by contract.
+    // Do this before freshness advances, even for an empty list.
+    let queued_numbers = snapshots
+        .iter()
+        .filter(|snapshot| {
+            snapshot.state == IssueState::Open
+                && snapshot
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("gwt-queued"))
+        })
+        .map(|snapshot| snapshot.number)
+        .collect::<BTreeSet<_>>();
+    for entry in cache.list_entries().map_err(|err| err.to_string())? {
+        let number = entry.snapshot.number;
+        let queued = queued_numbers.contains(&number);
+        let queue_labeled = entry
+            .snapshot
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-queued"));
+        if queued {
+            if entry.snapshot.state == IssueState::Open && queue_labeled {
+                continue;
+            }
+        } else if entry.snapshot.state != IssueState::Open || !queue_labeled {
+            continue;
+        }
+        // Read generation before reloading the entry. A writer between either
+        // read and the conditional write must never lose its other labels.
+        let generation = cache
+            .current_generation(number)
+            .map_err(|err| err.to_string())?;
+        let mut snapshot = cache
+            .load_entry(number)
+            .ok_or_else(|| format!("read cached queue membership #{number}", number = number.0))?
+            .snapshot;
+        let queue_labeled = snapshot
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("gwt-queued"));
+        if queued {
+            if snapshot.state == IssueState::Open && queue_labeled {
+                continue;
+            }
+            snapshot.state = IssueState::Open;
+            if !queue_labeled {
+                snapshot.labels.push("gwt-queued".into());
+            }
+        } else {
+            if snapshot.state != IssueState::Open || !queue_labeled {
+                continue;
+            }
+            snapshot
+                .labels
+                .retain(|label| !label.eq_ignore_ascii_case("gwt-queued"));
+        }
+        cache
+            .write_snapshot_if_generation(&snapshot, generation.as_ref())
+            .map_err(|err| {
+                format!(
+                    "write cached queue membership #{number}: {err}",
+                    number = number.0
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "cached queue membership #{number} changed during refresh",
+                    number = number.0
+                )
+            })?;
+    }
+    write_issue_cache_refresh_meta_at(cache_root, ISSUE_CACHE_TTL, fetched_at)?;
     Ok(())
 }
 
@@ -429,11 +589,20 @@ fn read_issue_cache_refresh_meta(cache_root: &Path) -> Option<IssueCacheRefreshM
     serde_json::from_slice(&bytes).ok()
 }
 
+#[cfg(test)]
 fn write_issue_cache_refresh_meta(cache_root: &Path, ttl: Duration) -> Result<(), String> {
+    write_issue_cache_refresh_meta_at(cache_root, ttl, Utc::now())
+}
+
+fn write_issue_cache_refresh_meta_at(
+    cache_root: &Path,
+    ttl: Duration,
+    fetched_at: DateTime<Utc>,
+) -> Result<(), String> {
     fs::create_dir_all(cache_root).map_err(|err| err.to_string())?;
     let ttl_minutes = std::cmp::max(1, ttl.as_secs() / 60);
     let payload = IssueCacheRefreshMeta {
-        last_full_refresh: Utc::now().to_rfc3339(),
+        last_full_refresh: fetched_at.to_rfc3339(),
         ttl_minutes,
     };
     let bytes = serde_json::to_vec_pretty(&payload).map_err(|err| err.to_string())?;
@@ -492,29 +661,31 @@ pub(crate) fn write_issue_labels_via_gh(
     if labels_to_add.is_empty() && labels_to_remove.is_empty() {
         return Ok(());
     }
-    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
-    // applies the unsandboxed-gh test guard itself.
+    // Preserve the caller-facing unsandboxed-gh denial (Issue #3675 AC-2).
     if let Some(detail) =
         gwt_core::process_console::unsandboxed_gh_denial(&format!("gh issue edit #{issue_number}"))
     {
         return Err(format!("gh issue edit #{issue_number}: {detail}"));
     }
-    let mut command = gwt_core::process::hidden_command(gh_executable());
-    command.args(["issue", "edit", &issue_number.to_string()]);
+    let number = issue_number.to_string();
+    let mut args = vec!["issue", "edit", number.as_str()];
     for label in labels_to_add {
-        command.arg("--add-label").arg(label);
+        args.extend(["--add-label", label]);
     }
     for label in labels_to_remove {
-        command.arg("--remove-label").arg(label);
+        args.extend(["--remove-label", label]);
     }
-    let output = command
-        .current_dir(gh_repo_cwd(repo_path))
-        .output()
-        .map_err(|err| format!("gh issue edit #{issue_number}: {err}"))?;
-    if !output.status.success() {
+    let label = format!("gh issue edit #{issue_number}");
+    let output = capture_gh_blocking(
+        gh_executable(),
+        &args,
+        SpawnOptions::new(&label).current_dir(gh_repo_cwd(repo_path)),
+    )
+    .map_err(|err| format!("{label}: {err}"))?;
+    if !output.success() {
         return Err(format!(
             "gh issue edit #{issue_number}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         ));
     }
     Ok(())
@@ -522,11 +693,9 @@ pub(crate) fn write_issue_labels_via_gh(
 
 /// Run one `gh` read for the Issue cache under the shared GitHub quota gate.
 ///
-/// This module spawns `gh` directly rather than through
-/// [`gwt_core::process_console::spawn_logged`], so it applies the gate itself
-/// (Issue #3604). Its two reads are gwt's largest GraphQL burst — a full issue
-/// enumeration plus one `issue view` per SPEC Issue — which is exactly the
-/// traffic that must stop while the budget is exhausted.
+/// This module owns quota accounting and reconciliation (Issue #3604).
+/// The capture helper applies the ambient deadline to reads and quota probes
+/// without counting the same call twice.
 fn run_gh_issue_command(repo_path: &Path, args: &[&str], label: &str) -> Result<String, String> {
     run_gh_issue_command_with_gate(gwt_core::github_quota::global(), repo_path, args, label)
 }
@@ -537,12 +706,13 @@ fn run_gh_issue_command_with_gate(
     args: &[&str],
     label: &str,
 ) -> Result<String, String> {
-    // Issue #3675 AC-2: this module spawns gh outside `spawn_logged`, so it
-    // applies the unsandboxed-gh test guard itself — before the quota gate,
-    // so a refusal never depends on (or pollutes) quota state.
+    // Issue #3675 AC-2: deny unsandboxed gh before caller-owned quota
+    // accounting, so a refusal never depends on (or pollutes) quota state.
     if let Some(detail) = gwt_core::process_console::unsandboxed_gh_denial(label) {
         return Err(format!("{label}: {detail}"));
     }
+    gwt_core::operation_deadline::ensure_remaining(label)
+        .map_err(|error| format!("{label}: {error}"))?;
     let now = chrono::Utc::now();
     // Issue #3928 AC-1: the window another process persisted suppresses this
     // read too, so a restarted GUI cannot re-fire the resync into it.
@@ -551,25 +721,37 @@ fn run_gh_issue_command_with_gate(
     {
         return Err(format!("{label}: {detail}"));
     }
-    // Issue #3891 AC-3: this burst is the one most worth counting in the
-    // machine-local budget ledger, since it bypasses `spawn_logged`.
+    // Keep caller-owned quota accounting (Issue #3891 AC-3); the capture
+    // wrapper applies the deadline without counting this spawn again.
     let quota = gwt_core::github_quota::classify_gh_args(args);
-    ledger.record_spawn_from(quota, &gwt_core::github_budget::spawn_source(args), now);
+    let caller = if label == "gh api queued issues" {
+        "issue-cache.queued-issues"
+    } else if label == "gh api issues" {
+        "issue-cache.refresh"
+    } else {
+        "issue-cache.issue"
+    };
+    ledger.record_spawn_from(
+        quota,
+        &gwt_core::github_budget::spawn_source_for_caller(args, caller),
+        now,
+    );
 
     let cwd = gh_repo_cwd(repo_path);
-    let output = gwt_core::process::hidden_command(gh_executable())
-        .args(args)
-        .current_dir(&cwd)
-        .output()
-        .map_err(|err| format!("{label}: {err}"))?;
+    let output = capture_gh_blocking(
+        gh_executable(),
+        args,
+        SpawnOptions::new(label).current_dir(&cwd),
+    )
+    .map_err(|err| format!("{label}: {err}"))?;
 
-    if output.status.success() {
+    if output.success() {
         gate.record_success(quota);
         ledger.clear_block(quota);
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        return Ok(output.stdout);
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = output.stderr;
     let detail =
         gwt_core::github_budget::observe_refusal(gate, &ledger, args, &stderr, now, || {
             probe_rate_limit_payload(&cwd)
@@ -586,15 +768,13 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
     if gwt_core::process_console::unsandboxed_gh_denial("gh api rate_limit").is_some() {
         return None;
     }
-    let output = gwt_core::process::hidden_command(gh_executable())
-        .args(gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS)
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-    let payload = output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())?;
+    let output = capture_gh_blocking(
+        gh_executable(),
+        gwt_core::github_quota::RATE_LIMIT_PROBE_ARGS,
+        SpawnOptions::new("gh api rate_limit").current_dir(cwd),
+    )
+    .ok()?;
+    let payload = output.success().then_some(output.stdout)?;
     // Issue #3891: share the fresh primary window with every other process.
     if let Some(snapshot) =
         gwt_core::github_budget::parse_rate_limit_probe_all(&payload, chrono::Utc::now())
@@ -604,15 +784,70 @@ fn probe_rate_limit_payload(cwd: &Path) -> Option<String> {
     Some(payload)
 }
 
-/// The full Issue enumeration, as a paged REST read (SPEC #4093 FR-002):
-/// `GET /repos/{owner}/{repo}/issues?state=all`, newest update first, at most
-/// `REST_MAX_PAGES_PER_READ` requests on the `core` budget and no GraphQL.
-fn fetch_issue_list_snapshots(repo_path: &Path) -> Result<Vec<IssueSnapshot>, String> {
+/// The bounded general Issue enumeration (SPEC #4093 FR-002), overlaid with
+/// the complete REST open queue label collection (#5080 AC-1). Only the label
+/// read opts out of the ordinary page cap. Both lists use the `core` budget.
+fn fetch_issue_list_snapshots(
+    repo_path: &Path,
+    page_cache: Option<&Path>,
+) -> Result<(Vec<IssueSnapshot>, DateTime<Utc>), String> {
+    let mut oldest_page = Utc::now();
     let pages = gwt_git::gh_rest::read_pages_with(
         "repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc",
-        |path| run_gh_issue_command(repo_path, &["api", path], "gh api issues"),
+        |path| {
+            let fetch =
+                || run_gh_issue_command(repo_path, &["api", path, "--include"], "gh api issues");
+            let Some(cache_dir) = page_cache else {
+                return fetch();
+            };
+            let (fetched_at, stdout) = gwt_git::gh_rest::cached_list_response_at_with(
+                cache_dir,
+                path,
+                Utc::now(),
+                ISSUE_CACHE_TTL.as_secs() as i64,
+                fetch,
+            )?;
+            oldest_page = oldest_page.min(fetched_at);
+            Ok(stdout)
+        },
     )?;
-    Ok(issue_list_snapshots(&pages.rows))
+    let queued = gwt_git::issue::fetch_queued_issue_listing_with("{owner}", "{repo}", |path| {
+        run_gh_issue_command(
+            repo_path,
+            &["api", path, "--include"],
+            "gh api queued issues",
+        )
+    })
+    .map_err(|error| error.to_string())?;
+    let mut snapshots = issue_list_snapshots(&pages.rows)
+        .into_iter()
+        .map(|mut snapshot| {
+            if snapshot.state == IssueState::Open {
+                snapshot
+                    .labels
+                    .retain(|label| !label.eq_ignore_ascii_case("gwt-queued"));
+            }
+            (snapshot.number, snapshot)
+        })
+        .collect::<BTreeMap<_, _>>();
+    snapshots.extend(queued.issues.into_iter().map(|issue| {
+        let snapshot = IssueSnapshot {
+            number: IssueNumber(issue.number),
+            author_login: issue.author_login,
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            labels: issue.labels,
+            state: parse_issue_state(Some(&issue.state)),
+            updated_at: UpdatedAt::new(
+                issue
+                    .updated_at
+                    .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string()),
+            ),
+            comments: vec![],
+        };
+        (snapshot.number, snapshot)
+    }));
+    Ok((snapshots.into_values().collect(), oldest_page))
 }
 
 fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSnapshot, String> {
@@ -623,7 +858,7 @@ fn fetch_issue_snapshot(repo_path: &Path, number: IssueNumber) -> Result<IssueSn
             "view",
             &number.0.to_string(),
             "--json",
-            "number,title,body,labels,state,updatedAt,comments",
+            "number,title,body,labels,state,updatedAt,author,comments",
         ],
         &format!("gh issue view #{number}", number = number.0),
     )?;
@@ -725,6 +960,11 @@ fn parse_issue_snapshot(json: &str, number: IssueNumber) -> Result<IssueSnapshot
 
     Ok(IssueSnapshot {
         number: IssueNumber(actual_number),
+        author_login: issue
+            .pointer("/author/login")
+            .and_then(Value::as_str)
+            .filter(|login| !login.is_empty())
+            .map(str::to_string),
         title,
         body,
         labels,
@@ -745,6 +985,7 @@ fn issue_list_snapshots(rows: &[Value]) -> Vec<IssueSnapshot> {
         .into_iter()
         .map(|row| IssueSnapshot {
             number: IssueNumber(row.number),
+            author_login: row.author_login,
             title: row.title,
             body: row.body.unwrap_or_default(),
             labels: row.labels,
@@ -842,6 +1083,7 @@ mod tests {
             r#"[{
                 "number": 1776,
                 "title": "Launch Agent issue linkage",
+                "author": {"login": "OriginalCreator"},
                 "body": "Body",
                 "labels": [{"name": "ux"}],
                 "state": "OPEN",
@@ -852,6 +1094,10 @@ mod tests {
         .expect("parse snapshots");
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].number.0, 1776);
+        assert_eq!(
+            snapshots[0].author_login.as_deref(),
+            Some("OriginalCreator")
+        );
         assert_eq!(snapshots[0].title, "Launch Agent issue linkage");
         assert_eq!(snapshots[0].body, "Body");
         assert_eq!(snapshots[0].labels, vec!["ux".to_string()]);
@@ -914,6 +1160,117 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn issue_5730_failed_monitor_refresh_reuses_pages_but_queue_and_explicit_refresh_stay_live() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _gh_lock = crate::cli::fake_gh_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let cache_root = temp.path().join("cache");
+        let log = temp.path().join("calls.txt");
+        let fake = temp.path().join("gh.cmd");
+        fs::write(
+            &fake,
+            r#"@echo off
+if "%~2"=="repos/{owner}/{repo}/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1" (
+  echo queue>>"%GWT_5730_CALLS%"
+  if "%GWT_5730_MODE%"=="fail" (
+    echo HTTP/2.0 503 queue unavailable
+    echo.
+    echo []
+    exit /b 0
+  )
+  echo HTTP/2.0 200 OK
+  echo.
+  echo [{"number":7,"title":"fresh queue","state":"open","labels":[{"name":"gwt-queued"}]}]
+  exit /b 0
+)
+echo general>>"%GWT_5730_CALLS%"
+echo HTTP/2.0 200 OK
+echo.
+echo [{"number":8,"title":"older open issue","state":"open","updated_at":"2026-10-18T00:00:00Z"}]
+"#,
+        )
+        .unwrap();
+        let _gh = gwt_core::test_support::ScopedEnvVar::set("GWT_TEST_GH", &fake);
+        let _log = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_CALLS", &log);
+        let _mode = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "fail");
+        for _ in 0..2 {
+            let error =
+                sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap_err();
+            assert!(error.contains("queue unavailable"), "{error}");
+            assert!(!issue_cache_refresh_meta_path(&cache_root).exists());
+        }
+        let authoritative = IssueSnapshot {
+            author_login: None,
+            number: IssueNumber(8),
+            title: "newer closed issue".into(),
+            body: String::new(),
+            labels: vec![],
+            state: IssueState::Closed,
+            updated_at: UpdatedAt::new("2026-10-18T01:00:00Z"),
+            comments: vec![],
+        };
+        Cache::new(cache_root.clone())
+            .write_snapshot(&authoritative)
+            .unwrap();
+        let _success = gwt_core::test_support::ScopedEnvVar::set("GWT_5730_MODE", "ok");
+        sync_issue_cache_from_remote_for_monitor(temp.path(), &cache_root).unwrap();
+        let entry = Cache::new(cache_root.clone())
+            .load_entry(IssueNumber(7))
+            .unwrap();
+        assert_eq!(entry.snapshot.title, "fresh queue");
+        let retained = Cache::new(cache_root.clone())
+            .load_entry(IssueNumber(8))
+            .unwrap();
+        assert_eq!(
+            retained.snapshot, authoritative,
+            "retry cannot roll back a newer targeted refresh"
+        );
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "general")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "queue")
+                .count(),
+            3
+        );
+        sync_issue_cache_from_remote(temp.path(), &cache_root).unwrap();
+        assert_eq!(
+            fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .filter(|line| *line == "general")
+                .count(),
+            2
+        );
+        let snapshot = BudgetLedger::global().snapshot(Utc::now());
+        let sources = &snapshot.local["core"].points_last_hour_by_source;
+        for (caller, expected) in [("issue-cache.refresh", 2), ("issue-cache.queued-issues", 4)] {
+            assert_eq!(
+                sources
+                    .iter()
+                    .filter(|(source, _)| source.ends_with(&format!("[{caller}]")))
+                    .map(|(_, count)| count)
+                    .sum::<u64>(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn sync_issue_cache_from_remote_writes_entries_and_surfaces_gh_failures() {
         // `GWT_TEST_GH` is process-global and the daemon scan tests hold the
         // env lock while they point it at their own fake; hold both so neither
@@ -937,6 +1294,8 @@ if /I \"%FAKE_GH_MODE%\"==\"fail\" (\r\n\
   >&2 echo gh api down\r\n\
   exit /b 1\r\n\
 )\r\n\
+echo HTTP/2.0 200 OK\r\n\
+echo.\r\n\
 if /I \"%FAKE_GH_MODE%\"==\"empty\" (\r\n\
   echo []\r\n\
   exit /b 0\r\n\
@@ -1013,6 +1372,8 @@ set \"gwt_arg2=%~2\"\r\n\
 if /I \"%gwt_arg1%\"==\"api\" set \"GWT_FAKE_LIST=1\"\r\n\
 if /I \"%gwt_arg1% %gwt_arg2%\"==\"issue list\" set \"GWT_FAKE_LIST=1\"\r\n\
 if /I \"%GWT_FAKE_LIST%\"==\"1\" (\r\n\
+  echo HTTP/2.0 200 OK\r\n\
+  echo.\r\n\
   echo [{\"number\":7,\"title\":\"Cached spec\",\"body\":\"<!-- gwt-spec id=7 version=1 -->\\n<!-- sections:\\nplan=comment:700\\nspec=body\\ntasks=body\\n-->\\n\\n<!-- artifact:spec BEGIN -->\\nSpec body\\n<!-- artifact:spec END -->\\n\\n<!-- artifact:tasks BEGIN -->\\n- [ ] T-001\\n<!-- artifact:tasks END -->\",\"labels\":[{\"name\":\"gwt-spec\"}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/7\",\"updatedAt\":\"2026-04-20T00:00:00Z\"}]\r\n\
   exit /b 0\r\n\
 )\r\n\
@@ -1087,6 +1448,7 @@ exit /b 1\r\n",
         let script = format!(
             "#!/bin/sh\n\
 if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
+  printf 'HTTP/2.0 200 OK\\n\\r\\n'\n\
   cat <<'JSON'\n\
 {list_json}\n\
 JSON\n\
@@ -1178,7 +1540,7 @@ exit 1\n",
             &fake_gh,
             format!(
                 "@echo off\r\n\
-if /I \"%1 %2 %3\"==\"issue view 42\" (\r\n\
+if /I \"%~1 %~2 %~3\"==\"issue view 42\" (\r\n\
   echo {view_json}\r\n\
   exit /b 0\r\n\
 )\r\n\
@@ -1296,7 +1658,7 @@ exit 1\n",
         );
         assert_eq!(
             fs::read_to_string(&invocation_log).expect("read invocation log"),
-            "issue view 42 --json number,title,body,labels,state,updatedAt,comments\n"
+            "issue view 42 --json number,title,body,labels,state,updatedAt,author,comments\n"
         );
         let entry = Cache::new(cache_root)
             .load_entry(IssueNumber(42))
@@ -1372,6 +1734,7 @@ if [ \"$PWD\" != '{}' ]; then\n\
   exit 1\n\
 fi\n\
 if [ \"$1 $2\" = \"issue list\" ] || [ \"$1\" = \"api\" ]; then\n\
+  printf 'HTTP/2.0 200 OK\\n\\r\\n'\n\
   printf '%s\\n' '[{{\"number\":43,\"title\":\"Workspace issue\",\"body\":\"Body\",\"labels\":[{{\"name\":\"bug\"}}],\"state\":\"OPEN\",\"url\":\"https://example.test/issues/43\",\"updatedAt\":\"2026-05-23T00:00:00Z\"}}]'\n\
   exit 0\n\
 fi\n\
@@ -1526,6 +1889,7 @@ exit 1\n",
         let temp = tempdir().expect("tempdir");
         let cache_root = temp.path().join("cache");
         let snapshot = IssueSnapshot {
+            author_login: None,
             number: IssueNumber(7),
             title: "Cache freshness".to_string(),
             body: "body".to_string(),
@@ -1731,14 +2095,15 @@ printf '%s\n' "$*" >> '{log}'
 updated_43="${{FAKE_UPDATED_43:-{v1}}}"
 case "$1 $2" in
   "issue list" | "api repos/"*)
-    printf '[{{"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
+    if [ "$1" = "api" ]; then printf 'HTTP/2.0 200 OK\n\r\n'; fi
+    printf '[{{"author":{{"login":"OriginalCreator"}},"number":7,"title":"Plain","body":"Body","labels":[{{"name":"bug"}}],"state":"OPEN","url":"https://example.test/issues/7","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/42","updatedAt":"{v1}"}},{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","url":"https://example.test/issues/43","updatedAt":"%s"}}]\n' "$updated_43"
     exit 0
     ;;
   "issue view")
     if [ "$3" = "42" ]; then
-      printf '{{"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":42,"title":"Spec 42","body":"Spec body 42","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"{v1}","comments":[]}}\n'
     else
-      printf '{{"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
+      printf '{{"author":{{"login":"OriginalCreator"}},"number":43,"title":"Spec 43","body":"Spec body 43","labels":[{{"name":"gwt-spec"}}],"state":"OPEN","updatedAt":"%s","comments":[]}}\n' "$updated_43"
     fi
     exit 0
     ;;
@@ -1767,7 +2132,9 @@ exit 1
 
     /// The REST issue list as [`invocations`] journals it.
     const LIST_CALL: &str =
-        "api repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1";
+        "api repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc&per_page=100&page=1 --include";
+    const QUEUED_LIST_CALL: &str =
+        "api repos/{owner}/{repo}/issues?state=open&labels=gwt-queued&sort=created&direction=desc&per_page=100&page=1 --include";
 
     fn invocations(log: &Path) -> Vec<String> {
         fs::read_to_string(log)
@@ -1795,7 +2162,7 @@ exit 1
     /// tests (and the fake-gh one) so neither family sees this test's fake
     /// disappear from under it.
     fn gh_env_locks() -> (
-        std::sync::MutexGuard<'static, ()>,
+        gwt_core::test_support::EnvLockGuard,
         std::sync::MutexGuard<'static, ()>,
     ) {
         let env = crate::env_test_lock()
@@ -1805,6 +2172,301 @@ exit 1
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         (env, fake_gh)
+    }
+
+    fn write_queue_label_fake_gh(dir: &Path, fail_continuation: bool) -> PathBuf {
+        let fake_gh = dir.join("queue-label-gh");
+        let script = format!(
+            r###"#!/bin/sh
+case "$2" in
+  *labels=gwt-queued*)
+    page="${{2##*page=}}"
+    if [ "{fail_continuation}" = "true" ] && [ "$page" = "2" ]; then
+      printf '%s\n' 'HTTP 502 queued continuation' >&2
+      exit 1
+    fi
+    printf 'HTTP/2.0 200 OK\n'
+    if [ "$page" -lt 11 ]; then
+      printf 'Link: <https://api.github.com/repos/o/r/issues?state=open&labels=gwt-queued&per_page=100&page=%s>; rel="next"\r\n\r\n[]' "$((page + 1))"
+    else
+      printf '\r\n[{{"number":42,"title":"Canonical queue row","state":"open","labels":[{{"name":"gwt-queued"}}],"updated_at":"{UPDATED_V2}"}},{{"number":99,"title":"Beyond general list","state":"open","labels":[{{"name":"gwt-spec"}},{{"name":"gwt-queued"}}],"updated_at":"{UPDATED_V2}"}}]'
+    fi
+    ;;
+  *)
+    printf 'HTTP/2.0 200 OK\n\r\n[{{"number":7,"title":"Still open","state":"open","labels":[{{"name":"gwt-queued"}},{{"name":"bug"}},{{"name":"gwt-spec"}}],"updated_at":"{UPDATED_V1}"}},{{"number":42,"title":"Stale general row","state":"open","labels":[{{"name":"gwt-queued"}}],"updated_at":"{UPDATED_V1}"}}]'
+    ;;
+esac
+"###
+        );
+        gwt_core::test_support::write_executable_script(&fake_gh, &script).unwrap();
+        fake_gh
+    }
+
+    #[test]
+    fn queue_label_full_refresh_loads_complete_labels_and_retains_unqueued_open_rows() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let cache_root = temp.path().join("cache");
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", write_queue_label_fake_gh(temp.path(), false));
+        let cache = Cache::new(cache_root.clone());
+        for (number, labels, updated_at) in [
+            (7, vec!["bug", "gwt-spec", "gwt-queued"], UPDATED_V1),
+            (99, vec!["bug", "gwt-spec"], UPDATED_V2),
+            (777, vec!["bug", "gwt-queued"], UPDATED_V1),
+        ] {
+            cache
+                .write_snapshot(&IssueSnapshot {
+                    author_login: Some("OriginalCreator".into()),
+                    number: IssueNumber(number),
+                    title: format!("Cached {number}"),
+                    body: format!("Cached body {number}"),
+                    state: if number == 99 {
+                        IssueState::Closed
+                    } else {
+                        IssueState::Open
+                    },
+                    labels: labels.into_iter().map(String::from).collect(),
+                    updated_at: UpdatedAt::new(updated_at),
+                    comments: vec![],
+                })
+                .unwrap();
+        }
+
+        sync_issue_cache_from_remote(&repo, &cache_root).unwrap();
+
+        let queued = cache
+            .load_entry(IssueNumber(99))
+            .expect("11th label page reaches cache");
+        assert_eq!(queued.snapshot.labels, ["bug", "gwt-spec", "gwt-queued"]);
+        assert_eq!(queued.snapshot.body, "Cached body 99");
+        assert_eq!(queued.snapshot.title, "Cached 99");
+        assert_eq!(queued.snapshot.updated_at.0, UPDATED_V2);
+        assert_eq!(queued.snapshot.state, IssueState::Open);
+        let current = cache.load_entry(IssueNumber(42)).unwrap();
+        assert_eq!(current.snapshot.title, "Canonical queue row");
+        let unqueued = cache.load_entry(IssueNumber(7)).unwrap();
+        assert_eq!(unqueued.snapshot.state, IssueState::Open);
+        assert_eq!(unqueued.snapshot.labels, ["bug", "gwt-spec"]);
+        assert_eq!(
+            unqueued.snapshot.body, "Cached body 7",
+            "matching SPEC skips the body refresh"
+        );
+        let outside_general = cache.load_entry(IssueNumber(777)).unwrap();
+        assert_eq!(outside_general.snapshot.labels, ["bug"]);
+        assert_eq!(outside_general.snapshot.body, "Cached body 777");
+        assert_eq!(outside_general.snapshot.title, "Cached 777");
+        assert_eq!(outside_general.snapshot.updated_at.0, UPDATED_V1);
+        assert_eq!(outside_general.snapshot.state, IssueState::Open);
+        assert_eq!(cache.list_entries().unwrap().len(), 4);
+        assert!(!issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now()).stale);
+    }
+
+    #[test]
+    fn queue_label_full_refresh_failure_preserves_freshness() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&cache_root).unwrap();
+        let cache = Cache::new(cache_root.clone());
+        cache
+            .write_snapshot(&IssueSnapshot {
+                author_login: None,
+                number: IssueNumber(777),
+                title: "Cached".into(),
+                body: "Keep body".into(),
+                state: IssueState::Open,
+                labels: vec!["bug".into(), "gwt-queued".into()],
+                updated_at: UpdatedAt::new(UPDATED_V1),
+                comments: vec![],
+            })
+            .unwrap();
+        let entry_meta = cache_root.join("777/meta.json");
+        let original_entry_meta = fs::read(&entry_meta).unwrap();
+        let meta = cache_root.join(ISSUE_CACHE_REFRESH_META_FILE);
+        let old = r#"{"last_full_refresh":"2020-01-01T00:00:00Z","ttl_minutes":15}"#;
+        fs::write(&meta, old).unwrap();
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", write_queue_label_fake_gh(temp.path(), true));
+
+        let error = sync_issue_cache_from_remote(&repo, &cache_root).unwrap_err();
+
+        assert!(error.contains("HTTP 502"), "{error}");
+        assert_eq!(fs::read_to_string(meta).unwrap(), old);
+        assert_eq!(fs::read(entry_meta).unwrap(), original_entry_meta);
+        assert_eq!(
+            cache.load_entry(IssueNumber(777)).unwrap().snapshot.body,
+            "Keep body"
+        );
+        assert_eq!(cache.list_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn queue_label_empty_full_refresh_reconciles_cached_membership() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let cache_root = temp.path().join("cache");
+        let cache = Cache::new(cache_root.clone());
+        cache
+            .write_snapshot(&IssueSnapshot {
+                author_login: None,
+                number: IssueNumber(777),
+                title: "Cached".into(),
+                body: "Keep body".into(),
+                state: IssueState::Open,
+                labels: vec!["bug".into(), "gwt-queued".into()],
+                updated_at: UpdatedAt::new(UPDATED_V1),
+                comments: vec![],
+            })
+            .unwrap();
+        let fake_gh = temp.path().join("empty-gh");
+        gwt_core::test_support::write_executable_script(
+            &fake_gh,
+            "#!/bin/sh\nprintf 'HTTP/2.0 200 OK\\n\\r\\n[]'\n",
+        )
+        .unwrap();
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+
+        sync_issue_cache_from_remote(&repo, &cache_root).unwrap();
+
+        let cached = cache.load_entry(IssueNumber(777)).unwrap();
+        assert_eq!(cached.snapshot.labels, ["bug"]);
+        assert_eq!(cached.snapshot.body, "Keep body");
+    }
+
+    #[test]
+    fn cache_pacing_rejects_a_wait_that_cannot_fit_the_scan_deadline() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", fake_gh);
+        let ledger = BudgetLedger::global();
+        for _ in 0..ThrottlePolicy::default().burst_calls_per_minute {
+            ledger.record_spawn(GitHubQuota::GraphQl, Utc::now());
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
+        let mut waits = Vec::new();
+        let result = sync_issue_cache_from_remote_with_wait(
+            &repo,
+            &temp.path().join("cache"),
+            &mut |delay| waits.push(delay),
+        );
+        assert!(
+            waits.is_empty(),
+            "pacing must not exceed the remaining scan budget"
+        );
+        assert!(result.unwrap_err().contains("deadline expired"));
+        assert_eq!(invocations(&log), vec![LIST_CALL, QUEUED_LIST_CALL]);
+    }
+
+    #[test]
+    fn cache_refresh_deadline_kills_child_and_preserves_stale_generation() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo = temp.path().join("repo");
+        git_init(&repo);
+        let cache_root = temp.path().join("cache");
+        fs::create_dir_all(&cache_root).expect("cache");
+        let meta = cache_root.join(ISSUE_CACHE_REFRESH_META_FILE);
+        let old = r#"{"last_full_refresh":"2020-01-01T00:00:00Z","ttl_minutes":15}"#;
+        fs::write(&meta, old).expect("stale metadata");
+        let pid_file = temp.path().join("child.pid");
+        let release = temp.path().join("release");
+        let fake_gh = temp.path().join("fake-gh");
+        gwt_core::test_support::write_executable_script(&fake_gh, &format!(
+            "#!/bin/sh\necho $$ > '{}'\nwhile [ ! -f '{}' ]; do :; done\nprintf 'HTTP/2.0 200 OK\\n\\r\\n[]\\n'\n",
+            pid_file.display(), release.display(),
+        )).expect("fake child");
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+        let ready_pid = pid_file.clone();
+        let error = gwt_core::process_console::spawn::with_spawn_ready_for_tests(
+            Duration::from_secs(1),
+            move || {
+                // Only bound fixture startup; the child deadline starts after
+                // readiness, so a loaded host cannot consume its budget.
+                let startup_deadline = std::time::Instant::now() + Duration::from_secs(15);
+                while fs::read_to_string(&ready_pid)
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<i32>().ok())
+                    .is_none()
+                {
+                    assert!(
+                        std::time::Instant::now() < startup_deadline,
+                        "child startup"
+                    );
+                    std::thread::yield_now();
+                }
+            },
+            || {
+                capture_gh_blocking(
+                    &fake_gh,
+                    &[] as &[&str],
+                    SpawnOptions::new("cache deadline"),
+                )
+            },
+        )
+        .expect_err("the hanging child must be cut off at its deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let pid: i32 = fs::read_to_string(pid_file)
+            .expect("child started")
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal zero observes this fixture's exact child; it sends no signal.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "child must be reaped");
+        let error = sync_issue_cache_from_remote(&repo, &cache_root)
+            .expect_err("an expired scan must not publish a generation");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert_eq!(fs::read_to_string(meta).unwrap(), old);
+        assert!(issue_cache_refresh_status(&cache_root, ISSUE_CACHE_TTL, Utc::now()).stale);
+        assert!(
+            !issue_cache_has_entries(&cache_root),
+            "no partial enumeration was published"
+        );
+    }
+
+    #[test]
+    fn cache_gh_routes_reject_an_expired_operation_without_spawning() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+        let read = run_gh_issue_command_with_gate(
+            &QuotaGate::default(),
+            temp.path(),
+            &["issue", "view", "42"],
+            "read",
+        )
+        .expect_err("expired read");
+        assert!(read.contains("deadline expired"), "{read}");
+        let write = write_issue_labels_via_gh(temp.path(), 42, &["bug".into()], &[])
+            .expect_err("expired label write");
+        assert!(write.contains("deadline expired"), "{write}");
+        assert!(probe_rate_limit_payload(temp.path()).is_none());
+        assert!(
+            invocations(&log).is_empty(),
+            "no child may start after expiry"
+        );
     }
 
     #[test]
@@ -1823,7 +2485,12 @@ exit 1
         sync_issue_cache_from_remote(&repo_path, &cache_root).expect("first sync");
         assert_eq!(
             invocations(&log),
-            vec![LIST_CALL, "issue view 42", "issue view 43"],
+            vec![
+                LIST_CALL,
+                QUEUED_LIST_CALL,
+                "issue view 42",
+                "issue view 43"
+            ],
             "a cold cache views every SPEC once"
         );
 
@@ -1831,16 +2498,40 @@ exit 1
         sync_issue_cache_from_remote(&repo_path, &cache_root).expect("second sync");
         assert_eq!(
             invocations(&log),
-            vec![LIST_CALL],
-            "unchanged SPECs cost one list call and no views"
+            vec![LIST_CALL, QUEUED_LIST_CALL],
+            "unchanged SPECs cost two REST list calls and no views"
+        );
+
+        let cache = Cache::new(cache_root.clone());
+        let mut legacy = cache.load_entry(IssueNumber(42)).unwrap().snapshot;
+        legacy.author_login = None;
+        cache.write_snapshot(&legacy).unwrap();
+        fs::remove_file(&log).expect("reset log");
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("backfill legacy author");
+        assert_eq!(
+            invocations(&log),
+            vec![LIST_CALL, QUEUED_LIST_CALL, "issue view 42"],
+            "missing author forces one full SPEC read even at the same revision"
+        );
+        assert_eq!(
+            cache
+                .load_entry(IssueNumber(42))
+                .unwrap()
+                .snapshot
+                .author_login
+                .as_deref(),
+            Some("OriginalCreator")
         );
 
         fs::remove_file(&log).expect("reset log");
         let _moved = ScopedEnvVar::set("FAKE_UPDATED_43", UPDATED_V2);
-        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("third sync");
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(30),
+        );
+        sync_issue_cache_from_remote(&repo_path, &cache_root).expect("third sync within a quantum");
         assert_eq!(
             invocations(&log),
-            vec![LIST_CALL, "issue view 43"],
+            vec![LIST_CALL, QUEUED_LIST_CALL, "issue view 43"],
             "only the SPEC whose live generation moved is viewed again"
         );
         let entry = Cache::new(cache_root)
@@ -1878,7 +2569,12 @@ exit 1
 
         assert_eq!(
             invocations(&log),
-            vec![LIST_CALL, "issue view 42", "issue view 43"],
+            vec![
+                LIST_CALL,
+                QUEUED_LIST_CALL,
+                "issue view 42",
+                "issue view 43"
+            ],
             "the resync still completes"
         );
         assert_eq!(
@@ -1892,6 +2588,63 @@ exit 1
                 .all(|delay| *delay > Duration::ZERO && *delay <= Duration::from_secs(61)),
             "{waits:?}"
         );
+    }
+
+    #[test]
+    fn ambient_deadline_refuses_issue_cache_read_before_spawning() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let log = temp.path().join("gh.log");
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let _deadline =
+            gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now());
+
+        let error = run_gh_issue_command_with_gate(
+            &QuotaGate::default(),
+            temp.path(),
+            &["issue", "view", "42"],
+            "gh issue view #42",
+        )
+        .expect_err("an exhausted refresh budget must not start another read");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(invocations(&log).is_empty());
+    }
+
+    #[test]
+    fn ambient_deadline_refuses_quota_wait_that_outlives_refresh_budget() {
+        let _guards = gh_env_locks();
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path().join("home"));
+        let repo_path = temp.path().join("repo");
+        let cache_root = temp.path().join("cache");
+        let log = temp.path().join("gh.log");
+        git_init(&repo_path);
+        let fake_gh = write_fake_gh(temp.path(), &log);
+        let _gh = ScopedEnvVar::set("GWT_TEST_GH", &fake_gh);
+        let ledger = BudgetLedger::global();
+        let now = chrono::Utc::now();
+        for _ in 0..ThrottlePolicy::current().burst_calls_per_minute {
+            ledger.record_spawn(GitHubQuota::GraphQl, now);
+        }
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            std::time::Instant::now() + Duration::from_secs(30),
+        );
+        let mut waits = Vec::new();
+
+        let error = sync_issue_cache_from_remote_with_wait(&repo_path, &cache_root, &mut |delay| {
+            waits.push(delay)
+        })
+        .expect_err("a quota wait longer than the remaining quantum must defer the read");
+        assert!(error.contains("deadline expired"), "{error}");
+        assert!(waits.is_empty(), "do not sleep outside the refresh budget");
+        assert_eq!(
+            invocations(&log),
+            vec![LIST_CALL, QUEUED_LIST_CALL],
+            "both REST lists precede the refused GraphQL quota wait"
+        );
+        assert!(Cache::new(cache_root).load_entry(IssueNumber(42)).is_none());
     }
 
     #[test]

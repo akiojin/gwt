@@ -5,6 +5,9 @@
 // `failed` (Stage / Reason / Log + Open log / Retry / Close). The CTA itself
 // has four observable statuses: `available` | `applying` | `ready` | `error`.
 
+import { createFocusTrap } from "./focus-trap.js";
+import { createUiStateStore } from "./ui-state-store.js";
+
 export function createUpdateCtaController({
   document,
   send,
@@ -18,16 +21,55 @@ export function createUpdateCtaController({
   openReleaseNotes = null,
   // Issue #3906 AC-12: injectable clock so the draining minutes are testable.
   now = () => Date.now(),
+  scheduleFrame,
 }) {
   const shellId = "update-cta-shell";
   const modalId = "update-modal";
   let latestVersion = null;
   let pendingVersion = null;
+  let pendingReadyReason = null;
   let status = "idle";
-  let lastProgress = null;
+  const availabilityModel = createUiStateStore(null);
+  availabilityModel.subscribe(value => value, available => {
+    if (available) renderUpdateState(available);
+  });
+  const autoApplyModel = createUiStateStore(null);
+  autoApplyModel.subscribe(value => value, autoApply => {
+    if (autoApply) renderUpdateAutoApply(autoApply);
+  });
+  const stagedModel = createUiStateStore(null);
+  stagedModel.subscribe(value => value, staged => {
+    if (!staged) return;
+    pendingVersion = staged.version;
+    if (staged.phase === "persisted") {
+      showReadyPending(staged.version);
+    } else if (status === "applying") {
+      renderModalReady(staged.version);
+    }
+  });
+  const progressModel = createUiStateStore(null, { scheduleFrame });
+  progressModel.subscribeFrame(value => value, progress => {
+    const modal = document.getElementById(modalId);
+    if (progress && modal?.dataset.state === "downloading") {
+      updateProgressDisplay(progress);
+    }
+  });
+  const errorModel = createUiStateStore(null);
+  errorModel.subscribe(value => value, error => {
+    if (!error) return;
+    showError(updateFailureDetail(error));
+    renderModalFailed(error);
+  });
   // Issue #3906 AC-12: the version whose draining CTA the user dismissed, so
   // the periodic issue_monitor_status ticks do not resurrect it.
   let dismissedDrainVersion = null;
+  // Issue #4376 AC-5: what the drain is waiting for, as last reported by
+  // issue_monitor_status, so the CTA title and the draining modal can name it.
+  let drainBlockers = [];
+  let restartPreview = null;
+  let restartRequestSequence = 0;
+  let releaseModalFocus = null;
+  let modalReturnFocus = null;
 
   function removeLegacyUpdateSurfaces() {
     document.querySelectorAll(".update-toast, .update-button").forEach((node) => {
@@ -143,17 +185,24 @@ export function createUpdateCtaController({
   function showAvailable(version) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
+    if (pendingReadyReason?.version !== version) pendingReadyReason = null;
     latestVersion = version;
     const cta = renderCta("available", `Update available: v${version} - Click to update`);
     announceUpdateAvailable();
     return cta;
   }
 
-  function showReadyPending(version) {
+  function showReadyPending(version, reason = null) {
     if (!version) return null;
     removeLegacyUpdateSurfaces();
+    if (reason) {
+      pendingReadyReason = { version, reason };
+    } else if (pendingReadyReason?.version !== version) {
+      pendingReadyReason = null;
+    }
     pendingVersion = version;
-    const cta = renderCta("ready", `Update v${version} ready — Restart now`);
+    const detail = pendingReadyReason ? `${pendingReadyReason.reason} — ` : "";
+    const cta = renderCta("ready", `Update v${version} ready — ${detail}Restart now`);
     announceUpdateAvailable();
     return cta;
   }
@@ -173,22 +222,47 @@ export function createUpdateCtaController({
     return Math.max(0, Math.floor((now() - started) / 60000));
   }
 
+  // Issue #4376 AC-5: one `update_drain.blocking[]` entry as the user reads
+  // it — the agent's work name and state, or the Issue a claim is pending for.
+  function describeBlocker(blocker) {
+    switch (blocker?.kind) {
+      case "active_pane":
+        return `${blocker.label} (${blocker.state})`;
+      case "pending_acquire_claim":
+        return `claim for #${blocker.issue_number}`;
+      case "active_execution":
+        return `execution in ${blocker.worktree}`;
+      case "held_verification_lease":
+        return `verification lease ${blocker.lease_id}`;
+      default:
+        return null;
+    }
+  }
+
+  function waitingForText() {
+    const names = drainBlockers.map(describeBlocker).filter(Boolean);
+    return names.length ? `Waiting for: ${names.join(", ")}.` : "Waiting for the host to go quiet.";
+  }
+
   function showDraining(drain) {
     const version = drain?.version;
     if (!version) return null;
     removeLegacyUpdateSurfaces();
     pendingVersion = version;
-    const blocking = Array.isArray(drain.blocking) ? drain.blocking.length : 0;
+    drainBlockers = Array.isArray(drain.blocking) ? drain.blocking : [];
+    const blocking = drainBlockers.length;
     const minutes = drainMinutes(drain.since);
     const entering = status !== "draining";
     // A manual drain (#4037 operator control) carries the running gwt
     // version, not a staged one, so it is named as what it is.
     const subject =
       drain.reason === "manual" ? "Manual update drain" : `Update v${version} pending`;
-    const cta = renderCta(
-      "draining",
-      `${subject} — draining ${blocking} agents (${minutes} min)`,
-    );
+    const text = `${subject} — draining ${blocking} agents (${minutes} min)`;
+    const cta = renderCta("draining", text);
+    // Issue #4376 AC-5: the CTA itself tells what the wait is for and how to
+    // end it, so a manual Update click that landed on running agents is
+    // never a silent hang.
+    cta.title = `${text}. ${waitingForText()} New launches are held; agents are never stopped. Click to apply now anyway or stop waiting.`;
     // issue_monitor_status ticks every scan; only the transition into the
     // draining state is worth a sidebar peek.
     if (entering) announceUpdateAvailable();
@@ -235,8 +309,24 @@ export function createUpdateCtaController({
     if (!event || event.state !== "available") {
       return;
     }
+    availabilityModel.update(() => ({ current: event.current, latest: event.latest }));
+  }
+
+  function renderUpdateState(event) {
     removeLegacyUpdateSurfaces();
     setVersionState(event.current, event.latest);
+    const previousVersion = pendingVersion || latestVersion;
+    if (event.latest && previousVersion && previousVersion !== event.latest) {
+      // Issue #4933: the authoritative target supersedes the staged release,
+      // including any open Restart action and its download progress.
+      pendingVersion = null;
+      progressModel.update(() => null);
+      drainBlockers = [];
+      dismissedDrainVersion = null;
+      closeModal();
+      showAvailable(event.latest);
+      return;
+    }
     if (status === "applying" && latestVersion === event.latest) {
       return;
     }
@@ -248,20 +338,12 @@ export function createUpdateCtaController({
 
   function handleUpdateProgress(payload) {
     if (!payload) return;
-    lastProgress = payload;
-    const modal = document.getElementById(modalId);
-    if (!modal || modal.dataset.state !== "downloading") {
-      return;
-    }
-    updateProgressDisplay(payload);
+    progressModel.update(() => payload);
   }
 
   function handleUpdateReady(payload) {
     if (!payload || !payload.version) return;
-    pendingVersion = payload.version;
-    if (status === "applying") {
-      renderModalReady(payload.version);
-    }
+    stagedModel.update(() => ({ version: payload.version, phase: "downloaded" }));
   }
 
   function handleUpdateApplyError(payload) {
@@ -271,9 +353,10 @@ export function createUpdateCtaController({
     // manifest is gone. The CTA was already morphed to `ready` by then, so
     // surface the failure modal even in the `ready` state — silently dropping
     // the error would leave the user believing Restart is safe when it isn't.
-    if (status === "applying" || status === "ready") {
-      showError(updateFailureDetail(payload));
-      renderModalFailed(payload);
+    // A successful project snapshot can precede another project's wait failure.
+    if (status === "applying" || status === "ready"
+      || (status === "draining" && payload.stage === "Apply after agents finish")) {
+      errorModel.update(() => payload);
     }
   }
 
@@ -282,6 +365,15 @@ export function createUpdateCtaController({
   // grace; `postponed` / `cancelled` withdraw it; `applying` precedes the
   // graceful restart.
   function handleUpdateAutoApply(payload) {
+    if (!payload?.version) return;
+    autoApplyModel.update(() => ({
+      version: payload.version,
+      phase: payload.phase,
+      grace_secs: payload.grace_secs,
+    }));
+  }
+
+  function renderUpdateAutoApply(payload) {
     const version = payload?.version;
     if (!version) return;
     switch (payload.phase) {
@@ -302,6 +394,10 @@ export function createUpdateCtaController({
         pendingVersion = version;
         showReadyPending(version);
         return;
+      case "elevation_required":
+        closeModal();
+        showReadyPending(version, "Administrator privileges required");
+        return;
       case "applying":
         closeModal();
         pendingVersion = version;
@@ -314,7 +410,7 @@ export function createUpdateCtaController({
 
   function handleUpdateApplyPendingPersisted(payload) {
     if (!payload || !payload.version) return;
-    showReadyPending(payload.version);
+    stagedModel.update(() => ({ version: payload.version, phase: "persisted" }));
   }
 
   function dismissCta(event) {
@@ -367,10 +463,11 @@ export function createUpdateCtaController({
     if (!modal) {
       modal = document.createElement("div");
       modal.id = modalId;
-      modal.className = "update-modal";
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-modal", "true");
-      modal.setAttribute("aria-labelledby", "update-modal-title");
+      modal.className = "modal-backdrop open update-modal";
+      modalReturnFocus = document.activeElement;
+      modal.addEventListener("click", (event) => {
+        if (event.target === modal && restartPreview) onCancelRestart();
+      });
       document.body.appendChild(modal);
     }
     return modal;
@@ -412,13 +509,47 @@ export function createUpdateCtaController({
   }
 
   function closeModal() {
+    restartPreview = null;
+    releaseModalFocus?.();
+    releaseModalFocus = null;
     const modal = document.getElementById(modalId);
     if (modal) {
       modal.remove();
     }
+    const returnTo = modalReturnFocus;
+    modalReturnFocus = null;
+    if (returnTo?.isConnected) returnTo.focus?.({ preventScroll: true });
+  }
+
+  function mountModalPanel(modal, panel, initialFocus = null) {
+    releaseModalFocus?.();
+    panel.classList.add("modal-shell");
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-modal", "true");
+    panel.setAttribute("aria-labelledby", "update-modal-title");
+    panel.setAttribute("tabindex", "-1");
+    const title = panel.querySelector("h2");
+    const actions = panel.querySelector(".update-modal__actions");
+    title.remove();
+    actions.remove();
+    const body = el("div", { className: "modal-body" }, [...panel.childNodes]);
+    panel.appendChild(el("div", { className: "modal-header" }, [title]));
+    panel.appendChild(body);
+    actions.classList.add("modal-footer");
+    panel.appendChild(actions);
+    panel.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && restartPreview) {
+        event.preventDefault();
+        onCancelRestart();
+      }
+    });
+    modal.appendChild(panel);
+    releaseModalFocus = createFocusTrap(panel, { document });
+    (initialFocus || panel.querySelector("button:not([disabled])"))?.focus?.({ preventScroll: true });
   }
 
   function renderModalDownloading(version) {
+    restartPreview = null;
     const modal = ensureModal();
     // SPEC-2041 Phase 19 (Playwright `update-modal.spec.ts` follow-up): keep
     // renderModal* idempotent. Repeated identical events (live backend
@@ -477,15 +608,18 @@ export function createUpdateCtaController({
         el("div", { className: "update-modal__actions" }, [cancel]),
       ],
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
 
-    if (lastProgress) {
-      updateProgressDisplay(lastProgress);
+    const progressSnapshot = progressModel.read();
+    if (progressSnapshot) {
+      updateProgressDisplay(progressSnapshot);
     }
   }
 
   function renderModalReady(version, { anyway = false } = {}) {
     const modal = ensureModal();
+    if (restartPreview?.version === version) return;
+    restartPreview = null;
     // See renderModalDownloading: idempotency guard for repeated events.
     const variant = anyway ? "anyway" : "ready";
     if (
@@ -500,13 +634,24 @@ export function createUpdateCtaController({
     modal.dataset.variant = variant;
     clearChildren(modal);
 
-    const later = el("button", {
-      type: "button",
-      className: "update-modal__btn update-modal__btn--secondary",
-      text: "Later",
-      data: { updateModalLater: "true" },
-      onClick: onApplyLater,
-    });
+    // Issue #4376 AC-5 / AC-6: while draining, the secondary action is Stop
+    // waiting (release the drain, keep the update staged) rather than Later,
+    // which would leave the drain running behind a closed modal.
+    const later = anyway
+      ? el("button", {
+          type: "button",
+          className: "update-modal__btn update-modal__btn--secondary",
+          text: "Stop waiting",
+          data: { updateModalStopWaiting: "true" },
+          onClick: onStopWaiting,
+        })
+      : el("button", {
+          type: "button",
+          className: "update-modal__btn update-modal__btn--secondary",
+          text: "Later",
+          data: { updateModalLater: "true" },
+          onClick: onApplyLater,
+        });
     const restartNow = el("button", {
       type: "button",
       className: "update-modal__btn update-modal__btn--primary",
@@ -536,7 +681,7 @@ export function createUpdateCtaController({
       el("p", {
         className: "update-modal__hint",
         text: anyway
-          ? "The Issue Monitor is draining agents and will apply it automatically once the host is quiet. Apply now anyway restarts gwt immediately through the same graceful path."
+          ? `The Issue Monitor is draining agents and will apply it automatically once the host is quiet. ${waitingForText()} Apply now anyway restarts gwt immediately through the same graceful path; Stop waiting releases the drain and keeps the update staged.`
           : "Restart now to launch the new version.",
       }),
       releaseNotesLink,
@@ -548,10 +693,11 @@ export function createUpdateCtaController({
       { className: "update-modal__panel", data: { state: "ready" } },
       panelChildren,
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
   }
 
   function renderModalFailed({ stage, reason, log_path, message }) {
+    restartPreview = null;
     const modal = ensureModal();
     modal.dataset.state = "failed";
     delete modal.dataset.version;
@@ -616,7 +762,7 @@ export function createUpdateCtaController({
         el("div", { className: "update-modal__actions" }, [openLog, retry, closeBtn]),
       ],
     );
-    modal.appendChild(panel);
+    mountModalPanel(modal, panel);
   }
 
   function updateProgressDisplay({ downloaded, total }) {
@@ -641,7 +787,7 @@ export function createUpdateCtaController({
 
   function onCancelDownload() {
     send({ kind: "cancel_update_download" });
-    lastProgress = null;
+    progressModel.update(() => null);
     closeModal();
     if (latestVersion) {
       showAvailable(latestVersion);
@@ -657,12 +803,131 @@ export function createUpdateCtaController({
   }
 
   function onApplyRestartNow() {
-    send({ kind: "apply_update_restart_now" });
-    // Modal is intentionally left in place; the parent process will exit.
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.dataset.state !== "ready") return;
+    restartPreview = {
+      requestId: `update-restart-${++restartRequestSequence}`,
+      version: modal.dataset.version,
+      impact: null,
+      submitted: false,
+    };
+    renderRestartConfirmation();
+    send({ kind: "get_update_restart_impact", request_id: restartPreview.requestId });
+  }
+
+  function handleUpdateRestartImpact(event) {
+    if (!restartPreview || event?.request_id !== restartPreview.requestId) return;
+    const modal = document.getElementById(modalId);
+    if (!modal || modal.dataset.state !== "restart-preview") return;
+    if (event.error) {
+      showError(event.error);
+      renderModalFailed({ stage: "Check restart impact", reason: event.error });
+      return;
+    }
+    if (!Array.isArray(event.blocking) || !Array.isArray(event.issue_numbers)) return;
+    restartPreview.impact = event;
+    renderRestartConfirmation();
+  }
+
+  function onCancelRestart() {
+    const version = restartPreview?.version;
+    closeModal();
+    if (version) showReadyPending(version);
+  }
+
+  function renderRestartConfirmation() {
+    const modal = ensureModal();
+    const preview = restartPreview;
+    const impact = preview.impact;
+    const busy = Boolean(impact?.blocking.length);
+    modal.dataset.state = impact ? "restart-confirm" : "restart-preview";
+    modal.dataset.version = preview.version;
+    clearChildren(modal);
+    const cancel = el("button", {
+      type: "button",
+      className: "update-modal__btn update-modal__btn--secondary",
+      text: "Cancel",
+      data: { updateModalCancelRestart: "true" },
+      onClick: onCancelRestart,
+    });
+    const wait = el("button", {
+      type: "button",
+      className: `update-modal__btn update-modal__btn--${busy ? "primary" : "secondary"}`,
+      text: "Apply after all agents finish",
+      data: { updateModalWaitForIdle: "true" },
+      onClick: () => submitRestart("apply_update_when_idle"),
+    });
+    const restart = el("button", {
+      type: "button",
+      className: `update-modal__btn update-modal__btn--${busy ? "secondary" : "primary"}`,
+      text: "Restart now",
+      data: { updateModalConfirmRestart: "true" },
+      onClick: () => submitRestart("apply_update_restart_now"),
+    });
+    wait.disabled = !impact;
+    restart.disabled = !impact;
+    const body = [el("p", {
+      className: "update-modal__version",
+      text: `gwt v${preview.version} is ready to install.`,
+    })];
+    if (impact) {
+      const count = (kind) => impact.blocking.filter((item) => item.kind === kind).length;
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: `Running / Starting agents: ${count("active_pane")}. Pending claims: ${count("pending_acquire_claim")}. Verification leases: ${count("held_verification_lease")}. Active executions: ${count("active_execution")}.`,
+      }));
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: impact.issue_numbers.length
+          ? `Affected Issues: ${impact.issue_numbers.map((number) => `#${number}`).join(", ")}.`
+          : "Affected Issues: none.",
+      }));
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: busy
+          ? "Restart now stops these agents and interrupts pending claims and verification. Apply after all agents finish waits for the host to be quiet."
+          : "No active agents, pending claims or verification leases were found. Restart now installs the update and restarts gwt.",
+      }));
+    } else {
+      body.push(el("p", {
+        className: "update-modal__hint",
+        text: "Checking which agents and Issues would be interrupted…",
+        attrs: { role: "status" },
+      }));
+    }
+    const panel = el("div", { className: "update-modal__panel" }, [
+      el("h2", { id: "update-modal-title", text: busy ? "Restart gwt and stop active work?" : "Restart gwt?" }),
+      ...body,
+      el("div", { className: "update-modal__actions" }, [cancel, wait, restart]),
+    ]);
+    mountModalPanel(modal, panel, busy ? wait : cancel);
+  }
+
+  function submitRestart(kind) {
+    if (!restartPreview?.impact || restartPreview.submitted) return;
+    restartPreview.submitted = true;
+    document.querySelectorAll("#update-modal button").forEach((button) => { button.disabled = true; });
+    send({ kind });
+    if (kind === "apply_update_when_idle") {
+      const version = restartPreview.version;
+      closeModal();
+      showReadyPending(version);
+    }
+  }
+
+  // Issue #4376 AC-5 / AC-6: stop waiting for the agents. The backend
+  // releases the drain (launches resume, the update stays staged) and
+  // answers with `update_auto_apply` cancelled, which returns the CTA to
+  // the ready state.
+  function onStopWaiting() {
+    send({ kind: "cancel_update_auto_apply" });
+    closeModal();
+    const cta = document.getElementById("update-cta");
+    if (cta) cta.textContent = "Stopping the wait…";
   }
 
   function onRetryFailed() {
-    lastProgress = null;
+    progressModel.update(() => null);
     renderCta("applying", "Applying update...");
     renderModalDownloading(latestVersion || pendingVersion || "");
     send({ kind: "apply_update_start" });
@@ -690,8 +955,9 @@ export function createUpdateCtaController({
   // path, without sending `apply_update_start` themselves.
   function beginDownloadingFor(version) {
     if (!version) return;
+    if (pendingReadyReason?.version !== version) pendingReadyReason = null;
     pendingVersion = null;
-    lastProgress = null;
+    progressModel.update(() => null);
     latestVersion = version;
     renderCta("applying", "Applying update...");
     renderModalDownloading(version);
@@ -705,6 +971,7 @@ export function createUpdateCtaController({
     handleUpdateApplyPendingPersisted,
     handleIssueMonitorStatus,
     handleUpdateAutoApply,
+    handleUpdateRestartImpact,
     showAvailable,
     showReadyPending,
     showError,

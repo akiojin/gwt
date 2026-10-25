@@ -1,8 +1,12 @@
 /* SPEC-3431 FR-132 — live Project Manager Settings verification. */
 import { expect, test } from "@playwright/test";
-import { basename, join } from "node:path";
+import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import {
+  sendLiveGwtEvent,
   gotoLiveGwt,
+  openLiveGwtProject,
   withLiveGwtBackendLock,
 } from "./_helpers/live-gwt";
 
@@ -13,7 +17,7 @@ test.describe("Project Manager Settings", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
   test.setTimeout(60_000);
 
-  test("rail routing, validation, persistence, and theme remain live", async ({
+  test("rail routing, pause/resume, validation, persistence, and theme remain live", async ({
     page,
   }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
@@ -31,6 +35,7 @@ test.describe("Project Manager Settings", () => {
       });
 
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      await openLiveGwtProject(page, PROJECT_ROOT);
       await expectActiveProject(page);
       await openProjectManagerSettings(page);
       const sharedMount = await mountSharedPmSettings(page);
@@ -45,6 +50,12 @@ test.describe("Project Manager Settings", () => {
       const intervalError = panel.locator(
         '[data-role="pm-loop-interval-error"]',
       );
+      const pauseToggle = panel.locator('[data-role="pm-pause-toggle"]');
+      const autonomyStatus = panel.locator('[data-role="pm-autonomy-status"]');
+      const sharedPause = page.locator(
+        '#pm-settings-shared-test-mount [data-role="pm-pause-toggle"]',
+      );
+      const launcher = page.locator("#op-pm-entry");
 
       await expect(settingsWindow).toBeVisible();
       await expect(
@@ -54,23 +65,76 @@ test.describe("Project Manager Settings", () => {
       await expect(interval).toHaveValue("60");
       await expect(sharedMount).toHaveValue("60");
       const originalInterval = await interval.inputValue();
+      await expect(pauseToggle).toHaveAttribute("aria-pressed", "false");
+      const originalPmState = await launcher.getAttribute("data-pm-state");
+      const originalPmCount = await page.locator('.workspace-window[data-pm="true"]').count();
+      const originalMonitorEnabled = await monitorEnabled(page);
 
       try {
+        await interval.focus();
+        const burst = await page.evaluate(async () => {
+          const panels = [
+            document.querySelector('.workspace-window[data-preset="settings"] [data-settings-panel="project-manager"]')!,
+            document.getElementById("pm-settings-shared-test-mount")!,
+          ];
+          const lines = panels.map(root => root.querySelector('[data-role="pm-running-as"]')!);
+          const before = lines.map(line => line.textContent);
+          const active = document.activeElement;
+          const status = (window as any).__gwtPlaywrightMessages.findLast((entry: any) =>
+            entry.payload?.kind === "pm_status").payload;
+          const renders = [0, 0];
+          const observers = lines.map((line, index) => {
+            const observer = new MutationObserver(records => { renders[index] += records.length; });
+            observer.observe(line, { childList: true });
+            return observer;
+          });
+          try {
+            // The bridge calls receive synchronously, after transport batching.
+            // This measures the actual app-owned Settings mounts.
+            for (let index = 1; index <= 50; index++) {
+              window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+                detail: { ...status, is_running: true, running_agent_id: "codex",
+                  running_model: `frame-${index}`, running_reasoning: null,
+                  agent_options: [{ id: "codex", name: "Codex" }], loop_interval_secs: 60 + index,
+                  loop_interval_secs_decimal: String(60 + index) },
+              }));
+            }
+            const immediate = lines.map(line => line.textContent);
+            await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+            return { unchanged: immediate.every((text, index) => text === before[index]),
+              renders, latest: lines.map(line => line.textContent),
+              values: panels.map(root => (root.querySelector('[data-role="pm-loop-interval"]') as HTMLInputElement).value),
+              focusRetained: document.activeElement === active };
+          } finally {
+            observers.forEach(observer => observer.disconnect());
+            window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: status }));
+          }
+        });
+        expect(burst).toEqual({ unchanged: true, renders: [1, 1],
+          latest: ["Running as: Codex · Model: frame-50", "Running as: Codex · Model: frame-50"],
+          values: ["110", "110"], focusRetained: true });
+        await testInfo.attach("pm-settings-frame-burst", { body: JSON.stringify(burst), contentType: "application/json" });
+        await expect(interval).toHaveValue(originalInterval);
+
         await injectPmStatus(page, { available: false });
         await expect(interval).toHaveValue("60");
         await expect(interval).toBeDisabled();
         await expect(sharedMount).toHaveValue("60");
         await expect(sharedMount).toBeDisabled();
+        await expect(pauseToggle).toBeDisabled();
+        await expect(sharedPause).toBeDisabled();
 
         const refreshCursor = await messageCursor(page);
-        await page.locator('.project-tab.active[aria-current="page"]').click({
-          position: { x: 20, y: 20 },
-        });
+        // Issue #4538: a Project tab re-hydrates through its own scope
+        // (re-selecting the bound tab is a no-op in a per-project URL).
+        await sendLiveGwtEvent(page, { kind: "frontend_ready" });
         await waitForPmInterval(page, refreshCursor, originalInterval);
         await expect(interval).toHaveValue(originalInterval);
         await expect(interval).toBeEnabled();
         await expect(sharedMount).toHaveValue(originalInterval);
         await expect(sharedMount).toBeEnabled();
+        await expect(pauseToggle).toBeEnabled();
+        await expect(sharedPause).toBeEnabled();
 
         await interval.fill("9");
         await interval.press("Tab");
@@ -85,12 +149,27 @@ test.describe("Project Manager Settings", () => {
         await expect(intervalError).toBeHidden();
         await expect(interval).toHaveAttribute("aria-invalid", "false");
 
+        const pauseCursor = await messageCursor(page);
+        await pauseToggle.click();
+        await waitForPmPaused(page, pauseCursor, true);
+        await expect(pauseToggle).toHaveText("Resume");
+        await expect(sharedPause).toHaveText("Resume");
+        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "true");
+        await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);
+        await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(originalPmCount);
+        expect(await monitorEnabled(page)).toBe(originalMonitorEnabled);
+
         await page.reload();
         await suppressStartupOverlays(page);
         await expectActiveProject(page);
         await openProjectManagerSettings(page);
         const reloadedInterval = pmInterval(page);
         await expect(reloadedInterval).toHaveValue("10");
+        await expect(pauseToggle).toHaveText("Resume");
+        await expect(pauseToggle).toHaveAttribute("aria-pressed", "true");
+        await expect(autonomyStatus).toHaveText("Autonomous loop paused");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "true");
 
         const expectedTheme = testInfo.project.name.endsWith("light")
           ? "light"
@@ -111,6 +190,16 @@ test.describe("Project Manager Settings", () => {
           });
         }
 
+        const resumeCursor = await messageCursor(page);
+        await pauseToggle.click();
+        await waitForPmPaused(page, resumeCursor, false);
+        await expect(pauseToggle).toHaveText("Pause");
+        await expect(autonomyStatus).toHaveText("Autonomous loop active");
+        await expect(launcher).toHaveAttribute("data-pm-paused", "false");
+        await expect(launcher).toHaveAttribute("data-pm-state", originalPmState!);
+        await expect(page.locator('.workspace-window[data-pm="true"]')).toHaveCount(originalPmCount);
+        expect(await monitorEnabled(page)).toBe(originalMonitorEnabled);
+
         await reloadedInterval.scrollIntoViewIfNeeded();
         await expect(reloadedInterval).toBeVisible();
         await testInfo.attach(`pm-settings-${expectedTheme}-interval`, {
@@ -130,21 +219,37 @@ test.describe("Project Manager Settings", () => {
         expect(consoleErrors).toEqual([]);
         expect(pageErrors).toEqual([]);
       } finally {
-        await restoreInterval(page, originalInterval);
+        try {
+          const restoreCursor = await messageCursor(page);
+          await sendLiveGwtEvent(page, { kind: "set_pm_paused", paused: false });
+          await waitForPmPaused(page, restoreCursor, false);
+        } finally {
+          await restoreInterval(page, originalInterval);
+        }
       }
     });
   });
 });
 
 const PROJECT_ROOT = process.env.GWT_PLAYWRIGHT_PROJECT_ROOT ?? "";
-const PROJECT_NAME = basename(PROJECT_ROOT);
-
 async function expectActiveProject(page: any): Promise<void> {
   expect(PROJECT_ROOT).not.toBe("");
-  const active = page.locator('.project-tab.active[aria-current="page"]');
-  await expect(active).toHaveCount(1, { timeout: 10_000 });
-  await expect(active).toHaveAttribute("data-project-root", PROJECT_ROOT);
-  await expect(active.locator(".project-tab-label")).toHaveText(PROJECT_NAME);
+  const projectKey = new URL(page.url()).pathname.match(/^\/p\/([0-9a-f]{16})$/)?.[1];
+  expect(projectKey, "PM Settings must stay bound to a Project route").toBeTruthy();
+  await expect(page.locator("#close-project-button")).toBeVisible();
+  const projectRoot = await page.waitForFunction((key: string) => {
+    const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+      entry.payload?.kind === "workspace_state"
+      && entry.payload.workspace.tabs.length === 1
+      && entry.payload.workspace.tabs[0].project_key === key);
+    return state?.payload.workspace.tabs[0].project_root;
+  }, projectKey).then((handle: any) => handle.jsonValue());
+  // Recent reopen canonicalizes a worktree to its repository root. Accept
+  // those two identities, never the helper's unrelated Recent fallback.
+  const commonDirectory = execFileSync("git", ["-C", PROJECT_ROOT, "rev-parse",
+    "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+  expect([realpathSync(PROJECT_ROOT), dirname(realpathSync(commonDirectory))])
+    .toContain(realpathSync(projectRoot));
 }
 
 async function mountSharedPmSettings(page: any): Promise<any> {
@@ -240,4 +345,29 @@ async function waitForPmInterval(
     { cursor, expected },
     { timeout: 10_000 },
   );
+}
+
+async function waitForPmPaused(
+  page: any,
+  cursor: number,
+  paused: boolean,
+): Promise<void> {
+  await page.waitForFunction(({ cursor, paused }) =>
+    (window as any).__gwtPlaywrightMessages?.some((entry: any) =>
+      entry.sequence > cursor
+      && entry.payload?.kind === "pm_status"
+      && entry.payload.paused === paused),
+  { cursor, paused }, { timeout: 10_000 });
+}
+
+async function monitorEnabled(page: any): Promise<boolean> {
+  const cursor = await messageCursor(page);
+  await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
+  const status = await page.waitForFunction((cursor: number) =>
+    (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+      entry.sequence > cursor && entry.payload?.kind === "issue_monitor_status")
+      ?.payload.status,
+  cursor, { timeout: 10_000 }).then((handle: any) => handle.jsonValue());
+  expect(typeof status.enabled).toBe("boolean");
+  return status.enabled;
 }

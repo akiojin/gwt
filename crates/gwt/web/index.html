@@ -29,9 +29,8 @@
     <link rel="stylesheet" href="/styles/tokens.css" />
     <link rel="stylesheet" href="/styles/typography.css" />
     <link rel="stylesheet" href="/styles/components.css" />
+    <link rel="stylesheet" href="/styles/works-agents.css" />
     <link rel="stylesheet" href="/assets/xterm/xterm.css" />
-    <!-- SPEC-2009 Phase 2b: dark syntax highlighting theme for File Tree text viewer. -->
-    <link rel="stylesheet" href="/assets/highlight/github-dark.min.css" />
     <link rel="preload" as="style" href="/styles/app.css" />
     <link rel="stylesheet" href="/styles/app.css" />
   </head>
@@ -39,29 +38,10 @@
     <div id="app">
       <div class="project-shell">
         <div class="project-bar">
-          <div class="project-tabs" id="project-tabs"></div>
+
           <div class="project-actions">
-            <div class="project-switcher-shell">
-              <button
-                class="arrange-button project-switcher-button"
-                id="project-switcher-button"
-                type="button"
-                aria-label="Switch projects"
-                aria-keyshortcuts="Meta+Shift+ArrowUp Meta+Shift+ArrowDown Meta+Shift+P"
-                aria-haspopup="listbox"
-                aria-expanded="false"
-                aria-controls="project-switcher-panel"
-                title="Switch projects"
-              >Projects</button>
-              <div
-                class="project-switcher-panel"
-                id="project-switcher-panel"
-                role="listbox"
-                aria-label="Projects"
-                aria-hidden="true"
-                hidden
-              ></div>
-            </div>
+            <button class="arrange-button" id="split-view-button" type="button" aria-pressed="false" title="Show two surfaces side by side">Split view</button>
+            <button class="arrange-button" id="close-project-button" type="button">Close Project</button>
             <span class="app-version" id="app-version" role="button" tabindex="0" hidden></span>
             <!-- SPEC-2013 Phase 8: the standalone Open Project split-button was
                  retired. Open Folder / Clone from GitHub now live inside the
@@ -107,7 +87,7 @@
             </div>
           </div>
         </div>
-        <!-- SPEC-3038 US-1: the Command Rail is the always-visible 56px home
+        <!-- SPEC-3038 US-1: the Command Rail is the always-visible 64px home
              for navigation, window operations, and system actions. Operation
              IDs (#tile-button etc.) and data-cmd attributes are preserved so
              app.js / operator-shell.js wiring stays intact. Icons are Unicode
@@ -130,14 +110,14 @@
                 type="button"
                 id="op-pm-entry"
                 data-pm-state="absent"
+                data-surface="pm"
+                aria-pressed="false"
                 aria-label="Project Manager"
                 title="Project Manager"
               >
-                <span class="op-rail__icon" aria-hidden="true">◎</span>
+                <svg class="op-rail__icon op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h16v10H10l-6 4z"/><path d="M8 9h8"/><path d="M8 12h5"/></svg>
+                <span class="op-rail__surface-label" aria-hidden="true">PM</span>
                 <span class="op-rail__pm-dot" aria-hidden="true"></span>
-                <span class="op-rail__flyout" aria-hidden="true">
-                  <span class="op-rail__flyout-label">PM</span>
-                </span>
               </button>
               <button
                 class="pm-launcher-gear"
@@ -149,24 +129,6 @@
                 <span aria-hidden="true">⚙</span>
               </button>
             </div>
-            <!-- SPEC-3245 Stage E: the deprecated Intake launch entry is removed;
-                 Workspace remains the normal route into existing work. -->
-            <!-- FR-392 (SPEC-2359 W-15): surface entry points say "Workspace"
-                 (Workspace = place / Work = launch / Session = conversation). -->
-            <button
-              class="op-rail__item"
-              type="button"
-              id="op-workspace-overview-entry"
-              aria-label="Workspace"
-              aria-keyshortcuts="Meta+G"
-              title="Workspace"
-            >
-              <span class="op-rail__icon" aria-hidden="true">◆</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Workspace</span>
-                <kbd class="op-rail__kbd">⌘ G</kbd>
-              </span>
-            </button>
             <!-- 2026-06-20 Update: Board (⌘B) and Logs (⌘L) were demoted out of
                  the Navigate rail group per user feedback. They stay reachable
                  via the Add Window presets, the command palette, and the ⌘B /
@@ -174,25 +136,62 @@
                  and operator-shell.js wiring are unchanged. -->
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
+          <!-- Issue #4777 T-1: the rail picks one of four surfaces. Every
+               window preset folds into Issues / Agents / Board / Settings
+               (surface-rail.js), and the entry for the focused window's
+               surface is pressed. The PM sits above them, cut off by the
+               rule, because it is the user's own window and not one of the
+               agents. SPEC-3885: Issues keeps the ⌘G entry id. -->
+          <div class="op-rail__group op-rail__group--surfaces" role="group" aria-label="Surfaces">
+            <button
+              class="op-rail__item op-rail__surface"
+              type="button"
+              data-surface="issues"
+              aria-pressed="false"
+              title="Issues (⌘G): pick Issues, queue them, and follow the agents working on them"
+              id="op-workspace-overview-entry"
+              aria-keyshortcuts="Meta+G"
+            >
+              <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h5v16H3z"/><path d="M9.5 4h5v11h-5z"/><path d="M16 4h5v8h-5z"/></svg>
+              <span class="op-rail__surface-label">Issues</span>
+            </button>
+            <button class="op-rail__item op-rail__surface" type="button" data-surface="works" aria-pressed="false" title="Works: live agent output and native terminals">
+              <span class="op-rail__surface-icon" aria-hidden="true">▤</span>
+              <span class="op-rail__surface-label">Works</span>
+            </button>
+            <button
+              class="op-rail__item op-rail__surface"
+              type="button"
+              data-surface="agents"
+              aria-pressed="false"
+              title="Agents: project members, capacity and assignment history"
+            >
+              <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h18v16H3z"/><path d="M7 9l3 3-3 3"/><path d="M12 15h5"/></svg>
+              <span class="op-rail__surface-label">Agents</span>
+            </button>
+            <button
+              class="op-rail__item op-rail__surface"
+              type="button"
+              data-surface="board"
+              aria-pressed="false"
+              title="Board: reports, requests, and blockers posted between agents"
+            >
+              <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h16v11H9l-5 4z"/></svg>
+              <span class="op-rail__surface-label">Board</span>
+            </button>
+            <button
+              class="op-rail__item op-rail__surface"
+              type="button"
+              data-surface="settings"
+              aria-pressed="false"
+              title="Settings: agents, concurrency limit, and theme"
+            >
+              <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8h16"/><path d="M4 16h16"/><path d="M14 6v4"/><path d="M9 14v4"/></svg>
+              <span class="op-rail__surface-label">Settings</span>
+            </button>
+          </div>
+          <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group" role="group" aria-label="Windows">
-            <button class="op-rail__item" id="tile-button" aria-label="Tile windows" title="Tile windows">
-              <span class="op-rail__icon" aria-hidden="true">⊞</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Tile</span>
-              </span>
-            </button>
-            <button class="op-rail__item" id="stack-button" aria-label="Stack windows" title="Stack windows">
-              <span class="op-rail__icon" aria-hidden="true">⊟</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Stack</span>
-              </span>
-            </button>
-            <button class="op-rail__item" id="align-button" aria-label="Align windows without resizing" title="Align windows">
-              <span class="op-rail__icon" aria-hidden="true">⊜</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Align</span>
-              </span>
-            </button>
             <div class="window-list-shell">
               <button
                 class="op-rail__item"
@@ -264,33 +263,8 @@
             </button>
           </div>
         </aside>
-        <div class="canvas-area">
-          <!-- SPEC-3038 US-4: the permanent hint bar is retired. Canvas
-               guidance lives in the ⌘? hotkey overlay; connection state has
-               one home — the Status Strip ONLINE cell. -->
-          <div class="canvas" id="canvas">
-            <div class="canvas-world-grid" id="canvas-world-grid" aria-hidden="true"></div>
-            <div class="canvas-stage" id="canvas-stage"></div>
-          </div>
-          <!-- SPEC-2008 camera-focus / FR-094: the always-on Fleet Minimap.
-               Lives in canvas-area, OUTSIDE #canvas-stage, so the camera
-               transform never scales it. Cells + camera frame are built by
-               fleet-minimap.js. -->
-          <!-- SPEC-3431 FR-018: shown only while the PM pane is absent from the
-               canvas or scrolled out of view, so it never competes with a
-               visible PM. Bottom-LEFT because the fleet minimap owns the
-               bottom-right corner. -->
-          <button
-            class="canvas-pm-launcher"
-            type="button"
-            id="canvas-pm-launcher"
-            hidden
-            aria-label="Open Project Manager"
-          >
-            <span class="canvas-pm-launcher__icon" aria-hidden="true">◎</span>
-            <span class="canvas-pm-launcher__label">PM</span>
-          </button>
-          <div class="fleet-minimap" id="fleet-minimap" data-empty="true" aria-label="Fleet minimap"></div>
+        <div class="surface-area">
+          <div class="split-surfaces" id="split-surfaces" hidden></div>
           <div class="project-picker" id="project-picker">
             <div class="project-picker-card">
               <h2 class="project-picker-title">Open a project</h2>
@@ -308,23 +282,6 @@
               <div class="project-recent-list" id="recent-project-list"></div>
             </div>
           </div>
-          <!-- SPEC-3038 AS-4.5: empty-canvas call to action. app.js toggles
-               `hidden` from the live window count (updateCanvasEmptyState). -->
-          <div class="canvas-empty-state" id="canvas-empty-state" hidden>
-            <p class="canvas-empty-state__kicker"><span aria-hidden="true">▸</span> OPERATOR READY</p>
-            <h2 class="canvas-empty-state__title">No windows on canvas</h2>
-            <p class="canvas-empty-state__copy">
-              Open an existing Workspace or add a surface window.
-            </p>
-            <div class="canvas-empty-state__actions">
-              <button class="wizard-button primary" id="canvas-empty-open-workspace" type="button">
-                Open Workspace
-              </button>
-              <button class="wizard-button" id="canvas-empty-add-window" type="button">
-                Add window
-              </button>
-            </div>
-          </div>
           <div class="project-onboarding" id="project-onboarding">
             <div class="project-onboarding-card">
               <h2 class="project-onboarding-title" id="project-onboarding-title">
@@ -336,9 +293,6 @@
               </button>
             </div>
           </div>
-          <!-- SPEC-3038: the sidebar peek band is retired — the Command Rail
-               is grid-docked and always visible. Zoom lives in the Status
-               Strip; the bottom-right canvas corner stays empty. -->
         </div>
         <footer
           class="op-status-strip"
@@ -403,25 +357,15 @@
             id="op-strip-runtime-health"
             tabindex="0"
             data-state="warming"
-            aria-label="Runtime performance"
-            title="Runtime performance warming"
+            aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
+            title="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
           >
             <span class="op-status-strip__label">PERF</span>
             <span
               class="op-status-strip__value"
               id="op-strip-runtime-health-value"
-              aria-label="Runtime performance"
+              aria-label="Runtime performance warming. Aggregate CPU is logical-core-normalized host share (0–100%); process rows use 1 core = 100%."
             >CPU -- MEM --</span>
-          </div>
-          <!-- SPEC-2356 operator chrome cleanup: canvas Zoom (− / 100% / +)
-               moves from the right-bottom floating toolbar into the Status Strip
-               so it is always visible. IDs are unchanged so app.js handlers stay
-               wired by id. -->
-          <div class="op-status-strip__cell op-status-strip__cell--zoom">
-            <span class="op-status-strip__label">ZOOM</span>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-out-button" aria-label="Zoom out">-</button>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-reset-button" aria-label="Reset zoom">100%</button>
-            <button type="button" class="op-status-strip__zoom-button" id="zoom-in-button" aria-label="Zoom in">+</button>
           </div>
           <button
             type="button"
@@ -510,33 +454,12 @@
               <kbd class="op-kbd">⌘ B</kbd>
             </div>
             <div class="op-hotkey-card__row">
-              <span>Workspace surface</span>
+              <span>Issue surface</span>
               <kbd class="op-kbd">⌘ G</kbd>
             </div>
             <div class="op-hotkey-card__row">
               <span>Logs surface</span>
               <kbd class="op-kbd">⌘ L</kbd>
-            </div>
-          </div>
-          <!-- SPEC-3038 US-4: canvas guidance moved here from the retired
-               permanent hint bar. -->
-          <div class="op-hotkey-card__group">
-            <h3 class="op-hotkey-card__group-title">Canvas</h3>
-            <div class="op-hotkey-card__row">
-              <span>Pan canvas</span>
-              <kbd class="op-kbd">Scroll / drag</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Pan anywhere</span>
-              <kbd class="op-kbd">Middle-drag</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Zoom canvas</span>
-              <kbd class="op-kbd">Ctrl/⌘ + wheel</kbd>
-            </div>
-            <div class="op-hotkey-card__row">
-              <span>Move window</span>
-              <kbd class="op-kbd">Drag titlebar</kbd>
             </div>
           </div>
           <div class="op-hotkey-card__group">
@@ -569,25 +492,11 @@
           <div class="preset-section" data-category="surface">
             <div class="preset-section-label">Surfaces</div>
             <div class="preset-list">
-              <button class="preset-button" data-preset="file_tree" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">⊟</span>
-                <span class="preset-button__text">
-                  <strong>File Tree</strong>
-                  <span>Browse repository files in a read-only tree</span>
-                </span>
-              </button>
               <button class="preset-button" data-preset="logs" data-category="surface">
                 <span class="preset-button__icon" aria-hidden="true">≡</span>
                 <span class="preset-button__text">
                   <strong>Logs</strong>
                   <span>Open the logs surface</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="console" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">❯</span>
-                <span class="preset-button__text">
-                  <strong>Console</strong>
-                  <span>External process stdout/stderr per kind</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="board" data-category="surface">
@@ -608,15 +517,8 @@
               <button class="preset-button" data-preset="issue" data-category="knowledge">
                 <span class="preset-button__icon" aria-hidden="true">◍</span>
                 <span class="preset-button__text">
-                  <strong>Issue</strong>
-                  <span>Open the Issue surface</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="pr" data-category="knowledge">
-                <span class="preset-button__icon" aria-hidden="true">⇄</span>
-                <span class="preset-button__text">
-                  <strong>PR</strong>
-                  <span>Open the PR surface</span>
+                  <strong>Issues</strong>
+                  <span>Open Settings › Project › Issues</span>
                 </span>
               </button>
               <button class="preset-button" data-preset="index" data-category="knowledge">
@@ -706,87 +608,6 @@
           tabindex="-1"
         ></div>
       </div>
-      <!-- SPEC-2013 FR-012: confirm modal shown when the project tab
-           close (`×`) is invoked while one or more agent panes are still
-           running. Renderer lives in /close-project-tab-confirm-modal.js
-           and the wiring lives in /app.js. -->
-      <div
-        class="modal-backdrop"
-        id="close-project-tab-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell close-project-tab-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Close project tab"
-          tabindex="-1"
-        ></div>
-      </div>
-      <!-- SPEC-3038 US-3: Close Guard — every window close (titlebar × and
-           tab ×) confirms through this modal regardless of agent state.
-           Renderer lives in /window-close-confirm-modal.js; wiring in
-           /app.js (requestCloseWindow). -->
-      <div
-        class="modal-backdrop"
-        id="window-close-confirm-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell window-close-confirm-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Close window"
-          tabindex="-1"
-        ></div>
-      </div>
-      <!-- SPEC-2009 amendment: Worktree Picker modal for the File Tree
-           window. Renderer lives in /app.js (frontendUnits.worktreePicker).
-           Opens once per File Tree window open; selection routes the tree
-           through the new gwt-managed worktree inventory. -->
-      <div
-        class="modal-backdrop"
-        id="file-tree-worktree-picker-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell worktree-picker-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Select worktree for File Tree"
-          tabindex="-1"
-        ></div>
-      </div>
-      <!-- SPEC-2009 amendment Phase 2: Discard / Conflict modal landing
-           pads for the File Tree editor. Renderers live in /app.js and
-           reuse the shared `.modal-shell` primitive without overriding the
-           canonical declaration that the embedded contract test checks. -->
-      <div
-        class="modal-backdrop"
-        id="file-tree-discard-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell discard-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Discard unsaved changes"
-          tabindex="-1"
-        ></div>
-      </div>
-      <div
-        class="modal-backdrop"
-        id="file-tree-conflict-modal"
-        aria-hidden="true"
-      >
-        <div
-          class="modal-shell conflict-modal-shell"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Resolve external change conflict"
-          tabindex="-1"
-        ></div>
-      </div>
       <!-- SPEC-1934 US-6: confirmation modal shown when a Normal Git layout
            is detected at startup. Renderer lives in /migration-modal.js. -->
       <!-- SPEC-2356 US-4 AS-5: branch-cleanup / migration modals adopt the
@@ -824,6 +645,63 @@
           aria-label="Work Resume Picker"
           tabindex="-1"
         ></div>
+      </div>
+
+      <!-- SPEC-1921 Phase 80: read-only durable delivery Recovery Center. -->
+      <div
+        class="modal-backdrop"
+        id="recovery-center-modal"
+        aria-hidden="true"
+      >
+        <div
+          class="modal-shell recovery-center-modal__shell"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="recovery-center-title"
+          tabindex="-1"
+        >
+          <header class="modal-header recovery-center-modal__header">
+            <div>
+              <p class="recovery-center-modal__kicker">DURABLE DELIVERY</p>
+              <h2 id="recovery-center-title">Recovery Center</h2>
+            </div>
+            <button
+              type="button"
+              class="wizard-button recovery-center-modal__close"
+              data-recovery-center-close
+              aria-label="Close Recovery Center"
+            >×</button>
+          </header>
+          <div class="modal-body recovery-center-modal__body">
+            <div class="recovery-center-filters" aria-label="Recovery filters">
+              <label>
+                <span>State</span>
+                <select id="recovery-center-state-filter">
+                  <option value="attention">Attention</option>
+                  <option value="all">All states</option>
+                  <option value="pending">Pending</option>
+                  <option value="acknowledged">Acknowledged</option>
+                  <option value="conflicted">Conflicted</option>
+                </select>
+              </label>
+              <label>
+                <span>Worktree</span>
+                <select id="recovery-center-worktree-filter">
+                  <option value="all">All forms</option>
+                  <option value="ephemeral">Ephemeral</option>
+                  <option value="branch-backed">Branch-backed</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+            </div>
+            <div class="recovery-center-status" role="status"></div>
+            <div class="recovery-center-list" role="listbox" aria-label="Recovery deliveries"></div>
+          </div>
+          <footer class="modal-footer recovery-center-modal__footer">
+            <span class="recovery-center-count" aria-live="polite">0 shown · 0 total</span>
+            <button type="button" class="wizard-button" data-recovery-center-close>Close</button>
+          </footer>
+        </div>
       </div>
 
       <!-- SPEC-2017 US-9: Knowledge Bridge Drawer. Re-uses the
@@ -869,6 +747,8 @@
          mount as sibling lanes so neither fixed surface can cover the other. -->
     <div id="operator-notice-stack" class="operator-notice-stack"></div>
 
-    <script type="module" src="/app.js"></script>
+    <!-- Issue #4538: route bootstrap. `/` loads the Hub, `/p/<repo-hash>`
+         loads the Project app (/app.js); nothing else runs first. -->
+    <script type="module" src="/frontend-bootstrap.js"></script>
   </body>
 </html>

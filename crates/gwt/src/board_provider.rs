@@ -20,10 +20,12 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use gwt_config::{BoardProviderKind, ProjectBoardConfig, Settings, SlackConfig, TeamsConfig};
 use gwt_core::coordination::{
-    BoardAudienceScope, BoardEntry, BoardEntryKind, BoardHistoryPage, BoardPostOutcome,
-    BoardProvider, CoordinationSnapshot, LocalProvider,
+    BoardAudienceScope, BoardDeterministicOutcome, BoardEntry, BoardEntryKind, BoardHistoryPage,
+    BoardPostOutcome, BoardProvider, CoordinationSnapshot, LocalProvider, PromptBoardRead,
+    PromptBoardReadRequest,
 };
 use gwt_core::paths::gwt_repo_local_work_dir;
+use gwt_core::recovery::RecoveryProvider;
 use gwt_core::{GwtError, Result};
 
 use crate::board_remote::http::ReqwestHttpClient;
@@ -60,10 +62,16 @@ pub fn current_kind() -> BoardProviderKind {
 #[cfg(test)]
 pub(crate) mod test_provider_override {
     use super::BoardProviderKind;
-    use std::cell::Cell;
+    use gwt_core::coordination::{BoardProvider, PromptBoardRead, PromptBoardReadRequest};
+    use std::{
+        cell::{Cell, RefCell},
+        path::Path,
+        rc::Rc,
+    };
 
     thread_local! {
         static KIND: Cell<BoardProviderKind> = const { Cell::new(BoardProviderKind::Local) };
+        static PROMPT_PROVIDER: RefCell<Option<Rc<dyn BoardProvider>>> = const { RefCell::new(None) };
     }
 
     /// Current override for this thread (defaults to `Local`).
@@ -77,12 +85,54 @@ pub(crate) mod test_provider_override {
         Guard(previous)
     }
 
+    pub(crate) fn force_prompt_provider(provider: Rc<dyn BoardProvider>) -> PromptProviderGuard {
+        let previous = PROMPT_PROVIDER.with(|cell| cell.replace(Some(provider)));
+        PromptProviderGuard(previous)
+    }
+
+    pub(crate) fn has_forced_prompt_provider() -> bool {
+        PROMPT_PROVIDER.with(|cell| cell.borrow().is_some())
+    }
+
+    pub(crate) fn load_prompt_reminder_for_repo_hash(
+        worktree_root: &Path,
+        repo_hash: Option<&str>,
+        request: &PromptBoardReadRequest<'_>,
+    ) -> Option<gwt_core::Result<PromptBoardRead>> {
+        PROMPT_PROVIDER.with(|cell| {
+            cell.borrow().as_ref().map(|provider| {
+                provider.load_prompt_reminder_for_repo_hash(
+                    worktree_root,
+                    repo_hash,
+                    PromptBoardReadRequest {
+                        diff_since: request.diff_since,
+                        cursor: request.cursor,
+                        scope: request.scope,
+                        status_author: request.status_author,
+                        status_kind: request.status_kind,
+                        status_since: request.status_since,
+                    },
+                )
+            })
+        })
+    }
+
     /// RAII guard restoring the previous override on drop.
     pub(crate) struct Guard(BoardProviderKind);
 
     impl Drop for Guard {
         fn drop(&mut self) {
             KIND.with(|cell| cell.set(self.0));
+        }
+    }
+
+    pub(crate) struct PromptProviderGuard(Option<Rc<dyn BoardProvider>>);
+
+    impl Drop for PromptProviderGuard {
+        fn drop(&mut self) {
+            PROMPT_PROVIDER.with(|cell| {
+                cell.replace(self.0.take());
+            });
         }
     }
 }
@@ -281,7 +331,7 @@ fn build_remote_for(
             None => format!("{provider} is not signed in"),
         }
     })?;
-    let http = Box::new(ReqwestHttpClient::new());
+    let http = Box::new(ReqwestHttpClient::new_with_operation_deadline()?);
     Ok(match provider {
         "teams" => Box::new(TeamsProvider::new(
             token.access_token,
@@ -304,25 +354,45 @@ fn build_remote_for(
 /// `.gwt/work/board.toml` overlaid on the global settings (SPEC-2963 FR-026).
 /// Each repo gets its own provider scoped to its own channel, so Board posts and
 /// reads never mix across projects. `local` stays on the zero-cost fast path.
-pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+fn resolved_provider_for(worktree_root: &Path) -> (BoardProviderKind, Box<dyn BoardProvider>) {
     let project = ProjectBoardConfig::load_from_work_dir(&gwt_repo_local_work_dir(worktree_root));
     let global_kind = current_kind();
     // Fast path: no project override and global is local → zero-cost local,
     // identical to the pre-per-project behaviour (avoids loading Settings).
     if project.is_empty() && global_kind == BoardProviderKind::Local {
-        return Box::new(LocalProvider);
+        return (BoardProviderKind::Local, Box::new(LocalProvider));
     }
     let settings = Settings::load().unwrap_or_default();
     let resolved = resolve_board(&project, &settings, global_kind);
-    match resolved.kind {
-        BoardProviderKind::Local => Box::new(LocalProvider),
+    let provider = match resolved.kind {
+        BoardProviderKind::Local => Box::new(LocalProvider) as Box<dyn BoardProvider>,
         BoardProviderKind::Slack => {
             build_remote_for("slack", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
         }
         BoardProviderKind::Teams => {
             build_remote_for("teams", &resolved).unwrap_or_else(UnconfiguredProvider::boxed)
         }
-    }
+    };
+    (resolved.kind, provider)
+}
+
+pub fn provider_for(worktree_root: &Path) -> Box<dyn BoardProvider> {
+    resolved_provider_for(worktree_root).1
+}
+
+/// Capture the configured provider and its recovery capability route once.
+/// The delivery coordinator performs capability preflight on this exact
+/// provider instance before deriving Session authority or opening a Store.
+pub(crate) fn recovery_route_for(
+    worktree_root: &Path,
+) -> crate::recovery_delivery::RecoveryDeliveryRoute {
+    let (kind, provider) = resolved_provider_for(worktree_root);
+    let provider_kind = match kind {
+        BoardProviderKind::Local => RecoveryProvider::Local,
+        BoardProviderKind::Slack => RecoveryProvider::Slack,
+        BoardProviderKind::Teams => RecoveryProvider::Teams,
+    };
+    crate::recovery_delivery::RecoveryDeliveryRoute::new(provider_kind, provider)
 }
 
 /// A JSON/human-facing view of how a repo's Board routes (SPEC-2963 FR-026).
@@ -435,22 +505,64 @@ pub fn provider() -> Box<dyn BoardProvider> {
     }
 }
 
+fn after_local_operation<T>(root: &Path, result: Result<T>) -> Result<T> {
+    if result.is_ok() {
+        crate::board_discussion_sync::schedule(root);
+    }
+    result
+}
+
 // --- Free-function shims (same signatures as `gwt_core::coordination`) -------
 
 /// Append a Board entry through the active provider.
 pub fn post_entry(worktree_root: &Path, entry: BoardEntry) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).post_entry(worktree_root, entry)
+    let result = provider_for(worktree_root).post_entry(worktree_root, entry.clone());
+    if result.is_ok() {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
 }
 
 /// Append a Board entry while distinguishing a committed post from a failed
 /// snapshot refresh.
 pub fn post_entry_outcome(worktree_root: &Path, entry: BoardEntry) -> Result<BoardPostOutcome> {
-    provider_for(worktree_root).post_entry_outcome(worktree_root, entry)
+    let result = provider_for(worktree_root).post_entry_outcome(worktree_root, entry.clone());
+    if result.is_ok() {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
+}
+
+/// Append a Board entry under a caller-supplied deterministic identity
+/// (SPEC-1974 FR-064 / FR-069).
+///
+/// Routed through the repo's resolved provider like every other Board write, so
+/// a project pointed at a provider that cannot preserve the identity gets a
+/// refusal here rather than a silent local append.
+pub fn post_entry_deterministic(
+    worktree_root: &Path,
+    entry: BoardEntry,
+) -> Result<BoardDeterministicOutcome> {
+    let result = provider_for(worktree_root).post_entry_deterministic(worktree_root, entry.clone());
+    if matches!(&result, Ok(BoardDeterministicOutcome::Appended(_))) {
+        crate::board_discussion_sync::local_post_committed(worktree_root, &entry);
+    }
+    after_local_operation(worktree_root, result)
+}
+
+/// Whether this repo's resolved Board provider can preserve a caller-supplied
+/// deterministic entry id (SPEC-1974 FR-069). Callers holding a durable intent
+/// check this before attempting delivery.
+pub fn supports_deterministic_identity(worktree_root: &Path) -> bool {
+    provider_for(worktree_root).supports_deterministic_identity()
 }
 
 /// Load the hot projection snapshot through the active provider.
 pub fn load_snapshot(worktree_root: &Path) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).load_snapshot(worktree_root)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_snapshot(worktree_root),
+    )
 }
 
 /// Load the snapshot filtered to an audience scope.
@@ -458,12 +570,33 @@ pub fn load_snapshot_for_scope(
     worktree_root: &Path,
     scope: &BoardAudienceScope,
 ) -> Result<CoordinationSnapshot> {
-    provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_snapshot_for_scope(worktree_root, scope),
+    )
+}
+
+/// Refresh a scoped Board view through the active provider (Issue #4406).
+pub fn refresh_scoped_board_view(
+    worktree_root: &Path,
+    scope: &BoardAudienceScope,
+    previous: Option<gwt_core::coordination::ScopedBoardView>,
+) -> Result<(
+    gwt_core::coordination::ScopedBoardView,
+    gwt_core::coordination::ScopedBoardRefresh,
+)> {
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).refresh_scoped_board_view(worktree_root, scope, previous),
+    )
 }
 
 /// Load entries updated strictly after `since`.
 pub fn load_entries_since(worktree_root: &Path, since: DateTime<Utc>) -> Result<Vec<BoardEntry>> {
-    provider_for(worktree_root).load_entries_since(worktree_root, since)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_since(worktree_root, since),
+    )
 }
 
 /// Load entries updated strictly after `since`, filtered to a scope.
@@ -472,7 +605,10 @@ pub fn load_entries_since_for_scope(
     since: DateTime<Utc>,
     scope: &BoardAudienceScope,
 ) -> Result<Vec<BoardEntry>> {
-    provider_for(worktree_root).load_entries_since_for_scope(worktree_root, since, scope)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_since_for_scope(worktree_root, since, scope),
+    )
 }
 
 /// Whether `author` posted a message of `kind` within `within`.
@@ -483,6 +619,32 @@ pub fn has_recent_post_by(
     within: chrono::Duration,
 ) -> Result<bool> {
     provider_for(worktree_root).has_recent_post_by(worktree_root, author, kind, within)
+}
+
+/// Load the prompt diff and own-status redundancy decision through one
+/// provider instance and one underlying history materialization.
+pub fn load_prompt_reminder_for_repo_hash(
+    worktree_root: &Path,
+    repo_hash: Option<&str>,
+    request: PromptBoardReadRequest<'_>,
+) -> Result<PromptBoardRead> {
+    crate::cli::hook::diagnostics::record_prompt_board_read();
+    #[cfg(test)]
+    if let Some(result) = test_provider_override::load_prompt_reminder_for_repo_hash(
+        worktree_root,
+        repo_hash,
+        &request,
+    ) {
+        return result;
+    }
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_prompt_reminder_for_repo_hash(
+            worktree_root,
+            repo_hash,
+            request,
+        ),
+    )
 }
 
 /// Whether an entry with `entry_id` exists.
@@ -496,7 +658,10 @@ pub fn load_entries_before(
     before_entry_id: Option<&str>,
     limit: usize,
 ) -> Result<BoardHistoryPage> {
-    provider_for(worktree_root).load_entries_before(worktree_root, before_entry_id, limit)
+    after_local_operation(
+        worktree_root,
+        provider_for(worktree_root).load_entries_before(worktree_root, before_entry_id, limit),
+    )
 }
 
 /// Load a page of older entries before `before_entry_id`, filtered to a scope.
@@ -506,17 +671,151 @@ pub fn load_entries_before_for_scope(
     limit: usize,
     scope: &BoardAudienceScope,
 ) -> Result<BoardHistoryPage> {
-    provider_for(worktree_root).load_entries_before_for_scope(
+    after_local_operation(
         worktree_root,
-        before_entry_id,
-        limit,
-        scope,
+        provider_for(worktree_root).load_entries_before_for_scope(
+            worktree_root,
+            before_entry_id,
+            limit,
+            scope,
+        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gwt_core::coordination::{AuthorKind, BoardExactAppendError, BoardRecoveryCapability};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct CountingHttp(Arc<AtomicUsize>);
+
+    impl crate::board_remote::slack::HttpClient for CountingHttp {
+        fn get(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP GET".to_string())
+        }
+
+        fn post_form(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[(&str, &str)],
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP POST".to_string())
+        }
+
+        fn post_json(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP POST".to_string())
+        }
+
+        fn patch_json(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::result::Result<crate::board_remote::slack::HttpResponse, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err("unexpected HTTP PATCH".to_string())
+        }
+    }
+
+    fn recovery_probe_entry() -> BoardEntry {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "Codex",
+            BoardEntryKind::Status,
+            "recovery probe",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn slack_and_teams_recovery_api_is_unsupported_before_http_or_local_mutation() {
+        let slack_http_calls = Arc::new(AtomicUsize::new(0));
+        let teams_http_calls = Arc::new(AtomicUsize::new(0));
+        for (provider_name, http_calls, provider) in [
+            (
+                "slack",
+                slack_http_calls.clone(),
+                Box::new(SlackProvider::new(
+                    "token",
+                    "channel",
+                    BTreeMap::new(),
+                    Box::new(CountingHttp(slack_http_calls)),
+                    60,
+                )) as Box<dyn BoardProvider>,
+            ),
+            (
+                "teams",
+                teams_http_calls.clone(),
+                Box::new(TeamsProvider::new(
+                    "token",
+                    "team/channel",
+                    BTreeMap::new(),
+                    Box::new(CountingHttp(teams_http_calls)),
+                    60,
+                )) as Box<dyn BoardProvider>,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            assert_eq!(
+                provider.recovery_capability(),
+                BoardRecoveryCapability::Unsupported
+            );
+            assert!(matches!(
+                provider.post_recovery_entry_exact(temp.path(), recovery_probe_entry()),
+                Err(BoardExactAppendError::Unsupported)
+            ));
+            assert!(
+                !gwt_core::coordination::coordination_events_path(temp.path()).exists(),
+                "unsupported remote recovery must not fall back to Local Board"
+            );
+            assert!(
+                !gwt_core::paths::gwt_board_remote_roots_path(temp.path()).exists(),
+                "unsupported remote recovery must not create thread-root mappings"
+            );
+            assert_eq!(
+                http_calls.load(Ordering::SeqCst),
+                0,
+                "unsupported {provider_name} recovery must perform zero HTTP calls"
+            );
+        }
+    }
+
+    #[test]
+    fn unconfigured_recovery_api_is_unsupported_before_any_board_mutation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let provider = UnconfiguredProvider::boxed("not configured");
+        assert_eq!(
+            provider.recovery_capability(),
+            BoardRecoveryCapability::Unsupported
+        );
+        assert!(matches!(
+            provider.post_recovery_entry_exact(temp.path(), recovery_probe_entry()),
+            Err(BoardExactAppendError::Unsupported)
+        ));
+        assert!(!gwt_core::coordination::coordination_events_path(temp.path()).exists());
+        assert!(!gwt_core::paths::gwt_board_remote_roots_path(temp.path()).exists());
+    }
 
     #[test]
     fn build_remote_local_reads_empty_board() {
@@ -587,11 +886,13 @@ mod tests {
             provider: Some(BoardProviderKind::Slack),
             channel: Some("C-A".into()),
             tenant: Some("acme".into()),
+            ..Default::default()
         };
         let proj_b = ProjectBoardConfig {
             provider: Some(BoardProviderKind::Slack),
             channel: Some("C-B".into()),
             tenant: Some("beta".into()),
+            ..Default::default()
         };
         let a = resolve_board(&proj_a, &settings, BoardProviderKind::Local);
         let b = resolve_board(&proj_b, &settings, BoardProviderKind::Local);
@@ -758,6 +1059,84 @@ mod tests {
         assert_eq!(routing.provider_source, "global");
         // In unit tests the global kind defaults to local (test override).
         assert_eq!(routing.provider, "local");
+    }
+
+    // --- Deterministic identity routing (SPEC-1974 FR-064 / FR-069) ---------
+
+    fn identified_entry(id: &str) -> BoardEntry {
+        let mut entry = BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Claude Code",
+            BoardEntryKind::Status,
+            "recovery intent body",
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        entry.id = id.to_string();
+        entry
+    }
+
+    #[test]
+    fn a_local_repo_routes_a_deterministic_append_and_stays_idempotent() {
+        // FR-064 through the routing shim: the repo resolves to local, which
+        // preserves the caller's id, so the replay is a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(supports_deterministic_identity(dir.path()));
+
+        post_entry_deterministic(dir.path(), identified_entry("intent-1")).unwrap();
+        let replay = post_entry_deterministic(dir.path(), identified_entry("intent-1")).unwrap();
+
+        assert!(matches!(
+            replay,
+            BoardDeterministicOutcome::AlreadyMaterialized { .. }
+        ));
+        assert_eq!(load_snapshot(dir.path()).unwrap().board.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_remote_provider_fails_closed_instead_of_appending_locally() {
+        // FR-069: Slack cannot preserve a caller-supplied id yet (SPEC #2963
+        // owns that contract), so the append is refused. The refusal must not
+        // leave a local post behind — that would acknowledge a delivery the
+        // remote Board never received.
+        let dir = tempfile::tempdir().unwrap();
+        let slack = SlackProvider::new(
+            "xoxb-test".to_string(),
+            "C-TEST".to_string(),
+            BTreeMap::new(),
+            Box::new(ReqwestHttpClient::new()),
+            60,
+        );
+
+        assert!(!slack.supports_deterministic_identity());
+        assert!(slack
+            .post_entry_deterministic(dir.path(), identified_entry("intent-2"))
+            .is_err());
+        assert!(
+            LocalProvider
+                .load_snapshot(dir.path())
+                .unwrap()
+                .board
+                .entries
+                .is_empty(),
+            "a refused remote append must not fall back to the local Board"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_provider_fails_closed_on_deterministic_append() {
+        // FR-010 + FR-069 together: a selected-but-unusable remote refuses the
+        // deterministic append for the same reason it refuses every other
+        // operation — no silent local service.
+        let dir = tempfile::tempdir().unwrap();
+        let provider = build_remote(BoardProviderKind::Slack, &Settings::default());
+
+        assert!(!provider.supports_deterministic_identity());
+        assert!(provider
+            .post_entry_deterministic(dir.path(), identified_entry("intent-3"))
+            .is_err());
     }
 
     #[test]

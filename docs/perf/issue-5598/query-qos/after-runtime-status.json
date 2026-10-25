@@ -1,0 +1,13 @@
+{
+  "wall_ms": 42097.23909999957,
+  "exit_code": 0,
+  "stdout": "{\"exit_code\":0,\"ok\":true,\"operation\":\"index.status\",\"output\":\"runtime: ready asset=efd8f94c0c9113ce smoke=passed\\nruntime_repaired: runner=true requirements=false manifest=true venv_created=false venv_rebuilt=false dependencies=false\\nissues: ready reason=ready documents=1622 repair_required=false\\nissues: mode=incremental\\nspecs: unhealthy reason=collection_missing documents=0 repair_required=true\\nmemory: unhealthy reason=collection_missing documents=0 repair_required=true\\ndiscussions: unhealthy reason=collection_missing documents=0 repair_required=true\\nboard: unhealthy reason=collection_missing documents=0 repair_required=true\\nworks: unhealthy reason=collection_missing documents=0 repair_required=true\\nreports: unhealthy reason=collection_missing documents=0 repair_required=true\\nfiles: unhealthy reason=view_head_missing documents=0 repair_required=true\\nfiles-docs: unhealthy reason=view_head_missing documents=0 repair_required=true\\nresources: heavy_held=false heavy_owner=none heavy_kind=none heavy_pending=0 broker_targets=0 queue_depth=0 running=0 follow_ups=0\\nresources: runner_tree=idle\\n\"}\n",
+  "stderr": "",
+  "timed_out": false,
+  "response": {
+    "exit_code": 0,
+    "ok": true,
+    "operation": "index.status",
+    "output": "runtime: ready asset=efd8f94c0c9113ce smoke=passed\nruntime_repaired: runner=true requirements=false manifest=true venv_created=false venv_rebuilt=false dependencies=false\nissues: ready reason=ready documents=1622 repair_required=false\nissues: mode=incremental\nspecs: unhealthy reason=collection_missing documents=0 repair_required=true\nmemory: unhealthy reason=collection_missing documents=0 repair_required=true\ndiscussions: unhealthy reason=collection_missing documents=0 repair_required=true\nboard: unhealthy reason=collection_missing documents=0 repair_required=true\nworks: unhealthy reason=collection_missing documents=0 repair_required=true\nreports: unhealthy reason=collection_missing documents=0 repair_required=true\nfiles: unhealthy reason=view_head_missing documents=0 repair_required=true\nfiles-docs: unhealthy reason=view_head_missing documents=0 repair_required=true\nresources: heavy_held=false heavy_owner=none heavy_kind=none heavy_pending=0 broker_targets=0 queue_depth=0 running=0 follow_ups=0\nresources: runner_tree=idle\n"
+  }
+}

@@ -8,7 +8,10 @@ const [summaryPath, thresholdArg, ...scopeArgs] = process.argv.slice(2);
 if (!summaryPath || !thresholdArg) {
   console.error(
     "Usage: node scripts/check-coverage-threshold.mjs <summary-json> <threshold> " +
-      "[--scope <regex>] [--scope-exclude <regex>]",
+      "[--scope <regex>] [--scope-exclude <regex>]\n" +
+      "Without --scope or --scope-exclude, filtered workspace coverage is not a CI gate.\n" +
+      "CI uses 90% --scope 'crates/(gwt-core|gwt)/' and " +
+      "80% --scope-exclude 'crates/(gwt-core|gwt)/'.",
   );
   process.exit(2);
 }

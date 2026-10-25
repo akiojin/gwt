@@ -5,13 +5,10 @@ const desktopChrome = chromiumChannel
   ? { ...devices["Desktop Chrome"], channel: chromiumChannel }
   : devices["Desktop Chrome"];
 
-// SPEC-2356 Operator Design System — Visual regression baseline.
-// Tests render the embedded gwt frontend and snapshot per surface × theme.
+// WebView behavior coverage runs against both Operator themes.
 export default defineConfig({
   testDir: "./tests",
   outputDir: "./test-results",
-  snapshotDir: "./snapshots",
-  snapshotPathTemplate: "{snapshotDir}/{testFilePath}/{projectName}/{platform}/{arg}{ext}",
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -21,12 +18,6 @@ export default defineConfig({
     baseURL: process.env.GWT_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:0/",
     trace: "on-first-retry",
     colorScheme: "dark",
-  },
-  expect: {
-    toHaveScreenshot: {
-      maxDiffPixelRatio: 0.005,
-      animations: "disabled",
-    },
   },
   projects: [
     {

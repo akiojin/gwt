@@ -55,7 +55,7 @@ test("the three Issue-family presets carry distinguishable role labels", () => {
 // FR-015.
 test("the Work surface is named Work in its role label", () => {
   const labels = presetRoleLabels();
-  assert.equal(labels.work, "Work", "the wire preset is `work`, so that key must be labelled");
+  assert.equal(labels.work, "Issue", "the legacy wire preset is `work`, so that key must be labelled");
   assert.doesNotMatch(
     appSource.slice(
       appSource.indexOf("function presetRoleLabel("),
@@ -80,15 +80,15 @@ test("the Work window is no longer offered in ADD WINDOW", () => {
 // FR-016: windows that are already open keep working — the `work` preset (and
 // its legacy `workspace` / `branches` spellings) must still resolve to the Work
 // surface so persisted windows render and reopen as before.
-test("already-open Work windows keep resolving to the Work surface", () => {
+test("already-open Work windows migrate to the Issue surface", () => {
   assert.match(
     appSource,
-    /function presetSurface\(preset\)[\s\S]+?preset\s*===\s*"work"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"work"/,
+    /function presetSurface\(preset\)[\s\S]+?preset\s*===\s*"work"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"knowledge"/,
     "presetSurface must keep mapping work/workspace to the Work surface",
   );
   assert.match(
     appSource,
-    /function normalizeSurfacePreset\(preset\)[\s\S]+?preset\s*===\s*"branches"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"work"/,
+    /function normalizeSurfacePreset\(preset\)[\s\S]+?preset\s*===\s*"branches"\s*\|\|\s*preset\s*===\s*"workspace"[\s\S]+?return\s+"issue"/,
     "normalizeSurfacePreset must keep folding legacy spellings onto work",
   );
 });

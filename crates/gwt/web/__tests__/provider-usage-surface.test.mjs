@@ -178,7 +178,7 @@ test("Status strip classifies usage at the 80 and 95 percent boundaries", async 
 
 test("Usage popover bars use the same 80 and 95 percent severity boundaries", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",
@@ -255,7 +255,7 @@ test("Usage popover bars use the same 80 and 95 percent severity boundaries", as
 
 test("Empty usage snapshot closes the popover and clears trigger state", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -321,7 +321,7 @@ test("Empty usage snapshot closes the popover and clears trigger state", async (
 
 test("Usage popover keeps keyboard focus within the trigger-popover boundary", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -415,7 +415,7 @@ test("Status strip compacts three providers while keeping the full accessible su
         state: { kind: "ok" },
       },
       {
-        provider: "gemini",
+        provider: "custom_provider",
         windows: [{ kind: "weekly", used_percent: 95 }],
         state: { kind: "ok" },
       },
@@ -425,22 +425,22 @@ test("Status strip compacts three providers while keeping the full accessible su
   const strip = document.getElementById("op-strip-usage");
   const visibleSummaries = strip.querySelectorAll(".op-usage-sum");
   assert.equal(visibleSummaries.length, 1);
-  assert.equal(visibleSummaries[0].dataset.provider, "gemini");
-  assert.equal(visibleSummaries[0].textContent.trim(), "GE 95%");
+  assert.equal(visibleSummaries[0].dataset.provider, "custom_provider");
+  assert.equal(visibleSummaries[0].textContent.trim(), "CU 95%");
   assert.equal(strip.querySelector(".op-usage-more").textContent, "+2");
   assert.equal(
     strip.getAttribute("aria-label"),
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, GE 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
   );
   assert.equal(
     strip.title,
-    "Provider usage: Codex 40% normal, Claude Code 70% normal, GE 95% danger",
+    "Provider usage: Codex 40% normal, Claude Code 70% normal, CU 95% danger",
   );
 });
 
 test("Keyboard focus opens the same labeled usage popover", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -504,7 +504,7 @@ test("Keyboard focus opens the same labeled usage popover", async () => {
 
 test("Usage hover shows account label while status strip stays compact", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { applyProviderUsage } = await importOperatorShell();
   const { document, window } = parseHTML(
@@ -559,6 +559,105 @@ test("Usage hover shows account label while status strip stays compact", async (
   }
 });
 
+test("Usage snapshot owns its data so strip and hover stay consistent", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { applyProviderUsage } = await importOperatorShell();
+  const { document, window } = parseHTML(
+    "<html><body><button id='op-strip-usage'></button></body></html>",
+  );
+  const previous = {
+    document: globalThis.document,
+    window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+    cancelAnimationFrame: globalThis.cancelAnimationFrame,
+  };
+  const frames = new Map();
+  let frameId = 0;
+  const flush = () => {
+    for (const callback of frames.values()) callback();
+    frames.clear();
+  };
+  Object.assign(globalThis, { document, window,
+    requestAnimationFrame: callback => { frames.set(++frameId, callback); return frameId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  window.__operatorShell = { applyProviderUsage: (snapshot) => applyProviderUsage(document, snapshot) };
+  const payload = {
+    accounts: [{ provider: "codex", windows: [{ kind: "weekly", used_percent: 10 }], state: { kind: "ok" } }],
+    sessions: [],
+    consumption: [],
+  };
+  try {
+    let workspaceRefreshes = 0;
+    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => workspaceRefreshes++ });
+    assert.equal(workspaceRefreshes, 0, "factory construction must not call a late-bound Workspace view");
+    surface.applyProviderUsageUi(payload);
+    assert.equal(workspaceRefreshes, 0, "views wait for the shared frame");
+    flush();
+    // A caller changing the received payload must not change model data.
+    payload.accounts[0].windows[0].used_percent = 70;
+    const strip = document.getElementById("op-strip-usage");
+    strip.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(strip);
+    const popover = document.getElementById("provider-usage-popover");
+    assert.match(strip.textContent, /CX 10%/);
+    assert.match(popover.textContent, /Weekly\s*10%/);
+    flush(); // Finish the popover's independent positioning frame.
+
+    surface.applyProviderUsageUi({ ...payload, accounts: [] });
+    surface.applyProviderUsageUi(payload);
+    assert.match(strip.textContent, /CX 10%/, "burst updates do not render intermediate snapshots");
+    assert.equal(frames.size, 1);
+    flush();
+    assert.match(strip.textContent, /CX 70%/);
+    assert.match(popover.textContent, /Weekly\s*70%/);
+    assert.equal(workspaceRefreshes, 2);
+  } finally {
+    flush();
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("Mounted usage panel follows snapshots while preserving local controls", async () => {
+  const { createProviderUsageSurface } = await import(pathToFileURL(resolve(here, "../provider-usage-surface.js")).href);
+  const { document, window } = parseHTML("<html><body><section id='usage-panel'></section></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, requestAnimationFrame: callback => callback() });
+  const usage = (kind) => ({ accounts: [{ provider: "claude_code", state: { kind } }] });
+  try {
+    const surface = createProviderUsageSurface({ send: () => {}, renderWorkspaceWindows: () => {} });
+    const panel = document.getElementById("usage-panel");
+    surface.applyProviderUsageUi(usage("disabled"));
+    surface.renderUsagePanel(panel);
+    const checkbox = panel.querySelector("input");
+    assert.equal(checkbox.checked, false);
+    surface.applyProviderUsageUi(usage("ok"));
+    assert.equal(checkbox.checked, true);
+    assert.equal(panel.querySelector("input"), checkbox, "snapshot must preserve the mounted control");
+
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new window.Event("change"));
+    assert.equal(checkbox.checked, false, "the local toggle remains immediate");
+    surface.applyProviderUsageUi(usage("ok"));
+    assert.equal(checkbox.checked, true, "the next canonical snapshot reflects backend truth");
+
+    surface.renderUsagePanel(panel);
+    const remountedCheckbox = panel.querySelector("input");
+    surface.applyProviderUsageUi(usage("disabled"));
+    assert.equal(remountedCheckbox.checked, false);
+    assert.equal(checkbox.checked, true, "remount must release the old control's subscription");
+    panel.remove();
+    remountedCheckbox.checked = true;
+    surface.applyProviderUsageUi(usage("disabled"));
+    assert.equal(remountedCheckbox.checked, true, "disconnected controls must not receive model updates");
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
 async function importOperatorShell() {
   const modulePath = resolve(here, "../operator-shell.js");
   const source = readFileSync(modulePath, "utf8")
@@ -574,7 +673,7 @@ async function importOperatorShell() {
 
 test("Usage popover labels unknown windows by their reported length (Issue #3860)", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",
@@ -640,9 +739,98 @@ test("Usage popover labels unknown windows by their reported length (Issue #3860
   }
 });
 
+test("Claude usage popover labels Fable weekly with its reported usage and reset", async () => {
+  const { createProviderUsageSurface } = await import(
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
+  );
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const resetsAt = "2031-01-02T03:04:05Z";
+    surface.applyProviderUsageUi({ accounts: [{ provider: "claude_code", state: { kind: "ok" },
+      windows: [{ kind: "fable_weekly", used_percent: 0, resets_at: resetsAt }] }],
+      consumption: [], sessions: [] });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    const row = document.querySelector('.op-usage-card[data-provider="claude_code"] .op-usage-win');
+    assert.equal(row.querySelector(".op-usage-win__lbl").textContent, "Fable weekly");
+    assert.equal(row.querySelector(".op-usage-win__pct").textContent, "0%");
+    assert.equal(row.querySelector(".op-usage-bar__fill").style.width, "0%");
+    assert.equal(row.querySelector(".op-usage-win__reset").textContent,
+      `↻ ${new Date(resetsAt).toLocaleString(undefined, {
+        month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+      })}`);
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
+test("Claude usage credits preserve supplied amounts and missing values", async () => {
+  const { createProviderUsageSurface } = await import(
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
+  );
+  const { document, window } = parseHTML("<html><body><div id='usage-anchor'></div></body></html>");
+  const previous = { document: globalThis.document, window: globalThis.window,
+    CustomEvent: globalThis.CustomEvent, requestAnimationFrame: globalThis.requestAnimationFrame };
+  Object.assign(globalThis, { document, window, CustomEvent: window.CustomEvent,
+    requestAnimationFrame: callback => callback() });
+  window.innerWidth = 1200;
+  window.innerHeight = 800;
+  try {
+    const surface = createProviderUsageSurface({ send() {}, renderWorkspaceWindows() {} });
+    const account = { provider: "claude_code", state: { kind: "ok" },
+      windows: [{ kind: "weekly", used_percent: 12 }] };
+    const applyExtraUsage = extraUsage => surface.applyProviderUsageUi({
+      accounts: [{ ...account, extra_usage: extraUsage }], consumption: [], sessions: [],
+    });
+    applyExtraUsage({ is_enabled: true, used_credits: 24.5, monthly_limit: 100,
+      utilization: 24.5, currency: "USD", disabled_reason: null });
+    const anchor = document.getElementById("usage-anchor");
+    anchor.getBoundingClientRect = () => ({ left: 24, top: 640 });
+    window.__gwtShowUsageHover(anchor);
+
+    let credits = document.querySelector('[data-usage-credits="true"]');
+    assert.ok(credits, "enabled usage credits should be visible");
+    assert.equal(credits.querySelector(".op-usage-win__lbl").textContent, "Usage credits");
+    assert.equal(credits.querySelector(".op-usage-win__pct").textContent, "25%");
+    assert.equal(credits.querySelector(".op-usage-bar__fill").style.width, "25%");
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "24.5 / 100 USD");
+
+    applyExtraUsage({ is_enabled: true, used_credits: 0, monthly_limit: null,
+      utilization: null, currency: "USD", disabled_reason: null });
+    credits = document.querySelector('[data-usage-credits="true"]');
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "0 / — USD");
+    assert.equal(credits.querySelector(".op-usage-win__pct").textContent, "—");
+    assert.equal(credits.querySelector(".op-usage-bar"), null);
+
+    applyExtraUsage({ is_enabled: true, used_credits: null, monthly_limit: null,
+      utilization: null, currency: null, disabled_reason: null });
+    credits = document.querySelector('[data-usage-credits="true"]');
+    assert.equal(credits.querySelector(".op-usage-win__reset").textContent, "— / —");
+    assert.doesNotMatch(credits.textContent, /0|USD/);
+
+    for (const extraUsage of [undefined, null, { is_enabled: false, used_credits: 24.5,
+      monthly_limit: 100, utilization: 24.5, currency: "USD", disabled_reason: null }]) {
+      applyExtraUsage(extraUsage);
+      assert.equal(document.querySelector('[data-usage-credits="true"]'), null);
+      assert.equal(document.querySelector(".op-usage-win__pct").textContent, "12%");
+    }
+  } finally {
+    Object.assign(globalThis, previous);
+  }
+});
+
 test("Usage popover lists per-session tokens and context per provider, capped (Issue #3862)", async () => {
   const { createProviderUsageSurface } = await import(
-    resolve(here, "../provider-usage-surface.js")
+    pathToFileURL(resolve(here, "../provider-usage-surface.js")).href
   );
   const { document, window } = parseHTML(
     "<html><body><div id='usage-anchor'></div></body></html>",

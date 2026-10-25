@@ -13,8 +13,11 @@ import datetime
 import json
 import math
 import os
+import socket
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -61,6 +64,21 @@ class _KnownDistanceEmbeddingModel:
 
 
 class SearchMultiContractTests(unittest.TestCase):
+    def test_missing_v2_files_do_not_block_available_issue_scope(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}):
+            base = Path(tmp)
+            self._write_cached_issue(base, 5430, "Available issue")
+            db_root = base / "index"
+            self.assertTrue(runner.action_index_issues_v2(
+                REPO_HASH, str(base), db_root=db_root)["ok"])
+            payload = runner.action_search_multi_v2(
+                REPO_HASH, WORKTREE_HASH, str(base), "Available", 5,
+                ["files", "issues"], db_root=db_root, file_index_protocol="v2")
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(payload["scopes"]["files"]["state"], "missing")
+            self.assertNotIn("files", payload["scope_results"])
+            self.assertEqual(payload["issueResults"][0]["number"], 5430)
+
     def setUp(self):
         runner._MODEL_CACHE = None
         self._coord_tmp = tempfile.TemporaryDirectory()
@@ -523,6 +541,86 @@ class SearchMultiContractTests(unittest.TestCase):
                 "search-multi must encode the query once and reuse the "
                 f"embedding across scopes (AS-2), calls: {counting.encode.call_args_list}",
             )
+
+    def test_model_cache_reuses_each_revision_after_scope_switches(self):
+        now = [100.0]
+
+        def load(*_args, **_kwargs):
+            now[0] += 2.5
+            return runner._FakeEmbeddingModel()
+
+        constructor = mock.Mock(side_effect=load)
+        with mock.patch.dict(os.environ, {"GWT_INDEX_FAKE_EMBEDDING": "0"}), \
+                mock.patch.dict("sys.modules", {
+                    "sentence_transformers": mock.Mock(SentenceTransformer=constructor)
+                }), \
+                mock.patch.object(runner, "_model_load_clock", lambda: now[0]), \
+                mock.patch.object(runner, "_MODEL_LOAD_MS", 0):
+            models, load_times = [], []
+            for revision in (None, runner.FILE_INDEX_V2_MODEL_REVISION) * 2:
+                before = runner._MODEL_LOAD_MS
+                models.append(runner._get_embedding_model(revision))
+                load_times.append(runner._MODEL_LOAD_MS - before)
+            self.assertEqual(load_times, [2500, 2500, 0, 0])
+            self.assertIs(models[0], models[2])
+            self.assertIs(models[1], models[3])
+            self.assertIsNot(models[0], models[1])
+            self.assertEqual(constructor.call_count, 2)
+
+    def test_search_multi_reports_model_load_time_for_the_cold_warm_split(self):
+        """Report each request's load cost, excluding prior warm worker requests.
+        A deterministic clock stands in
+        for the wall clock: loading the model advances it by exactly 2.5 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db_root = base / "index"
+            project = self._seed_file_scopes(base, db_root)
+
+            now = [100.0]
+
+            class _SlowLoadingTransformer(runner._FakeEmbeddingModel):
+                def __init__(self, *_args, **_kwargs):
+                    now[0] += 2.5
+
+            fake_module = mock.MagicMock(SentenceTransformer=_SlowLoadingTransformer)
+            with mock.patch.dict(
+                os.environ, {"GWT_INDEX_FAKE_EMBEDDING": "0"}
+            ), mock.patch.dict(
+                "sys.modules", {"sentence_transformers": fake_module}
+            ), mock.patch.object(
+                runner, "_model_load_clock", lambda: now[0]
+            ), mock.patch.object(
+                runner, "_MODEL_LOAD_MS", 0
+            ):
+                runner._MODEL_CACHE = None
+                payload = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=WORKTREE_HASH,
+                    project_root=str(project),
+                    query="alpha search",
+                    n_results=5,
+                    scopes=["files", "files-docs"],
+                    db_root=db_root,
+                )
+                warm = runner.action_search_multi_v2(
+                    repo_hash=REPO_HASH,
+                    worktree_hash=WORKTREE_HASH,
+                    project_root=str(project),
+                    query="alpha documentation",
+                    n_results=5,
+                    scopes=["files", "files-docs"],
+                    db_root=db_root,
+                )
+            self.assertTrue(payload.get("ok"), payload)
+            self.assertEqual(payload.get("model_load_ms"), 2500, payload)
+            self.assertEqual(warm.get("model_load_ms"), 0, warm)
+            for measured in (payload, warm):
+                phases = measured["timings_ms"]
+                self.assertEqual(set(phases), {
+                    "index_read", "model_load", "query_encode", "query", "assemble",
+                })
+                self.assertEqual(phases["model_load"], measured["model_load_ms"])
+                self.assertTrue(all(value >= 0 for value in phases.values()), phases)
 
     def test_search_multi_dispatch_forwards_explicit_file_index_protocol(self):
         args = argparse.Namespace(
@@ -1076,6 +1174,322 @@ class SearchMultiContractTests(unittest.TestCase):
                     finally:
                         base_manifest_path.write_bytes(original_manifest)
                         base_descriptor_path.write_bytes(original_descriptor)
+
+
+class SearchWorkerTests(unittest.TestCase):
+    def test_model_load_failure_never_leaves_worker_warming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            endpoint = Path(tmp) / "endpoint.json"
+            endpoint.write_text(json.dumps({"pid": os.getpid(), "model_state": "cold"}))
+            with mock.patch.object(runner, "_SEARCH_WORKER_ENDPOINT", endpoint), \
+                 mock.patch.object(runner, "_MODEL_CACHE", None), \
+                 mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="1"), \
+                 mock.patch.object(runner, "_FakeEmbeddingModel", side_effect=RuntimeError("load failed")):
+                with self.assertRaisesRegex(RuntimeError, "load failed"):
+                    runner._get_embedding_model()
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "cold")
+
+    def test_worker_retains_repo_generation_clients_and_closes_replaced_stores(self):
+        fake_chroma = mock.Mock()
+        clients = [mock.Mock() for _ in range(5)]
+        fake_chroma.PersistentClient.side_effect = clients
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
+            root = Path(tmp)
+            first = root / "issues.gen" / "gen-first"
+            second = root / "issues.gen" / "gen-second"
+            first.mkdir(parents=True)
+            second.mkdir()
+            with runner._search_worker_read_clients():
+                pair = runner._open_chroma_collection(first, runner.V2_ISSUES_COLLECTION)
+                runner._close_chroma_client(pair[0])
+                self.assertEqual(
+                    runner._open_chroma_collection(first, runner.V2_ISSUES_COLLECTION), pair
+                )
+                self.assertEqual(fake_chroma.PersistentClient.call_count, 1)
+                clients[0].close.assert_not_called()
+                replacement = runner._open_chroma_collection(
+                    second, runner.V2_ISSUES_COLLECTION
+                )
+                clients[0].close.assert_called_once()
+                runner._close_chroma_client(replacement[0])
+                clients[1].close.assert_not_called()
+                for store, collection in (
+                    (root / "memory", runner.V2_MEMORY_COLLECTION),
+                    (root / "file-index-v2" / "bases" / "base" / "store",
+                     runner.V2_FILES_CODE_COLLECTION),
+                ):
+                    client, _ = runner._open_chroma_collection(store, collection)
+                    runner._close_chroma_client(client)
+                    client.close.assert_called_once()
+            clients[1].close.assert_called_once()
+            direct, _ = runner._open_chroma_collection(second, runner.V2_ISSUES_COLLECTION)
+            runner._close_chroma_client(direct)
+            direct.close.assert_called_once()
+
+    def test_worker_retained_generation_clients_have_a_finite_limit(self):
+        fake_chroma = mock.Mock()
+        clients = [mock.Mock() for _ in range(3)]
+        fake_chroma.PersistentClient.side_effect = clients
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}), \
+             mock.patch.object(runner, "SEARCH_WORKER_READ_CLIENT_LIMIT", 2):
+            with runner._search_worker_read_clients():
+                for index in range(3):
+                    store = Path(tmp) / str(index) / "issues.gen" / "gen-active"
+                    store.mkdir(parents=True)
+                    client, _ = runner._open_chroma_collection(
+                        store, runner.V2_ISSUES_COLLECTION
+                    )
+                    runner._close_chroma_client(client)
+                clients[0].close.assert_called_once()
+                clients[1].close.assert_not_called()
+                clients[2].close.assert_not_called()
+            for client in clients:
+                client.close.assert_called_once()
+
+    def test_worker_closes_mutable_repo_generation_readers_after_each_request(self):
+        fake_chroma = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {"chromadb": fake_chroma}):
+            store = Path(tmp) / "memory.gen" / "gen-active"
+            store.mkdir(parents=True)
+            with runner._search_worker_read_clients():
+                client, _ = runner._open_chroma_collection(store, runner.V2_MEMORY_COLLECTION)
+                runner._close_chroma_client(client)
+                client.close.assert_called_once()
+
+    def test_worker_transport_failure_remains_retryable(self):
+        args = argparse.Namespace(action="search-multi", qos=None,
+                                  repo_hash=REPO_HASH, query="alpha")
+        with mock.patch.object(runner, "parse_args", return_value=args), \
+             mock.patch.object(runner, "_search_worker_request", side_effect=ConnectionError("gone")), \
+             mock.patch.object(runner, "emit") as emit:
+            self.assertEqual(runner.main(), 1)
+        payload = emit.call_args.args[0]
+        self.assertEqual(payload["error_code"], "SEARCH_UNAVAILABLE")
+        self.assertTrue(payload["retryable"])
+
+    def test_cli_searches_reuse_worker_and_reopen_published_store(self):
+        evidence = self._exercise_cli_worker_reuse()
+        if os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1":
+            self.assertLessEqual(max(evidence["warm_seconds"]), 2.0)
+
+    @unittest.skipUnless(
+        os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1",
+        "requires the opt-in real embedding model",
+    )
+    def test_real_model_worker_exposes_readiness(self):
+        evidence = self._exercise_cli_worker_reuse()
+        self.assertIn("warming", evidence["observed_model_states"])
+
+    def _exercise_cli_worker_reuse(self):
+        real_model = os.environ.get("GWT_INDEX_REAL_SEARCH_BENCHMARK") == "1"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            project.mkdir()
+            env = dict(os.environ, HOME=tmp, USERPROFILE=tmp,
+                       GWT_INDEX_FAKE_EMBEDDING="0" if real_model else "1")
+            subprocess.run(["git", "init", "--quiet", str(project)], env=env,
+                           check=True, capture_output=True, timeout=30)
+            if real_model:
+                env["HF_HUB_OFFLINE"] = "1"
+                env["HF_HUB_CACHE"] = os.environ.get(
+                    "HF_HUB_CACHE", str(Path.home() / ".cache" / "huggingface" / "hub")
+                )
+            common = [sys.executable, str(Path(runner.__file__).resolve()),
+                      "--repo-hash", REPO_HASH, "--project-root", str(project),
+                      "--worker-dir", str(base / "worker"),
+                      "--worktree-hash", WORKTREE_HASH, "--file-index-protocol", "v2"]
+            source = project / "src" / "worker.rs"
+            source.parent.mkdir()
+            source.write_text("//! Persistent search worker model.\npub fn worker() {}\n",
+                              encoding="utf-8")
+            memory = base / ".gwt" / "projects" / REPO_HASH / "work-notes" / "memory.md"
+            memory.parent.mkdir(parents=True)
+            memory.write_text("## 2026-10-15 — alpha worker\n\nPersistent search model.\n",
+                              encoding="utf-8")
+
+            def invoke(*args):
+                result = subprocess.run(common + list(args), env=env,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                return json.loads(result.stdout.strip().splitlines()[-1])
+
+            invoke("--action", "index-memory")
+            cold_started = time.monotonic()
+            first_args = ["--action", "search-multi", "--scopes", "memory",
+                          "--query", "alpha worker"]
+            observed_states = []
+            if real_model:
+                child = subprocess.Popen(common + first_args, env=env,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 60
+                    while child.poll() is None and time.monotonic() < deadline:
+                        try:
+                            state = json.loads((base / "worker" / "endpoint.json").read_text())["model_state"]
+                            if state not in observed_states:
+                                observed_states.append(state)
+                        except FileNotFoundError:
+                            pass
+                        time.sleep(0.1)
+                    stdout, stderr = child.communicate(timeout=10)
+                    self.assertEqual(child.returncode, 0, stderr + stdout)
+                    first = json.loads(stdout.strip().splitlines()[-1])
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate()
+            else:
+                first = invoke(*first_args)
+            cold_seconds = time.monotonic() - cold_started
+            self.assertTrue(first["ok"])
+            self.assertTrue(
+                first.get("scope_results", {}).get("memory", {}).get("memoryResults"), first
+            )
+            worker_pid = first["worker_pid"]
+            try:
+                self.assertEqual(json.loads((base / "worker" / "endpoint.json").read_text())["model_state"], "warm")
+                invoke("--action", "index-files")
+                files_first = invoke("--action", "search-multi", "--scopes", "files",
+                                     "--query", "persistent worker")
+                self.assertEqual(files_first["worker_pid"], worker_pid)
+                self.assertTrue(files_first.get("results"), files_first)
+                memory.write_text("## 2026-10-15 — beta update\n\nChanged published memory.\n",
+                                  encoding="utf-8")
+                invoke("--action", "index-memory")
+                warm_seconds = []
+                warm_timings_ms = []
+                for scope, query in (("memory", "beta update"),
+                                     ("files", "persistent worker"),
+                                     ("memory", "published memory"),
+                                     ("files", "search model")):
+                    started = time.monotonic()
+                    second = invoke("--action", "search-multi", "--scopes", scope,
+                                    "--query", query)
+                    warm_seconds.append(time.monotonic() - started)
+                    warm_timings_ms.append(second.get("timings_ms"))
+                    self.assertEqual(second["worker_pid"], worker_pid)
+                    self.assertEqual(second["model_load_ms"], 0)
+                    self.assertEqual(json.loads((base / "worker" / "endpoint.json").read_text())["model_state"], "warm")
+                    if scope == "memory":
+                        self.assertIn("beta update", json.dumps(second))
+                        self.assertNotIn("alpha worker", json.dumps(second))
+                    else:
+                        self.assertEqual(second["results"][0]["path"], "src/worker.rs")
+                if real_model:
+                    print(json.dumps({"platform": sys.platform, "worker_pid": worker_pid,
+                                      "observed_model_states": observed_states,
+                                      "cold_seconds": cold_seconds,
+                                      "cold_model_load_ms": first["model_load_ms"],
+                                      "files_cold_model_load_ms": files_first["model_load_ms"],
+                                      "warm_seconds": warm_seconds,
+                                      "cold_timings_ms": first.get("timings_ms"),
+                                      "warm_timings_ms": warm_timings_ms,
+                                      "warm_model_load_ms": second["model_load_ms"]}), flush=True)
+                    self.assertGreater(first["model_load_ms"], 0)
+                db_path = runner.resolve_db_path(
+                    REPO_HASH, None, "memory", db_root=base / ".gwt" / "index"
+                )
+                client, collection = runner._open_chroma_collection(
+                    runner.resolve_active_store(db_path), runner.V2_MEMORY_COLLECTION
+                )
+                try:
+                    collection.delete(ids=collection.get()["ids"])
+                finally:
+                    runner._close_chroma_client(client)
+                corrupted = invoke("--action", "search-multi", "--scopes", "memory",
+                                   "--query", "beta update")
+                self.assertEqual(corrupted["worker_pid"], worker_pid)
+                self.assertEqual(corrupted["scopes"]["memory"]["state"], "corrupt")
+                return {"observed_model_states": observed_states,
+                        "warm_seconds": warm_seconds}
+            finally:
+                # This PID came from the worker launched by this isolated fixture.
+                import signal
+                os.kill(worker_pid, signal.SIGTERM)
+
+    def test_worker_readiness_surrounds_model_construction_and_cache_hits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            endpoint = Path(tmp) / "endpoint.json"
+            endpoint.write_text(json.dumps({"pid": os.getpid(), "model_state": "cold"}))
+
+            def construct():
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warming")
+                return object()
+
+            with mock.patch.object(runner, "_SEARCH_WORKER_ENDPOINT", endpoint), \
+                 mock.patch.object(runner, "_MODEL_CACHE", None), \
+                 mock.patch.dict(os.environ, GWT_INDEX_FAKE_EMBEDDING="1"), \
+                 mock.patch.object(runner, "_FakeEmbeddingModel", side_effect=construct) as model:
+                first = runner._get_embedding_model()
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warm")
+                self.assertIs(runner._get_embedding_model(), first)
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "warm")
+                model.assert_called_once()
+
+    def test_idle_worker_exits_and_removes_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_dir = Path(tmp) / "worker"
+            code = ("import sys; from pathlib import Path; "
+                    "import chroma_index_runner as r; "
+                    "raise SystemExit(r._serve_search_worker(Path(sys.argv[1]), idle_timeout=1))")
+            env = dict(os.environ, PYTHONPATH=str(Path(runner.__file__).resolve().parent))
+            child = subprocess.Popen([sys.executable, "-c", code, str(worker_dir)],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                deadline = time.monotonic() + 30
+                endpoint = worker_dir / "endpoint.json"
+                while not endpoint.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                self.assertTrue(endpoint.exists(), "worker must publish readiness before idle exit")
+                self.assertEqual(json.loads(endpoint.read_text())["model_state"], "cold")
+                stdout, stderr = child.communicate(timeout=15)
+                self.assertEqual(child.returncode, 0, (stdout, stderr))
+                self.assertFalse(endpoint.exists(), "idle exit must remove its endpoint")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
+
+    def test_disconnected_caller_stops_inflight_model_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            worker_dir = Path(tmp)
+            code = """
+import sys, time
+from pathlib import Path
+import chroma_index_runner as r
+directory = Path(sys.argv[1])
+def search(**kwargs):
+    (directory / 'started').touch()
+    time.sleep(60)
+r.action_search_multi_v2 = search
+r._serve_search_worker(directory)
+"""
+            env = dict(os.environ, PYTHONPATH=str(Path(runner.__file__).resolve().parent))
+            child = subprocess.Popen([sys.executable, "-c", code, tmp], env=env,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                endpoint = worker_dir / "endpoint.json"
+                deadline = time.monotonic() + 30
+                while not endpoint.exists() and child.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                metadata = json.loads(endpoint.read_text(encoding="utf-8"))
+                with socket.create_connection(("127.0.0.1", metadata["port"]), timeout=10) as connection:
+                    request = {"token": metadata["token"], "args": {
+                        "action": "search-multi", "repo_hash": REPO_HASH, "query": "alpha"}}
+                    connection.sendall(json.dumps(request).encode() + b"\n")
+                    while not (worker_dir / "started").exists() and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    self.assertTrue((worker_dir / "started").exists())
+                stdout, stderr = child.communicate(timeout=15)
+                self.assertNotEqual(child.returncode, 0, (stdout, stderr))
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate()
 
 
 if __name__ == "__main__":

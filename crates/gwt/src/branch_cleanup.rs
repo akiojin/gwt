@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Mutex, PoisonError},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +46,137 @@ pub struct BranchCleanupProgressEntry {
     pub total: usize,
     pub phase: BranchCleanupProgressPhase,
     pub message: String,
+}
+
+/// Issue #4433: the latest state of a cleanup operation, as a reconnecting
+/// client needs to see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchCleanupOperationSnapshot {
+    Progress(BranchCleanupProgressEntry),
+    Result(Vec<BranchCleanupResultEntry>),
+}
+
+#[derive(Debug, Clone)]
+struct TrackedBranchCleanupOperation {
+    operation_id: String,
+    snapshot: BranchCleanupOperationSnapshot,
+}
+
+/// Issue #4433: the latest cleanup status per cleanup surface, keyed by window
+/// id and tagged with the frontend-generated operation id.
+///
+/// Cleanup progress and results are broadcast, so a client that reconnects
+/// mid-run still misses everything the worker emitted while it was away. This
+/// store lets that client pull the current state back by
+/// `(window id, operation id)`.
+///
+/// Only the most recent operation per window is kept: a cleanup surface runs
+/// one cleanup at a time, so the next run evicts the previous snapshot. That
+/// bounds the store by the number of cleanup surfaces and makes a stale result
+/// unreachable once a new operation id is in flight.
+#[derive(Debug, Default)]
+pub struct BranchCleanupOperationStore {
+    operations: Mutex<HashMap<String, TrackedBranchCleanupOperation>>,
+}
+
+impl BranchCleanupOperationStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Remember the latest progress for `operation_id`.
+    pub fn record_progress(
+        &self,
+        id: &str,
+        operation_id: &str,
+        progress: &BranchCleanupProgressEntry,
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Progress(progress.clone()),
+        );
+    }
+
+    /// Replace any remembered progress with the operation's final result.
+    pub fn record_result(
+        &self,
+        id: &str,
+        operation_id: &str,
+        results: &[BranchCleanupResultEntry],
+    ) {
+        self.store(
+            id,
+            operation_id,
+            BranchCleanupOperationSnapshot::Result(results.to_vec()),
+        );
+    }
+
+    /// The current state of `operation_id`, or `None` when the operation was
+    /// cleared or superseded. `None` means "nothing to replay" and must never
+    /// be rendered as a cleanup failure.
+    pub fn snapshot(&self, id: &str, operation_id: &str) -> Option<BranchCleanupOperationSnapshot> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .get(id)
+            .filter(|tracked| tracked.operation_id == operation_id)
+            .map(|tracked| tracked.snapshot.clone())
+    }
+
+    /// Every tracked operation as `(id, operation_id, snapshot)`.
+    ///
+    /// A WebView reload wipes the page's JS state, so the reloaded client
+    /// cannot name the operation it was watching. The initial per-client sync
+    /// hands it the live operations instead.
+    pub fn live_operations(&self) -> Vec<(String, String, BranchCleanupOperationSnapshot)> {
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations
+            .iter()
+            .map(|(id, tracked)| {
+                (
+                    id.clone(),
+                    tracked.operation_id.clone(),
+                    tracked.snapshot.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Drop the operation once the client has consumed its result. A clear for
+    /// an operation that has already been superseded is a no-op, so a late
+    /// modal close cannot wipe the run that is currently in flight.
+    pub fn clear(&self, id: &str, operation_id: &str) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if operations
+            .get(id)
+            .is_some_and(|tracked| tracked.operation_id == operation_id)
+        {
+            operations.remove(id);
+        }
+    }
+
+    fn store(&self, id: &str, operation_id: &str, snapshot: BranchCleanupOperationSnapshot) {
+        let mut operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        operations.insert(
+            id.to_string(),
+            TrackedBranchCleanupOperation {
+                operation_id: operation_id.to_string(),
+                snapshot,
+            },
+        );
+    }
 }
 
 pub fn cleanup_selected_branches(
@@ -504,28 +639,82 @@ mod tests {
             gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
         let repo = temp.path().join("repo");
         init_cleanup_repo(&repo);
-        let branch = "work/issue-3729";
-        let worktree = temp.path().join("issue-3729");
-        gwt_git::WorktreeManager::new(&repo)
-            .create_from_base("HEAD", branch, &worktree)
-            .expect("create managed worktree");
+        let repo = dunce::canonicalize(&repo).expect("canonical repository");
         let config_path = temp.path().join(".codex/config.toml");
-        let report = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
-            .expect("seed Codex project trust");
-        let project_key = report.project_path.to_string_lossy().into_owned();
-        let mut entry = sample_entry(branch);
-        entry.cleanup.availability = BranchCleanupAvailability::Safe;
-        entry.cleanup.execution_branch = Some(branch.to_string());
+        fs::create_dir_all(config_path.parent().expect("Codex config parent"))
+            .expect("create Codex config parent");
+        fs::write(
+            &config_path,
+            r#"[hooks.state."/user-owned/.codex/hooks.json:stop:0:0"]
+enabled = false
+trusted_hash = "sha256:user-owned"
+"#,
+        )
+        .expect("seed user hook state");
+        gwt_skills::generate_codex_hooks(&repo).expect("generate shared root hooks");
+        let root_hooks = gwt_skills::register_codex_managed_hook_trust(&repo, &config_path)
+            .expect("seed shared root hook trust");
+        assert!(!root_hooks.trusted_entries.is_empty());
+        let baseline_config: toml::Value =
+            toml::from_str(&fs::read_to_string(&config_path).expect("read baseline config"))
+                .expect("parse baseline config");
+        let baseline_state = baseline_config["hooks"]["state"].as_table().unwrap();
+        assert_eq!(baseline_state.len(), root_hooks.trusted_entries.len() + 1);
 
-        let results = cleanup_selected_branches(&repo, &[entry], &[branch.to_string()], false);
+        // Issue #4230 AC-4: repeated real worktree lifecycles must reclaim local
+        // hook rows while retaining shared root and user-owned baseline rows.
+        let manager = gwt_git::WorktreeManager::new(&repo);
+        for number in 3729..3732 {
+            let branch = format!("work/issue-{number}");
+            let worktree = repo.join(&branch);
+            manager
+                .create_from_base("HEAD", &branch, &worktree)
+                .expect("create managed worktree");
+            gwt_skills::generate_codex_hooks_for_mode(
+                &worktree,
+                gwt_skills::CodexHookDiscoveryMode::Both,
+            )
+            .expect("generate local and shared root hooks");
+            let hooks = gwt_skills::register_codex_managed_hook_trust_for_mode(
+                &worktree,
+                &config_path,
+                gwt_skills::CodexHookDiscoveryMode::Both,
+            )
+            .expect("seed worktree hook trust");
+            assert_eq!(
+                hooks.trusted_entries.len(),
+                root_hooks.trusted_entries.len() * 2
+            );
+            let report = gwt_skills::register_codex_managed_project_trust(&worktree, &config_path)
+                .expect("seed Codex project trust");
+            let project_key = report.project_path.to_string_lossy().into_owned();
+            let mut entry = sample_entry(&branch);
+            entry.cleanup.availability = BranchCleanupAvailability::Safe;
+            entry.cleanup.execution_branch = Some(branch.clone());
 
-        assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
-        assert!(!worktree.exists(), "eligible managed worktree is removed");
-        assert_eq!(
-            project_trust_level(&config_path, &project_key),
-            None,
-            "worktree cleanup must revoke the exact Codex project trust entry"
-        );
+            let results = cleanup_selected_branches(&repo, &[entry], &[branch], false);
+
+            assert_eq!(results[0].status, BranchCleanupResultStatus::Success);
+            assert!(!worktree.exists(), "eligible managed worktree is removed");
+            assert_eq!(
+                project_trust_level(&config_path, &project_key),
+                None,
+                "worktree cleanup must revoke the exact Codex project trust entry"
+            );
+            let remaining: toml::Value =
+                toml::from_str(&fs::read_to_string(&config_path).expect("read cleaned config"))
+                    .expect("parse cleaned config");
+            let state = remaining["hooks"]["state"].as_table().unwrap();
+            assert_eq!(
+                state.len(),
+                baseline_state.len(),
+                "hook state grew after cycle {number}"
+            );
+            assert_eq!(
+                state, baseline_state,
+                "baseline hook state changed after cycle {number}"
+            );
+        }
     }
 
     #[test]

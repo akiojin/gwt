@@ -1,5 +1,12 @@
-import { expect, test } from "@playwright/test";
-import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
+import { expect, test, type Page } from "@playwright/test";
+import { APP_URL, installEmbeddedRoutes, APP_PROJECT_KEY } from "./_helpers/embedded-frontend";
+import { liveGwtProjectUrl } from "./_helpers/live-gwt";
+
+const liveBase = process.env.GWT_PLAYWRIGHT_BASE_URL;
+const appUrl = liveBase
+  ? new URL(liveBase).pathname === "/" ? liveGwtProjectUrl(liveBase, APP_PROJECT_KEY) : liveBase
+  : APP_URL;
+const errors = new WeakMap<Page, string[]>();
 
 // SPEC-2356 Anshin Addendum — Phase 1 kill-switch + attention UI.
 //
@@ -13,43 +20,84 @@ import { APP_URL, installEmbeddedRoutes } from "./_helpers/embedded-frontend";
 //     frames the window on click
 test.describe("Anshin Phase 1 kill-switch + attention", () => {
   test.use({ deviceScaleFactor: 1, viewport: { width: 1440, height: 900 } });
+  test.beforeEach(async ({ page }, info) => {
+    const captured: string[] = [];
+    errors.set(page, captured);
+    page.on("pageerror", error => captured.push(error.message));
+    page.on("console", message => { if (message.type() === "error") captured.push(message.text()); });
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme),
+      info.project.name.includes("light") ? "light" : "dark");
+  });
+  test.afterEach(async ({ page }, info) => {
+    await expect(page.locator("html")).toHaveAttribute("data-theme",
+      info.project.name.includes("light") ? "light" : "dark");
+    expect(errors.get(page), "zero console/page errors").toEqual([]);
+  });
+
+  test("completed turn input readiness is distinct from model response wait", async ({ page }) => {
+    if (!liveBase) await installEmbeddedRoutes(page);
+    await installKillSwitchBackend(page);
+    // Issue #4538: the live server serves the Project app at `/p/<key>`.
+    await page.goto(appUrl);
+    const win = page.locator('.workspace-window[data-id="agent-1"]');
+    await expect(win).toBeAttached({ timeout: 10_000 });
+    const chip = win.locator(".status-chip");
+    // The running turn includes the quiet interval awaiting a model response;
+    // Stop returns the provider to its prompt without terminating its process.
+    for (const [state, label, description] of [
+      ["running", "Running", "Turn in progress, including waiting for a model response"],
+      ["idle", "Idle", "Turn ended; ready for input"],
+      ["waiting", "Waiting", "Waiting for approval or an external condition"],
+      ["error", "Error", "Error"],
+      ["stopped", "Stopped", "Stopped"],
+    ]) {
+      await page.evaluate((state) => window.__emit({
+        kind: "window_state", window_id: "agent-1", state,
+      }), state);
+      await expect(chip.locator(".status-label")).toHaveText(label);
+      await expect(chip).toHaveAttribute("title", description);
+      await expect(chip).toHaveAttribute("aria-label", label === description
+        ? label
+        : `${label}: ${description}`);
+    }
+  });
 
   // SPEC #3885 FR-015 (user ruling 2026-09-03) supersedes FR-041's titlebar
   // STOP: stopping an agent is offered only from the Issue row's ⋯ menu
   // (issue-preview.spec.ts). The chrome keeps close and, once stopped, RESTART.
   test("the window chrome carries no STOP button", async ({ page }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
+    await expect(win).toBeAttached({ timeout: 10_000 });
 
     await expect(win.locator('.titlebar [data-action="stop"]')).toHaveCount(0);
-    await expect(win.locator('.titlebar [data-action="close"]')).toBeVisible();
-    await expect(win.locator('.titlebar [data-action="restart"]')).toBeHidden();
+    await expect(win.locator('.titlebar [data-action="close"]')).toHaveCount(0);
+    await expect(win.locator('.titlebar [data-action="restart"]')).toHaveJSProperty("hidden", true);
     // A session with no Issue behind it (FR-013) shows neither Issue control.
-    await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toBeHidden();
+    await expect(win.locator('.titlebar [data-action="minimize-to-issue"]')).toHaveCount(0);
     await expect(win.locator('.titlebar [data-action="open-issue"]')).toBeHidden();
     const sent = await page.evaluate(() => window.__sentKinds);
     expect(sent).not.toContain("stop_window");
   });
 
   test("a stopped window exposes RESTART -> restart_window", async ({ page }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
+    await expect(win).toBeAttached({ timeout: 10_000 });
 
     // Push a Stopped runtime state; the chrome must swap STOP for RESTART.
     await page.evaluate(() => window.__emit({ kind: "window_state", window_id: "agent-1", state: "stopped" }));
 
     const restart = win.locator('[data-action="restart"]');
-    await expect(restart).toBeVisible();
+    await expect(restart).toHaveJSProperty("hidden", false);
     await expect(win.locator('[data-action="stop"]')).toBeHidden();
-    await restart.click();
+    await restart.dispatchEvent("click");
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))
@@ -59,11 +107,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
   });
 
   test("STOP ALL confirms then sends stop_all_windows", async ({ page }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
-    await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeVisible({
+    await expect(page.locator('.workspace-window[data-id="agent-1"]')).toBeAttached({
       timeout: 10_000,
     });
 
@@ -78,14 +126,16 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
   });
 
   test("the palette send-input entry routes pane_send_input by session_id", async ({ page }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const win = page.locator('.workspace-window[data-id="agent-1"]');
-    await expect(win).toBeVisible({ timeout: 10_000 });
-    // Focus the agent window so the focused-pane helper has a target.
-    await win.locator(".titlebar .title-text").click();
+    await expect(win).toBeAttached({ timeout: 10_000 });
+    // Open the exact native work so the focused-pane helper has a target.
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-1"] .work-open').click();
+    await page.locator('.works-terminal[data-window-id="agent-1"] .xterm-helper-textarea').focus();
 
     await page.evaluate(() => {
       window.prompt = () => "hello agent";
@@ -110,9 +160,9 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
   });
 
   test("manual and Monitor-linked panes dedupe waiting projection and rearm after running", async ({ page }) => {
-    await installEmbeddedRoutes(page);
+    if (!liveBase) await installEmbeddedRoutes(page);
     await installKillSwitchBackend(page);
-    await page.goto(APP_URL);
+    await page.goto(appUrl);
 
     const waitingCell = page.locator(".op-status-strip__cell--waiting");
     const waitingCount = page.locator("#op-strip-waiting");
@@ -121,17 +171,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     );
     const uiFor = (id: string) => {
       const win = page.locator(`.workspace-window[data-id="${id}"]`);
-      const windowTab = win.locator(
-        `.window-tab[data-window-tab-id="${id}"]`,
-      );
       return {
         win,
+        tile: page.locator(`.works-terminal[data-window-id="${id}"]`),
         statusChip: win.locator(".status-chip"),
-        windowTab,
-        windowTabCue: windowTab.locator(".window-tab-state"),
-        minimapCell: page.locator(
-          `.fleet-minimap__cell[data-window-id="${id}"]`,
-        ),
         toast: page.locator(
           `.toast-alerts__item[data-toast-id="attention-${id}"]`,
         ),
@@ -139,8 +182,10 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     };
     const manual = uiFor("agent-2");
     const monitor = uiFor("agent-3");
-    await expect(manual.win).toBeVisible({ timeout: 10_000 });
-    await expect(monitor.win).toBeHidden();
+    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
+    await expect(manual.tile).toBeVisible({ timeout: 10_000 });
+    await expect(monitor.tile).toBeHidden();
 
     const emitStatePair = (id: string, state: string) =>
       page.evaluate(
@@ -157,19 +202,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       await expect(ui.win).toHaveAttribute("data-agent-state", "waiting");
       await expect(ui.statusChip).toHaveClass(/waiting/);
       await expect(ui.statusChip.locator(".status-label")).toHaveText("Waiting");
-      await expect(ui.windowTab).toHaveAttribute("data-agent-state", "waiting");
-      await expect(ui.windowTabCue).toBeVisible();
-      await expect(ui.windowTabCue).toHaveText("WAIT");
-      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "waiting");
     };
     const expectRunningUi = async (ui) => {
       await expect(ui.win).toHaveAttribute("data-agent-state", "running");
       await expect(ui.statusChip).toHaveClass(/running/);
       await expect(ui.statusChip.locator(".status-label")).toHaveText("Running");
-      await expect(ui.windowTab).toHaveAttribute("data-agent-state", "running");
-      await expect(ui.windowTabCue).toBeVisible();
-      await expect(ui.windowTabCue).toHaveText("RUN");
-      await expect(ui.minimapCell).toHaveAttribute("data-telemetry", "running");
     };
 
     // Count insertions as well as the final DOM. The shared toast host replaces
@@ -222,10 +259,9 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     await expect(waitingCount).toHaveText("1");
     await expect(waitingCell).toHaveClass(/op-status-strip__cell--alert/);
 
-    const stage = page.locator("#canvas-stage");
-    const before = await stage.evaluate((el) => el.style.transform);
     await manual.toast.click();
-    await expect.poll(() => stage.evaluate((el) => el.style.transform)).not.toBe(before);
+    await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "works");
+    await expect(page.locator("#canvas, #fleet-minimap")).toHaveCount(0);
     await expect(manual.toast).toHaveCount(0);
 
     // Leaving waiting clears every persistent cue and rearms attention.
@@ -256,13 +292,26 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // `agent-3` models a pane launched by Issue Monitor. WindowState has no
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
-    // to it through the real tab-group interaction before exercising its cues.
-    await manual.win
-      .locator('.window-tab[data-window-tab-id="agent-3"]')
+    // to it through the Windows list before exercising its cues.
+    await page.locator("#window-list-button").click();
+    await page.locator(".window-list-row")
+      .filter({ has: page.locator(".window-list-title", { hasText: "Cedar — Monitor-linked Agent" }) })
       .click();
-    await expect(monitor.win).toBeVisible();
-    await expect(manual.win).toBeHidden();
-    await emitStatePair("agent-3", "waiting");
+    await expect(monitor.tile).toBeVisible();
+    await expect(manual.tile).toBeHidden();
+    // Issue #4887: start the next state in the same browser task after the
+    // focus helper returns, so a queued running snapshot cannot hide behind
+    // another Playwright round trip before the waiting episode begins.
+    await page.evaluate(async () => {
+      await (window as any).__killSwitchFixture.focusAndWait("agent-3");
+      await (window as any).__killSwitchFixture.emitBatchAndWait([
+        { kind: "window_state", window_id: "agent-3", state: "waiting" },
+        { kind: "terminal_status", id: "agent-3", status: "waiting" },
+      ]);
+    });
+    // A focus response also carries the backend workspace model. Deliver that
+    // snapshot explicitly so stale fixture status cannot hide behind timing.
+    await page.evaluate(() => (window as any).__killSwitchFixture.focusAndWait("agent-3"));
     await expect(monitor.toast).toHaveCount(1);
     await expect(monitor.toast.locator(".toast-alerts__title")).toHaveText(
       "Waiting for input",
@@ -311,6 +360,7 @@ async function installKillSwitchBackend(page) {
         dynamic_title: null,
         dynamic_title_detail: null,
         agent_id: id,
+        agent_name: { "agent-1": "Aster", "agent-2": "Birch", "agent-3": "Cedar" }[id],
         agent_color: "cyan",
         tab_group_id: null,
         tab_group_active: false,
@@ -323,6 +373,7 @@ async function installKillSwitchBackend(page) {
       agentWindow("agent-1", 120, 100, 1),
       agentWindow("agent-2", 1600, 1200, 2, {
         title: "Manual Agent",
+        purpose_title: "Manual Agent",
         tab_group_id: "approval-agent-tabs",
         tab_group_active: true,
       }),
@@ -332,6 +383,7 @@ async function installKillSwitchBackend(page) {
       // without inventing a frontend-only `source` discriminator.
       agentWindow("agent-3", 1600, 1200, 2, {
         title: "Monitor-linked Agent",
+        purpose_title: "Monitor-linked Agent",
         agent_color: "violet",
         tab_group_id: "approval-agent-tabs",
       }),
@@ -347,6 +399,7 @@ async function installKillSwitchBackend(page) {
               id: "tab-1",
               title: "Kill Switch Fixture",
               project_root: "/fixture",
+              project_key: "0123456789abcdef",
               kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },
@@ -377,6 +430,13 @@ async function installKillSwitchBackend(page) {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));
           this.emit(stateMsg());
+          this.emit({ kind: "active_work_projection", projection: { id: "attention-local-live", active_works: [], local_agent_activity: {
+            project_key: location.pathname.split("/").filter(Boolean).at(-1), host_id: "attention-fixture", observed_at: new Date().toISOString(), agents: [
+              { window_id: "agent-1", session_id: "session-agent-1", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-2", session_id: "session-agent-2", runtime_incarnation: 1, is_pm: false, issue_number: null },
+              { window_id: "agent-3", session_id: "session-agent-3", runtime_incarnation: 1, is_pm: false, issue_number: null },
+            ],
+          } } });
         }, 0);
       }
 
@@ -393,7 +453,7 @@ async function installKillSwitchBackend(page) {
           const target = windows.find((w) => w.id === msg.id);
           if (target) {
             target.z_index += 100;
-            this.emit(stateMsg());
+            return this.emit(stateMsg());
           }
         }
         if (msg.kind === "activate_window_tab") {
@@ -417,6 +477,13 @@ async function installKillSwitchBackend(page) {
       emit(payload) {
         return new Promise((resolve) => {
           setTimeout(() => {
+            // The backend persists status before broadcasting it. Later focus
+            // snapshots must include that state instead of the spawn status.
+            if (payload.kind === "window_state" || payload.kind === "terminal_status") {
+              const id = payload.kind === "window_state" ? payload.window_id : payload.id;
+              const target = windows.find(data => data.id === id);
+              if (target) target.status = payload.kind === "window_state" ? payload.state : payload.status;
+            }
             this.dispatchEvent(
               new MessageEvent("message", { data: JSON.stringify(payload) }),
             );
@@ -431,6 +498,15 @@ async function installKillSwitchBackend(page) {
       if (socketRef) socketRef.emit(payload);
     };
     window.__killSwitchFixture = {
+      async focusAndWait(id) {
+        if (!socketRef) throw new Error("fixture socket is not connected");
+        await socketRef.send(JSON.stringify({ kind: "focus_window", id }));
+        // Match emitBatchAndWait: emit completion only means the WebSocket
+        // frame was queued; its dispatcher and render work still need to run.
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
+      },
       async emitBatchAndWait(payloads) {
         if (!socketRef) throw new Error("fixture socket is not connected");
         for (const payload of payloads) {

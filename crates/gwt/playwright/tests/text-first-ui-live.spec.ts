@@ -16,7 +16,10 @@ test.describe("Text-first UI live readability", () => {
     page,
   }, testInfo) => {
     await suppressInitialFrontendReady(page);
-    await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+    await gotoLiveGwt(page, BASE, {
+      enableTestBridge: true,
+      suppressProjectSurfaces: true,
+    });
 
     const theme = testInfo.project.name.includes("light") ? "light" : "dark";
     await page.locator(`#op-theme-toggle [data-theme-value="${theme}"]`).click();

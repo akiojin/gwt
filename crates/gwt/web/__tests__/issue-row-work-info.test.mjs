@@ -16,7 +16,7 @@ import { parseHTML } from "linkedom";
 import {
   attentionForWorkspace,
   formatLifecycleStateLabel,
-} from "../workspace-kanban-surface.js";
+} from "../issue-other-surface.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
@@ -33,7 +33,7 @@ async function importSurfaceModule() {
     'from "data:text/javascript,export function createLaunchOperationId(){return%20%22work-row-test%22}"',
   );
   return import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
+    `data:text/javascript;base64,${Buffer.from(source.replace('from "./agent-kanban-surface.js"', `from "${new URL("../agent-kanban-surface.js", import.meta.url).href}"`).replace('from "./control-explanations.js"', `from "${new URL("../control-explanations.js", import.meta.url).href}"`).replace('from "./ui-state-store.js"', `from "${new URL("../ui-state-store.js", import.meta.url).href}"`).replace('from "./ui-content.js"', `from "${new URL("../ui-content.js", import.meta.url).href}"`)).toString("base64")}`
   );
 }
 
@@ -87,7 +87,7 @@ function workRow(overrides = {}) {
   };
 }
 
-async function makeFixture({ projection = null } = {}) {
+async function makeFixture({ projection = null, renderOtherWork } = {}) {
   const mod = await importSurfaceModule();
   const { document, window } = parseHTML(
     "<!doctype html><html><head></head><body></body></html>",
@@ -102,6 +102,7 @@ async function makeFixture({ projection = null } = {}) {
   const resumed = [];
   const cleaned = [];
   const surface = mod.createKnowledgeKanbanSurface({
+    scheduleFrame: run => { run(); return () => {}; },
     send: (message) => sent.push(message),
     sendKnowledgeSemanticSearchNow: (message) => {
       sent.push(message);
@@ -118,22 +119,21 @@ async function makeFixture({ projection = null } = {}) {
     sendWindowFocus() {},
     focusOrSpawnPreset() {},
     openIssueLaunchWizard() {},
-    visibleBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
     launchPending: {},
     createTerminalRuntime() {},
     windowDisplayTitle: (windowData) => windowData?.title || windowData?.id,
     windowRoleBadgeLabel: () => "Agent",
     windowizeIssuePreviewWindow() {},
     getActiveWorkProjection: () => projection,
+    renderOtherWork,
     workAttentionFor: attentionForWorkspace,
     formatWorkLifecycleLabel: formatLifecycleStateLabel,
-    continueWork: (workId, bounds) => {
-      continued.push({ workId, bounds });
+    continueWork: (workId) => {
+      continued.push({ workId });
       return true;
     },
     openWorkspaceResumePicker: (workspaceId) => resumed.push(workspaceId),
     openWorkspaceCleanup: (candidate, windowId) => cleaned.push({ candidate, windowId }),
-    getResumeBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
   });
   surface.mountKnowledgeWindow(issueWindow, body);
   const load = sent.find((message) => message.kind === "load_knowledge_bridge");
@@ -153,6 +153,28 @@ function applyEntries(surface, load, entries) {
     refresh_enabled: true,
   });
 }
+
+test("Issue board replaces redundant Work lane filter and keeps Other after the board", async (t) => {
+  const otherCalls = [];
+  const projection = { active_works: [
+    workRow({ id: "running" }),
+    workRow({ id: "paused", lifecycle_state: "paused", status_category: "idle", active_agents: 0 }),
+  ] };
+  const fixture = await makeFixture({ projection, renderOtherWork: (parent, id, options) => {
+    otherCalls.push({ parent, id, options });
+    parent.appendChild(createNode(parent.ownerDocument, "details", "issue-other-group", "Other"));
+  } });
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [
+    knowledgeEntry(1, [{ id: "running" }]),
+    knowledgeEntry(2, [{ id: "paused" }]),
+  ]);
+  const filter = fixture.body.querySelector("[data-issue-lane-filter]");
+  assert.equal(filter, null, "queue columns replace the lane filter");
+  assert.equal(fixture.body.querySelectorAll(".knowledge-row").length, 2);
+  assert.equal(otherCalls.at(-1).options.laneFilter, "all");
+  assert.equal(fixture.body.querySelector(".knowledge-list").lastElementChild.className, "issue-other-group");
+});
 
 test("issueWorkRowForEntry joins the Issue row to the active Work projection", async () => {
   const { issueWorkRowForEntry } = await importSurfaceModule();
@@ -203,9 +225,9 @@ test("the Issue row shows Work lifecycle, attention reason, and PR state", async
   assert.equal(row.querySelector(".knowledge-row-work"), null, "no separate Work band");
   const reason = row.querySelector('.knowledge-row-secondary-item[data-kind="reason"]');
   assert.equal(reason.textContent, "Waiting on review");
-  const pr = row.querySelector('.knowledge-row-secondary-item[data-key="pr"]');
-  assert.equal(pr.textContent, "PR #3699 · open");
-  assert.equal(pr.title, "https://github.com/akiojin/gwt/pull/3699");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="recorded"]').textContent, "Recorded work");
+  assert.equal(row.querySelector('.knowledge-row-secondary-item[data-key="pr"]'), null,
+    "the recorded-work explanation takes the second bounded secondary slot");
 });
 
 test("an Issue with no correlated Work renders no Work block", async (t) => {
@@ -248,7 +270,7 @@ test("Continue work, Resume, and Clean Up are reachable from the Issue row", asy
   assert.equal(row.querySelector(".knowledge-row-badge").textContent, "Launched");
   row.querySelector('[data-action="continue-work"]').click();
   assert.deepEqual(fixture.continued, [
-    { workId: "work-3671", bounds: { x: 0, y: 0, width: 1280, height: 800 } },
+    { workId: "work-3671" },
   ]);
 
   row.querySelector('[data-action="resume-work"]').click();
@@ -285,7 +307,7 @@ test("Clean Up stays disabled while the backend reports a cleanup blocker", asyn
 test("app.js feeds the Issue surface from the shared Work projection and helpers", () => {
   assert.match(
     appSource,
-    /attentionForWorkspace[\s\S]*from "\/workspace-kanban-surface\.js"/,
+    /attentionForWorkspace[\s\S]*from "\/issue-other-surface\.js"/,
     "the shared Work attention rules are imported, not re-derived",
   );
   assert.match(
@@ -303,4 +325,20 @@ test("app.js feeds the Issue surface from the shared Work projection and helpers
     /getActiveWorkProjection:\s*\(\)\s*=>\s*activeWorkProjection[\s\S]*windowizeIssuePreviewWindow|windowizeIssuePreviewWindow[\s\S]*getActiveWorkProjection:\s*\(\)\s*=>\s*activeWorkProjection/,
     "the Issue surface reads the already-broadcast active Work projection",
   );
+});
+
+
+test("Issue detail uses the related agent name with provider context", async (t) => {
+  const fixture = await makeFixture();
+  t.after(() => fixture.surface.clearKnowledgeBridgeState("win-1"));
+  applyEntries(fixture.surface, fixture.load, [knowledgeEntry(3671)]);
+  fixture.surface.requestKnowledgeDetail("win-1", "issue", 3671);
+  const requestId = fixture.sent.at(-1).request_id;
+  fixture.surface.applyKnowledgeReceiveEvent({ kind: "knowledge_detail", id: "win-1",
+    knowledge_kind: "issue", request_id: requestId,
+    detail: { number: 3671, title: "Issue #3671", state: "open", sections: [],
+      related_works: [{ title: "Implementation", agents: [{ session_id: "session-1",
+        agent_name: "ミオ", display_name: "Codex", agent_id: "codex", sessions: [] }] }] } });
+  fixture.body.querySelector("[data-issue-detail-view='issue']").click();
+  assert.equal(fixture.body.querySelector(".knowledge-related-agent-name").textContent, "ミオ (Codex)");
 });

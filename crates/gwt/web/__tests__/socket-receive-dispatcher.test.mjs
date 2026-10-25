@@ -36,6 +36,71 @@ function manualScheduler() {
   };
 }
 
+function browserScheduler(t) {
+  const frames = new Map();
+  const timers = new Map();
+  let nextId = 0;
+  for (const [key, replacement] of Object.entries({
+    requestAnimationFrame: (cb) => {
+      frames.set(++nextId, cb);
+      return nextId;
+    },
+    cancelAnimationFrame: (id) => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value: replacement });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (cb, delay) => {
+    timers.set(++nextId, { cb, delay });
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", (id) => timers.delete(id));
+  return { frames, timers };
+}
+
+test("default scheduler advances state while animation frames are suspended", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 1 }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "workspace_state", revision: 2 }) });
+  const staleFrame = frames.values().next().value;
+  assert.equal(timers.size, 1, "a timer must progress the queue without a frame or focus event");
+  const timer = timers.values().next().value;
+  assert.ok(timer.delay <= 1000, "fallback must be scheduled within the AC-13 bound");
+  timer.cb();
+
+  assert.deepEqual(received, [{ kind: "workspace_state", revision: 2 }]);
+  assert.equal(frames.size, 0, "timer winner cancels the suspended frame");
+  staleFrame();
+  assert.equal(received.length, 1, "a late frame cannot repeat delivery");
+});
+
+test("animation frame winner cancels its fallback timer", (t) => {
+  const received = [];
+  const { frames, timers } = browserScheduler(t);
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    now: () => 0,
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "a" });
+  assert.equal(timers.size, 1);
+  const staleTimer = timers.values().next().value.cb;
+  frames.values().next().value();
+
+  assert.equal(timers.size, 0, "normal frame delivery leaves no timer behind");
+  staleTimer();
+  assert.deepEqual(received, [{ kind: "terminal_output", data: "a" }]);
+});
+
 test("idempotent kinds collapse to the most recent occurrence", () => {
   const queue = [
     { kind: "workspace_state", n: 1 },
@@ -163,6 +228,7 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
 test("default coalescing policy mirrors backend latest-wins event policy", () => {
   for (const kind of [
     "workspace_state",
+    "local_agent_activity",
     "active_work_projection",
     "window_list",
     "runtime_health",
@@ -284,6 +350,102 @@ test("budget overflow defers remaining events to the next frame", () => {
   assert.equal(scheduler.pendingCount(), 0, "all events drained across two frames");
 });
 
+test("budget deferral moves only linear work for growing backlogs", (t) => {
+  for (const count of [64, 256, 1024]) {
+    const scheduler = manualScheduler();
+    const received = [];
+    let clock = 0;
+    let moved = 0;
+    const unshift = Array.prototype.unshift;
+    const slice = Array.prototype.slice;
+    const concat = Array.prototype.concat;
+    const dispatcher = createSocketReceiveDispatcher({
+      receive(event) { received.push(event.index); clock += 10; },
+      schedule: scheduler.schedule,
+      now: () => clock,
+    });
+    for (let index = 0; index < count; index += 1) {
+      dispatcher.enqueue({ kind: "terminal_output", index });
+    }
+    // Count copied/shifted elements rather than timing the runner. A repeated
+    // single-item prepend performs 1+2+...+N moves; bulk copies stay linear.
+    Array.prototype.unshift = function (...items) {
+      moved += this.length + items.length;
+      return unshift.apply(this, items);
+    };
+    Array.prototype.slice = function (start = 0, end = this.length) {
+      const result = slice.call(this, start, end);
+      moved += result.length;
+      return result;
+    };
+    Array.prototype.concat = function (...items) {
+      const result = concat.apply(this, items);
+      moved += result.length;
+      return result;
+    };
+    try { scheduler.runOnce(); }
+    finally {
+      Array.prototype.unshift = unshift;
+      Array.prototype.slice = slice;
+      Array.prototype.concat = concat;
+    }
+    assert.ok(moved <= count * 4, `${count} entries required ${moved} element moves`);
+    t.diagnostic(`${count} queued entries: ${moved} copied/shifted elements in one budgeted flush`);
+    assert.equal(dispatcher.pendingCount(), count - 1);
+    scheduler.runAll();
+    assert.deepEqual(received, Array.from({ length: count }, (_, index) => index));
+  }
+});
+
+test("overflow replaces a bounded backlog with one snapshot recovery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    maxQueueSize: 8,
+    onResync(reason) {
+      recovery.push(reason);
+      dispatcher.enqueue({ kind: "terminal_snapshot", id: "pane", revision: 99 });
+    },
+  });
+  for (let index = 0; index < 1000; index += 1) {
+    if (index % 2) dispatcher.handle({ data: JSON.stringify({ kind: "terminal_output", index }) });
+    else dispatcher.enqueue({ kind: "terminal_output", index });
+    assert.ok(dispatcher.pendingCount() <= 8, "all inbound paths share the limit");
+  }
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["overflow"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", id: "pane", revision: 99 }]);
+});
+
+test("resume discards stale frames before requesting authoritative state and dispose cancels delivery", () => {
+  const scheduler = manualScheduler();
+  const received = [];
+  const recovery = [];
+  const dispatcher = createSocketReceiveDispatcher({
+    receive: (event) => received.push(event),
+    schedule: scheduler.schedule,
+    now: () => 0,
+    onResync: (reason) => recovery.push(reason),
+  });
+  dispatcher.enqueue({ kind: "terminal_output", data: "stale" });
+  dispatcher.resume();
+  dispatcher.enqueue({ kind: "terminal_snapshot", data: "fresh" });
+  scheduler.runAll();
+  assert.deepEqual(recovery, ["visible"]);
+  assert.deepEqual(received, [{ kind: "terminal_snapshot", data: "fresh" }]);
+  dispatcher.enqueue({ kind: "terminal_output", data: "old socket" });
+  dispatcher.dispose();
+  dispatcher.resume();
+  scheduler.runAll();
+  assert.equal(received.length, 1);
+  assert.equal(recovery.length, 1);
+  assert.equal(dispatcher.pendingCount(), 0);
+});
+
 test("handle() accepts both WebSocket message events and pre-parsed payloads", () => {
   const received = [];
   const scheduler = manualScheduler();
@@ -385,6 +547,12 @@ test("flushNow synchronously drains pending events without waiting for the sched
 
   assert.equal(received.length, 1);
   assert.equal(received[0].revision, 2);
+
+  dispatcher.enqueue({ kind: "workspace_state", revision: 3 });
+  scheduler.runOnce();
+  assert.equal(received.length, 1, "the old callback cannot drain a newly scheduled queue");
+  scheduler.runOnce();
+  assert.equal(received[1].revision, 3);
 });
 
 // Issue #2698 PR 3 — terminal_output (streamed) flushes ahead of

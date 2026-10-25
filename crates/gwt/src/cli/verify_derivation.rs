@@ -7,22 +7,26 @@
 //! surfaces and derives the verification matrix from them, instead of
 //! trusting the agent to hand-pick commands:
 //!
-//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt and clippy
-//!   gates verbatim, plus the CI Rust test gate scoped to each changed
+//! - **rust** (`crates/<name>/…`, workspace manifests): CI's fmt, clippy, and
+//!   rustdoc gates verbatim, plus the CI Rust test gate scoped to each changed
 //!   crate (the whole workspace gate when a workspace manifest changed).
 //! - **skills / guidance** (`.claude/skills/`, `.codex/skills/`): the
 //!   `gwt-skills` test suite (managed-asset parity lives there).
 //! - **frontend** (`crates/gwt/web/` and js/ts/css/html): the embedded web
 //!   contract tests, which live in the `gwt` crate.
+//! - **node scripts** (`scripts/*.js`, `*.mjs`, `*.cjs`): existing sibling
+//!   `*.test.*` files through `node --test`.
 //! - **docs** (markdown outside the skill trees): `bunx markdownlint-cli2`
 //!   over the changed files (AGENTS markdown policy).
-//! - **anything else** (scripts, CI config, …): the conservative default —
-//!   the CI lint gates + the `gwt` crate suite.
+//! - **anything else**: the full workspace Rust matrix plus an explicit
+//!   `fallback(workspace:path)` diagnostic. Unknown surfaces broaden the
+//!   default instead of refusing automatic registration.
 //!
 //! # Package narrowing, never target narrowing
 //!
 //! The commands are CI's own gates ([`CI_RUST_TEST_GATE`], [`CI_FMT_GATE`],
-//! [`CI_CLIPPY_GATE`]) narrowed to the changed packages, and nothing else.
+//! [`CI_CLIPPY_GATE`], [`CI_RUSTDOC_GATE`]) narrowed to the changed packages,
+//! and nothing else.
 //! Narrowing by *target* instead is what made this derivation unsound: the
 //! `gwt` crate's matrix used to be `cargo test -p gwt --lib`, which never
 //! ran the ~1300 unit tests living in its binary targets (`app_runtime` and
@@ -32,29 +36,36 @@
 //! (#3640). Tests in this module pin the derived commands against the
 //! workflow files so CI cannot drift away from them unnoticed.
 //!
-//! # The one exception: the `gwt` crate's binary targets on Windows
+//! # Windows: library and binary unit tests without integration targets
 //!
-//! A Windows host cannot run those, and no amount of waiting changes that.
-//! Four `app_runtime` tests take `env_test_lock` and never release it
-//! (#4014), so the run wedges with the test binary's CPU flat, a pile of
-//! orphaned `cmd /d /s /c "exit /b 0"` children, and — because the wedged
-//! process keeps holding it — the host-wide verification lease. One such run
-//! starved every other worktree on the machine for hours, and since
+//! This narrowing used to cover `--bin gwt` as well. A Windows run wedged
+//! with the test binary's CPU flat and a pile of orphaned
+//! `cmd /d /s /c "exit /b 0"` children, and — because the wedged process
+//! kept holding it — the host-wide verification lease. One such run starved
+//! every other worktree on the machine for hours, and since
 //! `execution.reopen` and the Ready PR gate both consume a passing derived
 //! record, finished work could not ship while it sat there (#4182).
-//! Serializing with `--test-threads=1` only moves the wedge later; linking
-//! those targets also fails outright with `os error 5`, because Windows
-//! cannot replace the very `gwtd.exe` that is running the verification
-//! (#3808, #4172).
 //!
-//! So on Windows the `gwt` package — and the workspace gate, which contains
-//! it — narrows to `--lib`, and every derived `cargo test` is serialized.
-//! This follows CI rather than departing from it: the nightly
-//! `test-windows-default-parallel` job runs exactly
-//! [`CI_WINDOWS_RUST_TEST_GATE`] and documents the same
-//! deadlock as its reason for excluding the target. Every other package
-//! keeps CI's full gate, because only these targets have ever been observed
-//! to wedge — narrowing further would buy nothing and cost real coverage.
+//! #4014 found the cause and removed it: the window close finalizer joined
+//! the PTY reader thread while the pane still held the pseudoconsole open,
+//! and Windows ConPTY does not signal EOF on the output pipe until the
+//! pseudoconsole is closed, so that join could never return. It ran under
+//! `env_test_lock`, which is why one hung teardown looked like four wedged
+//! tests — the other three were only queued behind the lock. `--bin gwt` is
+//! back in the nightly Windows gate as a result.
+//!
+//! Integration tests cause Cargo to build the regular binaries, including
+//! the live `target/debug/gwtd.exe`, which Windows cannot replace (#3808,
+//! #4172). Binary unit tests build separate test harnesses instead. Selecting
+//! `--lib --bins` covers both `gwt` and `gwtd` unit tests without rebuilding
+//! the running controller (#4968). The portable fallback stays serialized.
+//! Projects declaring a `gwt-verify` nextest profile opt into process-isolated
+//! tests and JUnit evidence on Windows (#4822), with resource scheduling owned
+//! by that profile. The same target coverage is preserved, including separate
+//! rustdoc commands when the original gate included doctests.
+//!
+//! Every other package keeps CI's full gate, because its integration tests
+//! do not build the live controller.
 //! Windows verification is weaker than Linux's as a result, and CI stays the
 //! gate that decides; a local run that cannot finish decides nothing at all.
 //!
@@ -75,24 +86,30 @@ const CI_RUST_TEST_GATE: &str = "cargo test --workspace --all-features";
 const CI_FMT_GATE: &str = "cargo fmt --all -- --check";
 /// CI's clippy gate (`.github/workflows/lint.yml`, job `lint`).
 const CI_CLIPPY_GATE: &str = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+/// CI's rustdoc gate (`.github/workflows/lint.yml`, job `lint`). The step's
+/// `env: RUSTDOCFLAGS` is written as a leading assignment because `cargo doc`
+/// has no `-- -D warnings`; `verify.run` applies such a prefix as process
+/// environment (#3698).
+const CI_RUSTDOC_GATE: &str =
+    r#"RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items"#;
 
-/// The broad Rust test gate CI runs on Windows (`.github/workflows/
-/// nightly.yml`, job `test-windows-default-parallel`): the same gate restricted
-/// to library targets, because the `gwt` crate's binary targets deadlock
-/// there. Derivation applies the identical restriction — see the module
-/// header.
-const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --all-features";
+/// The Rust unit-test gate derivation uses on Windows. Explicit library and
+/// binary targets avoid integration tests rebuilding the live `gwtd.exe`.
+/// The nightly `test-windows-default-parallel` job selects `--bin gwt`
+/// instead of all binary unit-test harnesses. The test
+/// `windows_derived_rust_matrix_tracks_the_ci_windows_gate` pins that exact
+/// relationship so neither side can drift alone.
+const CI_WINDOWS_RUST_TEST_GATE: &str = "cargo test --workspace --lib --bins --all-features";
 
-/// The only package whose binary targets are known to wedge a Windows host,
-/// and the only one derivation narrows there (#4014, #4182).
-const WINDOWS_DEADLOCKING_PACKAGE: &str = "gwt";
+/// The package whose integration tests rebuild the running controller.
+const WINDOWS_CONTROLLER_PACKAGE: &str = "gwt";
 
 /// Which host the derived matrix has to be runnable on.
 ///
 /// Derivation is host-sensitive because CI's own Rust matrix is (#4182).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationHost {
-    /// Windows, where the `gwt` crate's binary targets deadlock.
+    /// Windows, where `gwt` integration tests rebuild the live controller.
     Windows,
     /// Every other host, where CI's full gate runs as written.
     Other,
@@ -128,10 +145,10 @@ fn workspace_test_command_for(host: VerificationHost) -> String {
 /// The derived Rust test command for one package, or for the whole
 /// workspace when `package` is `None`.
 fn rust_test_command_for(package: Option<&str>, host: VerificationHost) -> String {
-    // A workspace-wide gate builds the deadlocking package too, so both
+    // A workspace-wide gate builds the controller package too, so both
     // spellings take CI's Windows gate.
     let takes_windows_gate = host == VerificationHost::Windows
-        && package.is_none_or(|package| package == WINDOWS_DEADLOCKING_PACKAGE);
+        && package.is_none_or(|package| package == WINDOWS_CONTROLLER_PACKAGE);
     let gate = if takes_windows_gate {
         CI_WINDOWS_RUST_TEST_GATE
     } else {
@@ -253,10 +270,17 @@ fn changed_paths(worktree: &Path) -> Result<Vec<String>, TrivialReason> {
         return Err(TrivialReason::IntegrationBranch);
     }
     let base = integration_merge_base(worktree).ok_or(TrivialReason::MergeBaseUnavailable)?;
-    changed_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
+    changed_source_paths_since(worktree, &base).map_err(|_| TrivialReason::MergeBaseUnavailable)
 }
 
-fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, String> {
+/// The source paths `worktree` holds that `base` does not: the committed span,
+/// uncommitted changes against HEAD, and untracked files, with `.gwt/` and
+/// `tasks/` bookkeeping excluded. Shared with the delivered-owner classifier so
+/// "nothing to deliver" means exactly what the verification matrix means by it.
+pub(crate) fn changed_source_paths_since(
+    worktree: &Path,
+    base: &str,
+) -> Result<Vec<String>, String> {
     let mut paths: BTreeSet<String> = BTreeSet::new();
     paths.extend(checked_git_lines(
         worktree,
@@ -272,7 +296,10 @@ fn changed_paths_since(worktree: &Path, base: &str) -> Result<Vec<String>, Strin
     )?);
     Ok(paths
         .into_iter()
-        .filter(|path| !path.starts_with(".gwt/") && !path.starts_with("tasks/"))
+        .filter(|path| {
+            super::delivery_paths::classify_path(path.as_bytes())
+                == super::delivery_paths::DeliveryPath::Product
+        })
         .collect())
 }
 
@@ -297,15 +324,75 @@ fn is_frontend_path(path: &str) -> bool {
             .any(|ext| path.ends_with(ext))
 }
 
+fn is_node_script_path(path: &str) -> bool {
+    path.starts_with("scripts/")
+        && [".js", ".mjs", ".cjs"]
+            .iter()
+            .any(|ext| path.ends_with(ext))
+}
+
+fn node_test_paths(worktree: &Path, path: &str) -> Vec<String> {
+    if is_frontend_test_path(path) {
+        return worktree
+            .join(path)
+            .is_file()
+            .then(|| path.to_string())
+            .into_iter()
+            .collect();
+    }
+    let Some((stem, _)) = path.rsplit_once('.') else {
+        return Vec::new();
+    };
+    ["mjs", "js", "cjs"]
+        .iter()
+        .map(|ext| format!("{stem}.test.{ext}"))
+        .filter(|test| worktree.join(test).is_file())
+        .collect()
+}
+
+/// A frontend path that exercises the UI rather than rendering it.
+///
+/// Issue #4510: these still belong to the frontend *matrix* — changing a
+/// Playwright spec is exactly the reason to run the Playwright suite — but
+/// they are not a UI *surface*, because there is no rendered change for a
+/// human to look at. Conflating the two made a PR whose entire diff was one
+/// `*.spec.ts` demand a visual confirmation nobody could give (PR #4374).
+fn is_frontend_test_path(path: &str) -> bool {
+    path.starts_with("crates/gwt/playwright/tests/")
+        || path.contains("/__tests__/")
+        || [
+            ".spec.ts",
+            ".spec.js",
+            ".test.ts",
+            ".test.js",
+            ".test.mjs",
+            ".test.cjs",
+        ]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+/// Whether a changed path renders UI a human could be asked to look at.
+///
+/// Issue #4637: outside `crates/gwt/web/` a script extension alone proves
+/// nothing is rendered (`scripts/*.mjs` is tooling), so only markup and
+/// stylesheets keep the doubt-means-UI default there.
+pub(crate) fn is_ui_surface_path(path: &str) -> bool {
+    is_frontend_path(path)
+        && !is_frontend_test_path(path)
+        && (path.starts_with("crates/gwt/web/")
+            || [".css", ".html"].iter().any(|ext| path.ends_with(ext)))
+}
+
 /// Inspect frontend changes even when plan derivation is trivial on an
 /// integration branch. An unknown base or unreadable diff cannot prove that
 /// a Ready handoff has no UI surface.
 pub fn has_frontend_changes(worktree: &Path) -> Result<bool, String> {
     let base = integration_merge_base(worktree)
         .ok_or_else(|| "frontend classification requires a readable git merge-base".to_string())?;
-    Ok(changed_paths_since(worktree, &base)?
+    Ok(changed_source_paths_since(worktree, &base)?
         .iter()
-        .any(|path| is_frontend_path(path)))
+        .any(|path| is_ui_surface_path(path)))
 }
 
 fn is_docs_path(path: &str) -> bool {
@@ -316,38 +403,523 @@ fn is_docs_path(path: &str) -> bool {
 /// A no-target change set is represented by a reason-bearing trivial plan.
 /// Non-git directories remain invalid because they cannot provide a stable
 /// worktree fingerprint.
+#[cfg(test)]
 pub fn derive(worktree: &Path) -> Result<DerivedPlan, String> {
-    derive_for_host(worktree, VerificationHost::current())
+    derive_excluding(worktree, &[])
+}
+
+pub(crate) fn derive_excluding(
+    worktree: &Path,
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    derive_for_host_excluding(worktree, VerificationHost::current(), generated_outputs)
+}
+
+/// Read live protected contexts before taking the trusted store writer lease.
+pub fn read_pre_pr_required_contexts(worktree: &Path) -> Result<Vec<String>, String> {
+    if worktree.join("crates/gwt/Cargo.toml").is_file() {
+        let read = |args: &[&str]| -> Result<String, String> {
+            let output = hidden_command("gh")
+                .current_dir(worktree)
+                .args(args)
+                .output()
+                .map_err(|err| {
+                    format!("pre-pr required CI read failed: {err}; use verify.plan mode full")
+                })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "pre-pr required CI read failed: {}; use verify.plan mode full",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+        let repo = read(&[
+            "repo",
+            "view",
+            "--json",
+            "nameWithOwner",
+            "--jq",
+            ".nameWithOwner",
+        ])?;
+        let endpoint = format!("repos/{repo}/branches/develop/protection");
+        serde_json::from_str::<Vec<String>>(&read(&[
+            "api",
+            &endpoint,
+            "--jq",
+            ".required_status_checks.contexts",
+        ])?)
+        .map_err(|err| format!("pre-pr required contexts unreadable: {err}"))
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Explicit pre-PR policy for the gwt repository. Other projects keep their
+/// full matrix. Required contexts come from the live read at registration.
+pub fn derive_pre_pr(
+    worktree: &Path,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    derive_pre_pr_for_host_excluding(
+        worktree,
+        VerificationHost::current(),
+        required,
+        acceptance,
+        local,
+        generated_outputs,
+    )
+}
+
+#[cfg(test)]
+fn derive_pre_pr_for_host(
+    worktree: &Path,
+    host: VerificationHost,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+) -> Result<DerivedPlan, String> {
+    derive_pre_pr_for_host_excluding(worktree, host, required, acceptance, local, &[])
+}
+
+fn derive_pre_pr_for_host_excluding(
+    worktree: &Path,
+    host: VerificationHost,
+    required: &[String],
+    acceptance: &[String],
+    local: &[String],
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
+    let mut plan = derive_for_host_excluding(worktree, host, generated_outputs)?;
+    if plan.trivial_reason.is_some() {
+        for command in acceptance.iter().chain(local) {
+            if command.trim().is_empty() {
+                return Err("pre-pr commands must not be empty".into());
+            }
+            if !plan.commands.contains(command) {
+                plan.commands.push(command.clone());
+            }
+        }
+        if !plan.commands.is_empty() {
+            plan.trivial_reason = None;
+            plan.surfaces = vec!["explicit-checks".into()];
+        }
+        return Ok(plan);
+    }
+    if !worktree.join("crates/gwt/Cargo.toml").is_file() {
+        for command in acceptance.iter().chain(local) {
+            if !plan.commands.contains(command) {
+                plan.commands.push(command.clone());
+            }
+        }
+        return Ok(plan);
+    }
+    if acceptance.is_empty() || acceptance.iter().any(|c| c.trim().is_empty()) {
+        return Err("pre-pr requires non-empty acceptance_commands fixing this Issue's AC; use mode full otherwise".into());
+    }
+    validate_pre_pr_ci(worktree, required)?;
+    let mut packages = BTreeSet::new();
+    let mut workspace = plan
+        .surfaces
+        .iter()
+        .any(|surface| surface.starts_with("fallback(workspace:"));
+    for path in changed_paths(worktree).map_err(|reason| reason.as_str().to_string())? {
+        if generated_outputs.contains(&path) {
+            continue;
+        }
+        if is_rust_path(&path) {
+            if let Some(package) = crate_of(&path) {
+                packages.insert(package.to_string());
+            } else {
+                workspace = true;
+            }
+        } else if is_skills_path(&path) {
+            packages.insert("gwt-skills".to_string());
+        } else if !is_docs_path(&path) {
+            packages.insert("gwt".to_string());
+        }
+    }
+    // Required Rust/coverage contexts do not cover the derived Node runner.
+    let node_commands: Vec<_> = plan
+        .commands
+        .drain(..)
+        .filter(|command| command.starts_with("node --test "))
+        .collect();
+    if workspace || !packages.is_empty() {
+        plan.commands.push("rustc --version".to_string());
+        plan.commands.push(CI_FMT_GATE.to_string());
+        let scope = if workspace {
+            "--workspace".into()
+        } else {
+            packages
+                .iter()
+                .map(|p| format!("-p {p}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        plan.commands
+            .push(CI_CLIPPY_GATE.replace("--workspace", &scope));
+    }
+    plan.commands.extend(node_commands);
+    for command in acceptance.iter().chain(local) {
+        if command.trim().is_empty() {
+            return Err("pre-pr commands must not be empty".into());
+        }
+        if !plan.commands.contains(command) {
+            plan.commands.push(command.clone());
+        }
+    }
+    plan.surfaces.push("ci-delegated(rust-tests->Test (Rust);workspace-clippy,rustdoc,markdown->Clippy & Rustfmt;coverage90/80->coverage / Rust Coverage)".into());
+    Ok(plan)
+}
+
+/// The correspondence is intentionally small and repository-specific. A
+/// missing required context, job, trigger, or failure guard refuses delegation.
+fn validate_pre_pr_ci(worktree: &Path, required: &[String]) -> Result<(), String> {
+    use serde_yaml::Value;
+    let require = |condition: bool, missing: &str| -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(format!(
+                "pre-pr CI contract missing {missing}; repair CI or use verify.plan mode full"
+            ))
+        }
+    };
+    for context in [
+        "Test (Rust)",
+        "Clippy & Rustfmt",
+        "coverage / Rust Coverage",
+    ] {
+        require(
+            required.iter().any(|name| name == context),
+            &format!("required context {context}"),
+        )?;
+    }
+    let load = |name: &str| -> Result<Value, String> {
+        let text = std::fs::read_to_string(worktree.join(".github/workflows").join(name))
+            .map_err(|err| format!("pre-pr CI contract {name}: {err}"))?;
+        serde_yaml::from_str(&text).map_err(|err| format!("pre-pr CI contract {name}: {err}"))
+    };
+    let test = load("test.yml")?;
+    let lint = load("lint.yml")?;
+    let coverage_ci = load("coverage-ci.yml")?;
+    let coverage = load("coverage.yml")?;
+    for (name, doc) in [
+        ("test.yml", &test),
+        ("lint.yml", &lint),
+        ("coverage-ci.yml", &coverage_ci),
+    ] {
+        require(
+            doc["on"].get("pull_request").is_some() && doc["on"].get("merge_group").is_some(),
+            &format!("{name} PR/merge_group triggers"),
+        )?;
+        require(
+            doc["on"]["pull_request"].get("paths").is_none()
+                && doc["on"]["pull_request"].get("paths-ignore").is_none(),
+            &format!("unfiltered {name} PR trigger"),
+        )?;
+    }
+    let contains_guarded = |job: &Value, command: &str, condition: Option<&str>| {
+        job["steps"].as_sequence().into_iter().flatten().any(|s| {
+            condition.map_or_else(
+                || s.get("if").is_none(),
+                |expected| s["if"].as_str() == Some(expected),
+            ) && s.get("continue-on-error").is_none()
+                && s["run"]
+                    .as_str()
+                    .is_some_and(|run| run.lines().any(|line| line.trim() == command))
+        })
+    };
+    let contains = |job: &Value, command: &str| contains_guarded(job, command, None);
+    let depends = |job: &Value, dependency: &str| {
+        job["needs"].as_str() == Some(dependency)
+            || job["needs"]
+                .as_sequence()
+                .is_some_and(|needs| needs.iter().any(|n| n.as_str() == Some(dependency)))
+    };
+    let rust_gate = &test["jobs"]["test-rust-required"];
+    require(
+        rust_gate["name"].as_str() == Some("Test (Rust)")
+            && depends(rust_gate, "test")
+            && rust_gate["if"].as_str() == Some("${{ !cancelled() }}")
+            && contains(rust_gate, "test \"$RUST_RESULT\" = success")
+            && rust_gate["steps"][0]["env"]["RUST_RESULT"].as_str()
+                == Some("${{ needs.test.result }}"),
+        "Test (Rust) workspace failure propagation",
+    )?;
+    let workspace = &test["jobs"]["test"];
+    // Issue #5564: every slice must run, and the protected check verifies the
+    // disjoint JUnit union against the original unpartitioned inventory.
+    let shards: Vec<_> = workspace["strategy"]["matrix"]["shard"]
+        .as_sequence()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect();
+    require(
+        shards == [1, 2, 3, 4, 5, 6]
+            && contains(workspace,
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6")
+            && contains(rust_gate,
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6"),
+        "required workspace test slices and inventory union",
+    )?;
+    require(
+        workspace["steps"]
+            .as_sequence()
+            .into_iter()
+            .flatten()
+            .any(|step| {
+                step["if"].as_str() == Some("matrix.shard == 1")
+                    && step.get("continue-on-error").is_none()
+                    && step["run"].as_str() == Some("cargo test --workspace --all-features --doc")
+            }),
+        "required workspace doctests",
+    )?;
+    let lint_gate = &lint["jobs"]["lint"];
+    require(
+        lint_gate["name"].as_str() == Some("Clippy & Rustfmt")
+            && lint_gate.get("needs").is_none()
+            && lint_gate.get("if").is_none(),
+        "independent Clippy & Rustfmt job",
+    )?;
+    require(
+        contains(lint_gate, CI_CLIPPY_GATE)
+            && contains(
+                lint_gate,
+                "cargo doc --workspace --no-deps --document-private-items",
+            ),
+        "required clippy/rustdoc",
+    )?;
+    require(
+        lint_gate["steps"].as_sequence().is_some_and(|steps| {
+            steps.iter().any(|s| {
+                s["run"].as_str()
+                    == Some("cargo doc --workspace --no-deps --document-private-items")
+                    && s["env"]["RUSTDOCFLAGS"].as_str() == Some("-D warnings")
+            })
+        }),
+        "required rustdoc warnings",
+    )?;
+    require(
+        lint_gate["steps"].as_sequence().is_some_and(|steps| {
+            steps.iter().any(|s| {
+                s["uses"]
+                    .as_str()
+                    .is_some_and(|u| u.starts_with("nosborn/github-action-markdown-cli@"))
+                    && s["with"]["files"].as_str() == Some(".")
+            })
+        }),
+        "required markdown lint",
+    )?;
+    require(
+        coverage_ci["jobs"]["coverage"]["uses"].as_str()
+            == Some("./.github/workflows/coverage.yml")
+            && coverage_ci["jobs"]["coverage"].get("if").is_none()
+            && coverage_ci["jobs"]["coverage"]
+                .get("continue-on-error")
+                .is_none()
+            && lint["jobs"].get("coverage").is_none()
+            && coverage["on"].get("workflow_call").is_some(),
+        "required reusable coverage job",
+    )?;
+    let coverage_job = &coverage["jobs"]["rust-coverage"];
+    require(
+        coverage_ci["jobs"]["coverage"]["name"]
+            .as_str()
+            .unwrap_or("coverage")
+            == "coverage"
+            && coverage_job["name"].as_str() == Some("Rust Coverage"),
+        "coverage / Rust Coverage check name",
+    )?;
+    let coverage_shard = &coverage["jobs"]["coverage-shard"];
+    let modern = "${{ steps.transport.outputs.sharded == 'true' }}";
+    let legacy = "${{ steps.transport.outputs.sharded == 'false' }}";
+    let legacy_first = "${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 }}";
+    // These guards choose a complete transport for the measured source, never
+    // whether to measure it. Keep the selector and both branches fail-closed.
+    let selector = concat!(
+        "git show HEAD:.github/workflows/coverage.yml > \"$RUNNER_TEMP/coverage-head.yml\"\n",
+        "if grep -q '^  coverage-shard:' \"$RUNNER_TEMP/coverage-head.yml\"; then\n",
+        "  echo \"sharded=true\" >> \"$GITHUB_OUTPUT\"\n",
+        "else\n",
+        "  echo \"sharded=false\" >> \"$GITHUB_OUTPUT\"\n",
+        "fi"
+    );
+    for job in [coverage_shard, coverage_job] {
+        require(
+            job["steps"].as_sequence().is_some_and(|steps| {
+                steps.iter().any(|s| {
+                    s["id"].as_str() == Some("transport")
+                        && s["shell"].as_str() == Some("bash")
+                        && s["run"].as_str().is_some_and(|run| run.trim() == selector)
+                        && s.get("if").is_none()
+                        && s.get("continue-on-error").is_none()
+                })
+            }),
+            "source-selected coverage transport",
+        )?;
+    }
+    require(
+        coverage_shard["strategy"]["fail-fast"].as_bool() == Some(false)
+            && coverage_shard["strategy"]["matrix"]["shard"]
+                .as_sequence().is_some_and(|shards| {
+                    shards.iter().filter_map(serde_yaml::Value::as_u64).collect::<Vec<_>>() == [1, 2, 3, 4, 5, 6]
+                })
+            && coverage_job["needs"].as_str() == Some("coverage-shard")
+            && contains_guarded(coverage_shard, "node scripts/coverage-summary.mjs --nextest --partition slice:${{ matrix.shard }}/6 --export-dir target/coverage-export -- --workspace --all-features", Some(modern))
+            && contains_guarded(coverage_shard, "node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features", Some(legacy_first))
+            && contains(coverage_job, "test \"$COVERAGE_SHARDS_RESULT\" = success")
+            && coverage_job["steps"].as_sequence().is_some_and(|steps| steps.iter().any(|s| {
+                s["env"]["COVERAGE_SHARDS_RESULT"].as_str() == Some("${{ needs.coverage-shard.result }}")
+            })),
+        "complete non-advisory coverage shards",
+    )?;
+    for (command, condition) in [
+        ("python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6", Some(modern)),
+        ("node scripts/coverage-summary.mjs --report-from target/coverage-shards --shards 6 --output-path target/coverage-summary.json", Some(modern)),
+        ("cp target/coverage-shards/workspace-tests-1/coverage-summary.json target/coverage-summary.json", Some(legacy)),
+        ("node scripts/check-coverage-threshold.mjs target/coverage-summary.json 90 --scope \"crates/(gwt-core|gwt)/\"", None),
+        ("node scripts/check-coverage-threshold.mjs target/coverage-summary.json 80 --scope-exclude \"crates/(gwt-core|gwt)/\"", None),
+    ] {
+        require(contains_guarded(coverage_job, command, condition), &format!("required coverage command {command}"))?;
+    }
+    let coverage_condition = |step: &Value| {
+        match step["name"].as_str() {
+        Some("Run and export coverage shard" | "Verify the complete workspace test union" | "Generate workspace summary") => Some(modern),
+        Some("Run pre-shard head coverage") => Some(legacy_first),
+        Some("Restore pre-shard head summary") => Some(legacy),
+        Some("Install tray + GTK dependencies (Linux)" | "Select instrumented cache") => Some("${{ steps.transport.outputs.sharded == 'true' || matrix.shard == 1 }}"),
+        Some("Restore verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py restore") => Some("${{ steps.cache-mode.outputs.rolling == 'true' }}"),
+        Some("Capture verified coverage inputs") if step["run"].as_str() == Some("python3 scripts/ci_coverage_cache.py capture") => Some("${{ steps.cache-mode.outputs.rolling == 'true' && matrix.shard == 1 && (github.ref == 'refs/heads/develop' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Generate pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && matrix.shard == 1 && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Generate lcov") => Some("${{ steps.transport.outputs.sharded == 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        Some("Restore pre-shard head lcov") => Some("${{ steps.transport.outputs.sharded == 'false' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}"),
+        _ => None,
+    }
+    };
+    for (job, is_coverage) in [
+        (&test["jobs"]["test"], false),
+        (rust_gate, false),
+        (lint_gate, false),
+        (coverage_shard, true),
+        (coverage_job, true),
+    ] {
+        require(
+            job.get("continue-on-error").is_none()
+                && job["steps"].as_sequence().is_some_and(|steps| {
+                    steps
+                        .iter()
+                        .filter(|s| {
+                            s.get("run").is_some()
+                                || s["uses"]
+                                    .as_str()
+                                    .is_some_and(|u| u.starts_with("nosborn/"))
+                        })
+                        .all(|s| {
+                            s.get("continue-on-error").is_none()
+                                && s.get("if").is_none_or(|_| {
+                                    (is_coverage
+                                        && coverage_condition(s).is_some_and(|condition| {
+                                            s["if"].as_str() == Some(condition)
+                                        }))
+                                        || s["name"].as_str().is_some_and(|n| {
+                                            n == "Check for processes the suite failed to reap"
+                                        || ([
+                                            "Run doctests",
+                                            "Run real-binary front-door tests (Xvfb)",
+                                            "Voice accuracy regression (optional local dataset)",
+                                        ]
+                                        .contains(&n)
+                                            && s["if"].as_str() == Some("matrix.shard == 1"))
+                                        })
+                                })
+                        })
+                }),
+            "unconditional non-advisory delegated steps",
+        )?;
+    }
+    require(
+        coverage_job["if"].as_str() == Some("${{ always() }}")
+            && coverage_shard.get("if").is_none()
+            // A source-sync failure must not skip the workspace tests. This
+            // status-only guard overrides implicit success() without filtering sources.
+            && test["jobs"]["test"].get("if").is_none_or(|condition| {
+                condition.as_str() == Some("${{ !cancelled() }}")
+            }),
+        "unconditional delegated jobs",
+    )?;
+    Ok(())
 }
 
 /// [`derive()`] against an explicit host, so both branches of the
 /// host-sensitive matrix stay reachable from tests on any machine (#4182).
+#[cfg(test)]
 fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPlan, String> {
+    derive_for_host_excluding(worktree, host, &[])
+}
+
+fn derive_for_host_excluding(
+    worktree: &Path,
+    host: VerificationHost,
+    generated_outputs: &[String],
+) -> Result<DerivedPlan, String> {
     if git_lines(worktree, &["rev-parse", "--git-dir"]).is_empty() {
         return Err("verify.plan derive requires a git worktree".to_string());
     }
     let paths = match changed_paths(worktree) {
-        Ok(paths) => paths,
+        Ok(paths) => paths
+            .into_iter()
+            .filter(|path| !generated_outputs.contains(path))
+            .collect::<Vec<_>>(),
         Err(reason) => return Ok(DerivedPlan::trivial(reason)),
     };
     if paths.is_empty() {
         return Ok(DerivedPlan::trivial(TrivialReason::LedgerOnly));
     }
 
+    // Only mark the config covered when a derived runner actually reads it.
+    let nextest_profile = host == VerificationHost::Windows
+        && std::fs::read_to_string(worktree.join(".config/nextest.toml"))
+            .ok()
+            .and_then(|config| toml::from_str::<toml::Value>(&config).ok())
+            .is_some_and(|config| {
+                config
+                    .get("profile")
+                    .and_then(|p| p.get("gwt-verify"))
+                    .is_some()
+            });
+
     let mut rust_crates: BTreeSet<String> = BTreeSet::new();
     let mut workspace_rust = false;
     let mut skills = false;
     let mut frontend = false;
+    let mut ui_surface = false;
     let mut docs_files: Vec<String> = Vec::new();
     let mut other = false;
+    let mut node_tests = BTreeSet::new();
+    let mut fallbacks = Vec::new();
 
     for path in &paths {
         if is_skills_path(path) {
             skills = true;
         } else if is_docs_path(path) {
             docs_files.push(path.clone());
+        } else if is_node_script_path(path) {
+            let tests = node_test_paths(worktree, path);
+            if tests.is_empty() {
+                other = true;
+                fallbacks.push(format!("fallback(workspace:{path})"));
+            } else {
+                node_tests.extend(tests);
+            }
         } else if is_frontend_path(path) {
             frontend = true;
+            ui_surface |= is_ui_surface_path(path);
         } else if is_rust_path(path) {
             match crate_of(path) {
                 Some(name) => {
@@ -357,6 +929,9 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             }
         } else {
             other = true;
+            if path != ".config/nextest.toml" || !nextest_profile {
+                fallbacks.push(format!("fallback(workspace:{path})"));
+            }
         }
     }
     // Rust changes inside gwt-skills are also the skills surface.
@@ -374,8 +949,10 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
 
     let code_changed = !rust_crates.is_empty() || workspace_rust || skills || frontend || other;
     if code_changed {
+        push_unique(&mut commands, "rustc --version".to_string());
         push_unique(&mut commands, CI_FMT_GATE.to_string());
         push_unique(&mut commands, CI_CLIPPY_GATE.to_string());
+        push_unique(&mut commands, CI_RUSTDOC_GATE.to_string());
     }
     // Which packages the changed surfaces put under test. Narrowing stops
     // here: every package runs CI's whole gate, never a target subset.
@@ -396,14 +973,44 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
         test_packages.insert("gwt-skills");
     }
     if frontend {
-        surfaces.push("frontend".to_string());
+        // Issue #4510: the matrix is the same either way, but the label is the
+        // only thing the Ready handoff reads to decide whether a human has
+        // anything to look at. A test-only frontend change declares itself as
+        // such so the visual gate is not raised over a `*.spec.ts`.
+        surfaces.push(if ui_surface {
+            "frontend".to_string()
+        } else {
+            "frontend-tests".to_string()
+        });
         test_packages.insert("gwt");
     }
     if other {
         surfaces.push("other".to_string());
         test_packages.insert("gwt");
     }
-    if workspace_rust {
+    if !fallbacks.is_empty() {
+        if host == VerificationHost::Windows && worktree.join("crates/gwt/Cargo.toml").is_file() {
+            // Only the live controller needs unit-target narrowing. Keep
+            // every other crate's integration tests and doctests in the floor.
+            push_unique(
+                &mut commands,
+                format!(
+                    "{} -- --test-threads=1",
+                    CI_RUST_TEST_GATE.replace("--workspace", "--workspace --exclude gwt")
+                ),
+            );
+            push_unique(
+                &mut commands,
+                package_test_command_for(WINDOWS_CONTROLLER_PACKAGE, host),
+            );
+        } else {
+            let mut command = CI_RUST_TEST_GATE.to_string();
+            if host == VerificationHost::Windows {
+                command.push_str(" -- --test-threads=1");
+            }
+            push_unique(&mut commands, command);
+        }
+    } else if workspace_rust {
         // A workspace manifest change cannot be attributed to any single
         // package, so it takes CI's gate unnarrowed — which subsumes every
         // per-package command the surfaces above would have added.
@@ -413,6 +1020,44 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
             push_unique(&mut commands, package_test_command_for(package, host));
         }
     }
+    // Projects opt in through their own nextest profile. Do not require an
+    // additional runner in unrelated projects or change non-Windows gates.
+    if nextest_profile {
+        let mut nextest_commands = Vec::new();
+        for command in commands {
+            if let Some(selection) = command.strip_prefix("cargo test ") {
+                let selection = selection.trim_end_matches(" -- --test-threads=1");
+                nextest_commands.push(format!(
+                    "cargo nextest run {selection} --profile gwt-verify --retries 0"
+                ));
+                // nextest does not run rustdoc. A library-only cargo test
+                // never did either; preserve that existing target boundary.
+                if !selection.split_whitespace().any(|arg| arg == "--lib") {
+                    nextest_commands.push(format!("cargo test {selection} --doc"));
+                }
+            } else {
+                nextest_commands.push(command);
+            }
+        }
+        commands = nextest_commands;
+    }
+
+    if !node_tests.is_empty() {
+        surfaces.push("node-tests".to_string());
+        push_unique(
+            &mut commands,
+            format!(
+                "node --test {}",
+                node_tests
+                    .iter()
+                    .map(|path| format!("\"{path}\""))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        );
+    }
+    surfaces.extend(fallbacks);
+
     // Only lint files that still exist — a deleted path would make
     // markdownlint-cli2 exit 0 on zero matches (a vacuous PASS), and paths
     // are quoted so spaces survive the runner's tokenizer.
@@ -442,6 +1087,421 @@ fn derive_for_host(worktree: &Path, host: VerificationHost) -> Result<DerivedPla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pre_pr_fixture(worktree: &Path) {
+        fixture(worktree);
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for path in [
+            "crates/gwt/Cargo.toml",
+            ".github/workflows/test.yml",
+            ".github/workflows/lint.yml",
+            ".github/workflows/coverage-ci.yml",
+            ".github/workflows/coverage.yml",
+        ] {
+            write(
+                worktree,
+                path,
+                &std::fs::read_to_string(root.join(path)).unwrap(),
+            );
+        }
+        git(worktree, &["add", "."]);
+        git(worktree, &["commit", "-qm", "test: existing CI baseline"]);
+        git(
+            worktree,
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(worktree, "crates/gwt/src/change.rs", "// changed\n");
+    }
+
+    #[test]
+    fn pre_pr_refuses_coverage_without_its_own_required_context() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let result = validate_pre_pr_ci(
+            dir.path(),
+            &["Test (Rust)".into(), "Clippy & Rustfmt".into()],
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("required context coverage / Rust Coverage"),
+            "optional coverage must not permit delegating the threshold checks"
+        );
+    }
+
+    #[test]
+    fn pre_pr_delegates_only_to_required_contexts_and_keeps_ac_and_local_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = vec![
+            "Test (Rust)".to_string(),
+            "Clippy & Rustfmt".to_string(),
+            "coverage / Rust Coverage".to_string(),
+        ];
+        let ac = "cargo test -p gwt --test ci_pre_pr_contract_test".to_string();
+        let local = "bash scripts/local-only-check.sh".to_string();
+        let plan = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &required,
+            std::slice::from_ref(&ac),
+            std::slice::from_ref(&local),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.commands.first().map(String::as_str),
+            Some("rustc --version"),
+            "pre-pr evidence must capture the selected Rust toolchain before checking code"
+        );
+        assert!(plan.commands.contains(&CI_FMT_GATE.to_string()));
+        assert!(plan.commands.contains(
+            &"cargo clippy -p gwt --all-targets --all-features -- -D warnings".to_string()
+        ));
+        assert!(plan.commands.contains(&ac));
+        assert!(plan.commands.contains(&local));
+        assert!(!plan.commands.iter().any(|c| c.starts_with("RUSTDOCFLAGS=")
+            || c == "cargo test -p gwt --all-features"
+            || c == CI_CLIPPY_GATE));
+        assert!(plan.surfaces.iter().any(|s| s.contains("Test (Rust)")
+            && s.contains("Clippy & Rustfmt")
+            && s.contains("coverage90/80->coverage / Rust Coverage")));
+        assert!(derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &[],
+            std::slice::from_ref(&ac),
+            &[]
+        )
+        .unwrap_err()
+        .contains("required"));
+        // A running optional job is not an admissible replacement.
+        assert!(derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &["Test (Rust workspace)".into(), "Clippy & Rustfmt".into()],
+            std::slice::from_ref(&ac),
+            &[]
+        )
+        .is_err());
+        assert!(
+            derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &required, &[], &[])
+                .unwrap_err()
+                .contains("acceptance_commands")
+        );
+        assert!(derive(dir.path())
+            .unwrap()
+            .commands
+            .contains(&CI_CLIPPY_GATE.to_string()));
+        write(dir.path(), "scripts/pull-render-baseline.json", "{}");
+        let fallback = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &required,
+            std::slice::from_ref(&ac),
+            &[],
+        )
+        .unwrap();
+        assert!(fallback.commands.contains(&CI_CLIPPY_GATE.to_string()));
+        assert!(fallback.commands.contains(&ac));
+        std::fs::remove_file(dir.path().join(".github/workflows/test.yml")).unwrap();
+        assert!(
+            derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &required, &[ac], &[])
+                .unwrap_err()
+                .contains("test.yml")
+        );
+    }
+
+    #[test]
+    fn pre_pr_refuses_incomplete_coverage_transport_contracts() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = [
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        assert!(validate_pre_pr_ci(dir.path(), &required).is_ok());
+        for (before, after) in [
+            ("grep -q '^  coverage-shard:'", "grep -q '^  optional-shard:'"),
+            ("steps.cache-mode.outputs.rolling == 'true'", "steps.cache-mode.outputs.rolling == 'unknown'"),
+            ("python3 scripts/ci_coverage_cache.py restore", "echo skip content verification"),
+            (
+                "node scripts/coverage-summary.mjs --output-path target/coverage-export/coverage-summary.json --nextest -- --workspace --all-features",
+                "echo no legacy coverage",
+            ),
+            (
+                "steps.transport.outputs.sharded == 'false' && matrix.shard == 1",
+                "steps.transport.outputs.sharded == 'false' && matrix.shard == 0",
+            ),
+        ] {
+            let changed = coverage.replace(before, after);
+            assert_ne!(changed, coverage);
+            write(dir.path(), ".github/workflows/coverage.yml", &changed);
+            assert!(
+                validate_pre_pr_ci(dir.path(), &required).is_err(),
+                "incomplete transport must not permit delegation: {before}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_pr_workspace_job_accepts_only_the_cancellation_status_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = vec![
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        let job_header = "  test:\n    name: Test (Rust workspace ${{ matrix.shard }}/6)\n";
+        let guarded = format!("{job_header}    if: ${{{{ !cancelled() }}}}\n");
+        for (condition, accepted) in [
+            ("", true),
+            ("    if: ${{ !cancelled() }}\n", true),
+            ("    if: github.event_name == 'pull_request'\n", false),
+            (
+                "    if: ${{ !cancelled() && needs.source-sync.outputs.base_only == 'false' }}\n",
+                false,
+            ),
+        ] {
+            let replacement = format!("{job_header}{condition}");
+            assert!(original.contains(&guarded));
+            write(
+                dir.path(),
+                ".github/workflows/test.yml",
+                &original.replace(&guarded, &replacement),
+            );
+            let result = validate_pre_pr_ci(dir.path(), &required);
+            assert_eq!(result.is_ok(), accepted, "{condition:?}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn pre_pr_refuses_removed_ci_jobs_or_serial_lint() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let required = vec![
+            "Test (Rust)".into(),
+            "Clippy & Rustfmt".into(),
+            "coverage / Rust Coverage".into(),
+        ];
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/lint.yml")).unwrap();
+        for mutation in [
+            original.replace(
+                "    name: Clippy & Rustfmt\n",
+                "    name: Clippy & Rustfmt\n    needs: coverage\n",
+            ),
+            original.replace("Clippy & Rustfmt", "Optional lint"),
+        ] {
+            write(dir.path(), ".github/workflows/lint.yml", &mutation);
+            assert!(derive_pre_pr_for_host(
+                dir.path(),
+                VerificationHost::Other,
+                &required,
+                &["cargo test -p gwt --test ci_pre_pr_contract_test".into()],
+                &[]
+            )
+            .is_err());
+        }
+        write(dir.path(), ".github/workflows/lint.yml", &original);
+        let caller =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage-ci.yml")).unwrap();
+        write(
+            dir.path(),
+            ".github/workflows/coverage-ci.yml",
+            &caller.replace("  coverage:\n", "  optional-coverage:\n"),
+        );
+        assert!(derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &required,
+            &["cargo test -p gwt --test ci_contracts".into()],
+            &[]
+        )
+        .is_err());
+        write(dir.path(), ".github/workflows/coverage-ci.yml", &caller);
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        let mutation = coverage.replace(
+            "      - name: Enforce coverage threshold (gwt-core + gwt @ 90%)\n",
+            "      - name: Generate lcov\n        if: github.event_name == 'schedule'\n",
+        );
+        assert_ne!(mutation, coverage);
+        write(dir.path(), ".github/workflows/coverage.yml", &mutation);
+        assert!(
+            derive_pre_pr_for_host(
+                dir.path(),
+                VerificationHost::Other,
+                &required,
+                &["cargo test -p gwt --test ci_pre_pr_contract_test".into()],
+                &[]
+            )
+            .is_err(),
+            "a display name must not permit skipping the required coverage threshold"
+        );
+    }
+
+    #[test]
+    fn pre_pr_refuses_incomplete_workspace_shards_or_missing_union_check() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        for (before, after) in [
+            ("shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"),
+            (
+                "python3 scripts/ci_workspace_tests.py target/workspace-shards --shards 6",
+                "echo no inventory check",
+            ),
+            ("if: matrix.shard == 1", "if: matrix.shard == 0"),
+        ] {
+            let changed = original.replace(before, after);
+            assert_ne!(changed, original);
+            write(dir.path(), ".github/workflows/test.yml", &changed);
+            assert!(
+                derive_pre_pr_for_host(
+                    dir.path(),
+                    VerificationHost::Other,
+                    &[
+                        "Test (Rust)".into(),
+                        "Clippy & Rustfmt".into(),
+                        "coverage / Rust Coverage".into()
+                    ],
+                    &["cargo test -p gwt --test ci_contracts".into()],
+                    &[],
+                )
+                .is_err(),
+                "incomplete CI must not permit delegation: {before}"
+            );
+        }
+        write(dir.path(), ".github/workflows/test.yml", &original);
+        let coverage =
+            std::fs::read_to_string(dir.path().join(".github/workflows/coverage.yml")).unwrap();
+        for (before, after) in [
+            ("shard: [1, 2, 3, 4, 5, 6]", "shard: [1, 2, 3, 4, 5]"),
+            (
+                "python3 scripts/ci_workspace_tests.py target/coverage-shards --shards 6",
+                "echo no inventory check",
+            ),
+        ] {
+            let changed = coverage.replace(before, after);
+            assert_ne!(changed, coverage);
+            write(dir.path(), ".github/workflows/coverage.yml", &changed);
+            assert!(
+                derive_pre_pr_for_host(
+                    dir.path(),
+                    VerificationHost::Other,
+                    &[
+                        "Test (Rust)".into(),
+                        "Clippy & Rustfmt".into(),
+                        "coverage / Rust Coverage".into()
+                    ],
+                    &["cargo test -p gwt --test ci_contracts".into()],
+                    &[]
+                )
+                .is_err(),
+                "incomplete coverage must not permit delegation: {before}"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_pr_refuses_advisory_required_rust_aggregation() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        let original =
+            std::fs::read_to_string(dir.path().join(".github/workflows/test.yml")).unwrap();
+        write(
+            dir.path(),
+            ".github/workflows/test.yml",
+            &original.replace(
+                "    name: Test (Rust)\n",
+                "    name: Test (Rust)\n    continue-on-error: true\n",
+            ),
+        );
+        let result = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &[
+                "Test (Rust)".into(),
+                "Clippy & Rustfmt".into(),
+                "coverage / Rust Coverage".into(),
+            ],
+            &["cargo test -p gwt --test ci_pre_pr_contract_test".into()],
+            &[],
+        );
+        assert!(
+            result.is_err(),
+            "an advisory required guard permits auto-merge on test failure: {result:?}"
+        );
+    }
+
+    #[test]
+    fn pre_pr_keeps_explicit_checks_for_trivial_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        let command = "cargo test -p gwt --test ci_pre_pr_contract_test".to_string();
+        let plan = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Other,
+            &[],
+            &[],
+            std::slice::from_ref(&command),
+        )
+        .unwrap();
+        assert_eq!(plan.commands, vec![command]);
+        assert_eq!(plan.trivial_reason, None);
+    }
+
+    #[test]
+    fn pre_pr_preserves_full_matrix_in_other_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(dir.path(), "crates/project/src/lib.rs", "// change\n");
+        assert_eq!(
+            derive_pre_pr_for_host(dir.path(), VerificationHost::Other, &[], &[], &[]).unwrap(),
+            derive_for_host(dir.path(), VerificationHost::Other).unwrap()
+        );
+    }
+
+    #[test]
+    fn pre_pr_keeps_node_runner_outside_required_ci() {
+        let dir = tempfile::tempdir().unwrap();
+        pre_pr_fixture(dir.path());
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &["commit", "-qm", "test: existing pre-pr workflow"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "scripts/tool.mjs", "export {};\n");
+        write(dir.path(), "scripts/tool.test.mjs", "import 'node:test';\n");
+        let plan = derive_pre_pr_for_host(
+            dir.path(),
+            VerificationHost::Windows,
+            &[
+                "Test (Rust)".into(),
+                "Clippy & Rustfmt".into(),
+                "coverage / Rust Coverage".into(),
+            ],
+            &["git --version".into()],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            plan.commands
+                .contains(&r#"node --test "scripts/tool.test.mjs""#.into()),
+            "{plan:?}"
+        );
+    }
 
     fn write(worktree: &Path, rel: &str, contents: &str) {
         let path = worktree.join(rel);
@@ -489,8 +1549,10 @@ mod tests {
         assert_eq!(
             plan.commands,
             vec![
+                "rustc --version".to_string(),
                 CI_FMT_GATE.to_string(),
                 CI_CLIPPY_GATE.to_string(),
+                CI_RUSTDOC_GATE.to_string(),
                 "cargo test -p gwt --all-features".to_string(),
                 "cargo test -p gwt-core --all-features".to_string(),
                 "cargo test -p gwt-skills --all-features".to_string(),
@@ -611,6 +1673,108 @@ mod tests {
         );
     }
 
+    /// Issue #4510 AC-2: a frontend *test* file exercises the UI, it never
+    /// renders one. Counting `*.spec.ts` as a UI surface made a PR whose whole
+    /// diff was one Playwright spec demand a human visual check that had
+    /// nothing to look at (PR #4374). The verification matrix still treats the
+    /// same path as frontend — the Playwright suite must run — so only the
+    /// Ready-handoff question changes here.
+    #[test]
+    fn frontend_test_only_changes_are_not_a_ui_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+
+        write(
+            dir.path(),
+            "crates/gwt/playwright/tests/pane-close-latency-live.spec.ts",
+            "test('pane close', async () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a Playwright spec renders no UI of its own"
+        );
+        write(
+            dir.path(),
+            "crates/gwt/web/__tests__/kanban.test.js",
+            "test('kanban', () => {});\n",
+        );
+        assert!(
+            !has_frontend_changes(dir.path()).unwrap(),
+            "a web unit test renders no UI of its own"
+        );
+        // The matrix is unchanged — the suite that covers these paths still
+        // runs — but the surface declares itself as test-only so the Ready
+        // handoff does not raise a visual gate over it.
+        let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
+        assert!(
+            plan.commands
+                .contains(&package_test_command_for("gwt", VerificationHost::Other)),
+            "test-only frontend changes still run the gwt package gate: {:?}",
+            plan.commands
+        );
+        assert!(
+            plan.surfaces.contains(&"frontend-tests".to_string())
+                && !plan.surfaces.contains(&"frontend".to_string()),
+            "{:?}",
+            plan.surfaces
+        );
+
+        write(dir.path(), "crates/gwt/web/app.js", "export const x = 1;\n");
+        assert!(
+            has_frontend_changes(dir.path()).unwrap(),
+            "a real UI module is still a UI surface"
+        );
+
+        let committed = tempfile::tempdir().unwrap();
+        fixture(committed.path());
+        write(
+            committed.path(),
+            "crates/gwt/playwright/tests/live.spec.ts",
+            "test('live', async () => {});\n",
+        );
+        write(
+            committed.path(),
+            "crates/gwt/web/styles/tokens.css",
+            ":root {}\n",
+        );
+        git(committed.path(), &["add", "."]);
+        git(committed.path(), &["commit", "-qm", "feat: ui and spec"]);
+        assert!(
+            has_frontend_changes(committed.path()).unwrap(),
+            "a spec alongside a stylesheet keeps the stylesheet's UI surface"
+        );
+    }
+
+    /// Issue #4637: a script outside `crates/gwt/web/` renders nothing, so
+    /// its extension alone must not raise the visual gate — while any change
+    /// under `crates/gwt/web/` still does, alone or mixed with such a script.
+    #[test]
+    fn scripts_outside_the_web_tree_are_not_a_ui_surface() {
+        let cases: [(&[&str], bool); 5] = [
+            (&["scripts/foo.mjs"], false),
+            (&["scripts/foo.test.mjs"], false),
+            (&["scripts/foo.test.cjs"], false),
+            (&["crates/gwt/web/app.js"], true),
+            (&["crates/gwt/web/app.js", "scripts/foo.mjs"], true),
+        ];
+        for (changed, ui) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            fixture(dir.path());
+            for rel in changed {
+                write(dir.path(), rel, "export const x = 1;\n");
+            }
+            assert_eq!(has_frontend_changes(dir.path()).unwrap(), ui, "{changed:?}");
+            let surfaces = derive_for_host(dir.path(), VerificationHost::Other)
+                .unwrap()
+                .surfaces;
+            assert_eq!(
+                surfaces.contains(&"frontend".to_string()),
+                ui,
+                "{changed:?}: {surfaces:?}"
+            );
+        }
+    }
+
     #[test]
     fn frontend_detection_refuses_unknown_git_or_base() {
         let dir = tempfile::tempdir().unwrap();
@@ -653,8 +1817,8 @@ mod tests {
         assert!(err.contains("git worktree"), "{err}");
     }
 
-    /// Every `run:` script the named job executes, in step order.
-    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+    /// The parsed workflow document.
+    fn workflow_doc(workflow: &str) -> serde_yaml::Value {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -663,22 +1827,88 @@ mod tests {
             .join(workflow);
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        let doc: serde_yaml::Value = serde_yaml::from_str(&text).expect("workflow is valid YAML");
+        serde_yaml::from_str(&text).expect("workflow is valid YAML")
+    }
+
+    /// Every step of the named job, in step order.
+    fn workflow_job_steps(workflow: &str, job: &str) -> Vec<serde_yaml::Value> {
+        let doc = workflow_doc(workflow);
         doc["jobs"][job]["steps"]
             .as_sequence()
             .unwrap_or_else(|| panic!("{workflow} job `{job}` has steps"))
+            .clone()
+    }
+
+    /// Every `run:` script the named job executes, in step order.
+    fn workflow_job_runs(workflow: &str, job: &str) -> Vec<String> {
+        workflow_job_steps(workflow, job)
             .iter()
             .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
             .collect()
     }
 
-    /// Every cargo test invocation the job runs, one per script line.
+    /// The named job's single-line `run:` script rewritten with its `env:`
+    /// mapping as leading `KEY=value` assignments — the shape derivation
+    /// stores and `verify.run` executes (#3698). A step whose environment
+    /// CI supplies out-of-band is otherwise invisible to
+    /// [`workflow_job_runs`], which is how the rustdoc gate's `-D warnings`
+    /// stayed out of the derived matrix.
+    fn workflow_env_prefixed_run(step: &serde_yaml::Value) -> Option<String> {
+        let run = step.get("run")?.as_str()?.trim();
+        assert!(
+            !run.contains('\n'),
+            "env-prefixed reconstruction only models single-command steps: {run}"
+        );
+        let mut parts: Vec<String> = step
+            .get("env")
+            .and_then(|env| env.as_mapping())
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| {
+                let value = value.as_str()?;
+                let quoted = if value.is_empty() || value.contains(char::is_whitespace) {
+                    format!("\"{value}\"")
+                } else {
+                    value.to_string()
+                };
+                Some(format!("{}={quoted}", key.as_str()?))
+            })
+            .collect();
+        parts.push(run.to_string());
+        Some(parts.join(" "))
+    }
+
+    /// Every `run:` script declared by any job in `workflow` whose runner
+    /// image starts with `os` — the jobs that actually compile that platform's
+    /// `#[cfg(target_os = ...)]` code.
+    fn workflow_runs_on_os(workflow: &str, os: &str) -> Vec<String> {
+        let doc = workflow_doc(workflow);
+        doc["jobs"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("{workflow} declares jobs"))
+            .values()
+            .filter(|job| {
+                job.get("runs-on")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|runner| runner.starts_with(os))
+            })
+            .flat_map(|job| {
+                job.get("steps")
+                    .and_then(serde_yaml::Value::as_sequence)
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter_map(|step| Some(step.get("run")?.as_str()?.to_string()))
+            .collect()
+    }
+
+    /// Every Rust test invocation the job runs, one per script line.
     fn workflow_cargo_tests(workflow: &str, job: &str) -> Vec<String> {
         workflow_job_runs(workflow, job)
             .iter()
             .flat_map(|script| script.lines().collect::<Vec<_>>())
             .map(str::trim)
-            .filter(|line| line.contains("cargo test"))
+            .filter(|line| line.contains("cargo test") || line.contains("cargo nextest run"))
             .map(str::to_string)
             .collect()
     }
@@ -708,22 +1938,17 @@ mod tests {
             .collect()
     }
 
-    // #4182 AC-1 / AC-6: the derived matrix must not ask a Windows host to
-    // run the `gwt` crate's binary targets. Four `app_runtime` tests take
-    // `env_test_lock` and never release it there (#4014), so the run wedges
-    // with the test binary's CPU flat and a pile of orphaned
-    // `cmd /d /s /c "exit /b 0"` children — while still holding the
-    // host-wide verification lease. CI already refuses to run that target on
-    // Windows; only the locally derived matrix still demanded it.
+    // #4968 AC-1: library-only selection silently omitted app_runtime and
+    // gwtd unit tests. Binary harnesses do not rebuild the regular binaries.
     #[test]
-    fn windows_derivation_drops_the_deadlocking_gwt_bin_target() {
+    fn windows_derivation_includes_gwt_binary_unit_tests() {
         let plan = derive_on(
             VerificationHost::Windows,
             &["crates/gwt/src/app_runtime.rs"],
         );
         assert!(
             plan.commands.contains(
-                &"cargo test -p gwt --lib --all-features -- --test-threads=1".to_string()
+                &"cargo test -p gwt --lib --bins --all-features -- --test-threads=1".to_string()
             ),
             "{:?}",
             plan.commands
@@ -732,7 +1957,7 @@ mod tests {
             !plan
                 .commands
                 .contains(&"cargo test -p gwt --all-features".to_string()),
-            "the full gate deadlocks on Windows: {:?}",
+            "the full gate builds the running controller on Windows: {:?}",
             plan.commands
         );
     }
@@ -761,31 +1986,87 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn windows_nextest_profile_preserves_targets_and_doctests() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            ".config/nextest.toml",
+            "[profile.gwt-verify]\nretries = 0\n",
+        );
+        write(dir.path(), "crates/gwt/src/lib.rs", "");
+        write(dir.path(), "crates/gwt-core/src/lib.rs", "");
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            plan.commands.contains(
+                &"cargo nextest run -p gwt --lib --bins --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.commands.contains(
+                &"cargo nextest run -p gwt-core --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.commands
+                .contains(&"cargo test -p gwt-core --all-features --doc".to_string()),
+            "{plan:?}"
+        );
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.contains("-p gwt --all-features --doc")));
+        assert!(!plan
+            .commands
+            .iter()
+            .any(|command| command.contains("--test-threads=1")));
+        assert!(
+            !plan.surfaces.iter().any(|s| s.starts_with("fallback(")),
+            "{plan:?}"
+        );
+        let other = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
+        assert!(other.commands.contains(&CI_RUST_TEST_GATE.to_string()));
+        assert!(
+            other
+                .surfaces
+                .contains(&"fallback(workspace:.config/nextest.toml)".to_string()),
+            "{other:?}"
+        );
+        write(dir.path(), ".config/nextest.toml", "[invalid config\n");
+        let invalid = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            invalid
+                .surfaces
+                .contains(&"fallback(workspace:.config/nextest.toml)".to_string()),
+            "{invalid:?}"
+        );
+    }
 
-    // #4182 AC-8 / AC-9: the run that holds the verification lease is itself
-    // a `gwtd` process, and Windows cannot replace a file that is open. A
-    // derived matrix that relinks `target/debug/gwtd.exe` therefore fails
-    // with `os error 5` every time (#3808, #4172). Restricting the Windows
-    // matrix to library targets makes that structurally impossible, because
-    // `--lib` builds no binary targets at all.
+    // #4968 / #4182: integration targets build the regular binaries and
+    // relink the running controller. Library and binary unit harnesses do not.
     #[test]
     fn windows_derivation_never_relinks_the_running_gwtd() {
         for files in [
             vec!["crates/gwt/src/main.rs"],
             vec!["Cargo.toml"],
-            vec!["scripts/release.sh"],
+            vec!["scripts/release.sh", "crates/gwt/Cargo.toml"],
         ] {
             for command in cargo_tests(&derive_on(VerificationHost::Windows, &files)) {
-                for target in ["--bins", "--bin ", "--all-targets", "--tests", "--test "] {
+                for target in ["--all-targets", "--tests", "--test "] {
                     assert!(
                         !command.contains(target),
-                        "{files:?}: `{command}` builds binary targets ({target}) and would \
+                        "{files:?}: `{command}` builds integration targets ({target}) and would \
                          relink the running gwtd"
                     );
                 }
                 assert!(
-                    command.contains(" --lib "),
-                    "{files:?}: `{command}` is not restricted to library targets"
+                    command.contains(" --lib ") || command.contains("--exclude gwt "),
+                    "{files:?}: `{command}` must narrow or exclude the live controller"
                 );
             }
         }
@@ -802,9 +2083,11 @@ mod tests {
         // twice: once with `--no-run`, once for real. The job left PR CI for
         // the nightly schedule (#4134 AC-1) without changing its gate.
         let gwt_gate = CI_WINDOWS_RUST_TEST_GATE.replace("--workspace", "-p gwt");
+        // Local verification includes gwtd's unit harness as well as gwt's.
+        let nightly_gate = gwt_gate.replace("--bins", "--bin gwt");
         assert_eq!(
             workflow_cargo_tests("nightly.yml", "test-windows-default-parallel"),
-            vec![format!("{gwt_gate} --no-run"), gwt_gate.clone()],
+            vec![format!("{nightly_gate} --no-run"), nightly_gate.clone()],
             "CI's Windows Rust gate changed — update verify.plan derivation with it (#4182)"
         );
         assert_eq!(
@@ -819,11 +2102,8 @@ mod tests {
         );
     }
 
-    // #4182: the Windows narrowing is as small as the evidence. Only the
-    // `gwt` crate's binary targets have ever wedged a Windows host, so only
-    // they are dropped — every other package keeps CI's full gate there,
-    // integration tests included. Narrowing further would trade real
-    // coverage for nothing, which is the #3640 failure mode in reverse.
+    // The controller package excludes integration targets on Windows;
+    // every other package keeps CI's full gate, integration tests included.
     #[test]
     fn windows_narrowing_is_confined_to_the_deadlocking_package() {
         assert_eq!(
@@ -931,22 +2211,24 @@ mod tests {
         }
     }
 
-    // #3640 AC-3 / AC-4: the derived matrix is defined as the CI gate
-    // narrowed by package, so this test fails the moment CI's Rust job
-    // changes shape and the derivation is not updated with it.
+    // #3640 AC-3 / AC-4: preserve the same package/target/feature coverage.
+    // #3845 splits this repository's CI gate into isolated nextest tests and
+    // rustdoc tests. Its AGENTS.md registers that explicit plan; the portable
+    // default still uses cargo test, which includes both families.
     #[test]
     fn derived_rust_matrix_tracks_the_ci_rust_gate() {
         assert_eq!(
             workflow_cargo_tests("test.yml", "test"),
             vec![
-                CI_RUST_TEST_GATE.to_string(),
+                "cargo nextest run --workspace --all-features --test-threads=1 --profile ci --partition slice:${{ matrix.shard }}/6".to_string(),
+                "cargo test --workspace --all-features --doc".to_string(),
                 // The xvfb `--ignored` real-binary family stays CI-owned:
                 // it needs a display server, so it is deliberately outside
                 // the locally derived matrix.
-                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port -- --ignored --test-threads=1 --nocapture"
+                "dbus-run-session -- xvfb-run -a cargo test -p gwt --all-features --test stable_server_port --test project_restore_integration --test open_cli_integration -- --ignored --test-threads=1 --nocapture"
                     .to_string(),
             ],
-            "CI's Rust gate changed — update verify.plan derivation with it (#3640)"
+            "CI's Rust test coverage changed — reconcile its explicit plan and the default (#3640, #3845)"
         );
         assert_eq!(
             package_test_command_for("gwt-core", VerificationHost::Other),
@@ -982,19 +2264,172 @@ mod tests {
         );
     }
 
-    // Unknown surfaces (scripts, CI config) fall back to the conservative
-    // default matrix.
+    // #3698 AC-2: the rustdoc gate carries `-D warnings` in the step's
+    // `env:` mapping, so the #3640 drift check — which only reads `run:` —
+    // could not see it, and derivation shipped without a rustdoc gate at
+    // all. Pin the reconstructed env-prefixed command so neither half can
+    // drift away unnoticed.
+    #[test]
+    fn derived_rustdoc_gate_tracks_the_ci_rustdoc_gate() {
+        let ci_gate = workflow_job_steps("lint.yml", "lint")
+            .iter()
+            .filter_map(workflow_env_prefixed_run)
+            .find(|run| run.contains("cargo doc"))
+            .expect("CI's lint gate no longer runs `cargo doc` — update derivation (#3698)");
+        assert_eq!(
+            ci_gate, CI_RUSTDOC_GATE,
+            "CI's rustdoc gate changed — update verify.plan derivation with it (#3698)"
+        );
+        let plan = derive_for(&["crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.commands.contains(&CI_RUSTDOC_GATE.to_string()),
+            "a Rust change must derive CI's rustdoc gate (#3698): {plan:?}"
+        );
+    }
+
+    // #4522: the gate above is the command every macOS agent has to pass
+    // before it can deliver, but the ubuntu and windows clippy jobs never
+    // compile `#[cfg(target_os = "macos")]` code, so they cannot report a
+    // lint violation hiding behind it. `fsevent-sys` 5.2.0 deprecated its
+    // whole C API, CI stayed green through the bump, and `gwt-core` stopped
+    // compiling under `-D warnings` on every macOS host at once (#4396 and
+    // #3752 each lost hours to it). CI's green has to mean what the local
+    // gate means, on the platform the work is done on.
+    #[test]
+    fn ci_runs_the_clippy_gate_on_macos() {
+        let runs = workflow_runs_on_os("lint.yml", "macos");
+        assert!(
+            runs.iter().any(|run| run.trim() == CI_CLIPPY_GATE),
+            "no macOS job in lint.yml runs `{CI_CLIPPY_GATE}`, so a clippy \
+             violation behind `#[cfg(target_os = \"macos\")]` passes CI and \
+             stops every macOS agent instead (#4522). macOS steps found: \
+             {runs:?}"
+        );
+    }
+
+    // #5197: unknown paths use the full workspace CI Rust/lint/rustdoc floor.
     #[test]
     fn unknown_surface_gets_conservative_default() {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         write(dir.path(), "scripts/release.sh", "#!/bin/sh\n");
+        write(dir.path(), ".github/workflows/custom.yml", "jobs: {}\n");
 
         let plan = derive_for_host(dir.path(), VerificationHost::Other).unwrap();
-        assert!(plan.commands.contains(&CI_CLIPPY_GATE.to_string()));
+        assert_eq!(
+            plan.commands,
+            vec![
+                "rustc --version".to_string(),
+                CI_FMT_GATE.to_string(),
+                CI_CLIPPY_GATE.to_string(),
+                CI_RUSTDOC_GATE.to_string(),
+                CI_RUST_TEST_GATE.to_string(),
+            ]
+        );
         assert!(plan
-            .commands
-            .contains(&"cargo test -p gwt --all-features".to_string()));
-        assert!(plan.surfaces.contains(&"other".to_string()));
+            .surfaces
+            .contains(&"fallback(workspace:scripts/release.sh)".to_string()));
+        assert!(
+            plan.surfaces
+                .contains(&"fallback(workspace:.github/workflows/custom.yml)".to_string()),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn windows_unknown_surface_preserves_non_controller_integration_and_doc_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            "crates/gwt/Cargo.toml",
+            "[package]\nname = 'gwt'\n",
+        );
+        write(dir.path(), "crates/gwt-core/src/lib.rs", "");
+        write(dir.path(), "scripts/pull-render-baseline.json", "{}");
+        write(
+            dir.path(),
+            ".config/nextest.toml",
+            "[profile.gwt-verify]\nretries = 0\n",
+        );
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        for command in [
+            "cargo nextest run --workspace --exclude gwt --all-features --profile gwt-verify --retries 0",
+            "cargo test --workspace --exclude gwt --all-features --doc",
+            "cargo nextest run -p gwt --lib --bins --all-features --profile gwt-verify --retries 0",
+        ] {
+            assert!(plan.commands.contains(&command.to_string()), "{plan:?}");
+        }
+        std::fs::remove_file(dir.path().join("crates/gwt/Cargo.toml")).unwrap();
+        let generic = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            generic.commands.contains(
+                &"cargo nextest run --workspace --all-features --profile gwt-verify --retries 0"
+                    .to_string()
+            ),
+            "{generic:?}"
+        );
+        assert!(
+            !generic.commands.iter().any(|c| c.contains("-p gwt")),
+            "{generic:?}"
+        );
+    }
+
+    #[test]
+    fn node_scripts_derive_their_existing_tests_without_frontend_classification() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture(dir.path());
+        write(
+            dir.path(),
+            "scripts/coverage-summary.test.mjs",
+            "import 'node:test';\n",
+        );
+        write(
+            dir.path(),
+            "scripts/tool.test.js",
+            "require('node:test');\n",
+        );
+        git(dir.path(), &["add", "."]);
+        git(
+            dir.path(),
+            &["commit", "-qm", "test: existing Node runners"],
+        );
+        git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        write(dir.path(), "scripts/coverage-summary.mjs", "export {};\n");
+        write(dir.path(), "scripts/tool.js", "module.exports = {};\n");
+
+        let plan = derive_for_host(dir.path(), VerificationHost::Windows).unwrap();
+        assert!(
+            plan.commands.contains(
+                &r#"node --test "scripts/coverage-summary.test.mjs" "scripts/tool.test.js""#
+                    .to_string()
+            ),
+            "{plan:?}"
+        );
+        assert!(
+            plan.surfaces.contains(&"node-tests".to_string()),
+            "{plan:?}"
+        );
+        assert!(
+            !plan
+                .surfaces
+                .iter()
+                .any(|surface| surface.starts_with("frontend")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn node_script_without_tests_uses_workspace_fallback() {
+        let plan = derive_for(&["scripts/no-tests.mjs", "crates/gwt-core/src/lib.rs"]);
+        assert!(
+            plan.surfaces
+                .contains(&"fallback(workspace:scripts/no-tests.mjs)".to_string()),
+            "{plan:?}"
+        );
+        assert!(plan.commands.contains(&CI_RUST_TEST_GATE.to_string()));
     }
 }

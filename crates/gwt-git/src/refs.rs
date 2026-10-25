@@ -270,11 +270,29 @@ pub fn list_origin_refs_with_commit(repo_path: &Path) -> Result<Vec<(String, Str
 pub fn branch_tip_committer_times(
     repo_path: &Path,
 ) -> Result<std::collections::HashMap<String, i64>> {
+    Ok(branch_tip_snapshot(repo_path)?
+        .into_iter()
+        .map(|(name, tip)| (name, tip.committer_time))
+        .collect())
+}
+
+/// Immutable identity and display time from the same bulk ref observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchTip {
+    pub sha: String,
+    pub committer_time: i64,
+}
+
+/// Read local and origin tips once for a Workspace refresh. SHA identities
+/// allow merge results to be reused without per-base ref probes.
+pub fn branch_tip_snapshot(
+    repo_path: &Path,
+) -> Result<std::collections::HashMap<String, BranchTip>> {
     let repo_path = effective_refs_root(repo_path);
     let output = gwt_core::process::run_git_logged(
         &[
             "for-each-ref",
-            "--format=%(refname:short)\t%(committerdate:unix)",
+            "--format=%(refname:short)\t%(objectname)\t%(committerdate:unix)",
             "refs/heads/",
             "refs/remotes/origin/",
         ],
@@ -285,16 +303,27 @@ pub fn branch_tip_committer_times(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(GwtError::Git(format!("for-each-ref tip times: {stderr}")));
     }
-    let times = String::from_utf8_lossy(&output.stdout)
+    let tips = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let (name, unix) = line.split_once('\t')?;
+            let mut fields = line.split('\t');
+            let name = fields.next()?;
+            let sha = fields.next()?.trim();
+            let unix = fields.next()?;
             let name = name.trim();
             let unix: i64 = unix.trim().parse().ok()?;
-            (!name.is_empty()).then(|| (name.to_string(), unix))
+            (!name.is_empty() && !sha.is_empty()).then(|| {
+                (
+                    name.to_string(),
+                    BranchTip {
+                        sha: sha.to_string(),
+                        committer_time: unix,
+                    },
+                )
+            })
         })
         .collect();
-    Ok(times)
+    Ok(tips)
 }
 
 /// SPEC-3075: the tip commit subject of every local / `origin/*` branch, in ONE

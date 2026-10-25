@@ -74,6 +74,8 @@ pub(crate) enum IssueMonitorControlQueueError {
     RecoveryBlocked,
     Closed,
     Rejected,
+    ConfigConflict,
+    WaitNotLaunched,
     Busy,
 }
 
@@ -85,6 +87,10 @@ impl IssueMonitorControlQueueError {
             }
             Self::Closed => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CLOSED_ERROR,
             Self::Rejected => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_REJECTED_ERROR,
+            Self::ConfigConflict => crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
+            Self::WaitNotLaunched => {
+                "issue monitor control rejected before commit: reason=not_launched; no durable launch owns this issue; inspect issue.monitor.status and declare the wait from the actual launch context"
+            }
             Self::Busy => crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_BUSY_ERROR,
         }
     }
@@ -257,13 +263,13 @@ impl BroadcastHub {
             .expect("Issue Monitor status mutex poisoned") = Some(status);
     }
 
-    /// Read the latest projection only while the Issue Monitor worker is the
-    /// live control authority. Recovery-blocked workers retain their GUI
-    /// diagnostics, but must fail closed for agent status requests.
+    /// Read the latest projection from a ready or recovery-blocked worker.
+    /// Diagnostics remain readable while the independent control lane stays
+    /// fail-closed, so agents can identify the marker preventing recovery.
     pub(crate) fn issue_monitor_status(&self) -> Option<Value> {
         if !matches!(
             *self.issue_monitor_controls.state.borrow(),
-            IssueMonitorControlState::Ready
+            IssueMonitorControlState::Ready | IssueMonitorControlState::RecoveryBlocked
         ) {
             return None;
         }
@@ -282,10 +288,10 @@ impl BroadcastHub {
         loop {
             match *state.borrow() {
                 IssueMonitorControlState::Starting => {}
-                IssueMonitorControlState::Ready => return self.issue_monitor_status(),
-                IssueMonitorControlState::RecoveryBlocked | IssueMonitorControlState::Closed => {
-                    return None;
+                IssueMonitorControlState::Ready | IssueMonitorControlState::RecoveryBlocked => {
+                    return self.issue_monitor_status();
                 }
+                IssueMonitorControlState::Closed => return None,
             }
             if state.changed().await.is_err() {
                 return None;
@@ -735,7 +741,12 @@ mod tests {
     #[tokio::test]
     async fn issue_monitor_control_starting_resolves_to_recovery_blocked_or_closed() {
         let recovery_hub = BroadcastHub::new();
-        recovery_hub.set_issue_monitor_status(json!({"queue": []}));
+        let recovery_status = json!({
+            "queue": [],
+            "stall_reason": "unknown",
+            "scan_stall": "authority recovery blocked by issue-monitor.shutdown-revoke",
+        });
+        recovery_hub.set_issue_monitor_status(recovery_status.clone());
         let recovery_publish = tokio::spawn({
             let hub = recovery_hub.clone();
             async move { hub.publish_issue_monitor_control(DaemonFrame::Ack).await }
@@ -750,9 +761,14 @@ mod tests {
             recovery_error.message(),
             crate::runtime_daemon_events::ISSUE_MONITOR_CONTROL_RECOVERY_BLOCKED_ERROR
         );
-        assert!(
-            recovery_hub.issue_monitor_status().is_none(),
-            "recovery-blocked worker must not expose a normal agent status projection"
+        assert_eq!(
+            recovery_hub.issue_monitor_status(),
+            Some(recovery_status.clone()),
+            "read-only status must retain the actual recovery blocker"
+        );
+        assert_eq!(
+            recovery_hub.wait_for_issue_monitor_status().await,
+            Some(recovery_status)
         );
         assert_eq!(
             recovery_hub

@@ -1,0 +1,1955 @@
+use super::*;
+
+/// Issue #4359 AC-3/AC-4: a persisted decision wakes only its explicitly
+/// mentioned idle Session, through the same durable acknowledgement log as PM
+/// delivery. The notification carries a Board pointer, never the post's body.
+#[test]
+fn issue_4359_board_decision_notifies_mentioned_idle_session_once_with_shared_receipt() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for agent_id in ["codex", "opencode"] {
+        let temp = tempdir().expect("tempdir");
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+        let (queued, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = queued;
+        let target = "tab-1::other-window";
+        // Fixed Board pointers are available to every live Agent provider; PM's
+        // privileged message route keeps its own Claude/Codex restrictions.
+        runtime
+            .active_agent_sessions
+            .get_mut(target)
+            .unwrap()
+            .agent_id = agent_id.to_string();
+        let pane = if cfg!(windows) {
+            // The generic Windows fixture runs ping without reading stdin. Use
+            // the existing PM fixture's console reader and echo the submitted line
+            // so the assertion observes delivery rather than ConPTY echo settings.
+            Pane::new(
+            target.to_string(),
+            "powershell".to_string(),
+            [
+                "-NoProfile",
+                "-Command",
+                "while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            512,
+            24,
+            HashMap::new(),
+            test_pane_cwd(),
+        )
+        .expect("notification console reader")
+        } else {
+            long_running_test_pane(target)
+        };
+        let pty = pane.shared_pty();
+        pty.resize(512, 24)
+            .expect("keep notification on one PTY row");
+        let mut reader = pane.reader().expect("notification PTY reader");
+        let (output_tx, output_rx) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut bytes = [0u8; 4096];
+            while let Ok(count) = std::io::Read::read(&mut reader, &mut bytes) {
+                if count == 0 {
+                    break;
+                }
+                let _ = output_tx.send(bytes[..count].to_vec());
+            }
+        });
+        #[cfg(windows)]
+        pty.write_input(b"\x1b[1;1R").expect("ConPTY cursor reply");
+        let _pane_guard = TestPaneGuard {
+            pty,
+            reader: Some(reader),
+        };
+        insert_test_pane_runtime_with_pane(&mut runtime, target, pane);
+        runtime.register_pty_writer(target, None);
+        runtime.set_window_status("tab-1", "other-window", WindowProcessStatus::Idle);
+
+        let mut env = gwt::cli::TestEnv::new(repo.clone());
+        assert_eq!(
+            gwt::cli::dispatch_json_input(
+                &mut env,
+                "gwtd",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "operation": "board.post",
+                    "params": {
+                        "kind": "decision",
+                        "body": "untrusted decision body must stay on the Board",
+                        "mentions": ["session:other-session"],
+                        "broadcast": true,
+                    },
+                })
+                .to_string(),
+            ),
+            0,
+            "board.post must persist the decision before its notification",
+        );
+        let decision = gwt::board_provider::load_snapshot(&repo)
+            .expect("load posted decision")
+            .board
+            .entries
+            .into_iter()
+            .find(|entry| entry.kind == BoardEntryKind::Decision)
+            .expect("board.post saved its decision");
+        let (refreshed, views) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            Default::default(),
+        );
+        runtime.apply_board_projection_refresh(refreshed);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+
+        // test-hygiene: allow-wall-clock-deadline Bound the real OS PTY read; only observed notification bytes prove delivery.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let (prompt, operation_id, body_sha256) = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            output.extend(
+                output_rx
+                    // test-hygiene: allow-wall-clock-deadline Real PTY output arrives asynchronously; timeout only bounds failure, not success.
+                    .recv_timeout(remaining)
+                    .expect("a mentioned idle Session must receive its Board notification"),
+            );
+            let plain = gwt_core::process_console::strip_ansi(&String::from_utf8_lossy(&output));
+            if let Some((prompt, (operation_id, body_sha256))) = plain.lines().find_map(|line| {
+                gwt::pm_registry::parse_protected_pm_delivery_prompt(line)
+                    .map(|identity| (line.to_string(), identity))
+            }) {
+                break (prompt, operation_id, body_sha256);
+            }
+        };
+        assert!(prompt.contains("board.show"), "{prompt}");
+        assert!(prompt.contains(&decision.id[..8]), "{prompt}");
+        assert!(!prompt.contains(&decision.body), "{prompt}");
+        assert!(!prompt.contains(['\r', '\n']), "{prompt}");
+        let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        let prepared =
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .expect("read shared receipt log")
+                .expect("notification must prepare its receipt before writing");
+        assert_eq!(prepared.target_window_id, target);
+        assert_eq!(prepared.target_session_id, "other-session");
+        assert_eq!(prepared.body_sha256, body_sha256);
+        {
+            let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "other-session");
+            gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                &repo,
+                &serde_json::json!({"prompt": prompt}).to_string(),
+            );
+        }
+        assert_eq!(
+            gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, &operation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
+        );
+        let receipt_count = gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+            .unwrap()
+            .len();
+        let (duplicate, _) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        runtime.apply_board_projection_refresh(duplicate);
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+        assert_eq!(
+            gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
+                .unwrap()
+                .len(),
+            receipt_count,
+            "a repeated watcher event must not create another delivery",
+        );
+    }
+}
+
+#[test]
+fn issue_4359_board_notification_excludes_unmentioned_posts_status_and_busy_sessions() {
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, _) = pm_wake_fixture(&temp);
+    let target = "tab-1::other-window";
+    let _pane_guard = attach_live_pm_pane(&mut runtime, target);
+    runtime.register_pty_writer(target, None);
+    let mut views = Default::default();
+    for (kind, mentioned, status) in [
+        (BoardEntryKind::Decision, false, WindowProcessStatus::Idle),
+        (BoardEntryKind::Status, true, WindowProcessStatus::Idle),
+        (BoardEntryKind::Decision, true, WindowProcessStatus::Running),
+    ] {
+        runtime.set_window_status("tab-1", "other-window", status);
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            kind,
+            "ordinary Board post",
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        if mentioned {
+            entry.mentions = vec![BoardMention::new(
+                BoardMentionTargetKind::Session,
+                "other-session",
+            )];
+        }
+        post_entry(&repo, entry).expect("persist excluded post");
+        let (refreshed, retained) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        views = retained;
+        runtime.apply_board_projection_refresh(refreshed);
+        let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+            panic!("notification fixture must queue its workers");
+        };
+        let pending = std::mem::take(&mut *tasks.lock().unwrap());
+        for task in pending {
+            task();
+        }
+    }
+    assert!(gwt::pm_registry::load_pm_delivery_receipts(
+        &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn board_refresh_sends_only_changed_entries_and_suppresses_duplicate_notifications() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let entry = |body| {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+    };
+    post_entry(&repo, entry("old")).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "board-1");
+    runtime.board_all_view_windows.insert(id);
+    let (first, views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    assert_eq!(first.events.len(), 1);
+    let new = entry("**new**");
+    post_entry(&repo, new.clone()).unwrap();
+    let (next, views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        views,
+    );
+    assert!(
+        matches!(&next.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == 1 && entries[0].id == new.id
+        && entries[0].body_html.as_deref().unwrap().contains("<strong>new</strong>")),
+        "a post must send only its changed entry: {:?}",
+        next.events
+    );
+    let (duplicate, _) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        views,
+    );
+    assert!(
+        duplicate.events.is_empty(),
+        "duplicate watcher/daemon events must send nothing"
+    );
+}
+
+#[test]
+fn board_refresh_catches_up_burst_beyond_hot_projection_and_resets_scope() {
+    use super::super::board::run_board_projection_refresh;
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.agents.push(workspace_agent_summary_for_test(
+        "scope-test",
+        Some("scope-test"),
+    ));
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection).unwrap();
+    let entry = |body| {
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "test",
+            BoardEntryKind::Status,
+            body,
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+    };
+    let initial = entry("initial");
+    post_entry(&repo, initial.clone()).unwrap();
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let id = combined_window_id("tab-1", "board-1");
+    runtime.board_all_view_windows.insert(id.clone());
+    let (_, views) = run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    let count = gwt_core::coordination::HOT_PROJECTION_ENTRY_LIMIT + 1;
+    for _ in 0..count {
+        post_entry(
+            &repo,
+            entry("burst").with_audience(vec!["another-workspace"]),
+        )
+        .unwrap();
+    }
+    let (burst, views) =
+        run_board_projection_refresh(runtime.board_projection_refresh_job(&repo), views);
+    assert!(
+        matches!(&burst.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == count && entries.iter().all(|entry| entry.body == "burst")),
+        "all posts since the cursor, including outside the hot window, must arrive"
+    );
+    runtime.board_all_view_windows.remove(&id);
+    let (scoped, _) =
+        run_board_projection_refresh(runtime.board_projection_refresh_job(&repo), views);
+    assert!(
+        matches!(&scoped.events[..], [OutboundEvent {
+        event: BackendEvent::BoardEntries { entries, .. }, ..
+    }] if entries.len() == 1 && entries[0].id == initial.id),
+        "a scope switch must get a fresh scoped projection"
+    );
+}
+
+#[test]
+#[ignore = "Issue #5402 comparative performance probe; run explicitly with --ignored --nocapture"]
+fn board_refresh_measure_single_post() {
+    let temp = tempdir().unwrap();
+    let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let event_path = gwt_core::coordination::coordination_events_path(&repo);
+    fs::create_dir_all(event_path.parent().unwrap()).unwrap();
+    let mut file = std::io::BufWriter::new(fs::File::create(&event_path).unwrap());
+    let body = "### Progress\n\n**Checked** `board` processing.\n\n- first item\n- second item\n\n"
+        .repeat(12);
+    for n in 0..12_000 {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "probe",
+            BoardEntryKind::Status,
+            &body,
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.created_at = Utc::now() - chrono::Duration::hours(1) + chrono::Duration::seconds(n);
+        // Use a deterministic past ordering so live posts come after the fixture.
+        entry.created_at -= chrono::Duration::hours(4);
+        entry.updated_at = entry.created_at;
+        serde_json::to_writer(
+            &mut file,
+            &gwt_core::coordination::CoordinationEvent::MessageAppended { entry },
+        )
+        .unwrap();
+        writeln!(file).unwrap();
+    }
+    file.flush().unwrap();
+    drop(file);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo.clone(),
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (_, mut views) = super::super::board::run_board_projection_refresh(
+        runtime.board_projection_refresh_job(&repo),
+        Default::default(),
+    );
+    for round in 0..5 {
+        let started = Instant::now();
+        let snapshot = post_entry(
+            &repo,
+            BoardEntry::new(
+                AuthorKind::Agent,
+                "probe",
+                BoardEntryKind::Status,
+                format!("{body}\nLive {round}"),
+                None,
+                None,
+                vec![],
+                vec![],
+            ),
+        )
+        .unwrap();
+        assert_eq!(snapshot.board.total_entries, 12_001 + round);
+        let post_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let (refreshed, retained) = super::super::board::run_board_projection_refresh(
+            runtime.board_projection_refresh_job(&repo),
+            views,
+        );
+        let refresh_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bytes: usize = refreshed
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(&event.event).unwrap().len())
+            .sum();
+        let entries: usize = refreshed
+            .events
+            .iter()
+            .map(|event| match &event.event {
+                BackendEvent::BoardEntries { entries, .. } => entries.len(),
+                _ => 0,
+            })
+            .sum();
+        println!("board_probe total=12000 round={round} post_ms={post_ms:.3} refresh_ms={refresh_ms:.3} total_ms={:.3} entries={entries} broadcast_bytes={bytes}", post_ms + refresh_ms);
+        views = retained;
+    }
+}
+
+#[test]
+fn app_runtime_load_board_replies_with_repo_scoped_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    post_entry(
+        &repo,
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "Need review",
+            Some("running".to_string()),
+            None,
+            vec!["coordination".to_string()],
+            vec!["2018".to_string()],
+        ),
+    )
+    .expect("seed board snapshot");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo,
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "board-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::LoadBoard {
+            id: window_id.clone(),
+            all: false,
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::BoardEntries { id, entries, .. },
+            ..
+        }] if client_id == "client-1"
+            && id == &window_id
+            && entries.len() == 1
+            && entries[0].body == "Need review"
+    ));
+}
+
+#[test]
+fn app_runtime_load_board_defaults_to_current_workspace_audience() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut projection =
+        gwt_core::workspace_projection::WorkspaceProjection::default_for_project(&repo);
+    projection.id = "workspace-current".to_string();
+    projection
+        .agents
+        .push(gwt_core::workspace_projection::WorkspaceAgentSummary {
+            session_id: "session-current".to_string(),
+            window_id: None,
+            agent_id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            status_category: gwt_core::workspace_projection::WorkspaceStatusCategory::Active,
+            current_focus: Some("Board audience".to_string()),
+            title_summary: Some("Board audience".to_string()),
+            worktree_path: Some(repo.clone()),
+            branch: Some("work/board-audience".to_string()),
+            last_board_entry_id: None,
+            last_board_entry_kind: None,
+            coordination_scope: None,
+            affiliation_status:
+                gwt_core::workspace_projection::WorkspaceAgentAffiliationStatus::Assigned,
+            workspace_id: Some("workspace-current".to_string()),
+            updated_at: chrono::Utc::now(),
+        });
+    gwt_core::workspace_projection::save_workspace_projection(&repo, &projection)
+        .expect("save projection");
+    post_entry(
+        &repo,
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "broadcast entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        ),
+    )
+    .expect("seed broadcast");
+    post_entry(
+        &repo,
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "current workspace entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["workspace-current"]),
+    )
+    .expect("seed current");
+    post_entry(
+        &repo,
+        BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            "other workspace entry",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_audience(vec!["workspace-other"]),
+    )
+    .expect("seed other");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo,
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "board-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::LoadBoard {
+            id: window_id.clone(),
+            all: false,
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            event: BackendEvent::BoardEntries { entries, .. },
+            ..
+        }] if entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>()
+            == vec!["broadcast entry", "current workspace entry"]
+    ));
+}
+
+#[test]
+fn app_runtime_load_board_history_replies_with_older_page() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    for idx in 0..4 {
+        let mut entry = BoardEntry::new(
+            AuthorKind::Agent,
+            "codex",
+            BoardEntryKind::Status,
+            format!("entry-{idx}"),
+            None,
+            None,
+            vec![],
+            vec![],
+        );
+        entry.id = format!("entry-{idx}");
+        entry.created_at = chrono::Utc::now() + chrono::Duration::seconds(idx);
+        entry.updated_at = entry.created_at;
+        post_entry(&repo, entry).expect("seed board entry");
+    }
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo,
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "board-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::LoadBoardHistory {
+            id: window_id.clone(),
+            before_entry_id: Some("entry-3".to_string()),
+            limit: 2,
+            all: false,
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::BoardHistoryPage {
+                id,
+                entries,
+                has_more_before,
+            },
+            ..
+        }] if client_id == "client-1"
+            && id == &window_id
+            && entries.iter().map(|entry| entry.body.as_str()).collect::<Vec<_>>() == vec!["entry-1", "entry-2"]
+            && *has_more_before
+    ));
+}
+
+#[test]
+fn app_runtime_open_board_origin_agent_focuses_live_origin_session_window() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let mut tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+    let board_raw_id = tab.workspace.add_window(WindowPreset::Board).id;
+    let agent_raw_id = tab.workspace.add_window(WindowPreset::Agent).id;
+    let board_window_id = combined_window_id("tab-1", &board_raw_id);
+    let agent_window_id = combined_window_id("tab-1", &agent_raw_id);
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.active_agent_sessions.insert(
+        agent_window_id.clone(),
+        ActiveAgentSession {
+            window_id: agent_window_id.clone(),
+            session_id: "session-origin".to_string(),
+            agent_id: "codex".to_string(),
+            branch_name: "work/board-origin".to_string(),
+            display_name: "Codex".to_string(),
+            worktree_path: repo.clone(),
+            agent_project_root: repo.display().to_string(),
+            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
+            tab_id: "tab-1".to_string(),
+        },
+    );
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenBoardOriginAgent {
+            id: board_window_id,
+            origin_session_id: "session-origin".to_string(),
+        },
+    );
+
+    let workspace = runtime.tab("tab-1").expect("tab").workspace.persisted();
+    let focused = workspace
+        .windows
+        .iter()
+        .max_by_key(|window| window.z_index)
+        .expect("focused window");
+    assert_eq!(focused.id, agent_raw_id);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        OutboundEvent {
+            event: BackendEvent::WorkspaceState { .. },
+            ..
+        }
+    )));
+}
+
+#[test]
+fn board_origin_agent_resume_config_uses_exact_saved_session() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let mut session =
+        gwt_agent::Session::new(&repo, "work/board-origin", gwt_agent::AgentId::Codex);
+    session.id = "session-origin".to_string();
+    session.agent_session_id = Some("codex-resume-123".to_string());
+    session.model = Some("gpt-5.5".to_string());
+    session.reasoning_level = Some("high".to_string());
+    session.tool_version = Some("0.116.0".to_string());
+    session.tool_version_selector = Some("latest".to_string());
+    session.tool_runtime_provenance = Some(gwt_agent::ToolRuntimeProvenance {
+        schema_version: gwt_agent::ToolRuntimeProvenance::CURRENT_SCHEMA_VERSION,
+        official_package: "@openai/codex".to_string(),
+        requested_selector: "latest".to_string(),
+        resolved_exact_version: "0.116.0".to_string(),
+        runner_kind: gwt_agent::ToolRuntimeRunnerKind::Npx,
+        resolution_reason: gwt_agent::ToolRuntimeResolutionReason::RequestedSelector,
+    });
+    session.skip_permissions = true;
+    session.codex_fast_mode = true;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let config = runtime
+        .board_origin_agent_resume_config("session-origin")
+        .expect("resume config");
+
+    assert_eq!(config.command, "codex");
+    assert_eq!(config.branch.as_deref(), Some("work/board-origin"));
+    assert_eq!(config.working_dir.as_deref(), Some(repo.as_path()));
+    assert_eq!(
+        config.resume_session_id.as_deref(),
+        Some("codex-resume-123")
+    );
+    assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(config.reasoning_level.as_deref(), Some("high"));
+    assert!(config.skip_permissions);
+    assert!(config.codex_fast_mode);
+}
+
+#[test]
+fn board_origin_agent_resume_config_supports_builtin_agent_descriptors() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let runtime = sample_runtime(temp.path(), Vec::new(), None);
+
+    for agent_id in [gwt_agent::AgentId::OpenClaw, gwt_agent::AgentId::Hermes] {
+        let session_id = format!("session-{}", agent_id.command());
+        let resume_id = format!("resume-{}", agent_id.command());
+        let mut session = gwt_agent::Session::new(
+            &repo,
+            format!("work/{}", agent_id.command()),
+            agent_id.clone(),
+        );
+        session.id = session_id.clone();
+        session.agent_session_id = Some(resume_id.clone());
+        session.save(&runtime.sessions_dir).expect("save session");
+
+        let config = runtime
+            .board_origin_agent_resume_config(&session_id)
+            .expect("resume config");
+
+        assert_eq!(config.agent_id, agent_id);
+        assert_eq!(
+            config.resume_session_id.as_deref(),
+            Some(resume_id.as_str())
+        );
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+    }
+}
+
+#[test]
+fn app_runtime_open_board_origin_agent_rejects_missing_exact_resume_session() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "board-1",
+        repo,
+        WindowPreset::Board,
+        WindowProcessStatus::Ready,
+    );
+    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let board_window_id = combined_window_id("tab-1", "board-1");
+
+    let events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::OpenBoardOriginAgent {
+            id: board_window_id.clone(),
+            origin_session_id: "missing-session".to_string(),
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::BoardError { id, message },
+            ..
+        }] if client_id == "client-1"
+            && id == &board_window_id
+            && message.contains("missing-session")
+    ));
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_replies_with_cache_backed_issue_and_spec_views() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue bridge",
+            &["bug"],
+            "Issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            1930,
+            "SPEC-1930: Cache-backed SPEC bridge",
+            &["gwt-spec", "phase/implementation"],
+            concat!(
+                "<!-- gwt-spec id=1930 version=1 -->\n",
+                "<!-- sections:\n",
+                "spec=body\n",
+                "tasks=body\n",
+                "-->\n\n",
+                "<!-- artifact:spec BEGIN -->\n",
+                "# SPEC bridge\n",
+                "## Summary\n",
+                "Cache-backed issue view\n",
+                "<!-- artifact:spec END -->\n\n",
+                "<!-- artifact:tasks BEGIN -->\n",
+                "- [x] T-001\n",
+                "<!-- artifact:tasks END -->\n"
+            ),
+            "2026-04-20T09:00:00Z",
+        ))
+        .expect("write spec snapshot");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([("feature/issue-bridge".to_string(), 42)]),
+    );
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "issue-1",
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.windows.push(sample_window(
+        "spec-1",
+        WindowPreset::Spec,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.next_z_index = 3;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo,
+        kind: ProjectKind::Git,
+        workspace: WindowRegistry::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let issue_window_id = combined_window_id("tab-1", "issue-1");
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &issue_window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let issue_events = wait_for_knowledge_view_dispatch(&recorded_events, &issue_window_id);
+    assert_eq!(issue_events.len(), 1);
+    assert!(matches!(
+        &issue_events[0].event,
+        BackendEvent::KnowledgeEntries {
+            knowledge_kind,
+            entries,
+            selected_number,
+            refresh_enabled,
+            ..
+        } if *knowledge_kind == gwt::KnowledgeKind::Issue
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 42
+                && entry.linked_branch_count == 1
+                && !entry.is_spec)
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
+            && *selected_number == Some(42)
+            && *refresh_enabled
+    ));
+    let issue_detail =
+        select_issue_detail_for_test(&runtime, &recorded_events, &issue_window_id, 42);
+    assert_eq!(issue_detail.launch_issue_number, Some(42));
+    assert!(issue_detail.sections.iter().any(|section| {
+        section.title == "Linked branches" && section.body.contains("feature/issue-bridge")
+    }));
+
+    let spec_window_id = combined_window_id("tab-1", "spec-1");
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &spec_window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(1930),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let spec_events = wait_for_knowledge_view_dispatch(&recorded_events, &spec_window_id);
+    assert_eq!(spec_events.len(), 1);
+    assert!(matches!(
+        &spec_events[0].event,
+        BackendEvent::KnowledgeEntries {
+            knowledge_kind,
+            entries,
+            selected_number,
+            refresh_enabled,
+            ..
+        } if *knowledge_kind == gwt::KnowledgeKind::Issue
+            && entries.len() == 2
+            && entries.iter().any(|entry| entry.number == 1930 && entry.is_spec)
+            && *selected_number == Some(1930)
+            && *refresh_enabled
+    ));
+    let spec_detail =
+        select_issue_detail_for_test(&runtime, &recorded_events, &spec_window_id, 1930);
+    assert!(spec_detail.sections.iter().any(|section| {
+        section.title == "spec" && section.body.contains("Cache-backed issue view")
+    }));
+}
+
+#[test]
+fn app_runtime_knowledge_load_joins_latest_project_monitor_snapshot() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    for (number, title) in [
+        (42, "First queued Issue"),
+        (43, "Second queued Issue"),
+        (44, "Held Issue"),
+        (45, "Unmonitored Issue"),
+    ] {
+        cache
+            .write_snapshot(&sample_issue_snapshot(
+                number,
+                title,
+                &["bug"],
+                "Issue body",
+                "2026-08-10T00:00:00Z",
+            ))
+            .expect("write issue snapshot");
+    }
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut held = pm_wake_inbox_item(44, gwt::MonitorInboxState::SourceExcluded);
+    held.exclusion_reason = Some("Excluded by label: hold".to_string());
+    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
+    monitor.terminal_queue_push(&[42, 43], "operator", "2026-07-28T00:00:00Z");
+    monitor.inbox = vec![
+        pm_wake_inbox_item(42, gwt::MonitorInboxState::Queued),
+        pm_wake_inbox_item(99, gwt::MonitorInboxState::Launching),
+        pm_wake_inbox_item(43, gwt::MonitorInboxState::Queued),
+        held,
+    ];
+    let _ = runtime.issue_monitor_snapshot_events_for(None, Some(&repo), monitor);
+
+    let window_id = combined_window_id("tab-1", "issue-1");
+    assert!(runtime
+        .load_knowledge_bridge_events(
+            "client-1",
+            KnowledgeLoadRequest {
+                id: &window_id,
+                kind: gwt::KnowledgeKind::Issue,
+                request_id: None,
+                selected_number: None,
+                refresh: false,
+            },
+        )
+        .is_empty());
+    let events = wait_for_knowledge_view_dispatch(&recorded_events, &window_id);
+    let entries = events
+        .iter()
+        .find_map(|outbound| match &outbound.event {
+            BackendEvent::KnowledgeEntries { entries, .. } => Some(entries),
+            _ => None,
+        })
+        .expect("knowledge entries");
+    let entry = |number| {
+        entries
+            .iter()
+            .find(|entry| entry.number == number)
+            .unwrap_or_else(|| panic!("missing Issue #{number}"))
+    };
+
+    assert_eq!(
+        (
+            entry(42).monitor_state,
+            entry(42).queue_position,
+            entry(42).exclusion_reason.as_deref(),
+        ),
+        (Some(gwt::MonitorInboxState::Queued), Some(1), None),
+    );
+    assert_eq!(
+        (entry(43).monitor_state, entry(43).queue_position),
+        (Some(gwt::MonitorInboxState::Queued), Some(2)),
+    );
+    assert_eq!(
+        (
+            entry(44).monitor_state,
+            entry(44).queue_position,
+            entry(44).exclusion_reason.as_deref(),
+        ),
+        (
+            Some(gwt::MonitorInboxState::SourceExcluded),
+            None,
+            Some("Excluded by label: hold"),
+        ),
+    );
+    assert_eq!(
+        (
+            entry(45).monitor_state,
+            entry(45).queue_position,
+            entry(45).exclusion_reason.as_deref(),
+        ),
+        (None, None, None),
+    );
+}
+
+/// Issue #3297: the cache-backed knowledge load must not run on the GUI
+/// event loop. On slow machines the synchronous read blocked the loop past
+/// the frontend's 5s recovery timer, the late reply was discarded, and the
+/// retry escalated into a minutes-long forced sync. The load replies through
+/// the blocking-task proxy instead, like the semantic search path.
+#[test]
+fn app_runtime_load_knowledge_bridge_replies_off_the_gui_event_loop() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Issue bridge",
+            &["bug"],
+            "Issue body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let mut persisted = empty_workspace_state();
+    persisted.windows.push(sample_window(
+        "issue-1",
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    ));
+    persisted.next_z_index = 2;
+    let tab = ProjectTabRuntime {
+        id: "tab-1".to_string(),
+        title: "Repo".to_string(),
+        project_root: repo,
+        kind: ProjectKind::Git,
+        workspace: WindowRegistry::from_persisted(persisted),
+        migration_pending: false,
+        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    };
+    let (runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: Some(7),
+            selected_number: Some(42),
+            refresh: false,
+        },
+    );
+
+    assert!(
+        immediate.is_empty(),
+        "cache-backed knowledge load must not reply on the frontend event loop"
+    );
+    wait_for_recorded_event("knowledge entries dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.target,
+                            DispatchTarget::Client(client_id) if client_id == "client-1"
+                        ) && matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeEntries {
+                                id,
+                                request_id,
+                                entries,
+                                selected_number,
+                                ..
+                            } if id == &window_id
+                                && *request_id == Some(7)
+                                && entries.iter().any(|entry| entry.number == 42)
+                                && *selected_number == Some(42)
+                        )
+                    })
+            )
+        })
+    });
+    let detail = select_issue_detail_for_test(&runtime, &events, &window_id, 42);
+    assert_eq!(detail.number, Some(42));
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_projects_related_issue_work_sessions() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3096");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3096,
+            "Fix Launch Agent trace",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3096", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3096".to_string();
+    session.agent_session_id = Some("conv-issue-3096".to_string());
+    session.display_name = "Codex".to_string();
+    session.linked_issue_number = Some(3096);
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let now = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3096"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        now,
+    );
+    event.title = Some("Fix Launch Agent trace".to_string());
+    event.owner = Some("Issue #3096".to_string());
+    event.agent_session_id = Some("session-issue-3096".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3096".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3096),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3096);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3096,
+    );
+    assert_eq!(detail.related_works.len(), 1);
+    let work = &detail.related_works[0];
+    assert_eq!(work.title, "Fix Launch Agent trace");
+    assert_eq!(work.branch.as_deref(), Some("work/issue-3096"));
+    assert_eq!(work.agents[0].session_id, "session-issue-3096");
+    assert_eq!(
+        work.agents[0].sessions[0].agent_session_id,
+        "conv-issue-3096"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_marks_session_only_stopped_related_session_past() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume historical Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let stopped_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    session.id = "session-issue-3133-stopped".to_string();
+    session.agent_session_id = Some("conv-issue-3133-stopped".to_string());
+    session.status = gwt_agent::AgentStatus::Stopped;
+    session.linked_issue_number = Some(3133);
+    session.created_at = stopped_at;
+    session.updated_at = stopped_at;
+    session.last_activity_at = stopped_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
+
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].status_category, "idle");
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert!(
+        !detail.related_works[0].agents[0].sessions[0].is_active,
+        "session-only stopped related sessions must render as Past, not Current"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_dedupes_related_issue_sessions_by_conversation() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let conversation_id = "conv-issue-3133";
+    let old_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let new_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+
+    let mut stale_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    stale_session.id = "session-issue-3133-stale".to_string();
+    stale_session.agent_session_id = Some(conversation_id.to_string());
+    stale_session.status = gwt_agent::AgentStatus::Stopped;
+    stale_session.linked_issue_number = Some(3133);
+    stale_session.created_at = old_at;
+    stale_session.updated_at = old_at;
+    stale_session.last_activity_at = old_at;
+    stale_session
+        .save(&runtime.sessions_dir)
+        .expect("save stale session");
+
+    let mut current_session =
+        gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+    current_session.id = "session-issue-3133-current".to_string();
+    current_session.agent_session_id = Some(conversation_id.to_string());
+    current_session.status = gwt_agent::AgentStatus::Running;
+    current_session.linked_issue_number = Some(3133);
+    current_session.created_at = new_at;
+    current_session.updated_at = new_at;
+    current_session.last_activity_at = new_at;
+    current_session
+        .save(&runtime.sessions_dir)
+        .expect("save current session");
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    let mut event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id,
+        new_at,
+    );
+    event.title = Some("Resume Launch Agent session".to_string());
+    event.owner = Some("Issue #3133".to_string());
+    event.agent_session_id = Some("session-issue-3133-current".to_string());
+    event.agent_id = Some("codex".to_string());
+    event.display_name = Some("Codex".to_string());
+    event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current"
+    );
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        conversation_id
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_collapses_related_issue_session_actions_to_live_latest() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&worktree).expect("create worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let stale_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 0, 0).unwrap();
+    let past_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 1, 0).unwrap();
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let empty_agent_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap();
+
+    for (id, conversation_id, status, timestamp) in [
+        (
+            "session-issue-3133-stale-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Stopped,
+            stale_at,
+        ),
+        (
+            "session-issue-3133-past",
+            "conv-issue-3133-past",
+            gwt_agent::AgentStatus::Stopped,
+            past_at,
+        ),
+        (
+            "session-issue-3133-current-live",
+            "conv-issue-3133-live",
+            gwt_agent::AgentStatus::Running,
+            live_at,
+        ),
+    ] {
+        let mut session =
+            gwt_agent::Session::new(&worktree, "work/issue-3133", gwt_agent::AgentId::Codex);
+        session.id = id.to_string();
+        session.agent_session_id = Some(conversation_id.to_string());
+        session.status = status;
+        session.linked_issue_number = Some(3133);
+        session.created_at = timestamp;
+        session.updated_at = timestamp;
+        session.last_activity_at = timestamp;
+        session.save(&runtime.sessions_dir).expect("save session");
+    }
+
+    let work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&worktree),
+    )
+    .expect("work id");
+    for (session_id, timestamp) in [
+        ("session-issue-3133-stale-live", stale_at),
+        ("session-issue-3133-past", past_at),
+        ("session-issue-3133-current-live", live_at),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id.clone(),
+            timestamp,
+        );
+        event.title = Some("Resume Launch Agent session".to_string());
+        event.owner = Some("Issue #3133".to_string());
+        event.agent_session_id = Some(session_id.to_string());
+        event.agent_id = Some("codex".to_string());
+        event.display_name = Some("Codex".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-3133".to_string()),
+                worktree_path: Some(worktree.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        record_legacy_workspace_work_event_for_test(&repo, event).expect("record work event");
+    }
+    let mut empty_agent_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        work_id.clone(),
+        empty_agent_at,
+    );
+    empty_agent_event.title = Some("Resume Launch Agent session".to_string());
+    empty_agent_event.owner = Some("Issue #3133".to_string());
+    empty_agent_event.agent_session_id = Some("session-issue-3133-empty".to_string());
+    empty_agent_event.agent_id = Some("codex".to_string());
+    empty_agent_event.display_name = Some("Codex".to_string());
+    empty_agent_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    record_legacy_workspace_work_event_for_test(&repo, empty_agent_event)
+        .expect("record empty agent work event");
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(detail.related_works[0].agents.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].session_id,
+        "session-issue-3133-current-live"
+    );
+    assert_eq!(detail.related_works[0].agents[0].sessions.len(), 1);
+    assert_eq!(
+        detail.related_works[0].agents[0].sessions[0].agent_session_id,
+        "conv-issue-3133-live"
+    );
+}
+
+#[test]
+fn app_runtime_load_knowledge_bridge_ignores_ambiguous_branch_only_related_work() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let repo = temp.path().join("repo");
+    let develop_worktree = temp.path().join("repo-develop");
+    let issue_worktree = temp.path().join("repo-work-issue-3133");
+    fs::create_dir_all(&repo).expect("create repo");
+    fs::create_dir_all(&develop_worktree).expect("create develop worktree");
+    fs::create_dir_all(&issue_worktree).expect("create issue worktree");
+    init_repo(&repo);
+    Cache::new(issue_cache_root(&repo))
+        .write_snapshot(&sample_issue_snapshot(
+            3133,
+            "Resume Launch Agent session",
+            &["bug"],
+            "Issue body",
+            "2026-06-20T09:00:00Z",
+        ))
+        .expect("write issue snapshot");
+    write_issue_link_store(
+        &repo,
+        HashMap::from([("work/issue-3133".to_string(), 3133)]),
+    );
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo.clone(),
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+
+    let live_at = Utc.with_ymd_and_hms(2026, 6, 20, 9, 5, 0).unwrap();
+    let mut session = gwt_agent::Session::new(
+        &issue_worktree,
+        "work/issue-3133",
+        gwt_agent::AgentId::Codex,
+    );
+    session.id = "session-issue-3133-current".to_string();
+    session.agent_session_id = Some("conv-issue-3133-current".to_string());
+    session.status = gwt_agent::AgentStatus::Running;
+    session.linked_issue_number = Some(3133);
+    session.created_at = live_at;
+    session.updated_at = live_at;
+    session.last_activity_at = live_at;
+    session.save(&runtime.sessions_dir).expect("save session");
+
+    let issue_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &repo,
+        Some("work/issue-3133"),
+        Some(&issue_worktree),
+    )
+    .expect("issue work id");
+    let mut issue_event = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        issue_work_id,
+        live_at,
+    );
+    issue_event.title = Some("Issue #3133 visual verification".to_string());
+    issue_event.owner = Some("Issue #3133".to_string());
+    issue_event.agent_session_id = Some("session-issue-3133-current".to_string());
+    issue_event.agent_id = Some("codex".to_string());
+    issue_event.display_name = Some("Codex".to_string());
+    issue_event.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some("work/issue-3133".to_string()),
+            worktree_path: Some(issue_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    record_legacy_workspace_work_event_for_test(&repo, issue_event)
+        .expect("record issue work event");
+
+    let ambiguous_id = "legacy-ambiguous-branch-only";
+    for (branch, worktree, at) in [
+        (
+            "develop",
+            develop_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 6, 0).unwrap(),
+        ),
+        (
+            "work/issue-3133",
+            issue_worktree.as_path(),
+            Utc.with_ymd_and_hms(2026, 6, 20, 9, 7, 0).unwrap(),
+        ),
+    ] {
+        let mut event = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            ambiguous_id,
+            at,
+        );
+        event.title = Some("Work progress summary detail".to_string());
+        event.status_category =
+            Some(gwt_core::workspace_projection::WorkspaceStatusCategory::Unknown);
+        event.agent_session_id = Some("missing-legacy-session".to_string());
+        event.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some(branch.to_string()),
+                worktree_path: Some(worktree.to_path_buf()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        record_legacy_workspace_work_event_for_test(&repo, event)
+            .expect("record ambiguous work event");
+    }
+
+    let immediate = runtime.load_knowledge_bridge_events(
+        "client-1",
+        KnowledgeLoadRequest {
+            id: &combined_window_id("tab-1", "issue-1"),
+            kind: gwt::KnowledgeKind::Issue,
+            request_id: None,
+            selected_number: Some(3133),
+            refresh: false,
+        },
+    );
+    assert!(immediate.is_empty());
+    let events =
+        wait_for_knowledge_view_dispatch(&recorded_events, &combined_window_id("tab-1", "issue-1"));
+
+    let entries = match &events[0].event {
+        BackendEvent::KnowledgeEntries { entries, .. } => entries,
+        other => panic!("unexpected entries event: {other:?}"),
+    };
+    assert_eq!(entries[0].number, 3133);
+    assert_eq!(entries[0].related_work_count, 1);
+    assert_eq!(entries[0].related_session_count, 1);
+
+    assert_eq!(events.len(), 1);
+    let detail = select_issue_detail_for_test(
+        &runtime,
+        &recorded_events,
+        &combined_window_id("tab-1", "issue-1"),
+        3133,
+    );
+    assert_eq!(detail.related_works.len(), 1);
+    assert_eq!(
+        detail.related_works[0].title,
+        "Issue #3133 visual verification"
+    );
+    assert!(
+        detail
+            .related_works
+            .iter()
+            .all(|work| work.title != "Work progress summary detail"),
+        "ambiguous branch-only Work must not appear in Issue related work"
+    );
+}
+
+#[test]
+fn app_runtime_knowledge_search_errors_for_wrong_surface() {
+    let temp = tempdir().expect("tempdir");
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "shell-1",
+        repo,
+        WindowPreset::Shell,
+        WindowProcessStatus::Ready,
+    );
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "shell-1");
+    let events = runtime.search_knowledge_bridge_events(
+        "client-1",
+        KnowledgeSearchRequest {
+            id: &window_id,
+            kind: gwt::KnowledgeKind::Issue,
+            query: "semantic query",
+            request_id: 9,
+            selected_number: None,
+        },
+    );
+
+    assert!(matches!(
+        &events[..],
+        [OutboundEvent {
+            target: DispatchTarget::Client(client_id),
+            event: BackendEvent::KnowledgeError {
+                knowledge_kind,
+                message,
+                ..
+            },
+            knowledge_wire_metadata: Some(super::super::KnowledgeWireMetadata::NonSemanticError),
+            ..
+        }] if client_id == "client-1"
+            && *knowledge_kind == gwt::KnowledgeKind::Issue
+            && message == "Window is not a knowledge bridge"
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn app_runtime_knowledge_search_replies_through_async_dispatch() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().expect("tempdir");
+    let _home = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    write_fake_project_index_runtime(temp.path());
+
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).expect("create repo");
+    init_repo(&repo);
+
+    let cache = Cache::new(issue_cache_root(&repo));
+    cache
+        .write_snapshot(&sample_issue_snapshot(
+            42,
+            "Async semantic issue",
+            &["bug"],
+            "Search result body",
+            "2026-04-20T10:00:00Z",
+        ))
+        .expect("write issue snapshot");
+
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "issue-1",
+        repo,
+        WindowPreset::Issue,
+        WindowProcessStatus::Ready,
+    );
+    let (mut runtime, events) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let window_id = combined_window_id("tab-1", "issue-1");
+
+    let immediate_events = runtime.handle_frontend_event(
+        "client-1".to_string(),
+        FrontendEvent::SearchKnowledgeBridge {
+            id: window_id.clone(),
+            knowledge_kind: gwt::KnowledgeKind::Issue,
+            query: "semantic query".to_string(),
+            request_id: 9,
+            selected_number: None,
+        },
+    );
+
+    assert!(
+        immediate_events.is_empty(),
+        "semantic search must not reply on the frontend event loop"
+    );
+    wait_for_recorded_event("knowledge search dispatch", &events, |events| {
+        events.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::Dispatch(dispatched)
+                    if dispatched.iter().any(|outbound| {
+                        matches!(
+                            &outbound.target,
+                            DispatchTarget::Client(client_id) if client_id == "client-1"
+                        ) && matches!(
+                            &outbound.event,
+                            BackendEvent::KnowledgeSearchResults {
+                                id,
+                                knowledge_kind,
+                                query,
+                                request_id,
+                                entries,
+                                ..
+                            } if id == &window_id
+                                && *knowledge_kind == gwt::KnowledgeKind::Issue
+                                && query == "semantic query"
+                                && *request_id == 9
+                                && entries.len() == 1
+                                && entries[0].number == 42
+                        )
+                    })
+            )
+        })
+    });
+}

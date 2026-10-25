@@ -15,15 +15,47 @@ use serde::{Deserialize, Serialize};
 /// Warn while a volume has less than this many bytes free (20 GiB): about
 /// one cold workspace rebuild, the amount a single blocked agent needs to
 /// recover on its own.
-pub const WARN_BELOW_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+pub const WARN_BELOW_BYTES: u64 = gwt_config::build_artifact_gc_config::DEFAULT_BELOW_BYTES;
 /// Warn while a volume has less than this percentage free.
-pub const WARN_BELOW_PERCENT: u64 = 5;
+pub const WARN_BELOW_PERCENT: u64 = gwt_config::build_artifact_gc_config::DEFAULT_BELOW_PERCENT;
+
+/// The two floors a volume is judged against. The defaults are the constants
+/// above; `[build_artifact_gc]` in `~/.gwt/config.toml` overrides them for
+/// both the warning and the automatic reclaim, so the two stay one judgment
+/// (Issue #4391 AC-1 / AC-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskThresholds {
+    pub below_bytes: u64,
+    pub below_percent: u64,
+}
+
+impl Default for DiskThresholds {
+    fn default() -> Self {
+        Self {
+            below_bytes: WARN_BELOW_BYTES,
+            below_percent: WARN_BELOW_PERCENT,
+        }
+    }
+}
+
+impl From<&gwt_config::BuildArtifactGcConfig> for DiskThresholds {
+    fn from(config: &gwt_config::BuildArtifactGcConfig) -> Self {
+        Self {
+            below_bytes: config.below_bytes,
+            below_percent: config.below_percent,
+        }
+    }
+}
 
 /// One volume as seen from a path that lives on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskVolume {
     /// The path the volume was probed through.
     pub path: String,
+    /// Filesystem identity, rather than the path used to probe it. Missing
+    /// identities never authorize automatic cache deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_id: Option<String>,
     pub free_bytes: u64,
     pub total_bytes: u64,
 }
@@ -40,12 +72,57 @@ pub struct DiskSpaceStatus {
     pub warning: Option<String>,
 }
 
+impl DiskSpaceStatus {
+    pub(crate) fn low_volume_ids(&self) -> std::collections::BTreeSet<String> {
+        let thresholds = DiskThresholds {
+            below_bytes: self.warn_below_bytes,
+            below_percent: self.warn_below_percent,
+        };
+        self.volumes
+            .iter()
+            .filter(|volume| is_low(volume, thresholds))
+            .map(|volume| {
+                volume
+                    .volume_id
+                    .clone()
+                    .unwrap_or_else(|| format!("unknown:{}", volume.path))
+            })
+            .collect()
+    }
+}
+
+/// Identify the actual filesystem after resolving junctions and symlinks.
+/// This matches verification admission's device / mount-point identity.
+pub(crate) fn volume_id(path: &Path) -> std::io::Result<String> {
+    let path = dunce::canonicalize(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Ok(format!("device:{}", std::fs::metadata(path)?.dev()))
+    }
+    #[cfg(not(unix))]
+    {
+        let path = path.to_string_lossy().to_lowercase();
+        sysinfo::Disks::new_with_refreshed_list()
+            .iter()
+            .map(|disk| disk.mount_point().to_string_lossy().to_lowercase())
+            .filter(|mount| Path::new(&path).starts_with(Path::new(mount)))
+            .max_by_key(String::len)
+            .ok_or_else(|| std::io::Error::other(format!("cannot identify volume for {path}")))
+    }
+}
+
 /// Probe each path's volume and evaluate the thresholds. A path that does
 /// not exist or whose volume cannot be queried is skipped rather than
 /// reported as empty: a missing directory must not read as a full disk.
 /// (Windows resolves the volume of a missing path from its prefix, so the
 /// existence check is what keeps the two platforms answering alike.)
 pub fn probe(paths: &[&Path]) -> DiskSpaceStatus {
+    probe_with(paths, DiskThresholds::default())
+}
+
+/// [`probe`] against explicit thresholds.
+pub fn probe_with(paths: &[&Path], thresholds: DiskThresholds) -> DiskSpaceStatus {
     let mut volumes = Vec::new();
     for path in paths {
         if !path.exists() {
@@ -58,6 +135,7 @@ pub fn probe(paths: &[&Path]) -> DiskSpaceStatus {
         };
         let volume = DiskVolume {
             path: path.display().to_string(),
+            volume_id: volume_id(path).ok(),
             free_bytes,
             total_bytes,
         };
@@ -65,14 +143,19 @@ pub fn probe(paths: &[&Path]) -> DiskSpaceStatus {
             volumes.push(volume);
         }
     }
-    evaluate(volumes)
+    evaluate_with(volumes, thresholds)
 }
 
 /// Apply the thresholds to already-measured volumes.
 pub fn evaluate(volumes: Vec<DiskVolume>) -> DiskSpaceStatus {
+    evaluate_with(volumes, DiskThresholds::default())
+}
+
+/// [`evaluate`] against explicit thresholds.
+pub fn evaluate_with(volumes: Vec<DiskVolume>, thresholds: DiskThresholds) -> DiskSpaceStatus {
     let low: Vec<String> = volumes
         .iter()
-        .filter(|volume| is_low(volume))
+        .filter(|volume| is_low(volume, thresholds))
         .map(|volume| {
             format!(
                 "{} has {} free of {} ({:.2}%)",
@@ -93,16 +176,17 @@ pub fn evaluate(volumes: Vec<DiskVolume>) -> DiskSpaceStatus {
     });
     DiskSpaceStatus {
         volumes,
-        warn_below_bytes: WARN_BELOW_BYTES,
-        warn_below_percent: WARN_BELOW_PERCENT,
+        warn_below_bytes: thresholds.below_bytes,
+        warn_below_percent: thresholds.below_percent,
         warning,
     }
 }
 
-fn is_low(volume: &DiskVolume) -> bool {
-    volume.free_bytes < WARN_BELOW_BYTES
+fn is_low(volume: &DiskVolume, thresholds: DiskThresholds) -> bool {
+    volume.free_bytes < thresholds.below_bytes
         || volume.total_bytes > 0
-            && volume.free_bytes.saturating_mul(100) < volume.total_bytes * WARN_BELOW_PERCENT
+            && volume.free_bytes.saturating_mul(100)
+                < volume.total_bytes.saturating_mul(thresholds.below_percent)
 }
 
 fn free_percent(volume: &DiskVolume) -> f64 {
@@ -137,6 +221,7 @@ mod tests {
     fn volume(path: &str, free_bytes: u64, total_bytes: u64) -> DiskVolume {
         DiskVolume {
             path: path.to_string(),
+            volume_id: None,
             free_bytes,
             total_bytes,
         }
@@ -200,6 +285,10 @@ mod tests {
         let status = probe(&[existing.as_path(), missing.as_path()]);
         assert_eq!(status.volumes.len(), 1, "{status:?}");
         assert!(status.volumes[0].total_bytes > 0);
+        assert_eq!(
+            status.volumes[0].volume_id,
+            Some(volume_id(&existing).expect("volume identity"))
+        );
     }
 
     #[test]

@@ -24,12 +24,12 @@
 //! endpoint / authority-fence recovery that every crash already needs.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Child,
     sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex, PoisonError,
     },
 };
 
@@ -121,13 +121,30 @@ pub struct DaemonEnsureInputs<'a> {
 ///
 /// Children are reaped lazily inside [`DaemonSupervisor::ensure_running`]
 /// rather than by a per-child waiter thread. That keeps the supervisor free of
-/// background threads and, more importantly, means a pid is never signalled
-/// after it has been reaped — the [`std::process::Child`] handle is the only
-/// thing that ever addresses the process.
+/// background threads. Owned children are stopped through their child handles;
+/// an external stale-version candidate must authenticate before it is signalled.
 pub struct DaemonSupervisor {
     spawn: DaemonSpawner,
     children: Mutex<HashMap<PathBuf, Child>>,
     ensure_attempts: AtomicUsize,
+    in_flight: Mutex<HashSet<String>>,
+    stopped: AtomicBool,
+}
+
+/// Keeps one project's queued or running ensure pass unique until its task drops.
+pub struct DaemonEnsureReservation {
+    supervisor: Arc<DaemonSupervisor>,
+    project_key: String,
+}
+
+impl Drop for DaemonEnsureReservation {
+    fn drop(&mut self) {
+        self.supervisor
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.project_key);
+    }
 }
 
 impl DaemonSupervisor {
@@ -137,6 +154,8 @@ impl DaemonSupervisor {
             spawn: Box::new(spawn_production_daemon),
             children: Mutex::new(HashMap::new()),
             ensure_attempts: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -149,6 +168,8 @@ impl DaemonSupervisor {
             spawn: Box::new(spawn),
             children: Mutex::new(HashMap::new()),
             ensure_attempts: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            stopped: AtomicBool::new(false),
         }
     }
 
@@ -164,7 +185,35 @@ impl DaemonSupervisor {
             }),
             children: Mutex::new(HashMap::new()),
             ensure_attempts: AtomicUsize::new(0),
+            in_flight: Mutex::new(HashSet::new()),
+            stopped: AtomicBool::new(false),
         }
+    }
+
+    /// Reserve an off-thread ensure using the same project identity as discovery.
+    pub fn reserve_ensure(
+        self: &Arc<Self>,
+        project_root: &Path,
+    ) -> Result<Option<DaemonEnsureReservation>, String> {
+        if self.stopped.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+            project_root,
+            gwt_core::daemon::RuntimeTarget::Host,
+        )
+        .map_err(|error| format!("daemon scope resolution failed: {error}"))?;
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !in_flight.insert(scope.repo_hash.clone()) {
+            return Ok(None);
+        }
+        Ok(Some(DaemonEnsureReservation {
+            supervisor: Arc::clone(self),
+            project_key: scope.repo_hash,
+        }))
     }
 
     /// How many times [`Self::ensure_running`] has been asked to keep a daemon
@@ -204,10 +253,7 @@ impl DaemonSupervisor {
         project_root: &Path,
         inputs: DaemonEnsureInputs<'_>,
     ) -> Result<DaemonEnsureOutcome, String> {
-        use gwt_core::daemon::{
-            resolve_bootstrap_action_for_version, DaemonBootstrapAction, RuntimeScope,
-            RuntimeTarget, DAEMON_PROTOCOL_VERSION,
-        };
+        use gwt_core::daemon::{DaemonBootstrapAction, RuntimeScope, RuntimeTarget};
 
         self.ensure_attempts.fetch_add(1, Ordering::SeqCst);
         let DaemonEnsureInputs {
@@ -222,22 +268,46 @@ impl DaemonSupervisor {
         let endpoint_path = scope.endpoint_path(&gwt_home);
 
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-        let started_child_pid = reap_finished_child(&mut children, &endpoint_path);
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err("daemon supervisor is shut down".to_string());
+        }
+        let child_endpoint = child_endpoint_for_project(&children, &endpoint_path);
+        let started_child_pid = reap_finished_child(&mut children, &child_endpoint);
 
-        let action = resolve_bootstrap_action_for_version(
+        let action = crate::daemon_publisher::resolve_project_daemon_bootstrap(
             &gwt_home,
             &scope,
-            DAEMON_PROTOCOL_VERSION,
-            expected_daemon_version,
+            Some(expected_daemon_version),
             is_process_alive,
-        )
-        .map_err(|error| format!("daemon bootstrap resolution failed: {error}"))?;
+        )?;
 
         match action {
             DaemonBootstrapAction::Reuse(endpoint) => {
                 Ok(DaemonEnsureOutcome::AlreadyRunning { pid: endpoint.pid })
             }
             DaemonBootstrapAction::RetireStaleVersion { endpoint } => {
+                // Never hold the child table while waiting for IPC. The GUI
+                // only enqueues this worker, and shutdown must be able to win.
+                drop(children);
+                let (_probe_runtime, _connection) = authenticate_retirement_candidate(&endpoint)?;
+                let _children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
+                if self.stopped.load(Ordering::SeqCst) {
+                    return Err(
+                        "daemon supervisor shut down during retirement verification".to_string()
+                    );
+                }
+                let current = crate::daemon_publisher::resolve_project_daemon_bootstrap(
+                    &gwt_home,
+                    &scope,
+                    Some(expected_daemon_version),
+                    is_process_alive,
+                )?;
+                if !matches!(current, DaemonBootstrapAction::RetireStaleVersion { endpoint: current } if current == endpoint)
+                {
+                    return Err(
+                        "daemon authority changed during retirement verification".to_string()
+                    );
+                }
                 // Issue #4038 (AC-6): a daemon from a previous build survived
                 // the update (or was started by a hook while the old binary
                 // was still installed). Adopting it would serve stale logic
@@ -286,7 +356,8 @@ impl DaemonSupervisor {
         };
         let endpoint_path = scope.endpoint_path(gwt_home);
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
-        reap_finished_child(&mut children, &endpoint_path).is_some()
+        let child_endpoint = child_endpoint_for_project(&children, &endpoint_path);
+        reap_finished_child(&mut children, &child_endpoint).is_some()
     }
 
     /// Terminate every daemon this process started.
@@ -296,6 +367,7 @@ impl DaemonSupervisor {
     /// daemon from a previous build would be reused after an update. Stopping
     /// the ones we own keeps exactly one, version-matched driver per project.
     pub fn shutdown(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         let mut children = self.children.lock().unwrap_or_else(PoisonError::into_inner);
         for (endpoint_path, mut child) in children.drain() {
             // SIGTERM lets the serve loop unlink its socket and endpoint file;
@@ -312,6 +384,33 @@ impl DaemonSupervisor {
     }
 }
 
+fn authenticate_retirement_candidate(
+    endpoint: &gwt_core::daemon::DaemonEndpoint,
+) -> Result<
+    (
+        tokio::runtime::Runtime,
+        crate::cli::daemon::client::DaemonClient,
+    ),
+    String,
+> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("retirement verifier runtime failed: {error}"))?;
+    let client = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                crate::cli::daemon::client::DaemonClient::connect(endpoint),
+            )
+            .await
+            .map_err(|_| "daemon retirement authentication timed out".to_string())?
+        })
+        .map_err(|error| format!("daemon retirement candidate was not authenticated: {error}"))?;
+    // Keep the authenticated connection alive through the retirement callback.
+    Ok((runtime, client))
+}
+
 impl Default for DaemonSupervisor {
     fn default() -> Self {
         Self::gwtd()
@@ -325,6 +424,17 @@ impl std::fmt::Debug for DaemonSupervisor {
             .field("ensure_attempts", &self.ensure_attempts())
             .finish_non_exhaustive()
     }
+}
+
+/// Endpoint slots retain the owner's real worktree, but their parent directory
+/// is already keyed by ProjectKey. Reuse a starting child across that project
+/// before it has published an authority fence or endpoint.
+fn child_endpoint_for_project(children: &HashMap<PathBuf, Child>, endpoint: &Path) -> PathBuf {
+    children
+        .keys()
+        .find(|candidate| candidate.parent() == endpoint.parent())
+        .cloned()
+        .unwrap_or_else(|| endpoint.to_path_buf())
 }
 
 /// Drop a finished child from the table and return the pid of the one that is
@@ -608,18 +718,54 @@ mod tests {
     fn ensure_running_retires_a_live_daemon_of_another_version() {
         use gwt_core::daemon::{persist_endpoint, DaemonEndpoint, RuntimeScope, RuntimeTarget};
 
-        let gwt_home = tempfile::TempDir::new().expect("gwt home");
+        let gwt_home = gwt_core::test_support::socket_tempdir().expect("gwt home");
         let project = tempfile::TempDir::new().expect("project");
         let scope =
             RuntimeScope::from_project_root(project.path(), RuntimeTarget::Host).expect("scope");
+        let socket_path = gwt_home.path().join("retire.sock");
+        let listener = std::os::unix::net::UnixListener::bind(
+            gwt_core::test_support::checked_socket_path(&socket_path),
+        )
+        .unwrap();
         let endpoint = DaemonEndpoint::new(
             scope.clone(),
-            4242,
-            "unix:///tmp/gwt-test.sock".into(),
+            std::process::id(),
+            socket_path.display().to_string(),
             "secret-token".into(),
             "0.0.1-stale".into(),
         );
         persist_endpoint(&scope.endpoint_path(gwt_home.path()), &endpoint).expect("persist");
+
+        let server_scope = scope.clone();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: gwt_core::daemon::IpcHandshakeRequest =
+                serde_json::from_str(&line).unwrap();
+            assert_eq!(request.scope, server_scope);
+            assert_eq!(request.auth_token, "secret-token");
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&gwt_core::daemon::IpcHandshakeResponse {
+                    protocol_version: request.protocol_version,
+                    daemon_version: "0.0.1-stale".into(),
+                    accepted: true,
+                    rejection_reason: None,
+                })
+                .unwrap()
+            )
+            .unwrap();
+            let mut tail = Vec::new();
+            std::io::Read::read_to_end(&mut stream, &mut tail).unwrap();
+        });
 
         let supervisor = DaemonSupervisor::with_spawner(move |_context| {
             Err(std::io::Error::other(
@@ -632,15 +778,21 @@ mod tests {
                 project.path(),
                 DaemonEnsureInputs {
                     gwt_home: gwt_home.path().to_path_buf(),
-                    is_process_alive: &|pid| pid == 4242,
+                    is_process_alive: &|pid| pid == std::process::id(),
                     expected_daemon_version: env!("CARGO_PKG_VERSION"),
                     retire_stale_daemon: &|pid| retired.lock().unwrap().push(pid),
                 },
             )
             .expect("ensure succeeds");
 
-        assert_eq!(outcome, DaemonEnsureOutcome::RetiringStale { pid: 4242 });
-        assert_eq!(retired.lock().unwrap().as_slice(), &[4242]);
+        server.join().unwrap();
+        assert_eq!(
+            outcome,
+            DaemonEnsureOutcome::RetiringStale {
+                pid: std::process::id()
+            }
+        );
+        assert_eq!(retired.lock().unwrap().as_slice(), &[std::process::id()]);
         assert!(
             scope.endpoint_path(gwt_home.path()).exists(),
             "the live daemon unlinks its own descriptor on SIGTERM; the supervisor does not"

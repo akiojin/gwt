@@ -72,6 +72,51 @@ pub struct Comment {
     pub body: String,
 }
 
+/// Diagnose broken comment routing without assembling a [`SpecBody`].
+///
+/// Returns an empty string for a healthy index. Missing references and orphan
+/// artifact parts are all reported, even when missing comments prevent parsing
+/// the composed body. Malformed comments are reported without hiding findings
+/// from other comments. This is read-only: orphan content is never adopted.
+pub fn diagnose_index(body: &str, comments: &[Comment]) -> Result<String, ParseError> {
+    let index = parse_index_map(body)?;
+    let comment_map: BTreeMap<u64, &Comment> = comments.iter().map(|c| (c.id, c)).collect();
+    let mut diagnostics = Vec::new();
+    for (name, location) in &index.0 {
+        if let SectionLocation::Comments(ids) = location {
+            for id in ids {
+                if !comment_map.contains_key(id) {
+                    diagnostics.push(format!("missing: section={name} comment:{id}"));
+                }
+            }
+        }
+    }
+    for comment in comments {
+        let sections = match extract_sections(&comment.body) {
+            Ok(sections) => sections,
+            Err(error) => {
+                diagnostics.push(format!("malformed: comment:{} {error}", comment.id));
+                continue;
+            }
+        };
+        for section in sections {
+            let referenced = matches!(index.0.get(&section.name),
+                Some(SectionLocation::Comments(ids)) if ids.contains(&comment.id));
+            if !referenced {
+                let part = section.part.map_or_else(
+                    || "unmarked".to_string(),
+                    |part| format!("{}/{}", part.index, part.total),
+                );
+                diagnostics.push(format!(
+                    "orphan: section={} comment:{} part={part}",
+                    section.name, comment.id
+                ));
+            }
+        }
+    }
+    Ok(diagnostics.join("\n"))
+}
+
 impl SpecBody {
     /// Parse a body + comments snapshot into a [`SpecBody`].
     pub fn parse(body: &str, comments: &[Comment]) -> Result<Self, ParseError> {
@@ -242,7 +287,7 @@ fn parse_header(body: &str) -> Result<SpecMeta, ParseError> {
     Ok(SpecMeta { id, version })
 }
 
-fn parse_index_map(body: &str) -> Result<SectionsIndex, ParseError> {
+pub(crate) fn parse_index_map(body: &str) -> Result<SectionsIndex, ParseError> {
     // Multi-line comment block beginning with `<!-- sections:` and ending
     // with `-->` on its own. We accept content across newlines.
     let re =
