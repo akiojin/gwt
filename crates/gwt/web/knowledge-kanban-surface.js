@@ -5628,31 +5628,7 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_detail": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (
-              !state ||
-              normalizeKnowledgeKind(event.knowledge_kind) !==
-                normalizeKnowledgeKind(state.kind)
-            ) {
-              break;
-            }
-            if (!knowledgeDetailRequestMatches(state, event)) {
-              break;
-            }
-            const previousNumber = state.selectedNumber;
-            const matchesLoadRequest =
-              !event.request_id || event.request_id === state.loadRequestId;
-            state.detail = event.detail ? { ...event.detail,
-              sections: (event.detail.sections || []).map(section => ({ ...section,
-                content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
-            state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
-            if (matchesLoadRequest) {
-              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
-            }
-            state.detailLoading = false;
-            knowledgeCompletionViewModel.update(() => ({
-              windowId: event.id, previousNumber, detailCompletion: true,
-            }));
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, detailReceipt: event }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
@@ -5838,7 +5814,7 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion, terminalPreview, searchReceipt }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailReceipt, errorCompletion, terminalPreview, searchReceipt }) => {
         if (terminalPreview) {
           const text = terminalPreviewText.get(windowId);
           for (const element of windowMap.values()) {
@@ -5852,6 +5828,22 @@ export function createKnowledgeKanbanSurface({
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (detailReceipt) {
+          const event = detailReceipt;
+          if (normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind) ||
+              !knowledgeDetailRequestMatches(state, event)) return;
+          previousNumber = state.selectedNumber;
+          const matchesLoadRequest =
+            !event.request_id || event.request_id === state.loadRequestId;
+          state.detail = event.detail ? { ...event.detail,
+            sections: (event.detail.sections || []).map(section => ({ ...section,
+              content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
+          state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
+          if (matchesLoadRequest) {
+            finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+          }
+          state.detailLoading = false;
+        }
         if (searchReceipt) {
           const event = searchReceipt;
           const activeIntent = state.inFlightSearchIntent;
@@ -5906,7 +5898,7 @@ export function createKnowledgeKanbanSurface({
           if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);
           return;
         }
-        if (detailCompletion) {
+        if (detailReceipt) {
           renderKnowledgeSelection(windowId, state, previousNumber);
           // SPEC-2017 US-9 — refresh the Drawer body when the detail
           // is for the entry the Drawer is currently showing. This
