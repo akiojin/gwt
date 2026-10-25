@@ -68,28 +68,22 @@
 
 ## Step 6: Decide PR readiness before pushing
 
-- Apply the Ready PR Gate from the main skill before any push or PR write
-  that would create/update a Ready for review PR.
-- If the change is not a releaseable slice, has known blockers, has
-  Remaining acceptance, or lacks `gwt-verify --mode pre-pr` PASS evidence,
-  the PR state must be Draft.
-- If the user requested Ready for review but the gate fails, do not create
-  or update a Ready/non-draft PR. Create/update only as Draft if the user
-  accepts that state; otherwise return NO ACTION.
+- Apply the Ready PR Gate before any code-changing push or PR write.
+- Draft PRs are prohibited. If the change is not a releaseable slice, has
+  known blockers or Remaining acceptance, or lacks pre-PR PASS evidence,
+  repair the failure before creating a PR. Report NO ACTION if no safe
+  in-scope repair can proceed.
 
 ## Step 7: Ensure the head branch is pushed
 
-- If creating/updating a Ready for review PR, push only after the Ready PR
-  Gate passes.
-- If creating/updating a Draft PR, push with the draft intent recorded in
-  the PR body and include the exact verification already run.
+- Push only after the Ready PR Gate passes.
 - If no upstream: `git push -u origin <head>`
 - Otherwise: `git push`
 
 ## Step 8: Collect PR inputs
 
 - Title, Summary, Context, Changes, Testing, PR Readiness, Risk/Impact, Deployment, Screenshots, Related Links, Notes
-- Optional: labels, reviewers, assignees, draft
+- Optional: labels, reviewers, assignees
 - Derive missing sections from the diff, linked Issues/SPECs, and executed tests before asking the user.
 
 ## Step 9: Build PR body from template
@@ -123,7 +117,7 @@
 2. Each Summary bullet must be a single sentence. No vague wording.
 3. Changes must reference specific file or module names.
 4. Testing must be reproducible. No vague "tested."
-5. PR Readiness must be Ready for review only when the Ready PR Gate passed; otherwise it must be Draft with explicit blockers.
+5. PR Readiness must be Ready for review after the Ready PR Gate passes. Do not create a PR while the gate fails.
 6. Add a reason comment to every unchecked checklist item.
 7. Closing Issues: `Closes #N` or `None` only. Bare `#N` without keyword is forbidden.
 8. If `#N` in Related Issues should auto-close, it must also appear in Closing Issues as `Closes #N`.
@@ -131,9 +125,7 @@
 ## Step 10: Create or update the PR
 
 - Canonical path:
-  - Create: JSON operation `pr.create` with `params.base`, optional `params.head`, `params.title`, `params.body`, optional `params.labels`, and `params.draft`.
-    - Set `params.draft:false` only after the Ready PR Gate passes.
-    - Set `params.draft:true` when the PR Readiness state is Draft.
+  - Create: JSON operation `pr.create` with `params.base`, optional `params.head`, `params.title`, `params.body`, and optional `params.labels`, after the Ready PR Gate passes.
   - Update: JSON operation `pr.edit` with `params.number`, optional `params.title`, optional `params.body`, and optional `params.add_labels`.
 - Transport note: the current implementation may still use GitHub REST / `gh` internally, but agent-facing workflow should stay on gwtd JSON operations.
 

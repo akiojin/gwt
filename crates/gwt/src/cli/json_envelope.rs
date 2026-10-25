@@ -1226,14 +1226,22 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 },
             ))
         }
-        "pr.create" => CliCommand::Pr(PrCommand::CreateBody {
-            base: required_string(params, "base")?,
-            head: optional_string(params, "head")?,
-            title: required_string(params, "title")?,
-            body: required_string(params, "body")?,
-            labels: optional_string_vec(params, "labels")?,
-            draft: optional_bool(params, "draft")?.unwrap_or(false),
-        }),
+        "pr.create" => {
+            if optional_bool(params, "draft")?.unwrap_or(false) {
+                return Err(CliParseError::InvalidValue {
+                    flag: "draft",
+                    reason: crate::cli::pr::DRAFT_PR_REFUSAL,
+                });
+            }
+            CliCommand::Pr(PrCommand::CreateBody {
+                base: required_string(params, "base")?,
+                head: optional_string(params, "head")?,
+                title: required_string(params, "title")?,
+                body: required_string(params, "body")?,
+                labels: optional_string_vec(params, "labels")?,
+                draft: false,
+            })
+        }
         "pr.edit" => {
             let number = required_u64(params, "number")?;
             let base = optional_string(params, "base")?;
@@ -1264,9 +1272,6 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
             number: required_u64(params, "number")?,
         }),
         "pr.ready" => CliCommand::Pr(PrCommand::Ready {
-            number: required_u64(params, "number")?,
-        }),
-        "pr.draft" => CliCommand::Pr(PrCommand::Draft {
             number: required_u64(params, "number")?,
         }),
         "pr.close" => CliCommand::Pr(PrCommand::Close {
@@ -3742,9 +3747,9 @@ mod tests {
         #[test]
         fn guidance_operation_names_flag_an_operation_that_does_not_exist() {
             let operations = dispatched_operations();
-            assert!(operations.contains("pr.draft"), "{operations:?}");
+            assert!(operations.contains("pr.ready"), "{operations:?}");
             let text = "Disable auto-merge through `pr.merge`, or run workspace.prune. \
-                Keep `pr.draft`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
+                Keep `pr.ready`, `params.body`, `plan.md`, `issue.spec.*`, a `verify.lease` \
                 holder, and github.com.";
             assert_eq!(
                 unresolved_operation_names(text, &operations),
@@ -8635,10 +8640,18 @@ mod tests {
         assert!(matches!(
             ok(
                 "pr.create",
-                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": true})
+                json!({"base": "main", "head": "develop", "title": "t", "body": "b", "labels": ["release"], "draft": false})
             ),
-            CliCommand::Pr(PrCommand::CreateBody { draft: true, .. })
+            CliCommand::Pr(PrCommand::CreateBody { draft: false, .. })
         ));
+        let refused = err(
+            "pr.create",
+            json!({"base": "develop", "title": "t", "body": "b", "draft": true}),
+        );
+        assert!(
+            refused.to_string().contains("Draft PRs are prohibited"),
+            "{refused}"
+        );
         assert!(matches!(
             ok(
                 "pr.edit",
@@ -8693,8 +8706,8 @@ mod tests {
             CliCommand::Pr(PrCommand::Ready { number: 9 })
         ));
         assert!(matches!(
-            ok("pr.draft", json!({"number": 9})),
-            CliCommand::Pr(PrCommand::Draft { number: 9 })
+            err("pr.draft", json!({"number": 9})),
+            CliParseError::UnknownSubcommand(_)
         ));
         assert!(matches!(
             ok("pr.comment", json!({"number": 1, "body": "b"})),

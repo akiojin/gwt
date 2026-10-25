@@ -454,7 +454,6 @@ fn red_104a_parse_pr_create() {
         s("/tmp/pr-body.md"),
         s("--label"),
         s("release"),
-        s("--draft"),
     ])
     .unwrap();
     assert_eq!(
@@ -465,8 +464,32 @@ fn red_104a_parse_pr_create() {
             title: "feat(hooks): canonical pr.create operation".into(),
             file: "/tmp/pr-body.md".into(),
             labels: vec!["release".into()],
-            draft: true,
+            draft: false,
         })
+    );
+}
+
+#[test]
+fn pr_create_rejects_draft_and_draft_transition_is_removed() {
+    let refused = parse_pr_args(&[
+        s("create"),
+        s("--base"),
+        s("develop"),
+        s("--title"),
+        s("t"),
+        s("-f"),
+        s("/tmp/pr-body.md"),
+        s("--draft"),
+    ])
+    .expect_err("Draft creation must be refused");
+    assert!(
+        refused.to_string().contains("Draft PRs are prohibited"),
+        "{refused}"
+    );
+    assert!(parse_pr_args(&[s("draft"), s("42")]).is_err());
+    assert_eq!(
+        parse_pr_args(&[s("ready"), s("42")]).unwrap(),
+        CliCommand::Pr(PrCommand::Ready { number: 42 })
     );
 }
 
@@ -1421,6 +1444,29 @@ fn red_108_dispatch_pr_current_is_live_first() {
 #[test]
 fn red_108a_dispatch_pr_create_uses_live_transport() {
     let tmp = TempDir::new().unwrap();
+    // Ready creation classifies the actual diff; use an empty, known baseline.
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "chore: fixture",
+        ],
+        vec!["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    ] {
+        assert!(gwt_core::process::hidden_command("git")
+            .args(args)
+            .current_dir(tmp.path())
+            .status()
+            .unwrap()
+            .success());
+    }
     let mut env = TestEnv::new(tmp.path().to_path_buf());
     env.files.insert(
         "/virtual/pr-body.md".to_string(),
@@ -1456,10 +1502,9 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
             "/virtual/pr-body.md",
             "--label",
             "release",
-            "--draft",
         ]),
     );
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&env.stdout));
     assert_eq!(
         env.pr_create_call_log,
         vec![PrCreateCall {
@@ -1468,7 +1513,7 @@ fn red_108a_dispatch_pr_create_uses_live_transport() {
             title: "Created PR".to_string(),
             body: "## Summary\n\nBody".to_string(),
             labels: vec!["release".to_string()],
-            draft: true,
+            draft: false,
         }]
     );
 

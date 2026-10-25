@@ -1889,7 +1889,7 @@ quota:
     records the intent; the `Auto Merge PR` workflow performs the merge,
     and a queued or failed run of it leaves the PR exactly here. Find
     that run and rerun it with `actions.rerun`; waiting does not land it
-    (25 minutes measured). Never reach for `pr.draft` / `pr.ready` as a
+    (25 minutes measured). Never reach for Draft/Ready state flips as a
     nudge — Draft cancels auto-merge. External forks have the scoped operation
     described above; ordinary PRs retain repository merge automation.
   - `CONFLICTED`: relaunch the owner to resolve the conflict
@@ -1945,12 +1945,15 @@ do not recheck them:
   head,
 - the body records `Agent Visual Check: pass` or `n/a (no UI surface)`.
 
-`User Verification Result: deferred (autonomous execution)` is not a
-refusal. Deferral records that nobody has looked at the change yet, not
-that it may never ship; the UI question it leaves open is the one
-`Agent Visual Check` answers. Promote a `deferred` PR that satisfies the
-list above, and leave the owner's later sweep to `pr.list`'s
-`deferred_user_verification`.
+Draft PRs are prohibited; do not create one or demote a Ready PR.
+`User Verification Result: deferred (autonomous execution)` is not a refusal.
+The `deferred_user_verification` field is diagnostic, not an owner request.
+User Verification Result is optional unless the owner explicitly requests
+a human check. A missing, pending, or legacy deferred field alone does not
+create that request. `Agent Visual Check` and measured headed evidence cover
+UI quality. Promote an existing Draft that satisfies the machine checks with
+`pr.ready`; evidence belonging to another session does not by itself refuse
+the registered PM. The target head, required CI, and review gates still apply.
 
 `ready_to_promote_blocker` names the one condition still missing on a
 Draft that did not qualify, so a row never leaves you guessing why:
@@ -4029,6 +4032,9 @@ mod tests {
             "run `pr.ready` on it yourself, without asking the user",
             "Do not wait for the owning agent to come back",
             "deferred (autonomous execution)` is not a refusal",
+            "Draft PRs are prohibited",
+            "User Verification Result is optional unless the owner explicitly requests",
+            "evidence belonging to another session does not by itself refuse the registered PM",
             "`ready_to_promote_blocker` names the one condition still missing",
             "`agent_visual_check_failed` is the owner's work, never yours",
         ] {
@@ -4177,9 +4183,8 @@ mod tests {
             "cargo build -p gwt --bin gwtd",
             "`verify.lease.status`",
             "waiting, not stuck",
-            // Issue #3913: verify.run admits itself and answers `deferred`
-            // on a busy host; a deferred agent is retrying, not stuck.
-            "`deferred`",
+            // Deferred admission is verified by its actual record wording
+            // below, independently of the unrelated legacy PR body value.
             "`pending`",
             "first remaining command's admission",
             "incomplete, non-PASS deferred record",

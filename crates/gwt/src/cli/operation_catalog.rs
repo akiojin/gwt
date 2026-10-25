@@ -660,10 +660,6 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &[],
     },
     Operation {
-        name: "pr.draft",
-        aliases: &[],
-    },
-    Operation {
         name: "pr.edit",
         aliases: &[],
     },
@@ -940,8 +936,7 @@ pub fn suggestions(unknown: &str) -> Vec<&'static str> {
 /// what `pr.` does have.
 ///
 /// Also reached by the argv parser, whose unknown values are flags and
-/// subcommand words rather than operations — `--draft` would otherwise collect
-/// `pr.draft` as a candidate and send the caller to the wrong surface. Only a
+/// subcommand words rather than operations. Only a
 /// dotted name is treated as an attempted operation.
 pub fn unknown_subcommand_message(unknown: &str) -> String {
     let mut message = format!("unknown subcommand: {unknown}");

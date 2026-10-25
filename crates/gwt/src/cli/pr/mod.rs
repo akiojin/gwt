@@ -52,6 +52,9 @@ pub struct PrQuarantineContext {
     pub comments: Vec<PrQuarantineComment>,
 }
 
+pub(super) const DRAFT_PR_REFUSAL: &str =
+    "Draft PRs are prohibited. Create a verified Ready PR; use `pr.ready` for an existing Draft.";
+
 pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
     let mut it = args.iter().peekable();
     match it.next().map(String::as_str) {
@@ -91,11 +94,6 @@ pub(super) fn parse(args: &[String]) -> Result<PrCommand, CliParseError> {
             let number = super::parse_required_number(it.next())?;
             super::ensure_no_remaining_args(it)?;
             Ok(PrCommand::Ready { number })
-        }
-        Some("draft") => {
-            let number = super::parse_required_number(it.next())?;
-            super::ensure_no_remaining_args(it)?;
-            Ok(PrCommand::Draft { number })
         }
         Some("update-branch") => {
             let number = super::parse_required_number(it.next())?;
@@ -317,7 +315,18 @@ fn pr_mutation_body<E: CliEnv>(env: &mut E, cmd: &PrCommand) -> std::io::Result<
     Ok(body)
 }
 
-/// #4326: use the launch route and measured verification for Ready handoffs.
+fn user_verification_rejection(body: &str) -> Option<&'static str> {
+    gwt_git::pr_status::user_verification_results(body)
+        .any(|value| {
+            value
+                .trim_matches(['*', '`', ' '])
+                .to_ascii_lowercase()
+                .starts_with("rejected")
+        })
+        .then_some("PR handoff refused: a recorded user verification failure is unresolved. Repair the reported behavior and update the verification result before retrying.")
+}
+
+/// #4326: measured UI verification permits Ready independently of human review.
 pub(super) fn ready_verification(
     worktree: &std::path::Path,
     session_id: Option<&str>,
@@ -325,6 +334,9 @@ pub(super) fn ready_verification(
     is_pr_ready: bool,
 ) -> Result<Option<crate::cli::verification_record::VerificationRunRecord>, String> {
     use crate::cli::verification_record as verification;
+    if let Some(refusal) = user_verification_rejection(body) {
+        return Err(refusal.to_string());
+    }
     let route = crate::cli::execution_state::session_launch_route(session_id);
     let user_result = gwt_git::pr_status::user_verification_result(body).unwrap_or_default();
     let legacy_autonomous =
@@ -352,24 +364,15 @@ pub(super) fn ready_verification(
         || visual_result
             .as_deref()
             .is_some_and(|result| result == "pass" || result.starts_with("fail"));
-    let ui_surface = declared_ui || match crate::cli::verify_derivation::has_frontend_changes(worktree) {
-        Ok(frontend) => frontend,
-        Err(error) if autonomous => return Err(format!(
-            "PR handoff refused: cannot classify autonomous UI changes: {error}. Restore the Git integration base and rerun verify.plan / verify.run."
-        )),
-        Err(_) if user_result == "confirmed" => true,
-        Err(error) => return Err(format!(
-            "PR handoff refused: cannot classify manual UI changes: {error}. Restore the Git integration base and rerun verify.plan / verify.run, or complete the user verification handoff."
-        )),
-    };
-    if !autonomous {
-        if (ui_surface || user_result.starts_with("deferred")) && user_result != "confirmed" {
-            return Err("PR handoff refused: manual UI verification requires `User Verification Result: confirmed`. Complete the user verification handoff and retry; an automated check does not confirm a human review.".to_string());
-        }
+    let ui_surface = declared_ui
+        || crate::cli::verify_derivation::has_frontend_changes(worktree).map_err(|error| {
+            format!("PR handoff refused: cannot classify UI changes: {error}. Restore the Git integration base and rerun verify.plan / verify.run.")
+        })?;
+    if !autonomous && !ui_surface {
         return Ok(None);
     }
     let recovery = if ui_surface {
-        "PR handoff refused: autonomous UI changes require `Agent Visual Check: pass` and fresh measured headed Chromium E2E in dark and light themes. Register the complete matrix with verify.plan, then run verify.run with headed_e2e_commands naming the exact Playwright command in commands. Missing, skipped, headless or failing execution cannot authorize Ready."
+        "PR handoff refused: UI changes require `Agent Visual Check: pass` and fresh measured headed Chromium E2E in dark and light themes. Register the complete matrix with verify.plan, then run verify.run with headed_e2e_commands naming the exact Playwright command in commands. Missing, skipped, headless or failing execution cannot authorize Ready."
     } else {
         "PR handoff refused: autonomous Ready requires fresh passing verification. Register the complete matrix with verify.plan, then execute it with verify.run."
     };
@@ -454,17 +457,30 @@ pub(super) fn run<E: CliEnv>(
     cmd: PrCommand,
     out: &mut String,
 ) -> Result<i32, SpecOpsError> {
+    if matches!(
+        cmd,
+        PrCommand::Create { draft: true, .. } | PrCommand::CreateBody { draft: true, .. }
+    ) {
+        out.push_str(DRAFT_PR_REFUSAL);
+        out.push('\n');
+        return Ok(2);
+    }
     if let PrCommand::CreateFromCi(request) = cmd {
         return ci_delivery::run(env, request, out);
+    }
+    if let PrCommand::Ready { number } = &cmd {
+        if let Some(code) = ci_delivery::ready_by_pm(env, *number, out) {
+            return Ok(code);
+        }
     }
     // SPEC-3248 P8b (T-112/FR-037/AS-33): Ready handoffs — a non-draft PR
     // creation or `pr.ready` — require the current session's execution to be
     // settled or backed by fresh verification evidence. Exact Board decision
     // references may classify failed commands for `pr.ready` only. A
-    // terminally blocked execution refuses every PR mutation, draft creation
-    // and edits included; an active execution keeps the mid-work Draft flow
-    // available.
-    // Close is containment, like demoting to Draft: it must remain available
+    // terminally blocked execution refuses ordinary PR mutations and edits.
+    // Draft creation is prohibited before the lifecycle gate. The registered
+    // PM can promote existing Drafts using their producing verification above.
+    // Close is containment: it must remain available
     // when producing authority or verification is unavailable (Issue #3693).
     let is_pr_mutation = matches!(
         cmd,
@@ -577,7 +593,7 @@ pub(super) fn run<E: CliEnv>(
                 });
             if let Some((owner_number, completion)) = completed_evidence {
                 if completion.used_typed_quarantine && target_pr.is_none() {
-                    out.push_str("PR handoff refused: typed quarantine requires Draft-first creation so the exact PR body or durable top-level comment can be recorded and read back.\n");
+                    out.push_str("PR handoff refused: creating a Ready PR requires normal passing verification. Repair the failing commands and rerun verify.plan / verify.run; Draft PR creation is prohibited. Existing Draft PRs may use pr.ready with their validated quarantine references.\n");
                     return Ok(2);
                 }
                 let session_id = session_id.as_deref().unwrap_or_default();
@@ -608,7 +624,7 @@ pub(super) fn run<E: CliEnv>(
                 match crate::cli::verification_record::load(&worktree) {
                     Ok(Some(verification)) if !verification.quarantined_failures.is_empty() => {
                         if target_pr.is_none() {
-                            out.push_str("PR handoff refused: typed quarantine requires Draft-first creation so the exact PR body or durable top-level comment can be recorded and read back.\n");
+                            out.push_str("PR handoff refused: creating a Ready PR requires normal passing verification. Repair the failing commands and rerun verify.plan / verify.run; Draft PR creation is prohibited. Existing Draft PRs may use pr.ready with their validated quarantine references.\n");
                             return Ok(2);
                         }
                         let evidence = crate::cli::verification_record::evaluate_evidence(
@@ -687,7 +703,7 @@ pub(super) fn run<E: CliEnv>(
         // mutation authority. Keep this path receipt-independent; execution
         // authority, verification, and non-PR obligations remain gated here.
         // T-247: a Ready handoff with unsettled non-PR obligations is
-        // premature — draft creation and edits stay available mid-work.
+        // premature; edits remain available while implementation continues.
         if is_ready_handoff {
             if let Some(session_id) = std::env::var(gwt_agent::GWT_SESSION_ID_ENV)
                 .ok()
@@ -993,14 +1009,6 @@ pub(super) fn run<E: CliEnv>(
             )
             .map_err(super::io_as_api_error)?;
             out.push_str(&format!("marked pull request #{number} ready for review\n"));
-            render_pr(out, &pr);
-            0
-        }
-        PrCommand::Draft { number } => {
-            let pr = env
-                .convert_pr_to_draft(number)
-                .map_err(super::io_as_api_error)?;
-            out.push_str(&format!("converted pull request #{number} to draft\n"));
             render_pr(out, &pr);
             0
         }
@@ -1493,7 +1501,6 @@ fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
     let mut title: Option<String> = None;
     let mut file: Option<String> = None;
     let mut labels: Vec<String> = Vec::new();
-    let mut draft = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1532,7 +1539,12 @@ fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
                 }
                 labels.push(args[i].clone());
             }
-            "--draft" => draft = true,
+            "--draft" => {
+                return Err(CliParseError::InvalidValue {
+                    flag: "--draft",
+                    reason: DRAFT_PR_REFUSAL,
+                })
+            }
             other => return Err(CliParseError::UnknownSubcommand(other.to_string())),
         }
         i += 1;
@@ -1543,7 +1555,7 @@ fn parse_pr_create_args(args: &[&String]) -> Result<PrCommand, CliParseError> {
         title: title.ok_or(CliParseError::MissingFlag("--title"))?,
         file: file.ok_or(CliParseError::MissingFlag("-f"))?,
         labels,
-        draft,
+        draft: false,
     })
 }
 
@@ -1913,7 +1925,36 @@ mod tests {
         value.to_string()
     }
 
+    fn seed_non_ui_pr_repo(repo: &std::path::Path) {
+        let has_head = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if !has_head {
+            crate::cli::trusted_store::init_git_repo_with_origin(repo);
+        }
+        let has_base = gwt_core::process::hidden_command("git")
+            .args(["rev-parse", "--verify", "refs/remotes/origin/develop"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        if !has_base {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(["update-ref", "refs/remotes/origin/develop", "HEAD"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+    }
+
     fn seed_readable_pr_body(env: &mut crate::cli::TestEnv) {
+        seed_non_ui_pr_repo(&env.repo_path);
         env.pr_quarantine_contexts.insert(
             7,
             PrQuarantineContext {
@@ -2386,7 +2427,8 @@ mod tests {
         });
         env.client.fail_create_comment_after(0);
         crate::cli::operation_warnings::take();
-        let request = ci_request_for(&fixture.repo);
+        let mut request = ci_request_for(&fixture.repo);
+        request.body = "User Verification Result: deferred (human verification pending)\nAgent Visual Check: n/a (no UI surface)\n".into();
         seed_ci_delivery(&mut env, &request);
         crate::cli::action_obligation::mark_from_prompt(
             &fixture.repo,
@@ -2549,7 +2591,7 @@ mod tests {
         );
         seed_ci_delivery(&mut env, &request);
         let mut deferred = request.clone();
-        deferred.body = "User Verification Result: deferred (human verification pending)".into();
+        deferred.body = "User Verification Result: rejected(requested check failed)".into();
         assert_eq!(
             run(&mut env, PrCommand::CreateFromCi(deferred), &mut out).unwrap(),
             2,
@@ -2762,14 +2804,6 @@ mod tests {
                 body: s("body"),
                 labels: vec![],
                 draft: false,
-            },
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("draft"),
-                body: s("body"),
-                labels: vec![],
-                draft: true,
             },
             PrCommand::EditBody {
                 number: 7,
@@ -3038,6 +3072,33 @@ mod tests {
         )
         .unwrap();
 
+        crate::cli::verification_record::save_plan(
+            worktree.path(),
+            &crate::cli::verification_record::VerificationPlanRecord::from(
+                crate::cli::verification_record::VerificationPlanData {
+                    format_version: Some(1),
+                    session_id: "session-current".to_string(),
+                    owner_number: Some(42),
+                    execution_binding: Some(identity),
+                    commands: vec!["git --version".to_string()],
+                    derived: false,
+                    surfaces: Vec::new(),
+                    generated_outputs: Vec::new(),
+                    quarantines: Vec::new(),
+                    worktree_fingerprint: String::new(),
+                    created_at: chrono::Utc::now(),
+                    content_hash: String::new(),
+                },
+            ),
+        )
+        .expect("save generation-bound verification plan");
+        crate::cli::verification_record::run_verification(
+            worktree.path(),
+            "session-current",
+            &["git --version".to_string()],
+        )
+        .expect("run generation-bound verification");
+
         let mut out = String::new();
         assert_eq!(
             run(
@@ -3045,14 +3106,14 @@ mod tests {
                 PrCommand::CreateBody {
                     base: s("develop"),
                     head: None,
-                    title: s("draft"),
+                    title: s("ready"),
                     body: s("body"),
                     labels: vec![],
-                    draft: true,
+                    draft: false,
                 },
                 &mut out,
             )
-            .expect("create draft as exact current Session"),
+            .expect("create Ready as exact current Session"),
             0,
             "{out}",
         );
@@ -3091,51 +3152,6 @@ mod tests {
             "{out}",
         );
 
-        crate::cli::verification_record::save_plan(
-            worktree.path(),
-            &crate::cli::verification_record::VerificationPlanRecord::from(
-                crate::cli::verification_record::VerificationPlanData {
-                    format_version: Some(1),
-                    session_id: "session-current".to_string(),
-                    owner_number: Some(42),
-                    execution_binding: Some(identity),
-                    commands: vec!["git --version".to_string()],
-                    derived: false,
-                    surfaces: Vec::new(),
-                    generated_outputs: Vec::new(),
-                    quarantines: Vec::new(),
-                    worktree_fingerprint: String::new(),
-                    created_at: chrono::Utc::now(),
-                    content_hash: String::new(),
-                },
-            ),
-        )
-        .expect("save generation-bound verification plan");
-        crate::cli::verification_record::run_verification(
-            worktree.path(),
-            "session-current",
-            &["git --version".to_string()],
-        )
-        .expect("run generation-bound verification");
-
-        out.clear();
-        assert_eq!(
-            run(
-                &mut env,
-                PrCommand::CreateBody {
-                    base: s("develop"),
-                    head: None,
-                    title: s("ready"),
-                    body: s("User Verification Result: confirmed\n"),
-                    labels: vec![],
-                    draft: false,
-                },
-                &mut out,
-            )
-            .expect("create ready PR as exact current Session"),
-            0,
-            "{out}",
-        );
         out.clear();
         assert_eq!(
             run(&mut env, PrCommand::Ready { number: 7 }, &mut out)
@@ -3144,7 +3160,7 @@ mod tests {
             "{out}",
         );
 
-        assert_eq!(env.pr_create_call_log.len(), 2);
+        assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
     }
@@ -3196,12 +3212,12 @@ mod tests {
             refusal.contains("PR handoff refused"),
             "the Ready gate still refuses for want of verification evidence: {refusal}"
         );
-        // A draft handoff stays available mid-work, exactly as before: No
-        // Action changed no PR authority, only the Stop and obligation state.
+        // Edits remain available: No Action changed no PR authority, only
+        // the Stop and obligation state.
         assert_eq!(
             crate::cli::execution_state::pr_handoff_refusal(worktree.path(), false),
             None,
-            "No Action must not tighten the unrelated draft path either"
+            "No Action must not tighten the unrelated edit path either"
         );
     }
 
@@ -3385,7 +3401,7 @@ mod tests {
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
         let worktree = tempfile::tempdir().unwrap();
-        crate::cli::trusted_store::init_git_repo_with_origin(worktree.path());
+        seed_non_ui_pr_repo(worktree.path());
         let session_id = "manual-active-head-4979";
         let identity = initialize_pr_generation_authority(worktree.path(), session_id);
         persist_pr_generation_session(worktree.path(), session_id, identity.clone());
@@ -4198,14 +4214,6 @@ mod tests {
                 labels: vec![],
                 draft: false,
             },
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("draft without receipt"),
-                body: s("body"),
-                labels: vec![],
-                draft: true,
-            },
             PrCommand::EditBody {
                 number: 7,
                 base: None,
@@ -4226,7 +4234,7 @@ mod tests {
             assert_eq!(code, 0, "{out}");
         }
 
-        assert_eq!(env.pr_create_call_log.len(), 2);
+        assert_eq!(env.pr_create_call_log.len(), 1);
         assert_eq!(env.pr_edit_call_log.len(), 1);
         assert_eq!(env.pr_ready_call_log, vec![7]);
         assert_eq!(env.pr_comments.len(), 1);
@@ -4254,18 +4262,17 @@ mod tests {
                 .expect("rotate capability after the PR gate snapshot");
         });
         let mut env = crate::cli::TestEnv::new(worktree.path().to_path_buf());
-        env.seed_created_pr(seeded_pr());
+        env.seed_pr(7, seeded_pr());
         let mut out = String::new();
 
         let error = run(
             &mut env,
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("draft"),
-                body: s("body"),
-                labels: vec![],
-                draft: true,
+            PrCommand::EditBody {
+                number: 7,
+                base: None,
+                title: Some(s("updated")),
+                body: None,
+                add_labels: vec![],
             },
             &mut out,
         )
@@ -4275,7 +4282,7 @@ mod tests {
             .to_string()
             .contains("changed before external dispatch"));
         assert!(
-            env.pr_create_call_log.is_empty(),
+            env.pr_edit_call_log.is_empty(),
             "authority loss must be detected before the GitHub mutation",
         );
     }
@@ -4287,8 +4294,7 @@ mod tests {
     }
 
     // SPEC-3248 P8b (T-112/AS-33): Ready handoffs are gated on the current
-    // session's execution state and verification evidence; the Draft flow
-    // stays available.
+    // session's execution state and verification evidence. Draft is prohibited.
     #[test]
     fn pr_handoff_gate_blocks_ready_paths_until_evidence_or_settlement() {
         let _env_lock = crate::env_test_lock()
@@ -4340,7 +4346,7 @@ mod tests {
         assert_eq!(code, 2, "{out}");
         assert!(env.pr_ready_call_log.is_empty(), "ready must not reach gh");
 
-        // Draft creation stays available mid-work.
+        // Draft creation is prohibited, even while implementation is active.
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -4354,9 +4360,10 @@ mod tests {
             },
             &mut out,
         )
-        .expect("run pr create draft");
-        assert_eq!(code, 0, "{out}");
-        assert_eq!(env.pr_create_call_log.len(), 1);
+        .expect("refuse prohibited Draft creation");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("Draft PRs are prohibited"), "{out}");
+        assert!(env.pr_create_call_log.is_empty());
 
         // Fresh evidence (plan + covering run) unlocks the Ready handoff.
         crate::cli::verification_record::save_plan(
@@ -4414,8 +4421,7 @@ mod tests {
         assert_eq!(code, 2, "{out}");
         assert!(out.contains("terminally blocked"), "{out}");
 
-        // AS-33: a blocked execution refuses every PR mutation — draft
-        // creation and edits included.
+        // AS-33: a blocked execution refuses ordinary creation and edits.
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -4425,11 +4431,11 @@ mod tests {
                 title: s("t"),
                 body: s("b"),
                 labels: vec![],
-                draft: true,
+                draft: false,
             },
             &mut out,
         )
-        .expect("run pr create draft while blocked");
+        .expect("run Ready creation while blocked");
         assert_eq!(code, 2, "{out}");
         let mut out = String::new();
         let code = run(
@@ -5166,14 +5172,6 @@ mod tests {
                 title: s("fix: autonomous confirmation"),
                 body: s(body),
                 labels: vec![],
-                draft: true,
-            },
-            PrCommand::CreateBody {
-                base: s("develop"),
-                head: None,
-                title: s("fix: autonomous confirmation"),
-                body: s(body),
-                labels: vec![],
                 draft: false,
             },
             PrCommand::EditBody {
@@ -5190,7 +5188,7 @@ mod tests {
                 title: s("fix: autonomous confirmation"),
                 file: s("body.md"),
                 labels: vec![],
-                draft: true,
+                draft: false,
             },
             PrCommand::Edit {
                 number: 7,
@@ -5577,12 +5575,8 @@ mod tests {
             .expect("persist ready-gate session");
     }
 
-    /// Issue #4510 AC-3 / AC-4: PR #4374's exact shape — an Issue Monitor
-    /// launch whose whole diff is one Playwright spec — must reach Ready, and
-    /// a genuinely attended launch that touches real UI must still not.
-    ///
-    /// The two halves share one fixture on purpose: the fix is a narrowing of
-    /// *what counts as a UI surface*, never a relaxation of the gate itself.
+    /// Test-only diffs need no browser evidence; actual UI changes require
+    /// measured headed evidence regardless of whether a human launched them.
     #[test]
     fn a_monitor_launched_test_only_change_reaches_ready_while_manual_ui_still_waits() {
         let _lock = crate::env_test_lock()
@@ -5662,7 +5656,7 @@ mod tests {
         );
         assert_eq!(env.pr_ready_call_log, vec![7]);
 
-        // AC-4: an attended launch touching real UI keeps the human gate.
+        // Real UI still requires automated headed evidence, including attended launches.
         let manual_id = "ready-4510-manual";
         let _manual_session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, manual_id);
         let manual_repo = tempfile::tempdir().unwrap();
@@ -5688,8 +5682,11 @@ mod tests {
         );
         let mut out = String::new();
         let code = run(&mut manual_env, PrCommand::Ready { number: 7 }, &mut out).unwrap();
-        assert_eq!(code, 2, "a real UI change still needs a human: {out}");
-        assert!(out.contains("manual UI verification requires"), "{out}");
+        assert_eq!(
+            code, 2,
+            "a real UI change still needs headed evidence: {out}"
+        );
+        assert!(out.contains("headed"), "{out}");
         assert!(manual_env.pr_ready_call_log.is_empty());
     }
 
@@ -5776,57 +5773,284 @@ mod tests {
     }
 
     #[test]
-    fn manual_ready_still_requires_user_confirmation() {
+    fn registered_pm_readies_a_draft_using_the_producing_sessions_evidence() {
+        use crate::cli::verification_record as verification;
         let _lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _profile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let fixture = verification::tests::WorkEventGitFixture::tracked();
+        let git = |args: &[&str]| {
+            let output = gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&fixture.repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["branch", "-m", "work/issue-42"]);
+        git(&[
+            "push",
+            "-q",
+            "origin",
+            "HEAD:refs/heads/develop",
+            "work/issue-42",
+        ]);
+        let producer = "ready-producer-4326";
+        let identity = initialize_pr_generation_authority(&fixture.repo, producer);
+        persist_pr_generation_session(&fixture.repo, producer, identity.clone());
+        enable_autonomous_pr_session(&fixture.repo, producer);
+        let _producer = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, producer);
+        verification::save_plan(
+            &fixture.repo,
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
+                session_id: producer.into(),
+                owner_number: Some(42),
+                execution_binding: Some(identity),
+                commands: vec!["git --version".into()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            }),
+        )
+        .unwrap();
+        let (record, _) =
+            verification::run_verification(&fixture.repo, producer, &["git --version".into()])
+                .unwrap();
+        verification::save(&fixture.repo, &record).unwrap();
+        let pm_path = crate::pm_registry::pm_worktree_path_for_repo_path(&fixture.repo);
+        std::fs::create_dir_all(pm_path.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            "-q",
+            pm_path.to_str().unwrap(),
+            "HEAD",
+        ]);
+        let pm_id = "registered-pm-ready-4326";
+        crate::pm_registry::save_pm_prefs(
+            &crate::pm_registry::pm_prefs_path_for_repo_path(&fixture.repo),
+            &crate::pm_registry::PmPrefs {
+                registration: Some(crate::pm_registry::PmRegistration {
+                    session_id: pm_id.into(),
+                    agent_id: "codex".into(),
+                    worktree_path: pm_path.to_str().unwrap().into(),
+                    created_at: None,
+                    consecutive_crashes: 0,
+                    next_not_before: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let _pm = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, pm_id);
+        let mut env = crate::cli::TestEnv::new(pm_path.clone());
+        seed_prepared_completion_pr(
+            &mut env,
+            &fixture.repo,
+            record.verified_head.as_deref().unwrap(),
+        );
+        let snapshot = env.completion_prs.get_mut(&7).unwrap();
+        snapshot.inventory.is_draft = true;
+        snapshot.inventory.ci_status = "PENDING".into();
+        snapshot.inventory.body = "User Verification Result: deferred (autonomous execution)\nAgent Visual Check: n/a (no UI surface)\n".into();
+        env.pr_quarantine_contexts.insert(
+            7,
+            PrQuarantineContext {
+                number: 7,
+                body: snapshot.inventory.body.clone(),
+                comments: vec![],
+            },
+        );
+        let protected = [
+            crate::cli::execution_state::state_path(&fixture.repo),
+            verification::state_path(&fixture.repo),
+            gwt_core::paths::gwt_sessions_dir().join(format!("{producer}.toml")),
+        ];
+        let before = protected
+            .iter()
+            .map(std::fs::read)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            0,
+            "registered PM uses producer evidence, and CI continues to gate merge: {out}"
+        );
+        assert!(verification::load(&pm_path).unwrap().is_none());
+        assert_eq!(
+            protected
+                .iter()
+                .map(std::fs::read)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            before
+        );
+        env.completion_prs.get_mut(&7).unwrap().inventory.is_draft = true;
+        let prefs_path = crate::pm_registry::pm_prefs_path_for_repo_path(&fixture.repo);
+        let registered_prefs = crate::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+        let revoke_path = prefs_path.clone();
+        let revoke_on_read = env.completion_pr_call_log.len() + 2;
+        env.completion_pr_read_hook = Some(Box::new(move |reads| {
+            if reads == revoke_on_read {
+                crate::pm_registry::save_pm_prefs(
+                    &revoke_path,
+                    &crate::pm_registry::PmPrefs::default(),
+                )
+                .unwrap();
+            }
+        }));
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "PM deregistered during remote read cannot dispatch Ready: {out}"
+        );
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+        env.completion_pr_read_hook = None;
+        crate::pm_registry::save_pm_prefs(&prefs_path, &registered_prefs).unwrap();
+        {
+            let _foreign =
+                ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "not-the-registered-pm");
+            let mut out = String::new();
+            assert_eq!(
+                run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+                2,
+                "{out}"
+            );
+        }
+        env.completion_prs.get_mut(&7).unwrap().head_sha = "a".repeat(40);
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "PM cannot promote an unverified remote head: {out}"
+        );
+        env.completion_prs.get_mut(&7).unwrap().head_sha = record.verified_head.clone().unwrap();
+        std::fs::write(fixture.repo.join("product.rs"), "pub fn changed() {}\n").unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "PM cannot promote stale evidence after source changes: {out}"
+        );
+        assert!(out.contains("complete pushed head"), "{out}");
+        assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
+
+    #[test]
+    fn manual_ui_ready_uses_measured_evidence_without_human_confirmation() {
+        use crate::cli::verification_record as verification;
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
         let session_id = "ready-manual-4326";
         let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session_id);
         let repo = tempfile::tempdir().unwrap();
-        let mut session =
-            gwt_agent::Session::new(repo.path(), "work/issue-4326", gwt_agent::AgentId::Codex);
-        session.id = session_id.to_string();
-        session.launch_route = gwt_agent::LaunchRoute::Manual;
-        session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+        ready_gate_worktree(
+            repo.path(),
+            &[("crates/gwt/web/app.js", "export const x = 1;\n")],
+        );
+        ready_gate_session(
+            repo.path(),
+            session_id,
+            gwt_agent::LaunchRoute::Manual,
+            false,
+        );
+        verification::save_plan(
+            repo.path(),
+            &verification::VerificationPlanRecord::from(verification::VerificationPlanData {
+                format_version: Some(1),
+                session_id: session_id.into(),
+                owner_number: None,
+                execution_binding: None,
+                commands: vec!["git --version".into()],
+                derived: false,
+                worktree_fingerprint: String::new(),
+                surfaces: Vec::new(),
+                generated_outputs: Vec::new(),
+                quarantines: Vec::new(),
+                created_at: chrono::Utc::now(),
+                content_hash: String::new(),
+            }),
+        )
+        .unwrap();
+        let (mut record, _) =
+            verification::run_verification(repo.path(), session_id, &["git --version".into()])
+                .unwrap();
+        record.commands[0].headed_e2e = Some(verification::headed_e2e::HeadedE2eEvidence {
+            chromium_dark_passed: 1,
+            chromium_light_passed: 1,
+            failed: 0,
+            status: "passed".into(),
+            artifacts: Vec::new(),
+        });
+        verification::save(repo.path(), &record).unwrap();
         let mut env = crate::cli::TestEnv::new(repo.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
-        for (value, expected) in [
-            ("pending", 2),
-            ("deferred (autonomous execution)", 2),
-            ("confirmed", 0),
+        for user_result in [
+            "",
+            "User Verification Result: pending\n",
+            "User Verification Result: deferred (human verification pending)\n",
+            "User Verification Result: confirmed\n",
         ] {
             env.pr_quarantine_contexts.insert(
                 7,
                 PrQuarantineContext {
                     number: 7,
-                    body: format!("User Verification Result: {value}\nAgent Visual Check: pass\n"),
-                    comments: Vec::new(),
+                    body: format!("{user_result}Agent Visual Check: pass\n"),
+                    comments: vec![],
                 },
             );
             let mut out = String::new();
             assert_eq!(
                 run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
-                expected,
-                "{value}: {out}"
+                0,
+                "human verification is optional when measured UI evidence passes: {out}"
             );
         }
         env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
-            "User Verification Result: n/a\n".to_string();
+            "User Verification Result: rejected(observed behavior failed)\nAgent Visual Check: pass\n".into();
         let mut out = String::new();
         assert_eq!(
             run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
             2,
-            "an unreadable Git base cannot prove UI verification is unnecessary: {out}"
+            "{out}"
         );
-        assert!(out.contains("cannot classify manual UI changes"), "{out}");
-        assert_eq!(env.pr_ready_call_log, vec![7]);
+        assert!(out.contains("recorded user verification failure"), "{out}");
+        env.pr_quarantine_contexts.get_mut(&7).unwrap().body =
+            "User Verification Result: confirmed\nAgent Visual Check: pass\n".into();
+        record.commands[0].headed_e2e = None;
+        verification::save(repo.path(), &record).unwrap();
+        let mut out = String::new();
+        assert_eq!(
+            run(&mut env, PrCommand::Ready { number: 7 }, &mut out).unwrap(),
+            2,
+            "{out}"
+        );
+        assert!(
+            out.contains("headed"),
+            "human confirmation cannot replace measured evidence: {out}"
+        );
+        assert_eq!(env.pr_ready_call_log, vec![7; 4]);
     }
 
-    /// AC-4: an unreadable body cannot prove that the owner completed their
-    /// visual verification, so Ready must wait for a successful read.
+    /// An unreadable body cannot establish the automated verification verdict,
+    /// so Ready requires a successful read.
     #[test]
     fn unreadable_user_verification_keeps_its_pr_draft() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5844,8 +6068,7 @@ mod tests {
         );
     }
 
-    /// AC-4 non-regression: the Draft flow stays open mid-work, and a PR whose
-    /// verification was performed or never applied is unaffected.
+    /// An existing recorded human result remains valid as optional history.
     #[test]
     fn a_settled_user_verification_still_reaches_ready() {
         let _env_lock = crate::env_test_lock()
@@ -5863,6 +6086,7 @@ mod tests {
         session
             .save(&gwt_core::paths::gwt_sessions_dir())
             .expect("persist manual launch route");
+        seed_non_ui_pr_repo(tmp.path());
         let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         env.seed_pr(7, seeded_pr());
         env.seed_created_pr(seeded_pr());
@@ -5879,33 +6103,10 @@ mod tests {
         let code = run(&mut env, PrCommand::Ready { number: 7 }, &mut out).expect("run pr ready");
         assert_eq!(code, 0, "{out}");
         assert_eq!(env.pr_ready_call_log, vec![7]);
-
-        let mut out = String::new();
-        let code = run(
-            &mut env,
-            PrCommand::CreateBody {
-                base: "develop".to_string(),
-                head: None,
-                title: "feat: deferred but draft".to_string(),
-                body: format!(
-                    "{} {}\n",
-                    gwt_git::pr_status::USER_VERIFICATION_RESULT_LABEL,
-                    gwt_git::pr_status::DEFERRED_USER_VERIFICATION_RESULT,
-                ),
-                labels: Vec::new(),
-                draft: true,
-            },
-            &mut out,
-        )
-        .expect("run pr create draft");
-        assert_eq!(
-            code, 0,
-            "a deferred verification is exactly what a Draft PR is for: {out}"
-        );
     }
 
     #[test]
-    fn pr_family_ready_and_draft_dispatch_through_env() {
+    fn pr_family_ready_dispatch_through_env() {
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5925,15 +6126,33 @@ mod tests {
         );
         assert!(out.contains("#7 [OPEN] CLI family split"));
         assert_eq!(env.pr_ready_call_log, vec![7]);
+    }
 
+    #[test]
+    fn pr_create_refuses_draft_before_any_external_dispatch() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = crate::cli::TestEnv::new(tmp.path().to_path_buf());
         let mut out = String::new();
-        let code = run(&mut env, PrCommand::Draft { number: 7 }, &mut out).expect("run pr draft");
-        assert_eq!(code, 0);
-        assert!(
-            out.contains("converted pull request #7 to draft"),
-            "unexpected draft output: {out}"
-        );
-        assert_eq!(env.pr_draft_call_log, vec![7]);
+        let code = run(
+            &mut env,
+            PrCommand::CreateBody {
+                base: "develop".into(),
+                head: None,
+                title: "fix: verified".into(),
+                body: "## Verification\nPASS".into(),
+                labels: Vec::new(),
+                draft: true,
+            },
+            &mut out,
+        )
+        .expect("run create");
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("Draft PRs are prohibited"), "{out}");
+        assert!(env.pr_create_call_log.is_empty());
     }
 
     #[test]
@@ -6055,6 +6274,7 @@ mod tests {
             let identity = initialize_pr_generation_authority(&repo, "pr-metadata-session");
             persist_pr_generation_session(&repo, "pr-metadata-session", identity);
         }
+        seed_non_ui_pr_repo(&repo);
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
         let pr = gwt_git::PrStatus {
@@ -6172,16 +6392,23 @@ mod tests {
             env.repo_path = repo.join("nested");
             std::fs::create_dir_all(&env.repo_path).expect("create nested cwd");
         }
-        if detached_delivery {
+        if detached_delivery
+            && matches!(
+                &command,
+                PrCommand::Ready { .. }
+                    | PrCommand::Create { draft: false, .. }
+                    | PrCommand::CreateBody { draft: false, .. }
+            )
+        {
+            // Ready metadata delivery is independent of the host's free disk space.
+            gwt_config::Settings::update_global(|settings| {
+                settings.verification.disk_budget_bytes = Some(0);
+                settings.build_artifact_gc.below_bytes = 0;
+                settings.build_artifact_gc.below_percent = 0;
+                Ok(())
+            })
+            .expect("fixture disk admission");
             if let PrCommand::Ready { number } = &command {
-                // Ready metadata delivery is independent of the host's free disk space.
-                gwt_config::Settings::update_global(|settings| {
-                    settings.verification.disk_budget_bytes = Some(0);
-                    settings.build_artifact_gc.below_bytes = 0;
-                    settings.build_artifact_gc.below_percent = 0;
-                    Ok(())
-                })
-                .expect("fixture disk admission");
                 env.pr_quarantine_contexts.insert(
                     *number,
                     PrQuarantineContext {
@@ -6190,30 +6417,30 @@ mod tests {
                         comments: Vec::new(),
                     },
                 );
-                let mut verification_output = String::new();
-                for verification in [
-                    crate::cli::verification_record::VerifyCommand::Plan {
-                        commands: vec![s("git --version")],
-                        derive: false,
-                    },
-                    crate::cli::verification_record::VerifyCommand::Run {
-                        commands: vec![s("git --version")],
-                        max_wait_secs: None,
-                        headed_e2e_commands: Vec::new(),
-                        user_verification_result: None,
-                    },
-                ] {
-                    assert_eq!(
-                        crate::cli::verification_record::run(
-                            &mut env,
-                            verification,
-                            &mut verification_output,
-                        )
-                        .unwrap(),
-                        0,
-                        "{verification_output}"
-                    );
-                }
+            }
+            let mut verification_output = String::new();
+            for verification in [
+                crate::cli::verification_record::VerifyCommand::Plan {
+                    commands: vec![s("git --version")],
+                    derive: false,
+                },
+                crate::cli::verification_record::VerifyCommand::Run {
+                    commands: vec![s("git --version")],
+                    max_wait_secs: None,
+                    headed_e2e_commands: Vec::new(),
+                    user_verification_result: None,
+                },
+            ] {
+                assert_eq!(
+                    crate::cli::verification_record::run(
+                        &mut env,
+                        verification,
+                        &mut verification_output,
+                    )
+                    .unwrap(),
+                    0,
+                    "{verification_output}"
+                );
             }
         }
         let before_current = gwt_core::workspace_projection::load_workspace_projection(&repo)
@@ -6336,7 +6563,7 @@ mod tests {
             title: "Work event PR metadata".to_string(),
             body: "Regression coverage".to_string(),
             labels: vec![],
-            draft: true,
+            draft: false,
         });
     }
 
@@ -6380,7 +6607,7 @@ mod tests {
                 title: "Delivery after Work finalization".to_string(),
                 body: "Regression coverage".to_string(),
                 labels: vec![],
-                draft: true,
+                draft: false,
             },
             true,
             false,
@@ -6397,7 +6624,7 @@ mod tests {
                 title: "Current work PR".to_string(),
                 body: "Regression".to_string(),
                 labels: vec![],
-                draft: true,
+                draft: false,
             },
             true,
         );
@@ -6414,6 +6641,7 @@ mod tests {
         std::fs::create_dir_all(&repo).expect("create repo");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        seed_non_ui_pr_repo(&repo);
         let mut env = crate::cli::TestEnv::new(home.path().join("cache"));
         env.repo_path = repo.clone();
         env.files.insert(

@@ -8,8 +8,9 @@ detects the host project's actual test runners from manifests
 (Cargo.toml / package.json / pyproject.toml / go.mod / ProjectSettings /
 *.sln / etc.) per `references/runner-detection.md`,
 runs the appropriate unit / integration / E2E / visual tests, emits a
-**Test Inventory** that names which tests were executed, and hands off to
-the user via a 4-step verification path + Check Items before finalizing
+**Test Inventory** that names which tests were executed, and provides a
+4-step verification path + Check Items only when the owner explicitly requests
+a human handoff before finalizing
 `## Verification Report`. The right matrix is determined by what actually
 changed and which runners the project ships; do not hard-code a static
 cargo / pnpm / Playwright command list here.
@@ -20,17 +21,17 @@ The skill is considered green when **all** of the following hold:
 - the evidence bundle records no `failed: tooling-missing` entry
 - no visual / UI snapshot diff is unresolved (visual regression must be
   triaged before declaring PASS, not silently regenerated)
-- `User Verification Result` is one of `confirmed`, `n/a`, `n/a (autonomous)`,
-  `deferred (autonomous execution)`, or `skipped(<reason>)`. An autonomous
-  launch is recognized from `execution.status`'s `launch_route: autonomous`;
-  record `n/a (autonomous)` and waive the human handoff. UI work requires
-  `Agent Visual Check: pass` plus actual passing headed Chromium dark/light
-  results in the same fresh `verify.run` record, selected with
-  `params.headed_e2e_commands`. Existing autonomous PRs may retain the legacy
-  deferred body value without rewriting it or obtaining human confirmation.
-  Manual verification is unchanged. `pending` is not acceptable;
-  `rejected(<reason>)` forces `Overall: FAIL` and a return to Phase 2, preserving
-  the user's reason in the evidence bundle.
+- User Verification Result is optional. A human handoff is mandatory only when
+  the owner explicitly requests it; a missing, pending, or legacy deferred
+  field alone does not create that request. An actual `rejected(<reason>)`
+  forces `Overall: FAIL`; preserve the reason and repair the known blocker.
+- An autonomous launch is recognized from `execution.status`'s
+  `launch_route: autonomous`; record `n/a (autonomous)` and waive the human
+  handoff. UI work requires `Agent Visual Check: pass` plus actual passing
+  headed Chromium dark/light results in the same fresh `verify.run` record,
+  selected with `params.headed_e2e_commands`. Existing autonomous PRs may retain
+  the legacy `deferred (autonomous execution)` body value without rewriting it
+  or obtaining human confirmation.
 
 In SPEC mode, also verify:
 
@@ -51,11 +52,10 @@ Handle PR operations autonomously using the `gwt-manage-pr` skill:
   other Ready Gate failures still require repair.
 
 Do not create or update a Ready for review PR until Phase 3 verification
-passes and the Ready PR Gate confirms a releaseable slice. If work is
-intentionally incomplete or blocked but needs shared CI/early review,
-`gwt-manage-pr` may create/update only a Draft PR that lists known
-blockers and Remaining acceptance. Draft PR does not satisfy build
-completion.
+passes and the Ready PR Gate confirms a releaseable slice. Draft PRs are
+prohibited. Repair failed gates before creating a PR, or select a smaller
+releaseable slice with an explicit follow-up boundary. A Draft PR does not satisfy
+build completion.
 
 ## Phase 5: Completion Gate
 
@@ -78,8 +78,8 @@ Required checks:
   `dependent-follow-up` owners are recorded with explicit ordering and do not
   block Primary completion.
 - If artifacts disagree, return to `gwt-discussion` — do not proceed to PR
-- Ready PR Gate passed for a releaseable slice. An incomplete Draft PR
-  handoff must be reported separately and does not satisfy completion.
+- Ready PR Gate passed for a releaseable slice. Draft PRs are prohibited and
+  do not satisfy completion.
 
 Update execution tracking:
 
@@ -98,9 +98,8 @@ Update execution tracking:
 On completion, suggest `gwt-arch-review` for code review if available, or proceed to `gwt-manage-pr` if not already done.
 
 Only call JSON operation `build.complete` after the Ready PR Gate is
-satisfied for a releaseable slice. A Draft PR handoff must keep the
-remaining work visible in the report and must not be represented as a
-completed build.
+satisfied for a releaseable slice. Report remaining work truthfully; do not
+create a Draft PR or represent unfinished work as a completed build.
 
 ## Stop conditions
 
