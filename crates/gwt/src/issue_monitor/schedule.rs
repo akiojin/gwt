@@ -116,6 +116,12 @@ impl IssueMonitorPrefs {
         )
     }
 
+    fn scheduled_issue_has_pending_claim(&self, number: u64) -> bool {
+        self.pending_effects.iter().any(|effect| {
+            matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if *issue_number == number)
+        })
+    }
+
     fn scheduled_issue_in_flight(&self, number: u64) -> bool {
         self.launching_issues
             .iter()
@@ -227,14 +233,16 @@ fn reconcile(
                         .iter()
                         .any(|queued| queued.number == entry.issue_number)
                     && !prefs.scheduled_issue_in_flight(entry.issue_number)
-                    && members
-                        .iter()
-                        .any(|member| member.agent_member_id == entry.agent_member_id))
+                    && (prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+                        || members
+                            .iter()
+                            .any(|member| member.agent_member_id == entry.agent_member_id)))
         })
         .cloned()
         .collect::<Vec<_>>();
     for entry in queue {
         if prefs.scheduled_issue_in_flight(entry.number)
+            || prefs.scheduled_issue_has_pending_claim(entry.number)
             || reservations
                 .iter()
                 .any(|reservation| reservation.issue_number == entry.number)
@@ -367,7 +375,7 @@ pub fn mutate_project_agent_schedule(
             if snapshot.roster_revision != *expected_roster_revision || snapshot.queue_revision != *expected_queue_revision || snapshot.schedule_revision != *expected_schedule_revision {
                 return Err(io::Error::other(format!("Agent schedule changed: expected roster={expected_roster_revision}, queue={expected_queue_revision}, schedule={expected_schedule_revision}; current roster={}, queue={}, schedule={}; read issue.monitor.schedule.read and retry",snapshot.roster_revision,snapshot.queue_revision,snapshot.schedule_revision)));
             }
-            if prefs.scheduled_issue_in_flight(*issue_number) || prefs.pending_effects.iter().any(|effect| matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim {issue_number: owner, ..} if owner == issue_number)) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
+            if prefs.scheduled_issue_in_flight(*issue_number) || prefs.scheduled_issue_has_pending_claim(*issue_number) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
             let target = prefs.agent_roster.as_ref().and_then(|roster| roster.members.iter().find(|member| member.agent_member_id == *target_member_id)).ok_or_else(|| io::Error::other("Target Agent member is absent; read issue.monitor.schedule.read and retry"))?;
             if !target.enabled || target.assignment.as_ref().is_some_and(|assignment| !assignment.host_id.is_empty() && assignment.host_id != host) {
                 return Err(io::Error::other("Target Agent must be enabled and belong to this host; read issue.monitor.schedule.read and choose a local member"));
@@ -844,6 +852,51 @@ mod tests {
         assert!(
             monitor.agent_schedule_launch_exclusion(42).is_none(),
             "a different free member remains available"
+        );
+
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            let key = prefs.pending_effects[0].attempt_key();
+            assert!(prefs.mark_pending_effect_attempting(&key));
+            Ok(())
+        })
+        .unwrap();
+        crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Rest {
+                member_id: roster.members[0].agent_member_id.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        let prefs = load_issue_monitor_prefs(&path).unwrap();
+        assert_eq!(
+            prefs.pending_effects[0].state,
+            IssueMonitorEffectState::Attempting
+        );
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs);
+        assert_eq!(
+            monitor.scheduled_agent_member_id(41),
+            Some(roster.members[0].agent_member_id.as_str()),
+            "rest must not retarget an in-flight claim to another member"
+        );
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.pending_effects.clear();
+            Ok(())
+        })
+        .unwrap();
+        mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        let monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        assert_eq!(
+            monitor.scheduled_agent_member_id(41),
+            Some(roster.members[1].agent_member_id.as_str()),
+            "a settled claim permits normal replanning away from a resting member"
         );
     }
 
