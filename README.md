@@ -1093,6 +1093,15 @@ null; a supplied view without rows yields []. Keep its source, scan time and cov
 an old or degraded snapshot is only an observation then. Legacy omitted queue lists
 also decode to []; neither proves the host or whole project queue is empty. Queue residency is not execution waiting time, an SLA
 or starvation verdict, priority, preemption or permission to launch.
+Each row's `age_limits` compares its age with every saved policy's
+`starvation_after_seconds`, retaining policy order, ID, version and optional threshold.
+`observed_age_threshold_reached` means age >= threshold, including equality and zero;
+it requires a unique nonblank policy ID, a configured threshold, valid age and complete
+daemon Monitor coverage. Other cases yield `unknown`, never a within-limit PASS, with
+named missing inputs for absent, invalid, ambiguous or degraded evidence. No policies
+yields []. No active policy is selected or combined. This compares host membership at
+the recorded scan; it does not establish end-to-end starvation, SLA or permission to
+change priority, launch or preempt. Keep the source and scan age alongside it.
 Idle-window observations preserve the Monitor's window order, repeated or unknown Issue owners,
 idle classification and binding/pane facts. They show elapsed whole seconds from idle start
 to the supplied scan time, respecting time-zone offsets and using no current clock. Missing,

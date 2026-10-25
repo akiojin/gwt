@@ -991,6 +991,14 @@ RFC3339 の時差を反映し、秒未満を切り捨てます。時刻の欠測
 全体の queue が空である証明ではありません。旧 payload の queue リスト省略も [] となるため、
 ホスト内の空 queue も証明しません。所属滞留時間は実行待ち時間、SLA 違反、starvation、
 優先順位、preemption や起動許可の判定には使いません。
+各行の `age_limits` は、全保存 policy の `starvation_after_seconds` と所属滞留秒を
+保存順に照合し、ID・version・設定閾値を保持します。`observed_age_threshold_reached` は
+滞留秒が閾値以上（同値・0を含む）であることを示し、一意かつ空でない policy ID、設定済み閾値、
+有効な滞留秒と daemon の完全な観測範囲を必要とします。それ以外は `unknown` とし、欠測・
+不正・曖昧・degraded な入力を不足情報名で示します。閾値内 PASS は返さず、policy がなければ
+`[]` です。方針の選択や合成は行いません。これは記録されたスキャン時点のホスト内所属時間の
+比較であり、全工程の starvation・SLA や、優先順位変更・起動・preemption の許可ではありません。
+取得元とスキャンの古さも併せて確認してください。
 idle window の観測は、Monitor の window 順序、重複・不明の Issue、idle 分類、binding と
 pane の事実を保持します。idle 開始から指定のスキャン時点までの経過秒を、時差を反映し、
 現在時計を使わずに返します。時刻が欠落・不正・未来なら期間は不明とし、不足情報名も示します。
