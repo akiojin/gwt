@@ -791,7 +791,8 @@ fn observe_capacity(
     .collect();
     let scan_valid = monitor
         .and_then(|status| status.last_scan_at.as_deref())
-        .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok());
+        .and_then(parse_observed_instant)
+        .is_some();
     let wip_limits = state
         .policies
         .iter()
@@ -3032,8 +3033,15 @@ mod tests {
             "unknown"
         );
         monitor.active_launches_incomplete = false;
-        for scan in [None, Some("invalid")].map(|value| value.map(str::to_owned)) {
+        for scan in [
+            None,
+            Some("invalid"),
+            Some("2026-10-21T00:00:00.1234567891Z"),
+        ]
+        .map(|value| value.map(str::to_owned))
+        {
             monitor.last_scan_at = scan;
+            let before = serde_json::to_value(&monitor).unwrap();
             let untimed = evaluate(Some(&monitor));
             assert_eq!(
                 untimed["capacity"]["wip_limits"][0]["assessment"],
@@ -3043,8 +3051,21 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .contains(&json!("monitor_scan_time")));
+            assert_eq!(
+                untimed["monitor"]["last_scan_at"],
+                json!(monitor.last_scan_at)
+            );
+            assert_eq!(
+                untimed["capacity"]["wip_limits"][0]["observed_issue_count"],
+                2
+            );
+            assert_eq!(serde_json::to_value(&monitor).unwrap(), before);
         }
-        monitor.last_scan_at = Some("2026-10-21T00:00:00Z".into());
+        monitor.last_scan_at = Some("2026-10-21T00:00:00.123456789Z".into());
+        assert_eq!(
+            evaluate(Some(&monitor))["capacity"]["wip_limits"][0]["assessment"],
+            "observed_exceeded"
+        );
         monitor.active_launches.clear();
         assert_eq!(
             evaluate(Some(&monitor))["capacity"]["wip_limits"][4]["assessment"],

@@ -982,7 +982,8 @@ slot の使用数と上限は Monitor の報告値を保持し、Issue 件数か
 保存済み WIP policy は保存順に独立して、重複を除いた観測 Issue 件数と照合します。
 `observed_exceeded` は、このスナップショットの件数が保存上限より厳密に大きいことだけを
 示し、一意かつ空でない policy ID、設定済み上限、daemon の完全な観測範囲と有効なスキャン時刻を
-必要とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
+必要とします。スキャン時刻の小数秒が9桁を超える場合は `monitor_scan_time` の不足を示し、
+`unknown` とします。等値・下回る場合や情報不足・degraded では `unknown` とし、上限内 PASS は
 返しません。Monitor 不在なら件数は null、policy 不在なら空リストです。全工程 WIP・現在の
 超過・操作権限を証明せず、policy の選択や合成も行いません。verification と全 WIP の不足は残ります。
 `policy.capacity.terminal_queue` は、urgent 順序付けとラベル除外後のホスト別 queue を、

@@ -196,6 +196,7 @@ version and optional limit alongside `observed_issue_count` and an assessment.
 `observed_exceeded` compares only supplied distinct Issue owners with that saved limit:
 it requires a unique nonempty policy ID, a configured limit, complete daemon Monitor
 coverage and a valid RFC3339 scan time, with the observed count strictly greater than the limit.
+Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time.
 Equal or smaller counts and missing, invalid, ambiguous or degraded inputs yield `unknown`;
 there is no within-limit PASS. No Monitor leaves the count null; no policies yields [].
 Read the named missing inputs and enclosing provenance. These comparisons are snapshot-relative;
@@ -4560,6 +4561,7 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`declared_waits` reports only Launching/Launched inbox rows with a wait declaration",
             "`retry_deadlines` reports every inbox row with `retry_not_before`",
             "`wip_limits` compares each saved policy independently in saved order",
+            "Scan fractions beyond nine digits leave WIP comparisons unknown with monitor_scan_time",
             "`observed_exceeded` compares only supplied distinct Issue owners with that saved limit",
             "A retry deadline does not prove an active hold or authorize launch",
             "Copy canonical `in_force`; never infer protection from a deadline",
