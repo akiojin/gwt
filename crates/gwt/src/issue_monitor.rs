@@ -21307,9 +21307,13 @@ impl IssueMonitorState {
                     .map(|delivery| delivery.issue_number),
             )
             // A healthy lower tier cannot honor an Issue's higher tier floor.
-            // Preserve work that still has an eligible provider in its pool.
+            // The remaining candidate must also be able to run unattended.
             .filter(|issue_number| {
-                every_pool_provider_held || !self.retry_ready_for_saved_profile(*issue_number, now)
+                every_pool_provider_held
+                    || !self.retry_ready_for_saved_profile(*issue_number, now)
+                    || self
+                        .permission_readiness_block_for_launch(*issue_number, now)
+                        .is_some()
             })
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled_issues);
@@ -31487,6 +31491,64 @@ mod tests {
             "claim-effect-44",
             "2026-08-22T02:00:00Z",
         ));
+
+        // An unheld fallback can still be unable to run unattended. Revoke
+        // the unowned delivery before a GUI can materialize that fallback.
+        let mut unsupported = monitor.clone();
+        unsupported.launch_tiers[1].push(test_launch_profile("openclaw"));
+        unsupported.try_hold_provider_usage_limit(
+            42,
+            "tab-1::agent-42",
+            "claude",
+            "Claude quota exhausted",
+            Some("2026-08-22T04:00:00Z"),
+            None,
+            "2026-08-22T02:01:00Z",
+        );
+        assert!(unsupported.retry_ready_for_saved_profile(43, "2026-08-22T02:01:00Z"));
+        assert_eq!(unsupported.pending_launch_delivery_id(43), None);
+        assert!(!unsupported.active_issue_numbers().contains(&43));
+        assert_eq!(unsupported.attempt_count(43), 1);
+        assert_eq!(
+            unsupported
+                .prefs()
+                .queued_launch_session_strategies
+                .get(&43),
+            Some(&IssueMonitorLaunchSessionStrategy::FreshRequired)
+        );
+        assert_eq!(unsupported.pending_effects().len(), 1);
+        assert!(matches!(
+            &unsupported.pending_effects()[0].payload,
+            IssueMonitorEffectPayload::ReleaseClaim { issue_number: 43, claim_id, owner }
+                if claim_id == "claim-43" && owner == "host/session"
+        ));
+        assert!(!unsupported.claim_launch_delivery(
+            43,
+            &cancelled_delivery,
+            "gui",
+            43,
+            "tab-1::agent-43",
+            |_| false,
+        ));
+        assert_eq!(
+            unsupported.take_pending_launch_requests()[0].issue_number,
+            44
+        );
+        assert_eq!(
+            unsupported.prepare_claim_effects_with_observations(
+                "host/session",
+                "2026-08-22T02:02:00Z",
+                4,
+                &BTreeMap::from([(43, false)]),
+            ),
+            0
+        );
+        let blocked = unsupported.inbox_item(43).unwrap();
+        assert_eq!(blocked.state, MonitorInboxState::NotReady);
+        let reason = blocked.exclusion_reason.as_deref().unwrap();
+        for expected in ["pre_launch_block", "openclaw", "Recovery:"] {
+            assert!(reason.contains(expected), "{reason}");
+        }
 
         monitor.try_hold_provider_usage_limit(
             42,
