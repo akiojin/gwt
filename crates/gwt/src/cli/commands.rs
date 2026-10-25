@@ -196,6 +196,10 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         terminal: Option<String>,
     },
+    MonitorSchedule {
+        project_root: Option<std::path::PathBuf>,
+        action: crate::issue_monitor::AgentScheduleAction,
+    },
     MonitorQueuePush {
         project_root: Option<std::path::PathBuf>,
         issue_numbers: Vec<u64>,

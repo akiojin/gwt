@@ -243,6 +243,10 @@ pub(super) fn run<E: CliEnv>(
             project_root,
             terminal,
         } => run_monitor_queue_list(env, project_root.as_deref(), terminal.as_deref(), out)?,
+        IssueCommand::MonitorSchedule {
+            project_root,
+            action,
+        } => run_monitor_schedule(env, project_root.as_deref(), action, out)?,
         IssueCommand::MonitorQueuePush {
             project_root,
             issue_numbers,
@@ -1629,6 +1633,24 @@ fn run_monitor_priority_set<E: CliEnv>(
     })
     .map_err(io_as_api_error)?;
     out.push_str(&monitor_priority_reply(&project_root, &prefs, issue_numbers).to_string());
+    out.push('\n');
+    Ok(0)
+}
+
+fn run_monitor_schedule<E: CliEnv>(
+    env: &E,
+    project_root: Option<&std::path::Path>,
+    action: crate::issue_monitor::AgentScheduleAction,
+    out: &mut String,
+) -> Result<i32, SpecOpsError> {
+    let root = issue_monitor_project_root(env, project_root)?;
+    let schedule = crate::issue_monitor::mutate_project_agent_schedule(
+        &root,
+        &gwt_core::paths::gwt_sessions_dir(),
+        action,
+    )
+    .map_err(|error| io_as_api_error(io::Error::other(error)))?;
+    out.push_str(&serde_json::to_string(&schedule).map_err(super::serde_as_api_error)?);
     out.push('\n');
     Ok(0)
 }

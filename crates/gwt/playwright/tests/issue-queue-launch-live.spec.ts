@@ -10,6 +10,124 @@ test.describe("Issue queue real backend launch", () => {
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
+  test("T18 reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info);
+    const errors: string[] = [];
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const context = page.context();
+    let current = page;
+    const capture = (target: typeof page) => {
+      target.on("pageerror", error => errors.push(error.message));
+      target.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    };
+    const request = async (event: unknown, kind: string) => {
+      const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(current, event);
+      return (await current.waitForFunction(({ after, kind }) => {
+        const entry = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && [kind, `${kind}_error`].includes(entry.payload.kind));
+        return entry?.payload || null;
+      }, { after, kind }, { timeout: 30_000 })).jsonValue();
+    };
+    const schedule = () => {
+      const reply = fixture.scheduleOperation("issue.monitor.schedule.read");
+      expect(reply.ok, JSON.stringify(reply)).toBe(true);
+      return JSON.parse(reply.output);
+    };
+    const owner = (snapshot: any) => snapshot.members.find((member: any) =>
+      member.issues.some((issue: any) => issue.issue_number === fixture.issueNumber));
+    capture(current);
+    try {
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
+        { timeout: 30_000 }).toBe(false);
+      const initial = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+      expect(initial.error).toBeFalsy();
+      const roster = (await request({ kind: "agent_roster", action: { kind: "add" },
+        expected_revision: initial.revision }, "agent_roster")).roster;
+      expect(roster.error).toBeFalsy();
+      expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      const queued = await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] },
+        "issue_monitor_queue_result");
+      expect(queued.error).toBeNull();
+      expect(await fixture.launches()).toEqual([]);
+      const observed = schedule();
+      const source = owner(observed);
+      expect(source).toBeTruthy();
+      const target = roster.members.find((member: any) => member.enabled
+        && member.agent_member_id !== source.agent_member_id);
+      expect(target).toBeTruthy();
+      const reassignment = {
+        issue_number: fixture.issueNumber,
+        source_member_id: source.agent_member_id,
+        target_member_id: target.agent_member_id,
+        expected_roster_revision: observed.roster_revision,
+        expected_queue_revision: observed.queue_revision,
+        expected_schedule_revision: observed.schedule_revision,
+      };
+      const moved = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
+      expect(moved.ok, JSON.stringify(moved)).toBe(true);
+      const saved = JSON.parse(moved.output);
+      expect(owner(saved)).toMatchObject({ agent_member_id: target.agent_member_id,
+        issues: [{ issue_number: fixture.issueNumber, reason: "assigned_by_you" }] });
+      const beforeStale = await fixture.monitorPreferencesBytes();
+      const stale = fixture.scheduleOperation("issue.monitor.schedule.reassign", reassignment);
+      expect(stale.ok).toBe(false);
+      const afterStale = await fixture.monitorPreferencesBytes();
+      await info.attach("agent-schedule-stale-prefs", { body: JSON.stringify({
+        before: beforeStale.toString(), after: afterStale.toString(),
+      }, null, 2), contentType: "application/json" });
+      const plan = (bytes: Buffer) => {
+        const prefs = JSON.parse(bytes.toString());
+        return { agent_issue_schedule: prefs.agent_issue_schedule, agent_roster: prefs.agent_roster,
+          terminal_queues: Object.fromEntries(Object.entries(prefs.terminal_queues)
+            .map(([host, queue]) => [host, (queue as any).entries])) };
+      };
+      expect(plan(afterStale), "rejected stale move preserves canonical member plans and queue order").toEqual(plan(beforeStale));
+      expect(schedule()).toEqual(saved);
+      const gui = await request({ kind: "agent_schedule", action: { kind: "read" } }, "agent_schedule");
+      expect(gui.schedule, "GUI and JSON use the same canonical schedule").toEqual(saved);
+
+      const previousPid = fixture.ownedPid;
+      await current.close();
+      await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(previousPid);
+      current = await context.newPage();
+      capture(current);
+      await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(current, fixture.url, { enableTestBridge: true });
+      await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(owner(schedule()), "fresh GUI retains the reassigned member").toEqual(owner(saved));
+      expect(await fixture.launches(), "disabled Monitor stays idle across restart").toEqual([]);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 90_000, message: "normal Monitor launches the reassigned queued Issue" }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      expect(launch.gwt_session_id).toBeTruthy();
+      expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      const session = () => readFile(join(fixture.home, ".gwt", "sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+      await expect.poll(async () => field(await session(), "agent_session_id"),
+        { timeout: 60_000, message: "authentic Session receives the provider SessionStart identity" }).toBe(launch.provider_session_id);
+      const record = await session();
+      expect(field(record, "id")).toBe(launch.gwt_session_id);
+      expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
+      expect(field(record, "agent_name")).toBe(target.name);
+      expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
+      fixture.auditHooks(launch.cwd);
+      await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
+      await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch }, null, 2), contentType: "application/json" });
+      expect(errors, "zero console/page errors across JSON reassignment, GUI restart and real launch").toEqual([]);
+    } finally {
+      try { await current.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned fixture cleanup").toEqual([]);
+  });
+
   test("AC34 actual provider exit removes the local Active agent without closing its Issue", async ({ page }, info) => {
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];

@@ -222,6 +222,17 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     if (!envelope.ok) throw new Error(`Fixture ${operation} refused`);
     return typeof envelope.output === "string" ? JSON.parse(envelope.output) : envelope.output;
   }
+  function scheduleOperation(
+    operation: "issue.monitor.schedule.read" | "issue.monitor.schedule.reassign",
+    params: Record<string, unknown> = {},
+  ) {
+    const result = spawnSync(checkoutGwtd, [], { cwd: active.project, env: auditEnv, encoding: "utf8", timeout: 30_000,
+      input: JSON.stringify({ schema_version: 1, operation, params: { ...params, project_root: active.project } }),
+    });
+    if (result.error) throw result.error;
+    if (!result.stdout.trim()) throw new Error(`Fixture ${operation} returned no envelope: ${result.stderr}`);
+    return JSON.parse(result.stdout);
+  }
   async function restoreSummary(since: string) {
     for (const directory of [join(active.home, ".gwt", "logs"), projectLogs]) {
       for (const file of await readdir(directory).catch(() => [])) {
@@ -240,6 +251,8 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
     issueNumber: issue.number, requests, comments, hookAudits, restoreSummary,
     workItems, eventShardPath, stagedDiff, seedActiveOrphan,
+    scheduleOperation,
+    monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
     startupReport: () => readOperation("perf.startup", active.project).startup,

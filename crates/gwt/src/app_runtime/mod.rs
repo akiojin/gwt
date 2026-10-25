@@ -12697,6 +12697,7 @@ impl AppRuntime {
             | FrontendEvent::OpenPmAgent { .. }
             | FrontendEvent::RestartPmAgent
             | FrontendEvent::AgentRoster { .. }
+            | FrontendEvent::AgentSchedule { .. }
             | FrontendEvent::ListIssueMonitor
             | FrontendEvent::IssueMonitorLaunchNow { .. }
             | FrontendEvent::IssueMonitorQueuePush { .. }
@@ -13164,6 +13165,9 @@ impl AppRuntime {
                 action,
                 expected_revision,
             } => self.agent_roster_events(context, &client_id, action, expected_revision),
+            FrontendEvent::AgentSchedule { action } => {
+                self.agent_schedule_events(context, &client_id, action)
+            }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady {} => {
                 if self.agent_maintenance.busy {

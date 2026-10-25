@@ -29,6 +29,12 @@ use crate::{
     LinkedIssueKind, WindowState,
 };
 
+mod schedule;
+pub use schedule::{
+    mutate_project_agent_schedule, AgentIssueReservation, AgentIssueSchedule, AgentMemberSchedule,
+    AgentScheduleAction, AgentScheduleReason, AgentScheduleSnapshot, AgentScheduledIssue,
+};
+
 mod urgent;
 pub use urgent::{
     IssueMonitorUrgentGrant, IssueMonitorUrgentQueue, IssueMonitorUrgentQueueProjection,
@@ -989,6 +995,8 @@ pub struct IssueMonitorPriorityReasonNote {
 pub struct IssueMonitorPrefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_roster: Option<crate::agent_names::AgentRoster>,
+    #[serde(default)]
+    pub agent_issue_schedule: AgentIssueSchedule,
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
         default = "current_issue_monitor_prefs_schema_version",
@@ -1334,6 +1342,7 @@ impl Default for IssueMonitorPrefs {
     fn default() -> Self {
         Self {
             agent_roster: None,
+            agent_issue_schedule: AgentIssueSchedule::default(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
@@ -1891,6 +1900,8 @@ pub enum IssueMonitorProviderUsageLimitOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingIssueMonitorLaunchDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_observations: Vec<IssueMonitorDependencyObservation>,
     pub delivery_id: String,
@@ -5039,6 +5050,11 @@ enum IssueMonitorSourceRepository {
 pub struct IssueMonitorState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent_roster: Option<crate::agent_names::AgentRoster>,
+    #[serde(default)]
+    agent_issue_schedule: AgentIssueSchedule,
+    // Automatic scan proposals are valid only against this exact source snapshot.
+    #[serde(skip)]
+    agent_schedule_source: Option<(AgentIssueSchedule, String, u64)>,
     #[serde(skip)]
     roster_machine_policy: Option<crate::machine_agent_settings::Policy>,
     /// Runtime identity of the repository actually read; never a saved approval.
@@ -6483,6 +6499,10 @@ fn issue_monitor_prefs_cache(
 
 fn load_issue_monitor_prefs_unlocked(path: &Path) -> io::Result<IssueMonitorPrefs> {
     let mut prefs = load_issue_monitor_prefs_raw(path)?;
+    prefs
+        .agent_issue_schedule
+        .validate()
+        .map_err(io::Error::other)?;
     if let Some(roster) = &prefs.agent_roster {
         roster
             .validate()
@@ -7964,6 +7984,8 @@ impl IssueMonitorState {
     pub fn new(config: IssueMonitorConfig) -> Self {
         Self {
             agent_roster: None,
+            agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_schedule_source: None,
             roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
             queue_label_observation: None,
@@ -8073,6 +8095,7 @@ impl IssueMonitorState {
         };
         let mut state = Self::new(config);
         state.agent_roster = prefs.agent_roster.clone();
+        state.agent_issue_schedule = prefs.agent_issue_schedule.clone();
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
@@ -8252,6 +8275,7 @@ impl IssueMonitorState {
     pub fn prefs(&self) -> IssueMonitorPrefs {
         IssueMonitorPrefs {
             agent_roster: self.agent_roster.clone(),
+            agent_issue_schedule: self.agent_issue_schedule.clone(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
@@ -11561,6 +11585,7 @@ impl IssueMonitorState {
         self.priority_order = disk.priority_order.clone();
         self.priority_reason_note = disk.priority_reason_note.clone();
         self.terminal_queues = disk.terminal_queues.clone();
+
         self.urgent_queue.rebase(&disk.urgent_queue);
         self.terminal_queue_exclusions = disk.terminal_queue_exclusions.clone();
         self.terminal_queue_auto_refill = disk.terminal_queue_auto_refill;
@@ -11575,6 +11600,7 @@ impl IssueMonitorState {
         }
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
+        self.rebase_agent_issue_schedule(disk);
         // SPEC #3914 FR-012: the pool has no daemon control of its own for
         // GUI saves, so disk owns it; a stale in-memory copy must not shrink it.
         self.launch_profiles = disk.launch_profile_pool();
@@ -12435,6 +12461,7 @@ impl IssueMonitorState {
         autonomous_policy: AutonomousRecordRebasePolicy,
     ) {
         self.agent_roster = disk.agent_roster.clone();
+
         if let Some(roster) = self.agent_roster.as_ref() {
             self.config.max_active = roster.enabled_count();
         }
@@ -15869,6 +15896,7 @@ impl IssueMonitorState {
                     || self.open_pr_launch_held(*issue_number)
                     || self.launch_source_exclusion(*issue_number).is_some()
                     || self.scan_dependency_exclusion(*issue_number).is_some()
+                    || self.agent_schedule_launch_exclusion(*issue_number).is_some()
         )
     }
 
@@ -16427,6 +16455,9 @@ impl IssueMonitorState {
                         && idle_window_is_alive(window.status)
                 }))
         {
+            return false;
+        }
+        if !review_dispatch && self.agent_schedule_launch_exclusion(issue_number).is_some() {
             return false;
         }
         let max_active = self.effective_max_active_agents();
@@ -18203,6 +18234,7 @@ impl IssueMonitorState {
                 && !self.open_pr_launch_held(*issue)
                 && self.launch_source_exclusion(*issue).is_none()
                 && self.scan_dependency_exclusion(*issue).is_none()
+                && self.agent_schedule_launch_exclusion(*issue).is_none()
         })?;
         let issue_number = self.queue.remove(position)?;
         if !self.active_launches.contains(&issue_number) {
@@ -18315,6 +18347,9 @@ impl IssueMonitorState {
 
     fn claim_candidate_exclusions_without_dependencies(&self, issue_number: u64) -> Vec<String> {
         let mut reasons = Vec::new();
+        if let Some(reason) = self.agent_schedule_launch_exclusion(issue_number) {
+            reasons.push(reason);
+        }
         if let Some(reason) = self.launch_source_exclusion(issue_number) {
             reasons.push(reason);
         }
@@ -18603,6 +18638,9 @@ impl IssueMonitorState {
                     && !self.open_pr_launch_held(*issue_number)
                     && self.launch_source_exclusion(*issue_number).is_none()
                     && self.scan_dependency_exclusion(*issue_number).is_none()
+                    && self
+                        .agent_schedule_launch_exclusion(*issue_number)
+                        .is_none()
                     && self.retry_ready_for_saved_profile(*issue_number, now)
             }) else {
                 break;
@@ -18943,6 +18981,12 @@ impl IssueMonitorState {
             return true;
         }
         if self
+            .agent_schedule_launch_exclusion(delivery.issue_number)
+            .is_some()
+        {
+            return false;
+        }
+        if self
             .launch_dependency_exclusion(delivery.issue_number)
             .is_some()
         {
@@ -19215,10 +19259,14 @@ impl IssueMonitorState {
             .iter()
             .any(|delivery| delivery.delivery_id == delivery_id)
         {
+            let agent_member_id = self
+                .scheduled_agent_member_id(issue_number)
+                .map(str::to_owned);
             let dependency_observations =
                 self.dependency_observations_for_delivery(issue_number, None);
             self.pending_launch_deliveries
                 .push_back(PendingIssueMonitorLaunchDelivery {
+                    agent_member_id,
                     dependency_observations,
                     delivery_id,
                     issue_number,

@@ -424,6 +424,14 @@ pub const OPERATIONS: &[Operation] = &[
         aliases: &["issue.monitor.review-verdict"],
     },
     Operation {
+        name: "issue.monitor.schedule.read",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.schedule.reassign",
+        aliases: &[],
+    },
+    Operation {
         name: "issue.monitor.status",
         aliases: &[],
     },

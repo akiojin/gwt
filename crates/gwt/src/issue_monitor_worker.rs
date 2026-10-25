@@ -2116,6 +2116,9 @@ pub fn scan_loaded_issue_monitor_candidates_for_project_tab(
             .and_then(|issue| issue.updated_at.as_deref());
         monitor.record_urgent_assignment(*number, revision, assignment);
     }
+    if let Err(error) = monitor.synchronize_agent_issue_schedule(repo_path) {
+        monitor.record_scan_error(now, format!("Agent schedule refresh failed: {error}"));
+    }
     // Issue #3964 AC-1: every scan — daemon or GUI fallback — asks the owner
     // ledger whether a generation-conflict hold still protects anything. The
     // reaper released 29 of the 45 stranded production generations and their
