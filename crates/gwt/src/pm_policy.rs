@@ -920,6 +920,7 @@ pub struct RoadmapHorizons {
 pub struct RoadmapDiagnostic {
     pub id: String,
     pub dependency_observations: Option<Vec<DependencyObservation>>,
+    pub dependency_impacts: Option<Vec<DependencyImpactObservation>>,
     pub issues: Vec<u64>,
     pub observed_issue_states: Vec<MilestoneIssueStates>,
     pub unobserved_issues: Vec<u64>,
@@ -1199,6 +1200,10 @@ pub fn assess_planning(
             let (observed_issue_states, unobserved_issues) = observe_issues(&members, monitor);
             RoadmapDiagnostic {
                 id: item.id.clone(),
+                dependency_impacts: member_dependency_impacts(
+                    dependency_impacts.as_deref(),
+                    &members,
+                ),
                 dependency_observations: dependency_observations.as_ref().map(|rows| {
                     rows.iter()
                         .filter(|row| members.contains(&row.issue_number))
@@ -2052,10 +2057,12 @@ mod tests {
             {"issue_number":3,"state":"source_excluded","attempts":0,
              "dependency":{"blocked_by":[{"number":9}],"cycle":true,"bundle_with":[7,5]},
              "error_message":"private diagnostic"},
-            {"issue_number":5,"state":"merged","attempts":0},
+            {"issue_number":5,"state":"merged","attempts":0,
+             "dependency":{"blocked_by":[{"number":8}],"cycle":false,"bundle_with":[]}},
             {"issue_number":1,"state":"launched","attempts":0,
-             "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}},
-            {"issue_number":6,"state":"needs_human","attempts":0},
+             "dependency":{"blocked_by":[{"number":9},{"number":8},{"number":9}],"cycle":false,"bundle_with":[]}},
+            {"issue_number":6,"state":"needs_human","attempts":0,
+             "dependency":{"blocked_by":[{"number":9}],"cycle":false,"bundle_with":[]}},
             {"issue_number":1,"state":"needs_human","attempts":0},
             {"issue_number":1,"state":"launched","attempts":0,
              "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]}}
@@ -2071,7 +2078,7 @@ mod tests {
                  "dependency":{"blocked_by":[{"number":9}],"cycle":true,"bundle_with":[7,5]},
                  "missing_inputs":[]},
                 {"issue_number":1,"state":"launched",
-                 "dependency":{"blocked_by":[],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
+                 "dependency":{"blocked_by":[{"number":9},{"number":8},{"number":9}],"cycle":false,"bundle_with":[]},"missing_inputs":[]},
                 {"issue_number":1,"state":"needs_human","dependency":null,
                  "missing_inputs":["dependency_status"]},
                 {"issue_number":1,"state":"launched",
@@ -2081,12 +2088,24 @@ mod tests {
         assert_eq!(rows[1].get("dependency_observations"), Some(&json!([])));
         assert_eq!(
             rows[2].get("dependency_observations"),
-            Some(
-                &json!([{"issue_number":6,"state":"needs_human","dependency":null,
-                         "missing_inputs":["dependency_status"]}])
-            )
+            Some(&json!([{"issue_number":6,"state":"needs_human",
+                         "dependency":{"blocked_by":[{"number":9}],"cycle":false,"bundle_with":[]},
+                         "missing_inputs":[]}]))
         );
         assert_eq!(rows[3].get("dependency_observations"), Some(&json!([])));
+        assert_eq!(
+            rows[0].get("dependency_impacts"),
+            Some(&json!([
+                {"issue_number":8,"dependent_issues":[1]},
+                {"issue_number":9,"dependent_issues":[1,3]}
+            ]))
+        );
+        assert_eq!(rows[1].get("dependency_impacts"), Some(&json!([])));
+        assert_eq!(
+            rows[2].get("dependency_impacts"),
+            Some(&json!([{"issue_number":9,"dependent_issues":[6]}]))
+        );
+        assert_eq!(rows[3].get("dependency_impacts"), Some(&json!([])));
         assert!(!report.to_string().contains("private diagnostic"));
         assert_eq!(serde_json::to_value(&monitor).unwrap(), monitor_before);
         assert_eq!(rows[0]["issues"], json!([3, 1, 3, 2]));
@@ -2111,6 +2130,7 @@ mod tests {
         let absent = serde_json::to_value(assess_planning(&state, None)).unwrap();
         for row in absent["roadmap_items"].as_array().unwrap() {
             assert_eq!(row.get("dependency_observations"), Some(&Value::Null));
+            assert_eq!(row.get("dependency_impacts"), Some(&Value::Null));
         }
         assert_eq!(
             absent["roadmap_items"][0]["observed_issue_states"],
@@ -2124,6 +2144,14 @@ mod tests {
         let degraded = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         assert_eq!(degraded["roadmap_items"], *rows);
         assert_eq!(degraded["monitor"]["source"], "degraded_cache");
+        monitor.scan_aborted = true;
+        let aborted = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
+        assert_eq!(aborted["roadmap_items"], *rows);
+        assert_eq!(aborted["monitor"]["scan_aborted"], true);
+        assert!(aborted["missing_inputs"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("successful_monitor_scan")));
         monitor.inbox.retain(|row| row.issue_number == 5);
         let unrelated = serde_json::to_value(assess_planning(&state, Some(&monitor))).unwrap();
         monitor.inbox.clear();
@@ -2131,6 +2159,7 @@ mod tests {
         for observation in [unrelated, empty] {
             for row in observation["roadmap_items"].as_array().unwrap() {
                 assert_eq!(row.get("dependency_observations"), Some(&json!([])));
+                assert_eq!(row.get("dependency_impacts"), Some(&json!([])));
             }
         }
         assert_eq!(state, before);
