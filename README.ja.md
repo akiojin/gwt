@@ -916,6 +916,12 @@ milestone のみ・category のみ・他 Goal の参照から所属を広げま�
 `unobserved_issues` と Monitor の取得元・観測範囲も確認してください。この観測は
 Goal や指標の達成・critical path・起動可能性を証明せず、優先順位や起動の変更を
 許可しません。
+各 Goal の `dependency_impacts` は、全体の直接逆引きから同じ roadmap 所属の
+dependent だけを抽出します。外部 blocker・番号順・重複排除・直接辺を保持し、所属外の
+dependent と空の blocker 行は除きます。重複・空の Goal ID は所属を解決しません。
+Monitor 不在は null、所属 Issue の供給辺がなければ [] です。degraded・中断 snapshot の
+事実は Monitor の取得元・観測範囲の制約と共に保持します。Goal や指標の達成・推移的遅延・
+critical path を証明せず、優先順位・起動可能性・起動の変更を許可しません。
 各ロードマップ項目の `dependency_observations` は、その行に直接保存された Issue の
 診断だけを選び、供給された行順・重複・依存情報の欠落を保持します。空・重複 ID や
 不正な紐付けも行ごとの所属を維持し、Goal・milestone・他の行から所属を広げません。

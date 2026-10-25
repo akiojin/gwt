@@ -1005,6 +1005,13 @@ row order, repeats and missing dependency data; absent Monitor yields null, whil
 matching rows yields []. Keep `unobserved_issues` and the Monitor provenance. These
 observations do not prove Goal achievement, metric attainment, critical path or readiness,
 and authorize no priority or launch changes.
+Each Goal's `dependency_impacts` filters the global direct inverse to those same roadmap
+member dependents. It retains external blockers, numeric order and distinct direct
+dependents, and omits other dependents and empty blocker rows. Duplicate or blank Goal
+IDs resolve no members. Absent Monitor yields null; no supplied member blocker edges
+yields []. Degraded or aborted facts keep the enclosing Monitor provenance and limits.
+This inverse proves neither Goal/metric attainment, transitive delay nor critical path,
+and grants no priority, readiness or launch authority.
 Each roadmap item's `dependency_observations` selects only that row's directly saved
 Issues, retaining supplied row order, repeats and missing dependency data. Empty or
 duplicate IDs and invalid links keep independent membership; it never expands through
