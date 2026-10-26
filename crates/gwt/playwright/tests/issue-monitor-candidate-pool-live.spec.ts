@@ -90,6 +90,11 @@ test.describe("Issue Monitor candidate pool", () => {
       // Custom registration remains an actual UI action. Bind the saved pool
       // to the existing Claude member so migration cannot rest this new person.
       const customMember = await register(CUSTOM_ID);
+      const customRow = page.locator(`.roster-row[data-member-id="${customMember.agent_member_id}"]`);
+      await expect(customRow).toBeVisible();
+      await customRow.click();
+      await expect(page.locator(".roster-detail")).toContainText(CUSTOM_ID);
+      await page.screenshot({ path: testInfo.outputPath("registered-member-tools.png") });
       // The live fixture has Monitor and PM disabled. This only edits profiles;
       // it never starts an agent, enables the Monitor, or creates a branch.
       await sendLiveGwtEvent(page, {
