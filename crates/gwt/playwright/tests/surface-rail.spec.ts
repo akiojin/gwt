@@ -38,20 +38,20 @@ test.describe("Surface rail", () => {
     await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
   });
 
-  for (const [surface, focusedId] of [["settings", "issue-window"], ["board", "board-window"], ["issues", "legacy-issues-window"]] as const) {
+  for (const [surface, focusedId] of [["settings", "settings-grouped"], ["board", "board-window"], ["issues", "legacy-issues-window"]] as const) {
     test(`restoring ${surface} ignores legacy canvas geometry and grouping`, async ({ page }, testInfo) => {
       const errors = captureBrowserErrors(page);
       await installSurfaceAssets(page);
       await installSurfaceRailBackend(page, true, false, focusedId);
       await page.goto(surfaceAppUrl);
       const main = page.getByRole("region", { name: "Main pane", exact: true });
-      // Settings retains its existing default Issues tab; the rail follows
-      // that visible content rather than introducing new tab persistence.
-      const visibleSurface = surface === "settings" ? "issues" : surface;
+      // Restored Settings stays configuration-only, independent of Issues.
+      const visibleSurface = surface;
       await expect(main).toHaveAttribute("data-surface", visibleSurface);
       await expect(main.locator(`.workspace-window[data-id='${focusedId}']`)).toBeVisible();
       if (surface === "settings") {
-        await expect(main.getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
+        await expect(main.getByRole("tab", { name: "System", exact: true })).toHaveAttribute("aria-selected", "true");
+        await expect(main.locator(".issue-bridge-root")).toHaveCount(0);
       }
       await expectSurfaceOnly(page);
       await page.reload();
@@ -147,7 +147,8 @@ test.describe("Surface rail", () => {
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("board");
     await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
-    await expect(page.getByRole("region", { name: "Right pane", exact: true })).toHaveAttribute("data-surface", "issues");
+    await expect(page.getByRole("region", { name: "Right pane", exact: true })).toHaveAttribute("data-surface", "settings");
+    await expect(page.getByRole("region", { name: "Right pane", exact: true }).locator(".issue-bridge-root")).toHaveCount(0);
     await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "true");
     await expectSurfaceOnly(page);
     await page.screenshot({ path: testInfo.outputPath("fixed-layout-entry-points.png") });
@@ -369,7 +370,7 @@ test.describe("Surface rail", () => {
     for (const surface of ["board", "issues", "settings"]) {
       await left.getByRole("combobox", { name: "Left pane surface" }).selectOption(surface);
       await right.getByRole("combobox", { name: "Right pane surface" }).selectOption(surface);
-      const preset = surface === "issues" ? "settings" : surface;
+      const preset = surface === "issues" ? "issue" : surface;
       const view = `.workspace-window[data-preset='${preset}']`;
       await expect(left.locator(view)).toBeVisible();
       await expect(right.locator(view)).toBeVisible();
@@ -385,7 +386,7 @@ test.describe("Surface rail", () => {
       await pane.getByRole("tab", { name: "Custom Agents", exact: true }).click();
       await expect(pane.getByRole("tab", { name: "Custom Agents", exact: true })).toHaveAttribute("aria-selected", "true");
     }
-    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(2);
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(3);
     for (const message of (await sentMessages(page)).filter(message => message.kind === "create_window")) {
       expect(message).not.toHaveProperty("bounds");
       expect(message).not.toHaveProperty("geometry");
@@ -521,14 +522,15 @@ test.describe("Surface rail", () => {
     await systemTab.click({ position: { x: point.x - tabBounds!.x, y: point.y - tabBounds!.y } });
     await expect(systemTab).toHaveAttribute("aria-selected", "true");
     await expect(railPopup).toBeHidden();
-    await settings.getByRole("tab", { name: "Issues", exact: true }).click();
-    const issues = settings.locator('[data-settings-panel="issues"]');
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+    const issueView = page.locator('.workspace-window[data-preset="issue"]');
     await page.locator('.op-rail__surface[data-surface="agents"]').hover();
     await expect(railPopup).toBeVisible();
-    await issues.locator(".knowledge-monitor-pill").focus();
+    await issueView.locator(".knowledge-monitor-pill").focus();
     await expect(railPopup).toBeHidden();
     await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
-    await issues.getByRole("button", {name:"Issues settings",exact:true}).click();
+    await issueView.getByRole("button", {name:"Issues settings",exact:true}).click();
+    const issues = settings.locator('[data-settings-panel="issues"]');
     await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
     await clearMessages(page);
     const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {
@@ -559,8 +561,8 @@ test.describe("Surface rail", () => {
     await pm.locator('[data-role="pm-autonomy-status"]').focus();
     const popupId = (await pm.locator('[data-role="pm-autonomy-status"]').getAttribute("aria-describedby"))!.split(/\s+/).at(-1);
     await expect(page.locator(`#${popupId}`)).toBeVisible();
-    await page.evaluate(() => (window as any).__removeSurfaceAgent("issue-window"));
-    await expect(windowById(page, "issue-window")).toHaveCount(0);
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
     await expect(page.locator(`#${popupId}`)).toHaveCount(0);
     expect((await sentMessages(page)).filter(message => /^(set_issue_monitor|set_pm|restart_pm|update_viewport)/.test(message.kind || ""))).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
@@ -765,18 +767,20 @@ test.describe("Surface rail", () => {
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);
 
-    // Issues opens its section in the migrated Settings view, keeping its ID.
+    // Issues selects its own live host without Settings chrome.
     await clearMessages(page);
     await entry("issues").click();
     await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["issues"]);
-    await expect(windowById(page, "issue-window").getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(windowById(page, "issue-window").locator(".settings-root, .settings-tabs")).toHaveCount(0);
+    await expect(windowById(page, "issue-window").locator(".issue-bridge-root")).toBeVisible();
     expect(await createdPresets(page)).toEqual([]);
 
-    // Settings reuses that same view without creating a second host.
+    // Settings selects its independent configuration host.
     await clearMessages(page);
     await entry("settings").click();
-    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="settings-window"]')).toBeVisible();
+    await expect(windowById(page, "settings-window").locator(".issue-bridge-root")).toHaveCount(0);
     expect(await createdPresets(page)).toEqual([]);
 
     // Every entry explains itself on hover.
@@ -932,10 +936,16 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         z_index: 2,
       }),
       surfaceWindow("issue-window", {
+        title: "Issues",
+        preset: "issue",
+        geometry: { x: 80, y: 80, width: 640, height: 420 },
+        z_index: 10,
+      }),
+      surfaceWindow("settings-window", {
         title: "Settings",
         preset: "settings",
         geometry: { x: 80, y: 80, width: 640, height: 420 },
-        z_index: 10,
+        z_index: 9,
       }),
       surfaceWindow("board-window", {
         title: "Board",
@@ -964,7 +974,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     ];
     if (groupedSettings) {
       Object.assign(windows.find((data) => data.id === "board-window")!, { tab_group_id: "group", tab_group_active: true });
-      windows.push(surfaceWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
+      Object.assign(windows.find((data) => data.id === "settings-window")!, { id: "settings-grouped", tab_group_id: "group", tab_group_active: false });
     }
     if (focusedId === "shell-window") {
       windows.push(surfaceWindow(focusedId, { preset: "shell", status: "running", minimized: true,
@@ -977,7 +987,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     if (focused) focused.z_index = 100;
     if (focusedId === "issue-window") {
       // An inline agent can have a newer persisted z-index without becoming
-      // the project landing surface. Restore its owning Settings/Issues view.
+      // the project landing surface. Restore its owning Issues view.
       for (const data of windows.filter(data => ["agent-one", "agent-two"].includes(data.id))) {
         Object.assign(data, { z_index: 200, placement: { kind: "issue_preview", issue_window_id: "issue-window", issue_number: 5595 } });
       }

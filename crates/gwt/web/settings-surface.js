@@ -26,7 +26,7 @@ import { createInteractionGuard } from "/interaction-guard.js";
 import { renderIndexSettingsPanel } from "/index-settings-panel.js";
 import { renderCustomAgentEnvEditor } from "/custom-agent-env-editor.js";
 import { createUiStateStore } from "./ui-state-store.js";
-import { setControlExplanation } from "./control-explanations.js";
+import { bindControlExplanations, setControlExplanation } from "./control-explanations.js";
 
 function renderUpdateSettingsStatus(panel, status) {
   const document = panel.ownerDocument;
@@ -277,10 +277,31 @@ function renderIssuesSettingsPanel(panel, options) {
     return input;
   };
   const launch = group("Launch control");
-  for (const [action, name] of [["monitor-autonomous", "Autonomous"], ["monitor-toggle", "Monitoring"]]) {
+  for (const [action, name, key, kind] of [
+    ["monitor-autonomous", "Autonomous", "autonomous_mode", "set_issue_monitor_autonomous_mode"],
+    ["monitor-toggle", "Monitoring", "enabled", "set_issue_monitor_enabled"],
+  ]) {
     const slot = document.createElement("span");
-    const control = launchControls.find(control => control.dataset.action === action);
-    if (control) slot.appendChild(control);
+    let control = launchControls.find(control => control.dataset.action === action);
+    if (!control) {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.className = "settings-checkbox";
+      control.dataset.action = action;
+      control.setAttribute("aria-label", name);
+      control.addEventListener("change", () => {
+        const enabled = control.checked;
+        control.checked = control.dataset.confirmed === "true";
+        send({ kind, enabled });
+      });
+    }
+    control.checked = status?.[key] === true;
+    control.dataset.confirmed = String(control.checked);
+    control.disabled = !status;
+    setControlExplanation(control, action === "monitor-autonomous"
+      ? "Allow eligible issues to run without waiting for human approval."
+      : "Start or pause monitoring for queued issues.", `settings-${action}`);
+    slot.appendChild(control);
     row(launch, name, slot).dataset.settingsLaunchAction = action;
   }
   if (panel.dataset.maxActiveProject !== project?.project_root) delete panel.dataset.maxActiveDraft;
@@ -492,23 +513,6 @@ function reconcileCandidateSave(panel, event) {
     feedback.textContent = "Saved candidates.";
     feedback.dataset.kind = "success";
     feedback.setAttribute("role", "status");
-  }
-}
-
-function positionIssuesLaunchControls(body) {
-  const open = body.querySelector(".settings-issues-options")?.hasAttribute("open");
-  const summary = body.querySelector(".knowledge-monitor-controls");
-  for (const action of ["monitor-autonomous", "monitor-toggle"]) {
-    const control = body.querySelector(`[data-action="${action}"]`);
-    const slot = body.querySelector(`[data-settings-launch-action="${action}"] > :last-child`);
-    if (!control) continue;
-    if (open) slot?.appendChild(control);
-    else if (summary) {
-      const anchor = action === "monitor-autonomous"
-        ? summary.querySelector('.issue-monitor-limit, [data-action="monitor-settings"]')
-        : summary.querySelector('[data-action="monitor-diagnostics"], .knowledge-monitor-capacity-badge');
-      summary.insertBefore(control, anchor);
-    }
   }
 }
 
@@ -783,10 +787,6 @@ export function switchSettingsTab(body, target, focus = false) {
   const showCandidates = target === "agents";
   if (showCandidates) target = "issues";
   body.dataset.settingsSection = target;
-  if (showCandidates) {
-    const disclosure = body.querySelector(".settings-issues-options");
-    if (disclosure) disclosure.open = true;
-  }
   const tabs = body.querySelectorAll(".settings-tab");
   tabs.forEach((tab) => {
     const isSelected = tab.dataset.settingsTab === target;
@@ -851,7 +851,6 @@ export function createSettingsSurface({
   renderUsagePanel,
   getIndexStatus,
   pmSettingsPanel,
-  mountIssues,
   rosterModel,
   scheduleFrame,
 }) {
@@ -1105,6 +1104,11 @@ export function createSettingsSurface({
         const current = projectSettingsSnapshot(body);
         const project = { project_root: root, name: body.dataset.settingsProjectName };
         const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
+        for (const control of launchControls) {
+          control.checked = current.status?.[control.dataset.action === "monitor-autonomous" ? "autonomous_mode" : "enabled"] === true;
+          control.dataset.confirmed = String(control.checked);
+          control.disabled = !current.status;
+        }
         const focusedLaunchControl = launchControls.find(control => control === document.activeElement);
         const agentsPanel = body.querySelector("[data-settings-candidates]");
         if (agentsPanel) renderCandidateSaveError(agentsPanel, current.profilesFailure);
@@ -1138,9 +1142,8 @@ export function createSettingsSurface({
             availableMembers,
           });
         }
-        positionIssuesLaunchControls(body);
         focusedLaunchControl?.focus({ preventScroll: true });
-        body.querySelector(".issue-bridge-root")?.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
+        body.settingsExplanations?.refresh();
       }
       function applyIssueSettingsStatus(status, projectRoot) {
         if (!projectRoot) return;
@@ -1327,7 +1330,10 @@ export function createSettingsSurface({
 
       function purgeDetachedSettingsBodies() {
         for (const body of Array.from(settingsWindowBodies)) {
-          if (!body.isConnected) settingsWindowBodies.delete(body);
+          if (!body.isConnected) {
+            body.settingsExplanations?.dispose();
+            settingsWindowBodies.delete(body);
+          }
         }
       }
 
@@ -1341,13 +1347,15 @@ export function createSettingsSurface({
         purgeDetachedSettingsBodies();
         while (body.firstChild) body.removeChild(body.firstChild);
         const project = activeProjectTab();
-        body.dataset.settingsSection = "issues";
+        body.dataset.settingsSection = "system";
         body.dataset.settingsWindowId = windowData.id;
         body.dataset.surfaceOwner = windowData.surface_owner || "";
         body.dataset.settingsProjectRoot = project?.project_root || "";
         body.dataset.settingsProjectName = project?.name || project?.title || project?.project_root?.split(/[\\/]/).pop() || "No project";
 
         const root = createDiv("settings-root");
+        body.settingsExplanations?.dispose();
+        body.settingsExplanations = bindControlExplanations({ document, root, id: `settings-control-explanation-${windowData.id}` });
 
         const toolbar = document.createElement("header");
         toolbar.className = "settings-toolbar";
@@ -1389,7 +1397,7 @@ export function createSettingsSurface({
           buildSettingsTab("usage", "Usage & Limits", false, windowData.id),
         );
         tabs.appendChild(createNode("span", "settings-label", `Project settings · ${body.dataset.settingsProjectName}`));
-        tabs.appendChild(buildSettingsTab("issues", "Issues", true, windowData.id));
+        tabs.appendChild(buildSettingsTab("issues", "Issues execution settings", false, windowData.id));
         // PM settings are also project-owned; keep all project tabs together.
         tabs.appendChild(tabs.querySelector('[data-settings-tab="project-manager"]'));
 
@@ -1398,7 +1406,7 @@ export function createSettingsSurface({
         const bodyEl = createDiv("settings-body");
 
         const panelSystem = document.createElement("section");
-        panelSystem.className = "settings-panel hidden";
+        panelSystem.className = "settings-panel";
         panelSystem.setAttribute("role", "tabpanel");
         panelSystem.dataset.settingsPanel = "system";
         linkSettingsPanel(panelSystem, windowData.id, "system");
@@ -1467,13 +1475,17 @@ export function createSettingsSurface({
         bodyEl.appendChild(panelBackends);
         bodyEl.appendChild(panelUsage);
         const panelIssues = document.createElement("section");
-        panelIssues.className = "settings-panel settings-issues-panel";
+        panelIssues.className = "settings-panel settings-issues-panel hidden";
         panelIssues.setAttribute("role", "tabpanel");
         panelIssues.dataset.settingsPanel = "issues";
         linkSettingsPanel(panelIssues, windowData.id, "issues");
         bodyEl.appendChild(panelIssues);
-        const issuesHost = createDiv("settings-issues-host surface-knowledge");
-        panelIssues.appendChild(issuesHost);
+        const controls = createDiv();
+        controls.dataset.settingsIssuesControls = "";
+        panelIssues.appendChild(controls);
+        const candidates = createDiv();
+        candidates.dataset.settingsCandidates = "";
+        panelIssues.appendChild(candidates);
 
         const layout = createDiv("settings-layout");
         layout.appendChild(tabs);
@@ -1481,27 +1493,6 @@ export function createSettingsSurface({
         root.appendChild(toolbar);
         root.appendChild(layout);
         body.appendChild(root);
-        mountIssues(windowData, issuesHost);
-        const issuesRoot = issuesHost.querySelector(".issue-bridge-root");
-        const issuesOptions = document.createElement("details");
-        issuesOptions.className = "settings-issues-options";
-        const summary = document.createElement("summary");
-        summary.textContent = "Settings · Capacity, refill, labels and candidates";
-        issuesOptions.appendChild(summary);
-        const controls = createDiv();
-        controls.dataset.settingsIssuesControls = "";
-        issuesOptions.appendChild(controls);
-        const candidates = createDiv();
-        candidates.dataset.settingsCandidates = "";
-        issuesOptions.appendChild(candidates);
-        issuesRoot.querySelector(".workspace-toolbar").after(issuesOptions);
-        const gear = issuesRoot.querySelector('[data-action="monitor-settings"]');
-        gear.setAttribute("aria-expanded", "false");
-        issuesOptions.addEventListener("toggle", () => {
-          gear.setAttribute("aria-expanded", String(issuesOptions.open));
-          positionIssuesLaunchControls(body);
-        });
-        gear.addEventListener("click", () => { issuesOptions.open = !issuesOptions.open; });
 
         tabs.addEventListener("click", (e) => {
           const btn = e.target.closest("[data-settings-tab]");
@@ -1544,7 +1535,7 @@ export function createSettingsSurface({
         // Honour any pending settings:open dispatch (e.g. from the badge
         // click) by switching to the requested tab once the panel is mounted.
         const target = pendingSettingsTabTargets.get(windowData.surface_owner || null);
-        switchSettingsTab(body, target || "issues", Boolean(target));
+        switchSettingsTab(body, target || "system", Boolean(target));
         pendingSettingsTabTargets.delete(windowData.surface_owner || null);
       }
 

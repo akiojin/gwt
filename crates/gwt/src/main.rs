@@ -6084,13 +6084,13 @@ mod tests {
                 3
             );
         }
-        let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
         let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
         assert_eq!(
-            runtime.window_status(&settings_id),
+            runtime.window_status(&issue_id),
             Some(WindowProcessStatus::Running)
         );
-        assert_eq!(runtime.focus_window_events(&settings_id).len(), 1);
+        assert_eq!(runtime.focus_window_events(&issue_id).len(), 1);
         assert_eq!(
             runtime
                 .cycle_focus_events(&runtime.test_context(), FocusCycleDirection::Forward)
@@ -6128,6 +6128,7 @@ mod tests {
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
+            WindowPreset::Issue,
         ] {
             assert_eq!(
                 runtime
@@ -6136,7 +6137,11 @@ mod tests {
                 3
             );
         }
-        let id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        let id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+        assert_ne!(
+            id,
+            window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0)
+        );
         let raw = runtime.window_lookup[&id].raw_id.clone();
         let before = runtime
             .tab("tab-1")

@@ -474,8 +474,8 @@ Common windows include:
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
-  `Issues` for Autonomous, Max active, queue refill and allowed labels, or
-  the same Issues section to edit launch profiles and candidate order/preferences.
+  `Issues execution settings` for Autonomous, Max active, queue refill, allowed
+  labels, launch profiles, and candidate order/preferences.
   Candidate edits save automatically when committed; text fields save when focus
   leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
@@ -519,7 +519,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Issue surface and Issue Monitor
 
-Open **Settings → Project → Issues**, or use the **Issues** rail shortcut, to browse cached GitHub Issues in four columns:
+Open **Issues** from the rail to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
 actions. Drag Backlog items into Queued to schedule them, drag them back to remove
 them, or reorder items within Queued. Selecting multiple items sends one queue
@@ -547,10 +547,11 @@ Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue cou
 a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
 **Issues settings**. The switches show the server-confirmed On / Off state.
 Only current failures appear red; error details and history stay in the notification center.
-Use **Issues settings** to
-expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
+Use **Issues settings** to open **Settings → Project → Issues execution settings**.
+It contains **Launch control** (Autonomous, Max active, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. The summary switches remain available when settings are collapsed.
+profiles. Issues and Settings have independent views and can appear side by side
+in Split view, preserving Issue search/selection and unfinished settings edits.
 Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
 edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
 Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
@@ -609,7 +610,7 @@ and the shared `agent_capacity` measurement. Roster projects also report
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
-**Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
+**Allowed labels** in Settings → Issues execution settings accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
 cancelling running agents. Automation can set the same list with `issue.monitor.config.set`

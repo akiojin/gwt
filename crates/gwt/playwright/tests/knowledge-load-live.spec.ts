@@ -200,7 +200,7 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
         await expect(page.locator("#close-project-button")).toBeVisible();
         // The real corpus can still be hydrating after the static shell and
         // test bridge become visible. Wait for this Project's authoritative
-        // workspace before invoking its Settings listener.
+        // workspace before opening its Issues surface.
         await page.waitForFunction(({ project, hash }) => ((window as any).__gwtPlaywrightMessages ?? [])
           .some(({ payload }: any) => payload.kind === "workspace_state" && payload.workspace?.tabs?.some((tab: any) =>
             tab.project_key === hash || tab.project_root === project)),
@@ -209,13 +209,11 @@ test.describe("Issue cache load (live backend, Issue #5543)", () => {
         for (const name of ["started", "release", "resumed", "completed"]) await rm(join(gateDirectory, name), { force: true });
         await writeFile(join(gateDirectory, "work-items-path"), `${join(state, "works.json")}\n`);
         phase = "first";
-        // Issue-family presets are canonicalized to Settings. Use the actual
-        // Settings Issues entrypoint instead of looking for a retired window.
-        await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
-        const issueWindow = page.locator('.workspace-window[data-preset="settings"]').last();
+        await page.locator('.op-rail [data-surface="issues"]').click();
+        const issueWindow = page.locator('.workspace-window[data-preset="issue"]').last();
         await expect(issueWindow).toBeVisible();
-        await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-        const issueSurface = issueWindow.locator('[data-settings-panel="issues"] .surface-knowledge');
+        await expect(issueWindow.locator('.settings-root')).toHaveCount(0);
+        const issueSurface = issueWindow.locator('.issue-bridge-root');
         await expect(issueSurface).toBeVisible();
         windowId = await issueWindow.getAttribute("data-id") ?? undefined;
         expect(windowId).toBeTruthy();

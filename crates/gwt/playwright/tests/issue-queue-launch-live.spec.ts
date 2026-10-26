@@ -407,12 +407,10 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings" });
-      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue" });
+      const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
       await expect(issueWindow).toBeVisible();
-      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
-      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-      const issues = issueWindow.locator('[data-settings-panel="issues"]');
+      const issues = issueWindow.locator(".issue-bridge-root");
       const metric = issues.locator('[data-metric="active"]');
       await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
       const row = issues.locator(`[data-issue-number="${fixture.issueNumber}"]`);
@@ -484,15 +482,11 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings",
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue",
         bounds: { x: 20, y: 60, width: 1480, height: 920 } });
-      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
       await expect(issueWindow).toBeVisible();
-      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
-        detail: { section: "issues" },
-      })));
-      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-      const issues = issueWindow.locator('[data-settings-panel="issues"]');
+      const issues = issueWindow.locator(".issue-bridge-root");
       const backlog = issues.locator('[data-queue-column="backlog"]');
       const queued = issues.locator('[data-queue-column="queued"]');
       const row = backlog.locator(`[data-issue-number="${fixture.issueNumber}"]`);

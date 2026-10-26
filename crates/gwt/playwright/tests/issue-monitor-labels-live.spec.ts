@@ -76,7 +76,7 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const windows = page.locator('.workspace-window[data-preset="settings"]');
+      const windows = page.locator('.workspace-window[data-preset="issue"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1120, height: 820 },
@@ -85,17 +85,15 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       const windowId = await windows.first().getAttribute("data-id");
       const surface = page.locator(`.workspace-window[data-id="${windowId}"]`);
       const settings = page.locator('.workspace-window[data-preset="settings"]');
+      const createdSettings = !(await settings.count());
       const issues = settings.locator('[data-settings-panel="issues"]');
       const labels = issues.getByLabel("Allowed labels", { exact: true });
       const openIssues = async () => {
         await page.locator('[data-surface="issues"]').click();
+        await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
         await expect(issues).toBeVisible();
-        const options = issues.locator(".settings-issues-options");
-        if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) {
-          await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
-        }
-        await expect(options).toHaveAttribute("open", "");
+        await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
       };
       try {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: [] });
@@ -168,6 +166,14 @@ test.describe("Issue Monitor allowed labels (live backend)", () => {
       } finally {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_allowed_labels", allowed_labels: before.allowed_labels ?? [] });
         await expectSavedLabels(page, before.allowed_labels ?? []);
+        if (!page.isClosed() && (createdSettings || created)) {
+          await page.locator('button[data-surface="agents"]').click();
+          if (createdSettings) {
+            for (const id of await settings.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")))) {
+              await sendLiveGwtEvent(page, { kind: "close_window", id });
+            }
+          }
+        }
         if (created && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
     });

@@ -859,7 +859,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         return null;
@@ -4039,7 +4039,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("issue", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -4380,10 +4380,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         getIndexStatus,
         pmSettingsPanel,
         rosterModel,
-        mountIssues: (data, host) => {
-          mountKnowledgeWindow(data, host);
-          send({ kind: "request_remote_start_work_branches", id: data.id });
-        },
       });
 
       function ensureWindow(windowData) {
@@ -4488,7 +4484,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge" || surface === "settings") {
+        if (surface === "knowledge") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -4616,6 +4612,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     clearBranchCleanupForWindow(windowId);
 
                     pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
+                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -5604,7 +5601,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onAgentsHost: setRosterHost,
 
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "settings" : surface;
+          const preset = surface === "issues" ? "issue" : surface;
           send({ kind: "create_window", preset });
         },
         onChange: () => {
@@ -5613,7 +5610,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           refreshVisibleKnowledgeWindows();
         },
         onLayout: (ids) => {
-          for (const id of ids) activateTerminalOnReveal(id);
+          for (const id of ids) {
+            activateTerminalOnReveal(id);
+            windowMap.get(id)?.querySelector(".window-body")?.settingsExplanations?.refresh();
+          }
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
@@ -5792,10 +5792,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
-        if (preset === "issue") {
-          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
-        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset

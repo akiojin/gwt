@@ -60,7 +60,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const windows = page.locator('.workspace-window[data-preset="settings"]');
+      const windows = page.locator('.workspace-window[data-preset="issue"]');
       const created = !(await windows.count());
       if (created) await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue", });
@@ -76,13 +76,10 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const showIssues = () => page.getByRole("button", { name: "Issues", exact: true }).click();
       const openIssuesSettings = async () => {
         await showIssues();
+        await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
         await expect(issues).toBeVisible();
-        const options = issues.locator(".settings-issues-options");
-        if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) {
-          await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
-        }
-        await expect(options).toHaveAttribute("open", "");
+        await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
       };
       const notice = page.locator('.notification-center__item[data-error-key="issue-monitor:capacity"]');
       const budget = notice.locator(".notification-center__details");
@@ -263,9 +260,11 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       } finally {
         await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: before.max_active_agents_override });
         await expectOverride(page, before.max_active_agents_override);
+        if (!page.isClosed() && (createdSettings || created)) await page.locator('button[data-surface="agents"]').click();
         if (createdSettings && !page.isClosed()) {
-          const settingsId = await settings.getAttribute("data-id");
-          if (settingsId) await sendLiveGwtEvent(page, { kind: "close_window", id: settingsId });
+          for (const id of await settings.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")))) {
+            await sendLiveGwtEvent(page, { kind: "close_window", id });
+          }
         }
         if (created && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
@@ -284,7 +283,7 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
-      const windows = page.locator('.workspace-window[data-preset="settings"]');
+      const windows = page.locator('.workspace-window[data-preset="issue"]');
       if (!(await windows.count())) await sendLiveGwtEvent(page, {
         kind: "create_window", preset: "issue", });
       const surface = windows.first();
