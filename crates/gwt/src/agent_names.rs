@@ -475,7 +475,7 @@ pub fn mutate_project_roster(
     }
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let seed = initial_project_members(root, &path, sessions_dir)?;
-    let dead = dead_project_assignments(&path, sessions_dir)?;
+    let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
@@ -550,7 +550,11 @@ pub fn mutate_project_roster(
 }
 
 /// A reservation becomes reusable only after exact physical absence is known.
-fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -> bool {
+fn assignment_is_busy(
+    root: &Path,
+    assignment: &AgentMemberAssignment,
+    sessions_dir: &Path,
+) -> bool {
     if !assignment.host_id.is_empty() && assignment.host_id != crate::process::current_hostname() {
         return true;
     }
@@ -558,6 +562,15 @@ fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -
         let sessions = sessions_dir;
         match gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))) {
             Ok(session) if session.id == *session_id => {
+                if gwt_core::paths::project_scope_hash(
+                    session
+                        .project_state_root
+                        .as_deref()
+                        .unwrap_or(&session.worktree_path),
+                ) != gwt_core::paths::project_scope_hash(root)
+                {
+                    return true;
+                }
                 let observed = crate::session_inventory::observe_session(&session, sessions);
                 if !observed.sessions.is_empty() || !observed.uncertainties.is_empty() {
                     return true;
@@ -660,6 +673,7 @@ fn missing_session_is_absent(sessions: &Path, id: &str) -> std::io::Result<bool>
 }
 
 fn dead_project_assignments(
+    root: &Path,
     path: &Path,
     sessions_dir: &Path,
 ) -> Result<DeadProjectAssignments, String> {
@@ -692,7 +706,7 @@ fn dead_project_assignments(
     let assignments = assignments
         .into_iter()
         .filter(|assignment| {
-            !assignment_is_busy(assignment, sessions_dir)
+            !assignment_is_busy(root, assignment, sessions_dir)
                 || local(assignment)
                     && assignment.session_id.as_ref().is_some_and(|id| {
                         ids.contains(id)
@@ -874,7 +888,7 @@ fn reserve_project_member_inner(
     } else {
         None
     };
-    let dead = dead_project_assignments(&path, sessions_dir)?;
+    let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
@@ -1506,7 +1520,7 @@ mod tests {
         let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
         gwt_agent::with_session_path_lease(&sessions, "another-session", |_| {
             assert!(
-                dead_project_assignments(&path, &sessions)
+                dead_project_assignments(&root, &path, &sessions)
                     .unwrap()
                     .assignments
                     .is_empty(),
@@ -1515,7 +1529,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let dead = dead_project_assignments(&path, &sessions).unwrap();
+        let dead = dead_project_assignments(&root, &path, &sessions).unwrap();
         assert_eq!(dead.assignments.len(), 2);
         crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
             for session in &removed {
@@ -1701,14 +1715,31 @@ mod tests {
                 .unwrap();
         runtime.runtime_incarnation = None;
         runtime.save(&path).unwrap();
-        assert!(assignment_is_busy(&assignment, &sessions));
+        assert!(assignment_is_busy(&root, &assignment, &sessions));
         runtime.runtime_incarnation = Some(7);
         runtime.save(&path).unwrap();
         let handshake = gwt_agent::active_launch_handshake_path(&sessions, &session.id);
         std::fs::create_dir_all(handshake.parent().unwrap()).unwrap();
         std::fs::write(&handshake, b"preparing or unreadable").unwrap();
-        assert!(assignment_is_busy(&assignment, &sessions));
+        assert!(assignment_is_busy(&root, &assignment, &sessions));
         std::fs::remove_file(handshake).unwrap();
+        let foreign = temp.path().join("foreign-project");
+        std::fs::create_dir_all(&foreign).unwrap();
+        session.project_state_root = Some(foreign);
+        session.save(&sessions).unwrap();
+        assert!(
+            read_project_roster(&root, &sessions)
+                .unwrap()
+                .members
+                .iter()
+                .find(|entry| entry.agent_member_id == member.agent_member_id)
+                .unwrap()
+                .assignment
+                .is_some(),
+            "a same-id Session belonging to another project must retain the assignment"
+        );
+        session.project_state_root = None;
+        session.save(&sessions).unwrap();
         let restarted = reserve_project_member(
             &root,
             &sessions,

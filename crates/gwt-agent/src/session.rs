@@ -968,18 +968,48 @@ impl Session {
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
         with_session_lock(dir, &self.id, || {
-            let path = session_file_path(dir, &self.id);
-            let durable = match inspect_session_path(&path) {
-                SessionPathState::Present(session) => session,
-                SessionPathState::Missing => return Ok(false),
-                SessionPathState::Error(error) => return Err(error),
-            };
-            if serialize_session_toml(&durable)? != expected_content {
-                return Ok(false);
-            }
-            write_session_toml_atomic(&path, &content)?;
-            Ok(true)
+            self.commit_if_unchanged_under_lease(dir, &content, &expected_content)
         })
+    }
+
+    /// Use the caller's already-held lease for this exact Session, retaining
+    /// the ordinary canonical snapshot CAS instead of entering a nested lease.
+    pub fn save_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        expected: &Session,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.id {
+            return Ok(false);
+        }
+        self.commit_if_unchanged_under_lease(
+            dir,
+            &serialize_session_toml(self)?,
+            &serialize_session_toml(expected)?,
+        )
+    }
+
+    fn commit_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        content: &str,
+        expected_content: &str,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        let path = session_file_path(dir, &self.id);
+        let durable = match inspect_session_path(&path) {
+            SessionPathState::Present(session) => session,
+            SessionPathState::Missing => return Ok(false),
+            SessionPathState::Error(error) => return Err(error),
+        };
+        if serialize_session_toml(&durable)? != expected_content {
+            return Ok(false);
+        }
+        write_session_toml_atomic(&path, content)?;
+        Ok(true)
     }
 
     /// Create this Session when absent, or replace one exact pre-mutation
@@ -3474,6 +3504,32 @@ display_name = "Codex"
             .save_if_execution_identity_matches(dir.path(), &identity)
             .expect("reject replacement"));
         assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn held_lease_snapshot_cas_rejects_unleased_and_stale_name_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Session::new(dir.path(), "main", AgentId::Codex);
+        original.save(dir.path()).unwrap();
+        let mut named = original.clone();
+        named.agent_name = Some("Ada".into());
+        assert!(named
+            .save_if_unchanged_under_lease(dir.path(), &original)
+            .is_err());
+        with_session_lease(dir.path(), &original.id, |_| {
+            assert!(named.save_if_unchanged_under_lease(dir.path(), &original)?);
+            let mut stale = original.clone();
+            stale.agent_name = Some("Bert".into());
+            assert!(!stale.save_if_unchanged_under_lease(dir.path(), &original)?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            Session::load(&dir.path().join(format!("{}.toml", original.id)))
+                .unwrap()
+                .agent_name,
+            Some("Ada".into())
+        );
     }
 
     #[test]

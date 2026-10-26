@@ -390,9 +390,20 @@ fn ensure_private_dir(dir: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Residency requested by the launcher. Legacy/explicit starts remain resident.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonStartIntent {
+    #[default]
+    Standalone,
+    GuiManaged,
+}
+
 /// Persisted daemon endpoint metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEndpoint {
+    #[serde(default)]
+    pub startup_intent: DaemonStartIntent,
     pub protocol_version: u32,
     pub daemon_version: String,
     pub scope: RuntimeScope,
@@ -400,6 +411,8 @@ pub struct DaemonEndpoint {
     pub bind: String,
     pub auth_token: String,
     pub updated_at_unix_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_transport_url: Option<String>,
 }
 
 impl DaemonEndpoint {
@@ -411,6 +424,7 @@ impl DaemonEndpoint {
         daemon_version: String,
     ) -> Self {
         Self {
+            startup_intent: DaemonStartIntent::Standalone,
             protocol_version: DAEMON_PROTOCOL_VERSION,
             daemon_version,
             scope,
@@ -418,6 +432,7 @@ impl DaemonEndpoint {
             bind,
             auth_token,
             updated_at_unix_ms: chrono::Utc::now().timestamp_millis(),
+            project_transport_url: None,
         }
     }
 

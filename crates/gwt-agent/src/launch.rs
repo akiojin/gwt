@@ -419,7 +419,7 @@ pub enum ExecutionLaunchIntent {
     PreparedManualSuccessor(crate::SessionExecutionBinding),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ManualLaunchRuntimeProof {
     pub host_pid: u32,
     pub runtime_incarnation: u64,
@@ -434,7 +434,7 @@ pub struct ManualLaunchRuntimeProof {
 /// evidence — a launched Session always publishes a sidecar into its own
 /// Host's namespace — so it is modeled alongside the proof rather than folded
 /// into "no evidence".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ManualLaunchRuntimeEvidence {
     Proof(ManualLaunchRuntimeProof),
     Absent,
@@ -446,7 +446,7 @@ impl From<ManualLaunchRuntimeProof> for ManualLaunchRuntimeEvidence {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ManualLaunchSuccessorPredecessor {
     Blocked,
     Completed,
@@ -454,7 +454,7 @@ pub enum ManualLaunchSuccessorPredecessor {
 }
 
 /// Final configuration used to spawn an agent process.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LaunchConfig {
     pub agent_id: AgentId,
     pub command: String,
@@ -517,6 +517,8 @@ pub struct LaunchConfig {
     /// Blocked merely because it has no new PR to show. It never reopens the
     /// GitHub Issue; materially different scope belongs to a new owner.
     pub explicit_follow_up: bool,
+    // Prepared authority is created and validated inside the project owner.
+    #[serde(skip)]
     pub execution_intent: ExecutionLaunchIntent,
     /// Issue #4217 FR-002: who started this launch. Only the launcher knows,
     /// so it is stamped here and persisted onto the Session rather than being
@@ -2567,7 +2569,7 @@ mod tests {
             },
             capability_generation: 2,
         };
-        let config = AgentLaunchBuilder::new(AgentId::Codex)
+        let mut config = AgentLaunchBuilder::new(AgentId::Codex)
             .session_mode(SessionMode::Resume)
             .resume_session_id("conversation-existing")
             .prepared_continuation(binding.clone())
@@ -2576,11 +2578,27 @@ mod tests {
         assert_eq!(config.session_mode, SessionMode::Resume);
         assert_eq!(
             config.execution_intent,
-            ExecutionLaunchIntent::PreparedContinuation(binding)
+            ExecutionLaunchIntent::PreparedContinuation(binding.clone())
         );
         assert!(
             config.args.iter().any(|arg| arg == "conversation-existing"),
             "the provider conversation remains a Resume even though execution is producing"
+        );
+
+        // The private owner request carries settings, never prepared authority.
+        config.env_vars = HashMap::from([("LAUNCH_TEST_SETTING".into(), "value".into())]);
+        let settings = serde_json::to_value(&config).expect("serialize launch settings");
+        assert!(settings.get("execution_intent").is_none());
+        let mut incoming = settings.clone();
+        incoming["execution_intent"] = serde_json::json!({
+            "PreparedContinuation": binding,
+        });
+        let restored: LaunchConfig =
+            serde_json::from_value(incoming).expect("deserialize launch settings");
+        assert_eq!(restored.execution_intent, ExecutionLaunchIntent::Automatic);
+        assert_eq!(
+            serde_json::to_value(restored).expect("roundtrip launch settings"),
+            settings,
         );
     }
 
