@@ -517,7 +517,13 @@ impl AppRuntime {
         self.active_agent_sessions.remove(window_id);
         let window_id = window_id.to_string();
         let scheduler_window_id = window_id.clone();
-        let proxy = self.proxy.clone();
+        // A detached close may finish after this project has reopened. Keep
+        // its completion in the captured generation, like other GUI workers.
+        let proxy = close_project_root
+            .as_deref()
+            .and_then(|root| self.project_context_for_root(root))
+            .map(|context| self.proxy.for_project(context))
+            .unwrap_or_else(|| self.proxy.clone());
         let generations = Arc::clone(&self.window_lifecycle_generations);
         let task: WindowCloseFinalizerTask = Box::new(move || {
             let mut pm_outcome: Option<gwt::project_runtime::pm_delivery::PmLifecycleOutcome> =
