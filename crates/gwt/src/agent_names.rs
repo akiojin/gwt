@@ -276,6 +276,7 @@ pub fn mutate_project_roster(
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        let dead = unpinned_dead_assignments(prefs, &dead);
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
         if expected_revision.is_some_and(|expected| expected != roster.revision) {
             return Err(std::io::Error::other(
@@ -449,23 +450,32 @@ fn dead_project_assignments(
     sessions_dir: &Path,
 ) -> Result<Vec<AgentMemberAssignment>, String> {
     let prefs = crate::load_issue_monitor_prefs(path).map_err(|error| error.to_string())?;
-    // A switch's source remains uncertain until its exact runtime exit is
-    // confirmed, even when the durable Session has already disappeared.
-    let pinned_sources: Vec<_> = prefs
-        .agent_switch_intents
-        .values()
-        .filter(|intent| intent.has_admission_pin() && !intent.runtime_exit_confirmed)
-        .map(|intent| &intent.source.assignment)
-        .collect();
     Ok(prefs
         .agent_roster
         .into_iter()
         .flat_map(|roster| roster.members)
         .filter_map(|member| member.assignment)
-        .filter(|assignment| {
-            !pinned_sources.contains(&assignment) && !assignment_is_busy(assignment, sessions_dir)
-        })
+        .filter(|assignment| !assignment_is_busy(assignment, sessions_dir))
         .collect())
+}
+
+fn unpinned_dead_assignments(
+    prefs: &crate::IssueMonitorPrefs,
+    dead: &[AgentMemberAssignment],
+) -> Vec<AgentMemberAssignment> {
+    // A switch's source remains uncertain until its exact runtime exit is
+    // confirmed. Recheck under the prefs writer lock: the pin can appear after
+    // physical absence was observed without changing the assignment itself.
+    dead.iter()
+        .filter(|assignment| {
+            !prefs.agent_switch_intents.values().any(|intent| {
+                intent.has_admission_pin()
+                    && !intent.runtime_exit_confirmed
+                    && &intent.source.assignment == *assignment
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// History supplies a preference, never evidence that a member is idle.
@@ -562,6 +572,7 @@ pub fn reserve_project_member(
     };
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        let dead = unpinned_dead_assignments(prefs, &dead);
         let switch_exclusions: std::collections::BTreeMap<_, _> = prefs.agent_roster.as_ref().expect("initialized roster").members.iter().filter_map(|member| {
             prefs.agent_switch_admission_exclusion(issue_number, &member.agent_member_id,
                 inherited_member_id == Some(member.agent_member_id.as_str()), &host).map(|reason| (member.agent_member_id.clone(), reason))
@@ -1133,6 +1144,43 @@ pub fn allocate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_6413_new_switch_pin_fences_an_older_dead_assignment_observation() {
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        let intent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":"switch","member_id":"member","expected_roster_revision":1,"target_issue_number":42},
+            "source":{"assignment":{"reservation_id":"source","session_id":"removed-session",
+                "issue_number":41,"spec_number":null,"delivery_id":null,"host_id":"host","host_pid":1,"host_started_at":2},
+                "window_id":"window","claim_id":"claim",
+                "confirmation":{"window_id":"window","claim_id":"claim","confirmed_at":"2026-10-26T00:00:00Z"}},
+            "stage":"checkpoint_verified","runtime_exit_confirmed":false
+        })).unwrap();
+        prefs.agent_switch_intents.insert("switch".into(), intent);
+        let observed_dead = vec![prefs.agent_switch_intents["switch"]
+            .source
+            .assignment
+            .clone()];
+        assert_eq!(
+            unpinned_dead_assignments(&prefs, &observed_dead),
+            observed_dead
+        );
+
+        // The switch can advance after absence is observed without changing
+        // the assignment. The writer must consult this newer pin state.
+        prefs.agent_switch_intents.get_mut("switch").unwrap().stage =
+            crate::issue_monitor::AgentSwitchStage::StoppingCurrent;
+        assert!(unpinned_dead_assignments(&prefs, &observed_dead).is_empty());
+        prefs
+            .agent_switch_intents
+            .get_mut("switch")
+            .unwrap()
+            .runtime_exit_confirmed = true;
+        assert_eq!(
+            unpinned_dead_assignments(&prefs, &observed_dead),
+            observed_dead
+        );
+    }
 
     #[test]
     fn an_exited_physical_child_releases_an_idle_session_for_its_member_restart() {
