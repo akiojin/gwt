@@ -239,6 +239,9 @@ test.describe("Issue queue real backend launch", () => {
   });
 
   test("T20a UI reassigned schedule survives GUI restart and force requeue with live Busy and Works", async ({ page }, info) => {
+    // Setup, GUI restart and two bounded launches reached proof collection at
+    // 242s on Windows. Budget their aggregate plus cleanup; retain phase limits.
+    test.setTimeout(420_000);
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
