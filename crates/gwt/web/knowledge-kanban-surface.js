@@ -5527,13 +5527,6 @@ export function createKnowledgeKanbanSurface({
             knowledgeCompletionViewModel.update(() => ({ windowId: event.id, detailReceipt: event }));
             break;
           }
-          // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
-          // live in the branches cleanup surface.
-          case "branch_cleanup_result":
-          case "branch_cleanup_progress":
-          case "branch_error":
-            applyBranchCleanupReceiveEvent(event);
-            break;
           case "knowledge_bridge_phase_updated": {
             // SPEC-2017 US-8 — phase write-back response. On Ok we
             // overwrite the optimistic card with fresh_entry and clear
