@@ -255,7 +255,7 @@ fn issue_preview_placement_uses_the_issue_preview_wire_kind() {
 // surface titled itself "Workspace" while it lists Works.
 #[test]
 fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
-    assert_eq!(WindowPreset::Issue.title(), "Issue");
+    assert_eq!(WindowPreset::Issue.title(), "Issues");
     assert_eq!(WindowPreset::IssueMonitor.title(), "Issue Monitor");
     assert_eq!(WindowPreset::Spec.title(), "SPEC");
     assert_eq!(WindowPreset::Work.title(), "Work");
