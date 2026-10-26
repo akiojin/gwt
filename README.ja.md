@@ -434,7 +434,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issue Monitor が自動起動した Agent は、
-  Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
+  独立した Issues 面の右ペインに読み取り専用でミラー表示されます。入力
   したいときは `Windowize` で同じセッションを Works のネイティブ端末に開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
@@ -446,7 +446,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
-  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
+  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues execution settings` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
   順序・優先条件を同じ欄で編集できます。
   起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
@@ -490,7 +490,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 ## Issue サーフェスと Issue Monitor
 
-**Settings → Project → Issues**、または左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
+左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
 Active / Done の 4 列で表示します。各行の実行状態と操作はそのまま利用できます。
 Backlog から Queued へドラッグすると実行対象に追加され、逆方向でキューから外れます。
 Queued 内では順序を変更でき、複数選択の移動は 1 回のキュー操作で送信されます。
@@ -523,10 +523,11 @@ Active バッジは PM を含むエージェント人数を数え、Issue 数と
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
 スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。**Issues settings** で同じペインの設定行を展開し、
-**Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
+エラーの詳細と履歴は通知センターで確認できます。**Issues settings** から **Settings → Project → Issues execution settings** を開き、
+**Launch control（起動制御）**で Autonomous・Max active・Monitoring、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
-設定を閉じても要約帯のスイッチを操作できます。Auto-apply updates は **System** で設定します。
+Issues と Settings は独立した面で、Split view で並べても Issue の検索・選択と設定の編集中入力を保持します。
+Auto-apply updates は **System** で設定します。
 Agents 名簿のあるプロジェクトでは **Max active** で有効メンバー数を編集し、**Apply** で名簿を増減します。**Auto** は選べません。
 名簿のない旧設定では **Manual** で数値を編集できます。**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
 稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
@@ -568,7 +569,7 @@ PM 窓の会計は別に表示し、Settings には自プロジェクトの割�
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
-**Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
+**Settings → Issues execution settings** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
 維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
 自動化からは

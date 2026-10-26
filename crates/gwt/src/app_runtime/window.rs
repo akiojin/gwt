@@ -193,10 +193,11 @@ impl AppRuntime {
             return Vec::new();
         }
         let tab_id = context.tab_id.clone();
+        let canonical_preset = preset.canonical_surface_preset();
         let surface_owner = surface_owner
             .filter(|owner| *owner != WindowSurfaceOwner::Pm || !preset.is_agent_terminal());
         if shares_work_surface_singleton(preset)
-            || (preset.canonical_surface_preset() == WindowPreset::Settings
+            || (canonical_preset == WindowPreset::Settings
                 && surface_owner == Some(WindowSurfaceOwner::Pm))
         {
             let existing_id = {
@@ -210,8 +211,7 @@ impl AppRuntime {
                     .iter()
                     .filter(|window| {
                         window.surface_owner == surface_owner
-                            && (shares_work_surface_singleton(window.preset)
-                                || window.preset == WindowPreset::Settings)
+                            && window.preset.canonical_surface_preset() == canonical_preset
                     })
                     .max_by_key(|window| window.z_index)
                     .map(|window| window.id.clone());
@@ -225,7 +225,7 @@ impl AppRuntime {
                 return self.activate_tab_for_window_events(tab_id);
             }
         }
-        let preset = preset.canonical_surface_preset();
+        let preset = canonical_preset;
         let window = {
             let Some(tab) = self.tab_mut(&tab_id) else {
                 return Vec::new();

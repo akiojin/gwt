@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
-import { setControlExplanation } from "../control-explanations.js";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -67,11 +67,11 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
     { member_id: "member-codex", name: "Codex member", agent_id: "codex", enabled: true },
     { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
   ] }, { scheduleFrame: frameScheduler });
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor,
   );
   const surface = factory({
     scheduleFrame: frameScheduler,
@@ -1029,7 +1029,8 @@ test("Settings keeps grouped navigation beside a flexible content pane", () => {
   assert.match(tabsBlock[1], /overflow-y:\s*auto/);
   assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
   assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
-  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /\.settings-body\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /@media\s*\(max-width:\s*600px\)[\s\S]*?\.settings-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {

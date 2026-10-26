@@ -282,13 +282,14 @@ fn knowledge_and_work_presets_carry_distinguishable_window_titles() {
     assert_eq!(WindowPreset::Spec.surface(), WindowSurface::Knowledge);
     assert_eq!(WindowPreset::Work.surface(), WindowSurface::Work);
 
-    // Issue #5321: persisted Work metadata remains readable, while Settings
-    // owns the current Issue-family entrypoint.
+    // Issue #4777 T24: persisted Work metadata remains readable, while Issues
+    // owns the independent Issue-family entrypoint.
     assert!(!WindowPreset::ALL.contains(&WindowPreset::Work));
     assert!(WindowPreset::ALL.contains(&WindowPreset::Settings));
+    assert!(WindowPreset::ALL.contains(&WindowPreset::Issue));
     assert_eq!(
         WindowPreset::Work.canonical_surface_preset(),
-        WindowPreset::Settings
+        WindowPreset::Issue
     );
 }
 

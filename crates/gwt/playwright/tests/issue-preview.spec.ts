@@ -173,7 +173,7 @@ test.describe("Issue preview placement", () => {
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
 
-    await expect(page.locator(".workspace-window[data-preset='settings'] .surface-knowledge")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-preset='issue'] .surface-knowledge")).toBeVisible();
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
 
@@ -328,7 +328,7 @@ test.describe("Issue preview placement", () => {
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "undock_agent_window").map(message => message.id)))
       .toEqual(["tab-issue::agent-preview", "tab-issue::agent-preview"]);
-    await page.evaluate(() => window.__patchWindow("tab-issue::issue-1", { preset: "settings" }));
+    await page.evaluate(() => window.__patchWindow("tab-issue::issue-1", { preset: "issue" }));
     await page.locator('.op-rail__surface[data-surface="issues"]').click();
     await expect(pair.locator('[data-action="windowize-issue-preview"]')).toHaveCount(0);
     await expect(pair.locator('[data-action="focus-surface-window"]')).toBeVisible();
@@ -797,8 +797,8 @@ async function installIssuePreviewBackend(page, { agentStatus = "running", issue
 
       const issueWindow = {
         id: "tab-issue::issue-1",
-        title: "Settings",
-        preset: "settings",
+        title: "Issues",
+        preset: "issue",
         geometry: { x: 40, y: 60, width: 1400, height: issueHeight },
         z_index: 1,
         status: "running",

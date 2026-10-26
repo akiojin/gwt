@@ -36,7 +36,7 @@ async function fixture() {
   const { document, window } = parseHTML(html);
   const parking = document.createDocumentFragment();
   const windows = [
-    { id: "issues", preset: "settings", settingsSection: "issues" },
+    { id: "issues", preset: "issue" },
     { id: "board", preset: "board" },
     { id: "settings", preset: "settings" },
     { id: "a", preset: "agent" },
@@ -123,8 +123,7 @@ test("same non-Agent surfaces use distinct live windows and request only the mis
     assert.equal(controller.select(surface, 1), true);
     controller.sync();
     assert.deepEqual(opened, [surface]);
-    const second = { id: `${surface}-second`, preset: surface === "issues" ? "settings" : surface,
-      ...(surface === "issues" ? { settingsSection: "issues" } : {}) };
+    const second = { id: `${surface}-second`, preset: surface === "issues" ? "issue" : surface };
     const element = document.createElement("div");
     controller.park(element);
     elements.set(second.id, element);
@@ -417,28 +416,36 @@ test("inactive live views stay in a hidden inert cache outside both pane bodies"
   assert.equal(cache.closest(".split-pane"), null);
   assertParked(elements.get("settings"));
   controller.show("settings");
-  assert.equal(elements.get("issues").closest(".split-pane").hidden, false);
+  assert.equal(elements.get("settings").closest(".split-pane").hidden, false);
+  assertParked(elements.get("issues"));
   assertParked(elements.get("board"));
 });
 
-test("Settings and Issues reuse one canonical view and follow its internal section changes", async () => {
-  const { controller, windows, elements, model, flush } = await fixture();
-  windows.splice(windows.findIndex(data => data.id === "settings"), 1);
-  controller.show("issues");
-  const view = elements.get("issues");
-  assert.equal(controller.containsWindow("issues"), true);
-  controller.show("settings");
-  assert.equal(controller.containsWindow("issues"), true);
-  assert.equal(windows.find(data => data.id === "issues").settingsSection, "system");
-  view.querySelector('[data-settings-tab="issues"]').click();
-  model.update(() => ({ catalog: { version: 1 } }));
-  flush();
-  assert.equal(controller.activeSurface(), "issues");
-  view.querySelector('[data-settings-tab="system"]').click();
-  model.update(() => ({ catalog: { version: 2 } }));
-  flush();
+test("Settings and Issues keep distinct hosts and preserve drafts across section changes", async () => {
+  const { controller, windows, elements, model, flush, document } = await fixture();
+  const settings = elements.get("settings"), issues = elements.get("issues");
+  const input = document.createElement("input");
+  input.value = "unsaved labels";
+  settings.appendChild(input);
+  const search = document.createElement("input");
+  search.value = "issue query";
+  issues.appendChild(search);
+  controller.open("issues");
+  controller.select("settings", 1);
+  const panes = document.querySelectorAll(".split-pane");
+  assert.equal(issues.closest(".split-pane"), panes[0]);
+  assert.equal(settings.closest(".split-pane"), panes[1]);
+  settings.querySelector('[data-settings-tab="issues"]').click();
+  model.update(() => ({ catalog: { version: 1 } })); flush();
   assert.equal(controller.activeSurface(), "settings");
-  assert.equal(controller.containsWindow("issues"), true);
+  assert.equal(windows.find(data => data.id === "settings").settingsSection, "issues");
+  assert.equal(issues.closest(".split-pane"), panes[0]);
+  assert.equal(search.value, "issue query");
+  assert.equal(input.value, "unsaved labels");
+  controller.select("board", 0);
+  controller.select("issues", 0);
+  assert.equal(issues.closest(".split-pane"), panes[0]);
+  assert.equal(settings.closest(".split-pane"), panes[1]);
 });
 
 // Works and the member roster own separate hosts; neither creates a backend window.

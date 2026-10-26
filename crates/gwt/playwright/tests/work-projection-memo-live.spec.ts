@@ -98,13 +98,12 @@ test("Issue #5404 canonical Work remains responsive across ready replays and ref
     expect(work?.id, "Current shell summary must create a canonical Work row").toBeTruthy();
     expect(work.work_summary).toBe(initial);
 
-    await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings",
+    await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue",
       bounds: { x: 24, y: 24, width: 1200, height: 850 } });
-    const surface = page.locator('.workspace-window[data-preset="settings"]').last();
+    const surface = page.locator('.workspace-window[data-preset="issue"]').last();
     await expect(surface).toBeVisible();
     const id = (await surface.getAttribute("data-id"))!;
     try {
-      await surface.locator('[data-settings-tab="issues"]').click();
       await surface.locator(".issue-other-summary").click();
       const row = surface.locator(`.workspace-overview-row[data-workspace-id="${work.id}"]`);
       await expect(row).toContainText(initial);

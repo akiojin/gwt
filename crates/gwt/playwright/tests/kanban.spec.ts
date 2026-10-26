@@ -21,19 +21,21 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   const settings = page.locator('.workspace-window[data-preset="settings"]');
   await expect(settings).toHaveCount(1);
+  const issues = page.locator('.workspace-window[data-preset="issue"]');
+  await expect(issues).toHaveCount(1);
   const monitor = page.locator("#op-strip-issue-monitor");
   await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
   await expect(monitor).toHaveAttribute("title", "Open Monitor | Issue Monitor: Off");
   const messageCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
   for (const activation of ["click", "Enter", "Space"]) {
+    await page.locator('.op-rail__surface[data-surface="settings"]').click();
     await settings.getByRole("tab", { name: "System", exact: true }).click();
-    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
-      .toHaveAttribute("aria-selected", "false");
+    await expect(settings).toBeVisible();
     const auditCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
     if (activation === "click") await monitor.click();
     else await monitor.press(activation);
-    await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
-      .toHaveAttribute("aria-selected", "true");
+    await expect(issues).toBeVisible();
+    await expect(settings).toBeHidden();
     await expect(settings).toHaveCount(1);
     await expect(page.locator(".surface-knowledge")).toBeVisible();
     await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
@@ -977,6 +979,10 @@ test.describe("Issue Bridge load recovery", () => {
     const gear = issueSurface.getByRole("button", { name: "Issues settings", exact: true });
     await expect(gear).toHaveText("⚙ Issues settings");
     await gear.click();
+    const executionSettings = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]');
+    await expect(executionSettings).toBeVisible();
+    await expect(executionSettings.locator(".issue-bridge-root")).toHaveCount(0);
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
     // SPEC #3885 T-033: quick register lives in the "+ New" popover.
     await issueSurface.locator('[data-action="issue-new"]').click();
     const popover = page.locator(".modal-backdrop.issue-new-popover.open .modal-shell");
@@ -1007,9 +1013,9 @@ test.describe("Issue Bridge load recovery", () => {
       kind: "set_issue_monitor_autonomous_mode",
       enabled: true,
     });
-    // AC-M1: the gear expands options in the existing Settings window.
+    // AC44–45: the gear reaches the independent configuration-only Settings host.
     await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(1);
-    await expect(page.locator(".settings-issues-options")).toHaveAttribute("open", "");
+    await expect(page.locator('.workspace-window[data-preset="settings"] [data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
     expect(messages.filter(message => message.kind === "create_window")).toEqual([]);
     expect(messages).toContainEqual({
       kind: "quick_register_issue",
@@ -1242,7 +1248,7 @@ test.describe("Issue Bridge load recovery", () => {
     expect(pageErrors).toEqual([]);
   });
 
-  test("renders a backend-normalized restored Issue Monitor in Settings", async ({
+  test("renders a backend-normalized restored Issue Monitor in Issues", async ({
     page,
   }) => {
     const consoleErrors: string[] = [];
@@ -1254,24 +1260,25 @@ test.describe("Issue Bridge load recovery", () => {
 
     await installEmbeddedRoutes(page);
     // Persistence normalization is covered by the Rust backend tests. The
-    // browser receives the canonical Settings preset with the durable old id.
+    // browser receives the canonical Issue preset with the durable old id.
     const restoredWindowId = "tab-issue::issue-monitor-legacy";
     await installIssueBridgeBackend(page, { windowId: restoredWindowId });
 
     await page.goto(APP_URL);
 
-    const settings = page.locator(`.workspace-window[data-id="${restoredWindowId}"]`);
-    await expect(settings).toHaveAttribute("data-preset", "settings");
+    const issues = page.locator(`.workspace-window[data-id="${restoredWindowId}"]`);
+    await expect(issues).toHaveAttribute("data-preset", "issue");
     await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(1);
-    await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+    await expect(page.locator('.workspace-window[data-preset="issue"]')).toHaveCount(1);
+    await expect(page.locator('.workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
     await expect(page.locator(".surface-knowledge")).toBeVisible();
     await expect(page.locator(".surface-issue-monitor")).toHaveCount(0);
     await expect(page.locator(".surface-knowledge .knowledge-heading")).toHaveText(
       "Cached work items",
     );
     await expect(page.locator(".surface-knowledge .knowledge-row")).toHaveCount(5);
-    await settings.locator('.knowledge-row[data-issue-number="3095"] .knowledge-row-select').click();
-    await expect(settings.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
+    await issues.locator('.knowledge-row[data-issue-number="3095"] .knowledge-row-select').click();
+    await expect(issues.locator(".knowledge-detail-pane")).toContainText("Issue Bridge detail body");
     expect(await page.evaluate(() => window.__knowledgeLoadMessages
       .filter(message => message.kind === "select_knowledge_bridge_entry").at(-1)))
       .toMatchObject({ id: restoredWindowId, knowledge_kind: "issue", number: 3095 });
@@ -2134,7 +2141,7 @@ async function installKnowledgeSelectionBackend(
                   {
                     id: fixtureWindowId,
                     title: fixtureWindowTitle,
-                    preset: windowPreset === "issue" ? "settings" : windowPreset,
+                    preset: windowPreset,
                     geometry: { x: 40, y: 60, width: 1320, height: 760 },
                     z_index: 1,
                     status: "running",
@@ -2809,8 +2816,8 @@ async function installIssueBridgeBackend(
                 windows: [
                   {
                     id: fixtureWindowId,
-                    title: "Settings",
-                    preset: "settings",
+                    title: "Issues",
+                    preset: "issue",
                     geometry: { x: 40, y: 60, width: 1320, height: 760 },
                     z_index: 1,
                     status: "running",
@@ -2834,6 +2841,11 @@ async function installIssueBridgeBackend(
           recent_projects: [],
         },
       };
+
+      workspaceState.workspace.tabs[0].workspace.windows.push({
+        ...workspaceState.workspace.tabs[0].workspace.windows[0],
+        id: "tab-issue::settings", title: "Settings", preset: "settings", z_index: 0,
+      });
 
       window.__setKnowledgeVisibility = (mode, visible) => {
         if (mode === "hidden") document.querySelector(".surface-knowledge").hidden = !visible;
