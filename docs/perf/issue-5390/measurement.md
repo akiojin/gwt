@@ -144,3 +144,49 @@ or four-hour memory acceptance. Existing parent ACs remain unchecked.
 User Verification Result: n/a (autonomous).
 Agent Visual Check: recorded by the final canonical headed run; unit results
 alone do not establish a visual pass.
+
+## Single-pass live Work dirty scan
+
+The next bounded slice retains live settlement checks. The terminal observer
+and Work projection reach `live_settlement_diagnosis`; a saved `PathDirty`
+receipt invokes `work_event_dirty_paths`. That reader previously started
+`git status` and a separate ignored `git ls-files` on every call. Returning
+saved facts or adding a cache would change freshness and Issue #5072's
+clean-tree recovery contract, so neither is part of this fix.
+
+Use `status --ignored=traditional --untracked-files=all` to obtain both ordinary
+and ignored entries. An actual Git probe confirmed that `traditional` lists
+ignored files recursively with `--untracked-files=all`; `matching` collapses
+the ignored parent and cannot preserve the existing shard checks. Classify
+`!!` only as an ignored canonical immutable shard, retaining the existing PR
+delivery certificate exemption. Ignored legacy logs, noncanonical names and
+writer temporary files remain excluded. The tracked/untracked state parser,
+Git error handling, caller cadence and terminal-close policy stay unchanged.
+
+The new actual-reader regression uses Git's trace file, two ignored canonical
+shards and excluded legacy/noncanonical/temporary files. Before the fix its
+path/basis assertion passed, then its one-process assertion failed with the
+expected two built-in commands (`status`, `ls-files`). It asserts one fresh
+Git operation after the fix. Its final structured trace counter filters by
+the fixture's canonical worktree, excluding unrelated parallel tests' Git
+processes. Existing settlement and checkout/owner
+diagnosis regressions cover delivery, corrupt-index rejection and stale-clean
+recovery; the implementation also retains both certificate checks.
+
+`single-pass-scan.json` preserves twenty alternating paired command-path
+measurements after one warmup per variant, using the same disposable fixture:
+256 ignored canonical shards, two excluded ignored files, and a tracked legacy
+log with staged and unstaged changes. All 258 path/state/basis rows matched.
+Git starts per scan fell from 2 to 1; elapsed median was 223.67245ms before and
+56.68125ms after. Raw samples, exact command vectors, Git version,
+base SHA and source hashes are retained. These are shared-host observations
+under concurrent build load, without a scheduling-sensitive timing assertion.
+The paired harness measures the command path; the actual-reader regression
+independently checks the production function. No certificate is synthesized
+by the timing fixture.
+
+This slice does not establish the parent 60-minute fleet CPU/RSS/timeout or PM
+prompt criteria. The earlier 56 observed Git lifetimes are a normal-load lower
+bound, not an exact scan count, and halving calls within this reader does not
+imply halving whole-GUI CPU. Final canonical regression and isolated checkout
+headed dark/light evidence are recorded with the delivery PR.
