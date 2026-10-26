@@ -451,6 +451,8 @@ test.describe("Issue queue real backend launch", () => {
       });
       expect(requeued.ok, JSON.stringify(requeued)).toBe(true);
       await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
+        { timeout: 30_000, message: "Monitor enable is durable before the separate launch_now operation" }).toBe(true);
       const immediate = fixture.fixtureOperation("issue.monitor.launch_now", { number: fixture.issueNumber });
       expect(immediate.ok, JSON.stringify(immediate)).toBe(true);
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
