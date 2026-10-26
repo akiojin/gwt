@@ -1,0 +1,108 @@
+{
+  "scope": "paired native Git command-path benchmark; not whole-GUI or installed-fleet acceptance",
+  "base_sha": "0aa51b80d3e7822b9a52cb011dfa641a410551b1",
+  "git_version": "git version 2.51.2.windows.1",
+  "fixture": {
+    "ignored_canonical_shards": 256,
+    "excluded_ignored_noncanonical_files": 2,
+    "tracked_legacy_states": [
+      "staged",
+      "unstaged"
+    ],
+    "dirty_rows": 258
+  },
+  "identical_results_sha256": "b5b8fe41b822f68bb33620391a53ec26c37985fc6cc7e92e70cd409eae1ea610",
+  "rounds_each": 20,
+  "order": "alternating before/after and after/before, after one warmup per variant",
+  "before_commands": [
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--",
+      ".gwt/work/events.jsonl",
+      ".gwt/work/events"
+    ],
+    [
+      "ls-files",
+      "--others",
+      "--ignored",
+      "--exclude-standard",
+      "-z",
+      "--",
+      ".gwt/work/events"
+    ]
+  ],
+  "after_commands": [
+    [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--ignored=traditional",
+      "--",
+      ".gwt/work/events.jsonl",
+      ".gwt/work/events"
+    ]
+  ],
+  "git_processes_per_scan": {
+    "before": 2,
+    "after": 1
+  },
+  "elapsed_ms": {
+    "before": {
+      "samples": [
+        96.2359999975888,
+        88.94850000797305,
+        92.09839999675751,
+        584.4606000027852,
+        1027.6111000130186,
+        92.40149999095593,
+        92.08059999218676,
+        102.88399999262765,
+        349.5811000029789,
+        817.6332999864826,
+        96.36650000174996,
+        346.5205000102287,
+        343.7360000098124,
+        822.887799993623,
+        104.4772000022931,
+        339.8563000082504,
+        107.48859999876004,
+        605.5239000124857,
+        854.9086999992142,
+        93.74830000160728
+      ],
+      "median": 223.67245000350522,
+      "mean": 352.972445001069
+    },
+    "after": {
+      "samples": [
+        51.97810000390746,
+        275.823500007391,
+        302.7261999959592,
+        51.21200000576209,
+        54.079499997897074,
+        52.58289999619592,
+        52.847899991320446,
+        288.2435999927111,
+        55.7418999960646,
+        295.5818000045838,
+        293.25439999229275,
+        55.0303000054555,
+        296.3890000100946,
+        747.5448999903165,
+        50.60580000281334,
+        57.62060001143254,
+        337.1495000028517,
+        54.2455999966478,
+        55.200900009367615,
+        65.09759998880327
+      ],
+      "median": 56.68125000374857,
+      "mean": 174.6478000000934
+    }
+  },
+  "before_source_sha256": "aed9b625289ce5e8309020693f46b649219b18c6389d0285508654949e6dbe37",
+  "after_source_sha256": "458d59ed5ab124b9be62d65bc894bd4189432f7e03b36787ec175dc0c1307d1c",
+  "limitations": "Shared Windows host under normal concurrent build load. Command vectors match the old/new reader; no certificate fixture. Runtime unit regressions separately verify actual reader and certification. Times are observations, not a threshold or causal process CPU measurement."
+}
