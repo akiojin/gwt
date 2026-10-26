@@ -161,6 +161,125 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
+  test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {
+    const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ bin }) {
+        const path = join(bin, "codex");
+        const provider = await readFile(path, "utf8");
+        const command = "  if (line.trim() === 'GWT_FIXTURE_EXIT')";
+        expect(provider).toContain(command);
+        await writeFile(path, provider.replace(command, `  if (line.trim() === 'GWT_FIXTURE_LINES') {
+    process.stdout.write('\\u001b[2J\\u001b[H');
+    for (const text of ${JSON.stringify(lines)}) console.log(text);
+    return;
+  }
+` + command));
+      },
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".works-surface:not(.works-surface--preview)");
+    const config = join(fixture.home, ".gwt", "config.toml");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "3");
+      await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      const setting = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
+      await expect(setting).toHaveValue("3");
+      await setting.fill("10"); await setting.press("Tab");
+      await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await page.screenshot({ path: info.outputPath("settings-native-works-output-lines.png") });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const session = launch.gwt_session_id!;
+      expect(session).toBeTruthy();
+      const checkOutput = async (stage: string, observedSession = session) => {
+        const window = await liveCodexWindow(page, observedSession);
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await surface.locator(".works-full").isVisible()) await surface.locator('[data-action="back"]').click();
+        const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
+        await expect(row).toBeVisible({ timeout: 60_000 });
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_LINES\r" });
+        await expect(row.locator(".terminal-text-preview")).toHaveText(lines.slice(-10).join("\n"), { useInnerText: false });
+        await expect(row.locator(".terminal-text-preview x")).toHaveCount(0);
+        await expect(surface).toHaveCSS("--works-preview-lines", "10");
+        await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(row.locator(".work-stats [data-stat]")).toHaveCount(8);
+        await row.locator(".work-tail").click(); await expect(surface.locator(".works-full")).toBeHidden();
+        await row.getByRole("button", { name: "Open terminal" }).click();
+        await expect(surface.locator(".works-full .xterm-helper-textarea")).toBeVisible();
+        await surface.locator('[data-action="back"]').click();
+        await page.screenshot({ path: info.outputPath(`works-output-lines-native-${stage}.png`) });
+      };
+      await checkOutput("saved");
+      // Remove only this fixture's non-agent Settings host. A restored host
+      // would fetch System settings on its own and mask Works-only bootstrap.
+      const beforeClose = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "list_windows" });
+      const windowList = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || [])
+        .findLast((entry: any) => entry.sequence > after && entry.payload.kind === "window_list")?.payload.windows,
+      beforeClose).then(handle => handle.jsonValue());
+      const settingsHost = windowList.filter((window: any) => window.preset === "settings");
+      expect(settingsHost).toHaveLength(1);
+      expect(settingsHost[0].session_id ?? null).toBeNull();
+      expect(settingsHost[0].agent_id ?? null).toBeNull();
+      expect(settingsHost[0].is_pm ?? false).toBe(false);
+      const currentWindow = await liveCodexWindow(page, session);
+      const launchesBeforeClose = (await fixture.launches()).length;
+      const closeCursor = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: settingsHost[0].id });
+      await page.waitForFunction(({ after, id }) => ((window as any).__gwtPlaywrightMessages || []).some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "workspace_state"
+        && !entry.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).some((window: any) => window.id === id)),
+      { after: closeCursor, id: settingsHost[0].id });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      expect((await liveCodexWindow(page, session)).id).toBe(currentWindow.id);
+      expect((await fixture.launches()).length).toBe(launchesBeforeClose);
+      await page.reload();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await checkOutput("reload");
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      const oldPid = fixture.ownedPid;
+      const restarted = await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(oldPid);
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
+      const resumed = (await fixture.launches())[1];
+      expect(resumed.gwt_session_id).toBeTruthy();
+      expect(resumed.gwt_session_id).not.toBe(session);
+      expect(resumed.resume_session_id).toBe(launch.provider_session_id);
+      expect(resumed.provider_session_id).toBe(launch.provider_session_id);
+      await checkOutput("restart", resumed.gwt_session_id!);
+      const restoredRecord = await sessionRecord(fixture.home, resumed.gwt_session_id!);
+      expect(tomlString(restoredRecord, "agent_session_id")).toBe(launch.provider_session_id);
+      expect(tomlString(restoredRecord, "restore_source_session_id")).toBe(session);
+      expect(tomlString(restoredRecord, "launch_origin")).toBe("automatic_restore");
+      await info.attach("works-output-lines-restore-continuity", { body: JSON.stringify({
+        source_session: session, restored_session: resumed.gwt_session_id,
+        native_conversation: resumed.provider_session_id, settings_host_restored: false,
+      }), contentType: "application/json" });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath("works-output-lines-native-400.png") });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "real settings/terminal/restart console and page errors").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
   test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";

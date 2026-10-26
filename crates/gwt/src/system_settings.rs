@@ -31,6 +31,8 @@ pub enum SystemSettingsError {
     /// SPEC #1921 Phase 86 (#3813): agent resource policy failed validation.
     #[error("invalid agent resource policy: {0}")]
     InvalidAgentResource(String),
+    #[error("invalid Works preview line count `{0}`: expected an integer from 3 to 10")]
+    InvalidWorksPreviewLines(u32),
     #[error("config storage error: {0}")]
     Storage(String),
 }
@@ -50,6 +52,7 @@ pub struct SystemSettingsSnapshot {
     pub board_provider: String,
     /// SPEC #1921 Phase 86 (#3813): effective agent process-tree policy.
     pub agent_resource: AgentResourceConfig,
+    pub works_preview_lines: u32,
 }
 
 /// Validate that `value` is one of [`ALLOWED_BOARD_PROVIDERS`] (case-insensitive,
@@ -100,6 +103,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
         agent_resource: settings.agent.resource.clone(),
+        works_preview_lines: effective_works_preview_lines(&settings),
     })
 }
 
@@ -107,7 +111,7 @@ pub fn read_settings(path: &Path) -> Result<SystemSettingsSnapshot, SystemSettin
 /// canonical value that was written so the dispatch layer can echo it
 /// back to the frontend.
 pub fn write_language(path: &Path, language: &str) -> Result<String, SystemSettingsError> {
-    Ok(write_settings(path, language, None, None, None)?.language)
+    Ok(write_settings(path, language, None, None, None, None)?.language)
 }
 
 pub fn write_settings(
@@ -116,11 +120,17 @@ pub fn write_settings(
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<&str>,
     agent_resource: Option<&AgentResourceConfig>,
+    works_preview_lines: Option<u32>,
 ) -> Result<SystemSettingsSnapshot, SystemSettingsError> {
     let canonical = validate_language(language)?;
     // Validate the provider (if supplied) before touching disk so an invalid
     // value never half-writes config.
     let provider = board_provider.map(validate_board_provider).transpose()?;
+    if let Some(lines) = works_preview_lines {
+        if !(3..=10).contains(&lines) {
+            return Err(SystemSettingsError::InvalidWorksPreviewLines(lines));
+        }
+    }
     if let Some(resource) = agent_resource {
         resource
             .validate()
@@ -137,6 +147,9 @@ pub fn write_settings(
         if let Some(resource) = agent_resource {
             settings.agent.resource = resource.clone();
         }
+        if let Some(lines) = works_preview_lines {
+            settings.works_preview_lines = Some(lines);
+        }
         Ok(settings.clone())
     })
     .map_err(|error| SystemSettingsError::Storage(error.to_string()))?;
@@ -146,7 +159,15 @@ pub fn write_settings(
         codex_trust_managed_hooks: Some(codex_trust_managed_hooks_enabled(&settings)),
         board_provider: settings.board.provider.as_str().to_string(),
         agent_resource: settings.agent.resource.clone(),
+        works_preview_lines: effective_works_preview_lines(&settings),
     })
+}
+
+fn effective_works_preview_lines(settings: &Settings) -> u32 {
+    settings
+        .works_preview_lines
+        .filter(|lines| (3..=10).contains(lines))
+        .unwrap_or(3)
 }
 
 fn codex_trust_managed_hooks_enabled(settings: &Settings) -> bool {
@@ -371,6 +392,7 @@ pub fn get_event(path: &Path) -> BackendEvent {
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
             agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),
+            works_preview_lines: Some(snapshot.works_preview_lines),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -385,6 +407,7 @@ pub fn update_event(
     codex_trust_managed_hooks: Option<bool>,
     board_provider: Option<String>,
     agent_resource: Option<AgentResourceSettings>,
+    works_preview_lines: Option<u32>,
 ) -> BackendEvent {
     let agent_resource = match agent_resource
         .as_ref()
@@ -404,6 +427,7 @@ pub fn update_event(
         codex_trust_managed_hooks,
         board_provider.as_deref(),
         agent_resource.as_ref(),
+        works_preview_lines,
     ) {
         Ok(snapshot) => BackendEvent::SystemSettingsUpdated {
             language: snapshot.language,
@@ -411,6 +435,7 @@ pub fn update_event(
             codex_trust_managed_hooks: snapshot.codex_trust_managed_hooks,
             board_provider: Some(snapshot.board_provider),
             agent_resource: Some(AgentResourceSettings::from_config(&snapshot.agent_resource)),
+            works_preview_lines: Some(snapshot.works_preview_lines),
         },
         Err(err) => BackendEvent::SystemSettingsError {
             message: err.to_string(),
@@ -448,6 +473,92 @@ mod tests {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
         assert_eq!(read_language(&path).unwrap(), "auto");
+    }
+
+    #[test]
+    fn works_preview_lines_reads_legacy_defaults_and_saved_values() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        assert_eq!(
+            serde_json::to_value(get_event(&path)).unwrap()["works_preview_lines"],
+            3
+        );
+        for lines in [3, 7, 10] {
+            std::fs::write(&path, format!("works_preview_lines = {lines}\n")).unwrap();
+            assert_eq!(
+                serde_json::to_value(get_event(&path)).unwrap()["works_preview_lines"],
+                lines
+            );
+        }
+        std::fs::write(&path, "works_preview_lines = 11\n").unwrap();
+        assert_eq!(
+            serde_json::to_value(get_event(&path)).unwrap()["works_preview_lines"],
+            3
+        );
+    }
+
+    #[test]
+    fn works_preview_lines_wire_rejects_non_integer_values() {
+        let legacy: crate::protocol::FrontendEvent =
+            serde_json::from_str(r#"{"kind":"update_system_settings","language":"en"}"#).unwrap();
+        assert!(matches!(
+            legacy,
+            crate::protocol::FrontendEvent::UpdateSystemSettings {
+                works_preview_lines: None,
+                ..
+            }
+        ));
+        let current: crate::protocol::FrontendEvent = serde_json::from_str(
+            r#"{"kind":"update_system_settings","language":"en","works_preview_lines":7}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            current,
+            crate::protocol::FrontendEvent::UpdateSystemSettings {
+                works_preview_lines: Some(7),
+                ..
+            }
+        ));
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(3.5),
+            serde_json::json!("7"),
+        ] {
+            assert!(serde_json::from_value::<crate::protocol::FrontendEvent>(serde_json::json!({
+                "kind": "update_system_settings", "language": "en", "works_preview_lines": value,
+            })).is_err(), "invalid preview line count: {value}");
+        }
+    }
+
+    #[test]
+    fn works_preview_lines_updates_validate_before_writing_and_preserve_on_omission() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        for lines in [3, 7, 10] {
+            let saved = update_event(&path, "ja".to_string(), None, None, None, Some(lines));
+            assert_eq!(
+                serde_json::to_value(saved).unwrap()["works_preview_lines"],
+                lines
+            );
+            assert_eq!(
+                serde_json::to_value(get_event(&path)).unwrap()["works_preview_lines"],
+                lines
+            );
+        }
+        let saved_bytes = std::fs::read(&path).unwrap();
+        for lines in [0, 2, 11] {
+            let error = update_event(&path, "en".to_string(), None, None, None, Some(lines));
+            assert!(
+                matches!(error, BackendEvent::SystemSettingsError { message } if message.contains("3 to 10"))
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
+        }
+        let preserved = update_event(&path, "en".to_string(), None, None, None, None);
+        assert_eq!(
+            serde_json::to_value(preserved).unwrap()["works_preview_lines"],
+            10
+        );
+        assert_eq!(read_language(&path).unwrap(), "en");
     }
 
     #[test]
@@ -496,7 +607,7 @@ mod tests {
             "missing config should render System Settings as enabled by default"
         );
 
-        let snapshot = write_settings(&path, "en", Some(false), None, None).unwrap();
+        let snapshot = write_settings(&path, "en", Some(false), None, None, None).unwrap();
         assert_eq!(snapshot.language, "en");
         assert_eq!(snapshot.codex_trust_managed_hooks, Some(false));
 
@@ -508,7 +619,7 @@ mod tests {
     fn update_event_returns_updated_on_success() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "ja".to_string(), Some(true), None, None);
+        let event = update_event(&path, "ja".to_string(), Some(true), None, None, None);
         match event {
             BackendEvent::SystemSettingsUpdated {
                 language,
@@ -526,7 +637,7 @@ mod tests {
     fn update_event_returns_error_for_invalid_language() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        let event = update_event(&path, "zh".to_string(), None, None, None);
+        let event = update_event(&path, "zh".to_string(), None, None, None, None);
         match event {
             BackendEvent::SystemSettingsError { message } => {
                 assert!(message.contains("invalid language"));
@@ -563,12 +674,12 @@ mod tests {
         assert_eq!(read_settings(&path).unwrap().board_provider, "local");
 
         // Persist slack and read it back; language is unchanged.
-        let snapshot = write_settings(&path, "auto", None, Some("slack"), None).unwrap();
+        let snapshot = write_settings(&path, "auto", None, Some("slack"), None, None).unwrap();
         assert_eq!(snapshot.board_provider, "slack");
         assert_eq!(read_settings(&path).unwrap().board_provider, "slack");
 
         // None leaves the persisted provider unchanged.
-        let snapshot = write_settings(&path, "en", None, None, None).unwrap();
+        let snapshot = write_settings(&path, "en", None, None, None, None).unwrap();
         assert_eq!(snapshot.board_provider, "slack");
     }
 
@@ -589,6 +700,7 @@ mod tests {
             "auto".to_string(),
             None,
             Some("teams".to_string()),
+            None,
             None,
         );
         match event {
@@ -815,11 +927,11 @@ mod tests {
             build_jobs: Some(2),
         };
 
-        let snapshot = write_settings(&path, "en", None, None, Some(&resource)).unwrap();
+        let snapshot = write_settings(&path, "en", None, None, Some(&resource), None).unwrap();
         assert_eq!(snapshot.agent_resource, resource);
         assert_eq!(read_settings(&path).unwrap().agent_resource, resource);
 
-        let snapshot = write_settings(&path, "ja", None, None, None).unwrap();
+        let snapshot = write_settings(&path, "ja", None, None, None, None).unwrap();
         assert_eq!(snapshot.language, "ja");
         assert_eq!(snapshot.agent_resource, resource);
         let reloaded = Settings::load_from_path(&path).unwrap();
@@ -830,14 +942,14 @@ mod tests {
     fn write_settings_rejects_invalid_agent_resource_before_persisting() {
         let tmp = tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        write_settings(&path, "ja", None, None, None).unwrap();
+        write_settings(&path, "ja", None, None, None, None).unwrap();
 
         let invalid = gwt_config::AgentResourceConfig {
             preset: gwt_config::AgentResourcePreset::Custom,
             cpu_limit_percent: Some(0),
             ..gwt_config::AgentResourceConfig::default()
         };
-        let error = write_settings(&path, "en", None, None, Some(&invalid)).unwrap_err();
+        let error = write_settings(&path, "en", None, None, Some(&invalid), None).unwrap_err();
         assert!(
             matches!(error, SystemSettingsError::InvalidAgentResource(_)),
             "{error}"

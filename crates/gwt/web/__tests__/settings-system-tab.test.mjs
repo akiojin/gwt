@@ -624,7 +624,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   body.remove();
   surface.resyncSettings();
-  assert.deepEqual(sent, [], "detached Settings must not trigger read probes");
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }], "only shared Works presentation settings are read without a Settings mount");
 });
 
 test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
@@ -1715,4 +1715,39 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
 test("app.js delegates complete System events to the shared model (#3813)", () => {
   assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
   assert.match(settingsSource, /agentResource: normalizeAgentResource\(event\.agent_resource, state\.agentResource\)/);
+});
+
+
+test("Works output lines use the System writer and keep invalid or rejected drafts out of the shared setting", () => {
+  const { surface, body, window, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const input = () => body.querySelector('[aria-label="Works output lines"]');
+  assert.ok(input(), "System settings exposes the saved Works line count");
+  assert.equal(input().value, "3");
+  assert.equal(input().getAttribute("min"), "3"); assert.equal(input().getAttribute("max"), "10"); assert.equal(input().getAttribute("step"), "1");
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" }); flush();
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3);
+  input().value = "5"; input().dispatchEvent(new window.Event("change"));
+  assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", works_preview_lines: 5 });
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3, "only saved backend values reach Works");
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated", works_preview_lines: 5 }); flush();
+  assert.equal(input().value, "5");
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  const count = sent.length;
+  for (const invalid of ["", "2", "11", "4.5"]) {
+    input().value = invalid; input().dispatchEvent(new window.Event("change")); flush();
+    assert.equal(sent.length, count);
+    assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+    assert.match(body.textContent, /whole number from 3 to 10/);
+  }
+  input().value = "10"; input().dispatchEvent(new window.Event("change"));
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Storage unavailable" }); flush();
+  assert.equal(input().value, "5"); assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  assert.match(body.textContent, /Storage unavailable/);
+});
+
+test("Works loads its saved output line count on reconnect without a Settings mount", () => {
+  const { surface, sent } = createSettingsHarness();
+  surface.resyncSettings();
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }]);
 });

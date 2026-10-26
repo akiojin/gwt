@@ -12859,12 +12859,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
@@ -14045,12 +14047,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
