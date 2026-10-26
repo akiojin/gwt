@@ -338,6 +338,12 @@ test("Open Project result receiver commits shared state and rejects bypass rende
     { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyProjectOpenReceiveEvent');
   assert.deepEqual(delegated(source), []);
   assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive' && finding.context === '/project_opened');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Clone Project receivers commit shared state and reject bypass rendering", () => {
@@ -658,24 +664,32 @@ test("reassigned factory handler aliases fail closed per lexical binding", () =>
     .some(finding => finding.kind === "unresolved-call" && finding.path === "receive"));
 });
 
-test("direct named imports follow exported function bodies for one module hop", () => {
+test("direct named imports follow exported function bodies for at most two module hops", () => {
   const entry = `import { selectValue as select } from "./data.js";
     function receive(event) { select(event); }`;
   const data = `export function selectValue(event) { return normalize(event.value); }
     function normalize(value) { return String(value).trim(); }`;
-  const inspect = (source = entry, module = data) => scanModule(source, "entry.js", {
-    modules: new Map([["data.js", module], ["second.js", "export function normalize(value) { return String(value); }"]]),
+  const second = "export function normalize(value) { return String(value); }";
+  const twoHops = 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }';
+  const inspect = (source = entry, module = data, dependency = second) => scanModule(source, "entry.js", {
+    modules: new Map([["data.js", module], ["second.js", dependency], ["third.js", second]]),
   });
   assert.deepEqual(inspect(), []);
   assert.deepEqual(inspect(entry, data + '\nfunction unrelated() { let normalize = () => {}; normalize = external; }'), []);
   const dirty = inspect(entry, data.replace("return String(value).trim();", "element.textContent = value;"));
   assert.ok(dirty.some(finding => finding.kind === "dom-write" && finding.file === "data.js"
     && finding.root === "receive" && finding.path.includes("selectValue>normalize")));
+  assert.deepEqual(inspect(entry, twoHops), []);
+  assert.ok(inspect(entry, twoHops, second.replace('return String(value);', 'element.textContent = value;'))
+    .some(finding => finding.kind === 'dom-write' && finding.file === 'second.js' && finding.root === 'receive'));
+  for (const dependency of [
+    'import { normalize as next } from "./third.js"; export function normalize(value) { return next(value); }',
+    'import { selectValue } from "./data.js"; export function normalize(value) { return selectValue(value); }',
+  ]) assert.ok(inspect(entry, twoHops, dependency).some(finding => finding.kind === 'unresolved-call'));
   for (const [source, module] of [
     [entry, data.replace("export function", "function")],
     [entry, "export function other() {}"],
     [entry.replace("receive(event)", "receive(event, select)"), data],
-    [entry, 'import { normalize } from "./second.js"; export function selectValue(event) { normalize(event.value); }'],
     [entry, data + "\nselectValue = external;"],
   ]) assert.ok(inspect(source, module).some(finding => finding.kind === "unresolved-call"));
   assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
@@ -1292,6 +1306,13 @@ test("folder picker receiver commits shared state and rejects direct rendering",
     { modules: new Map([[file, controller]]) }).filter(finding => finding.root === 'applyPickerReceiveEvent');
   assert.deepEqual(delegated(source), []);
   assert.ok(delegated(bypass).some(finding => finding.kind === 'dom-write'));
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const fromApp = controller => scanModule(app, 'crates/gwt/web/app.js', {
+    modules: new Map([['crates/gwt/web/project-shell-surface.js', shell], [file, controller]]),
+  }).filter(finding => finding.root === 'receive'
+    && finding.context === '/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy');
+  assert.deepEqual(fromApp(source), []);
+  assert.ok(fromApp(bypass).some(finding => finding.kind === 'dom-write'));
 });
 
 test("Knowledge detail completions commit shared state and reject direct rendering", () => {
