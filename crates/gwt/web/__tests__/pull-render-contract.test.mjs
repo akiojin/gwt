@@ -681,7 +681,7 @@ test("direct named imports follow exported function bodies for one module hop", 
   assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
 });
 
-test("Board receiver and Branch subscriber data imports reject DOM mutations in their helpers", () => {
+test("Board receipt and Branch subscriber data imports reject DOM mutations in their helpers", () => {
   for (const [sourceName, dependencyName, exportedName, marker, context] of [
     ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
     ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
@@ -691,7 +691,7 @@ test("Board receiver and Branch subscriber data imports reject DOM mutations in 
     const file = `crates/gwt/web/${dependencyName}.js`;
     const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
       modules: new Map([[file, module]]),
-      rootName: sourceName === 'app' ? 'renderBranchEntries' : undefined,
+      rootName: sourceName === 'app' ? 'renderBranchEntries' : 'applyBoardReceipt',
     }).filter(finding => finding.context === (sourceName === 'app' ? '' : context)
       && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
     assert.deepEqual(inspect(dependency), []);
@@ -1151,32 +1151,30 @@ test("Knowledge phase completions commit shared state and reject direct renderin
   assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')));
 });
 
-test("Board entries commit shared data and reject direct mention rendering", () => {
+test("Board response receipts commit shared data and reject direct rendering", () => {
   const file = 'crates/gwt/web/board-logs-surface.js';
   const appFile = 'crates/gwt/web/app.js';
   const source = readFileSync(new URL('../board-logs-surface.js', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const entries = findings => findings.filter(finding =>
-    finding.context.split('/').at(-1).split('|').includes('board_entries'));
-  const local = entries(scanModule(source, file, { rootName: 'applyBoardLogsReceiveEvent' }));
-  const delegated = entries(scanModule(app, appFile, { modules: new Map([[file, source]]) }));
-  // The guard deliberately leaves the existing imported pure mention selector
-  // unresolved. Every path other than that selector must cross the store.
-  for (const findings of [local, delegated]) {
-    assert.ok(findings.length > 0);
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && finding.path.endsWith('>find:callback')));
+  for (const kind of ['board_entries', 'board_history_page', 'board_error']) {
+    const responses = findings => findings.filter(finding =>
+      finding.context.split('/').at(-1).split('|').includes(kind));
+    const local = text => responses(scanModule(text, file, { rootName: 'applyBoardLogsReceiveEvent' }));
+    const delegated = (text, surface = source) => responses(scanModule(text, appFile,
+      { modules: new Map([[file, surface]]) }));
+    assert.deepEqual(local(source), [], kind);
+    assert.deepEqual(delegated(app), [], kind);
+    const receiver = source.indexOf('function applyBoardLogsReceiveEvent(event)');
+    const bypass = source.slice(0, receiver) + source.slice(receiver).replace(`case "${kind}": {`,
+      `case "${kind}": { renderBoard(event.id);`);
+    assert.notEqual(bypass, source);
+    assert.ok(local(bypass).length > 0, kind);
+    assert.ok(delegated(app, bypass).length > 0, kind);
+    const appBypass = app.replace(`case "${kind}":`,
+      `case "${kind}": document.body.textContent = event.kind;`);
+    assert.notEqual(appBypass, app);
+    assert.ok(delegated(appBypass).some(finding => finding.kind.startsWith('dom-')), kind);
   }
-  const bypass = source.replace('case "board_entries": {',
-    'case "board_entries": { showBoardMentionNotification(event.entries[0], event.id);');
-  assert.notEqual(bypass, source);
-  assert.ok(entries(scanModule(bypass, file, { rootName: 'applyBoardLogsReceiveEvent' })).length > local.length);
-  assert.ok(entries(scanModule(app, appFile, { modules: new Map([[file, bypass]]) })).length > delegated.length);
-  const appBypass = app.replace('case "board_entries":',
-    'case "board_entries": document.body.textContent = event.kind;');
-  assert.notEqual(appBypass, app);
-  assert.ok(entries(scanModule(appBypass, appFile, { modules: new Map([[file, source]]) }))
-    .some(finding => finding.kind.startsWith('dom-')));
 });
 
 test("Logs live receipts commit shared data and reject direct rendering", () => {
