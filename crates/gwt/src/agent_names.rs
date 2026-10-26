@@ -396,6 +396,43 @@ fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -
                 }
                 false
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Closing a pane removes its Session and sidecars, but its
+                // roster assignment can survive. The still-live GUI host is
+                // not evidence that this particular Session remains busy.
+                gwt_agent::with_session_path_lease(sessions, session_id, |state| {
+                    if !matches!(state, gwt_agent::SessionPathState::Missing) {
+                        return Ok(true);
+                    }
+                    let absent = |path: &Path| match std::fs::symlink_metadata(path) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+                        Ok(_) => Ok(false),
+                        Err(error) => Err(error),
+                    };
+                    if !absent(&gwt_agent::active_launch_handshake_path(
+                        sessions, session_id,
+                    ))? {
+                        return Ok(true);
+                    }
+                    let namespaces = match std::fs::read_dir(sessions.join("runtime")) {
+                        Ok(entries) => entries,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            return Ok(false)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for namespace in namespaces {
+                        let namespace = namespace?;
+                        if namespace.file_type()?.is_dir()
+                            && !absent(&namespace.path().join(format!("{session_id}.json")))?
+                        {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(true)
+            }
             _ => true,
         }
     } else {
@@ -412,12 +449,22 @@ fn dead_project_assignments(
     sessions_dir: &Path,
 ) -> Result<Vec<AgentMemberAssignment>, String> {
     let prefs = crate::load_issue_monitor_prefs(path).map_err(|error| error.to_string())?;
+    // A switch's source remains uncertain until its exact runtime exit is
+    // confirmed, even when the durable Session has already disappeared.
+    let pinned_sources: Vec<_> = prefs
+        .agent_switch_intents
+        .values()
+        .filter(|intent| intent.has_admission_pin() && !intent.runtime_exit_confirmed)
+        .map(|intent| &intent.source.assignment)
+        .collect();
     Ok(prefs
         .agent_roster
         .into_iter()
         .flat_map(|roster| roster.members)
         .filter_map(|member| member.assignment)
-        .filter(|assignment| !assignment_is_busy(assignment, sessions_dir))
+        .filter(|assignment| {
+            !pinned_sources.contains(&assignment) && !assignment_is_busy(assignment, sessions_dir)
+        })
         .collect())
 }
 
