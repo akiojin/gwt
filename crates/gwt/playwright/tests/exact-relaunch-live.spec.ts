@@ -282,11 +282,33 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
         expect(roster.members.find(value => value.agent_member_id === memberId)?.saved_manual_profile).toMatchObject(savedCandidate);
         await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
         await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
-        await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
+        await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
         await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
       };
       await assertSaved();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
+      await expect(settings).toBeVisible();
+      await page.getByRole("button", { name: "Split view", exact: true }).click();
+      await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
+      await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
+      const beforeInlineSave = await cursor(page);
+      await settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`).selectOption("high");
+      const inlineReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && Number.isInteger(entry.payload.request_id)
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeInlineSave).then(handle => handle.jsonValue());
+      expect(inlineReply.kind, inlineReply.message).toBe("issue_monitor_profiles");
+      expect(inlineReply.profiles).toContainEqual(expect.objectContaining({ ...savedCandidate, reasoning: "high" }));
+      // No manual read, host change or reload can mask a missing ACK invalidation.
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
+      savedCandidate.reasoning = "high";
+      await page.getByRole("button", { name: "Close split", exact: true }).click();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
       const afterSaveRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
       expect(tomlString(afterSaveRecord, "model")).toBe(facts.model);
       expect(tomlString(afterSaveRecord, "reasoning_level")).toBe(tomlString(record, "reasoning_level"));
