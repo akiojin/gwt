@@ -264,8 +264,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           runtime.terminal.write(text, onWritten);
         },
-        // Hidden Agents tabs still feed the shared buffer used by Issue previews.
-        canWrite: (windowId) => (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        // Reports hides the PM renderer, but its VT buffer must keep consuming
+        // output at the current grid. Replaying it only after reveal can apply
+        // old-width wraps and relative erases to an already resized terminal.
+        // Hidden Agents likewise feed the buffer used by Issue previews.
+        canWrite: (windowId) => pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
