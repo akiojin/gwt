@@ -1585,6 +1585,8 @@ fn sample_runtime_with_events(
     tabs: Vec<ProjectTabRuntime>,
     active_tab_id: Option<&str>,
 ) -> (AppRuntime, Arc<Mutex<Vec<UserEvent>>>) {
+    super::pty_io::initialize_process_window_close_finalizer()
+        .expect("start runtime cleanup worker");
     let (proxy, _events) = AppEventProxy::stub();
     let sessions_dir = temp_root.join("sessions");
     let log_dir = temp_root.join("logs");
