@@ -397,9 +397,9 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
   if (index === 0) {
     // Normal Launch binds a fixed-tool member; provider registration alone
     // does not make this disposable command tool available in the roster.
-    const rosterRequest = async (action: unknown) => {
+    const rosterRequest = async (action: unknown, expectedRevision: number | null = null) => {
       const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
-      await sendLiveGwtEvent(page, { kind: "agent_roster", action });
+      await sendLiveGwtEvent(page, { kind: "agent_roster", action, expected_revision: expectedRevision });
       const roster = await page.waitForFunction(after => {
         const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
           entry.sequence > after && entry.payload.kind === "agent_roster");
@@ -412,7 +412,7 @@ async function launchAgent(page: Page, theme: string, index: number, before: str
     const available = () => roster.members.filter((member: any) =>
       member.agent_id === agentId && member.enabled && !member.assignment).length;
     for (let added = 0; available() < paneCount && added < paneCount; added += 1) {
-      roster = await rosterRequest({ kind: "add", agent_id: agentId });
+      roster = await rosterRequest({ kind: "add", agent_id: agentId }, roster.revision);
     }
     expect(available(), "twelve normally allocated command-tool members").toBe(paneCount);
   }

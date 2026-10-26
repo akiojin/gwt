@@ -89,6 +89,13 @@ project. No Session, capability or roster identity is forged. Keep all existing
 twelve-pane, authenticated IPC, quiet output, input responsiveness, CPU budget
 and theme/error assertions. The production fix remains the single predicate.
 
+The next run, `vrr-da5607ae39fc4f08b6bbd5e64b7cdeee`, exposed an omitted
+`expected_revision` in that preparation helper. The backend correctly rejects
+member mutations without the freshly read revision; the helper waited for a
+success snapshot instead. Pass the current revision exactly as the application
+frontend does. Owned GUI PID 18508 and daemon PID 24460 exited; both failed
+theme traces remain under `issue-5658-after-994f14d8fc804142b936a6e50e7afd6e`.
+
 ## Residual work
 
 A separate 15-second/19-snapshot observation found 56 distinct GUI-child Git
