@@ -318,9 +318,12 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
     const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));
     for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
-    for (const [index, member] of members.entries()) {
+    const focusedRow = document.activeElement?.closest(".roster-row");
+    let anchor = null;
+    for (const member of [...members].reverse()) {
       const row = memberRow(member);
-      if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
+      if (row !== focusedRow && (row.parentElement !== list || row.nextElementSibling !== anchor)) list.insertBefore(row, anchor);
+      anchor = row;
     }
     renderDetail(selected); renderPast(roster.past_contributors || [], roster.past_complete);
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }

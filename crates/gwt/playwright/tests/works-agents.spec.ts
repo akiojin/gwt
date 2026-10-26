@@ -292,6 +292,21 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
 
     await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
+    const memberOrder = () => roster(page).locator(".roster-row").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.memberId));
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reorderMembers(["m-two", "m-one", "m-idle"]));
+    await expect.poll(memberOrder).toEqual(["m-two", "m-one", "m-idle"]);
+    await purpose.focus();
+    await page.keyboard.down("Space");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reorderMembers(["m-one", "m-two", "m-idle"]));
+    await expect.poll(memberOrder).toEqual(["m-one", "m-two", "m-idle"]);
+    expect(await purpose.evaluate(node => node === (window as any).__focusedRosterPurpose)).toBe(true);
+    await expect(purpose).toBeFocused();
+    await page.keyboard.up("Space");
+    await expect(main(page)).toHaveAttribute("data-surface", "works");
+    await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
+    expect(await full(page).locator(".xterm").evaluate(node => node === (window as any).__worksNativeTerminal)).toBe(true);
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
     for (const [state, label] of [["idle", "Idle"], ["error", "Error"], ["waiting", "Waiting"]]) {
       await page.evaluate(status => (window as any).__worksAgentsFixture.status("agent-two", status), state);
       await expect(workRow(page, "agent-two").locator(".work-state")).toHaveText(label);
@@ -550,6 +565,7 @@ async function installWorksAgentsBackend(page: Page) {
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
       workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },

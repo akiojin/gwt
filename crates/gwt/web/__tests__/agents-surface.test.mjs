@@ -114,6 +114,11 @@ test("Agents current pill, row task and Now task open the exact assignment, whil
   assert.equal(task.textContent, "Updated purpose");
   assert.equal(row.querySelector("h3").textContent, "Updated member");
   assert.equal(row.querySelector(".roster-row-stats .roster-stat:last-child b").textContent, "6K");
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...row.parentElement.children].map(node => node.dataset.memberId), ["m2", "m1"]);
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...row.parentElement.children].map(node => node.dataset.memberId), ["m1", "m2"]);
+  assert.ok(row.querySelector(".roster-purpose") === task && task.isConnected, "reordered members retain exact native controls");
   f.surface.selectMember("m2"); assert.equal(row.getAttribute("aria-selected"), "false");
   f.surface.selectMember("m1"); assert.equal(row.getAttribute("aria-selected"), "true");
   const successor = { ...current, runtime_incarnation: 5 };
