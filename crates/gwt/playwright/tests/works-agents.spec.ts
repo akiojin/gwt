@@ -540,6 +540,10 @@ test.describe("Works and Agents approved baseline", () => {
     // The fixture's explicit status refresh is unrelated to the rename.
     expect(renamedIdentity.agents).toEqual(identity.agents);
     expect(renamedIdentity.assignments).toEqual(identity.assignments);
+    await expect(roster(page).locator(".roster-history-config")).toHaveText([
+      "Recorded name: — · Tool: — · Recorded model: —",
+      "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+    ]);
     await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
     await expect(roster(page).locator(".roster-past tbody")).toContainText("Earlier author");
     await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
@@ -555,6 +559,10 @@ test.describe("Works and Agents approved baseline", () => {
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
     await expect(page.locator('.agents-surface--preview [aria-label="Display name"]')).toBeDisabled();
+    await expect(page.locator(".agents-surface--preview .roster-history-config")).toHaveText([
+      "Recorded name: — · Tool: — · Recorded model: —",
+      "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+    ]);
   });
 
   test("ordered member plans keep current work through pending readback, stale rejection and reassignment", async ({ page }, info) => {
@@ -649,7 +657,7 @@ async function installWorksAgentsBackend(page: Page) {
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
     const members: any[] = [
       { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-        { session_id: "s-earlier", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+        { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
         { session_id: "s-later", issue_number: 4600, title: "Later slice", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
       ] },
       { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },

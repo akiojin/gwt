@@ -15,7 +15,8 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
-  assignment: { session_id: string | null; issue_number: number | null } | null };
+  assignment: { session_id: string | null; issue_number: number | null } | null;
+  history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
@@ -242,6 +243,62 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     } finally {
       await fixture.stop();
     }
+  });
+
+  test("recorded assignment facts survive member rename, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const window = await liveCodexWindow(page, launch.gwt_session_id);
+      const record = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const memberId = tomlString(record, "agent_member_id")!;
+      const facts = { name: tomlString(record, "agent_name"), provider: "codex", model: tomlString(record, "model") };
+      expect(memberId).toBeTruthy(); expect(facts.name).toBeTruthy();
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, launch.gwt_session_id), "status"),
+        { timeout: 60_000 }).toBe("Stopped");
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      const member = before.members.find(value => value.agent_member_id === memberId)!;
+      expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const sequence = await cursor(page);
+      await surface.getByRole("textbox", { name: "Display name", exact: true }).fill("Current renamed member");
+      const renamed = await rosterAfter(page, sequence, before.revision);
+      expect(renamed.error).toBeNull();
+      expect(renamed.members.find(value => value.agent_member_id === memberId)?.history).toEqual(member.history);
+      expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(beforeRename);
+      const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
+      const assertHistory = async () => {
+        const roster = await readRoster(page);
+        const saved = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect(saved.name).toBe("Current renamed member");
+        expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-history-config")).toContainText([expected]);
+      };
+      await assertHistory();
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-history-config").first().scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`recorded-history-native-${theme}.png`) });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
+    } finally { await fixture.stop(); }
   });
 
   test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {

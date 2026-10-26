@@ -4114,6 +4114,9 @@ fn agent_roster_view(
             .and_then(|entry| entry.title_summary.clone());
         gwt::AgentAssignmentHistoryView {
             session_id: session.id.clone(),
+            name: session.agent_name.clone(),
+            provider: Some(session.agent_id.command().to_string()),
+            model: session.model.clone(),
             issue_number: session.linked_issue_number,
             title,
             result: Some(format!("{:?}", session.status)),
@@ -6437,12 +6440,13 @@ mod bounded_cache_merge_tests {
             generation: 1,
             project_root: root.clone(),
         };
-        let roster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
-            "agent_member_id":"member-1","name":"Shared","enabled":true,"created_at":"2026-10-25T00:00:00Z"
+        let roster: gwt::agent_names::AgentRoster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"member-1","agent_id":"claude","name":"Current name","enabled":true,"created_at":"2026-10-25T00:00:00Z"
         }]})).unwrap();
         let mut own = gwt_agent::Session::new(&root, "own", gwt_agent::AgentId::Codex);
         own.agent_member_id = Some("member-1".into());
-        own.agent_name = Some("Shared".into());
+        own.agent_name = Some("Recorded name".into());
+        own.model = Some("recorded-model".into());
         own.linked_issue_number = Some(4777);
         let own_id = own.id.clone();
         let mut other = own.clone();
@@ -6465,7 +6469,7 @@ mod bounded_cache_merge_tests {
             .collect::<Vec<_>>();
         let view = agent_roster_view(
             &context,
-            roster,
+            roster.clone(),
             &sessions,
             &[],
             true,
@@ -6474,6 +6478,38 @@ mod bounded_cache_merge_tests {
         assert_eq!(view.members[0].issue_count, Some(1));
         assert_eq!(view.members[0].history.len(), 1);
         assert_eq!(view.members[0].history[0].session_id, own_id);
+        let history = serde_json::to_value(&view.members[0].history[0]).unwrap();
+        assert_eq!(history["name"], "Recorded name");
+        assert_eq!(history["provider"], "codex");
+        assert_eq!(history["model"], "recorded-model");
+        let mut legacy_payload = history.clone();
+        for key in ["name", "provider", "model"] {
+            legacy_payload.as_object_mut().unwrap().remove(key);
+        }
+        let legacy_payload: gwt::AgentAssignmentHistoryView =
+            serde_json::from_value(legacy_payload).unwrap();
+        assert!(
+            legacy_payload.name.is_none()
+                && legacy_payload.provider.is_none()
+                && legacy_payload.model.is_none()
+        );
+        assert_eq!(view.members[0].member.name, "Current name");
+        assert_eq!(view.members[0].provider.as_deref(), Some("claude"));
+        // Missing legacy facts stay unknown, never borrow the current member.
+        let mut unknown = sessions[0].as_ref().clone();
+        unknown.agent_name = None;
+        unknown.model = None;
+        let unknown_view = agent_roster_view(
+            &context,
+            roster,
+            &[Arc::new(unknown)],
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+        );
+        let history = serde_json::to_value(&unknown_view.members[0].history[0]).unwrap();
+        assert!(history["name"].is_null());
+        assert!(history["model"].is_null());
         let legacy = view
             .past_contributors
             .iter()
