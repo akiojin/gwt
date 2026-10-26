@@ -18,6 +18,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
+  const memberRows = new Map();
   let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
   const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
   const switchState = () => switchModel?.read() || emptySwitch;
@@ -256,6 +257,38 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     if (!host || disposed) return;
     previewElement = document.createElement("div"); previewElement.className = "roster-preview-host"; host.append(previewElement); syncPreview();
   }
+  function memberRow(member) {
+    const current = liveWork(member), key = current ? JSON.stringify([current.window_id, current.session_id, current.runtime_incarnation]) : "idle";
+    let cached = memberRows.get(member.member_id);
+    if (!cached || cached.key !== key) {
+      cached?.row.remove();
+      const row = document.createElement("article"); row.className = "roster-row"; row.dataset.memberId = member.member_id; row.setAttribute("role", "listitem"); row.tabIndex = 0;
+      const who = document.createElement("div"); who.className = "roster-who";
+      const name = document.createElement("h3"), purpose = document.createElement(current ? "button" : "span"); purpose.className = "roster-purpose";
+      const state = document.createElement(current ? "button" : "span"); state.className = `roster-state${current ? " roster-current" : ""}`;
+      if (current) {
+        for (const button of [purpose, state]) {
+          button.type = "button";
+          button.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); });
+        }
+        state.title = "Open current work in Works";
+      }
+      who.append(name, purpose, stats(member, "roster-row-stats")); row.append(avatar(member), who, state);
+      row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
+      row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
+      cached = { key, row }; memberRows.set(member.member_id, cached);
+    }
+    const { row } = cached, unavailable = member.assignment?.session_id && activityModel.read().count === null;
+    row.setAttribute("aria-selected", String(member.member_id === selectedId));
+    row.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
+    row.querySelector("h3").textContent = member.name;
+    const purpose = row.querySelector(".roster-purpose");
+    purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
+    row.querySelector(".roster-state").textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
+    const values = [number(member.issue_count), number(member.landed_count), hours(member.active_seconds), number(member.tokens)];
+    row.querySelectorAll(".roster-stat b").forEach((node, index) => { node.textContent = values[index]; });
+    return row;
+  }
   function sync() {
     if (disposed) return;
     const roster = rosterModel.read(), activity = activityModel.read(), catalog = windowCatalogModel.read().catalog;
@@ -283,19 +316,11 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     element.querySelector(".roster-capacity-note").textContent = `Busy ${number(activity.count === null ? null : members.filter(member => liveWork(member)).length)} / Team ${enabledCount} · Recommended capacity ${number(roster.recommended_capacity)}${finite(roster.recommended_capacity) && enabledCount > roster.recommended_capacity ? " · Above recommended capacity" : ""}`;
     element.querySelector('.roster-capacity [data-action="rest"]').disabled = !selected?.enabled || enabledCount <= 1;
     const error = element.querySelector(".roster-error"); error.textContent = roster.error || ""; error.hidden = !roster.error;
-    const list = element.querySelector(".roster-list"); list.replaceChildren();
-    for (const member of members) {
-      const row = document.createElement("article"); row.className = "roster-row"; row.dataset.memberId = member.member_id; row.setAttribute("role", "listitem"); row.tabIndex = 0; row.setAttribute("aria-selected", String(member.member_id === selectedId));
-      const current = liveWork(member), unavailable = member.assignment?.session_id && activity.count === null, who = document.createElement("div"); who.className = "roster-who";
-      const name = document.createElement("h3"), purpose = document.createElement(current ? "button" : "span"); name.textContent = member.name; purpose.className = "roster-purpose"; purpose.textContent = current ? workTitle(current) : unavailable ? "Activity unavailable" : "Waiting for the next issue"; purpose.title = purpose.textContent;
-      if (current) { purpose.type = "button"; purpose.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); }); }
-      who.append(name, purpose, stats(member, "roster-row-stats"));
-      const state = document.createElement(current ? "button" : "span"); state.className = `roster-state${current ? " roster-current" : ""}`; state.textContent = current ? `${member.enabled ? "In Works" : "Resting · Finishing in Works"} ${current.issue_number ? `#${current.issue_number}` : ""}` : unavailable ? "Activity unavailable" : "Waiting";
-      if (current) { state.type = "button"; state.title = "Open current work in Works"; state.addEventListener("click", event => { event.stopPropagation(); openCurrent(member.member_id, current); }); }
-      row.append(avatar(member), who, state);
-      row.addEventListener("click", event => { if (!event.target.closest("button")) selectMember(member.member_id); });
-      row.addEventListener("keydown", event => { if (event.target === row && ["Enter", " "].includes(event.key)) { event.preventDefault(); selectMember(member.member_id); } });
-      list.append(row);
+    const list = element.querySelector(".roster-list"), memberIds = new Set(members.map(member => member.member_id));
+    for (const [id, { row }] of memberRows) if (!memberIds.has(id)) { row.remove(); memberRows.delete(id); }
+    for (const [index, member] of members.entries()) {
+      const row = memberRow(member);
+      if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
     }
     renderDetail(selected); renderPast(roster.past_contributors || [], roster.past_complete);
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }

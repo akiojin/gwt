@@ -190,8 +190,12 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("0");
     await expect(page.locator("#op-strip-idle")).toHaveText("1");
     await openRail(page, "works");
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     await expect(works(page).locator(".work-row")).toHaveCount(1);
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("waiting"));
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Waiting");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
     await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "running"));
     await expect(page.locator("#op-strip-running")).toHaveText("1");
     await expect(works(page).locator('[data-count="running"]')).toHaveText("1");
@@ -276,7 +280,14 @@ test.describe("Works and Agents approved baseline", () => {
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
-    await roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose').press("Enter");
+    const purpose = roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose');
+    await purpose.focus();
+    await purpose.evaluate(node => { (window as any).__focusedRosterPurpose = node; });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceTitle("Updated purpose before Enter"));
+    await expect(purpose).toHaveText("Updated purpose before Enter");
+    expect(await purpose.evaluate(node => node === (window as any).__focusedRosterPurpose)).toBe(true);
+    await expect(purpose).toBeFocused();
+    await purpose.press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
 
@@ -538,6 +549,7 @@ async function installWorksAgentsBackend(page: Page) {
         socket.emit(event);
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
+      workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
