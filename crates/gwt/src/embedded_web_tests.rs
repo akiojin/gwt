@@ -1718,7 +1718,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
     let mut remaining = subscription;
     for step in [
         "projectError = \"\";",
-        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);",
         "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
         "updatePmLauncher(activeWorkspace());",
         "resolvePendingWindowFrames();",
@@ -1781,7 +1781,7 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
         "expected workspace rendering fallback helper in embedded html",
     );
     assert!(
-        html.contains("function renderAppState(nextState)"),
+        html.contains("function renderAppState(nextState, incomingRuntimeStatus = false)"),
         "expected app state rendering to live in a named helper",
     );
     assert!(
@@ -3141,7 +3141,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         workspace_event.is_match(html)
             && html.contains("const workspaceStateModel = createUiStateStore(null);")
             && html.contains(
-                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);"
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);"
             ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
