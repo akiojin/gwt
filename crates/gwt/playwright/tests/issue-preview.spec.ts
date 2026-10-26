@@ -173,7 +173,7 @@ test.describe("Issue preview placement", () => {
     await page.goto(liveUrl || APP_URL);
     await openIssueOutput(page);
 
-    await expect(page.locator(".workspace-window[data-preset='issue'] .surface-knowledge")).toBeVisible();
+    await expect(page.locator(".workspace-window[data-preset='issue'].surface-knowledge")).toBeVisible();
     await expect(page.locator(".workspace-window:visible")).toHaveCount(1);
     await expect(page.locator(".workspace-window.surface-terminal:visible")).toHaveCount(0);
 
