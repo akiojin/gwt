@@ -1422,8 +1422,20 @@ fn pm_crash_records_backoff_and_respawns() {
             .contains(&repo),
         "the canonical crash result requests the existing resume preparation"
     );
-    assert_eq!(tasks.lock().unwrap().len(), 1);
-    tasks.lock().unwrap().remove(0)();
+    drain_queued_blocking_tasks(&tasks);
+    assert_eq!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                recorded_project_payload(event),
+                UserEvent::PmWorktreePrepared { .. }
+            ))
+            .count(),
+        1,
+        "the exact PM crash requests one preparation alongside census work"
+    );
     drain_pm_worktree_preparation(&mut runtime, &recorded);
 
     let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");

@@ -845,6 +845,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     #[serde(default)]
     pub(crate) display_name: Option<String>,
     #[serde(default)]
+    pub(crate) purpose_title: Option<String>,
+    #[serde(default)]
     pub(crate) branch: Option<String>,
     #[serde(default)]
     pub(crate) worktree_path: Option<PathBuf>,
@@ -15209,6 +15211,10 @@ impl AppRuntime {
                 .set_session_id(&address.raw_id, snapshot.session_id.clone());
             tab.workspace
                 .set_agent_name(&address.raw_id, snapshot.agent_name.clone());
+            if let Some(purpose) = &snapshot.purpose_title {
+                tab.workspace
+                    .set_purpose_title(&address.raw_id, Some(purpose.clone()));
+            }
             if let Some(agent_id) = &snapshot.agent_id {
                 tab.workspace
                     .set_agent_id(&address.raw_id, agent_id.clone());

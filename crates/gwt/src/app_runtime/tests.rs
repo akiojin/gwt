@@ -6862,6 +6862,73 @@ fn drain_owner_launch_fixtures(
     events
 }
 
+fn spawn_owner_title_fixture(
+    runtime: &mut AppRuntime,
+    tab_id: &str,
+    mut config: gwt_agent::LaunchConfig,
+    expected_title: &str,
+) {
+    let root = runtime.tab(tab_id).unwrap().project_root.clone();
+    pane_control_tests::control_init_repo(&root);
+    config
+        .base_branch
+        .get_or_insert_with(|| git_stdout(&root, &["branch", "--show-current"]));
+    run_git(
+        &root,
+        &["checkout", "-b", config.branch.as_deref().unwrap()],
+    );
+    config.working_dir = Some(root.clone());
+    seed_owner_fixture_roster(&root, 8);
+    configure_owner_fixture_tools(&root, &["codex"]);
+    let temp = runtime.sessions_dir.parent().unwrap().to_path_buf();
+    pin_live_pm_fixture_agents(runtime, &temp);
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.launch_wizard_cache =
+        LaunchWizardMemoryCache::load_with_agent_options(&runtime.sessions_dir, Vec::new());
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    runtime.spawn_agent_window(tab_id, config, None).unwrap();
+    assert_eq!(runtime.pending_launch_completions.len(), 1);
+    let window_id = runtime
+        .pending_launch_completions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let owner = project_owner_fixture(runtime, &window_id);
+    drain_queued_blocking_tasks(&tasks);
+    let completion = take_remote_owner_launch_completion(match &runtime.proxy {
+        AppEventProxy::Stub(events) => events,
+        _ => panic!("recording title fixture proxy"),
+    });
+    let snapshot = match &completion.result {
+        Ok(super::RemoteOwnerLaunchOutcome::Runtime(snapshot, _)) => snapshot,
+        Ok(super::RemoteOwnerLaunchOutcome::Failed { failure, .. }) => {
+            panic!("actual owner title launch failed: {}", failure.detail)
+        }
+        Ok(super::RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => {
+            panic!("actual owner title launch compensated: {}", failure.error)
+        }
+        Ok(super::RemoteOwnerLaunchOutcome::DiagnosticClosed { detail, .. }) => {
+            panic!("actual owner title launch exited: {detail:?}")
+        }
+        other => panic!(
+            "actual owner title launch was not installed: {:?}",
+            other.as_ref().err()
+        ),
+    };
+    let wire = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: snapshot.id.clone(),
+            incarnation: snapshot.incarnation,
+        },
+    ))
+    .unwrap();
+    assert_eq!(wire["purpose_title"].as_str(), Some(expected_title));
+    runtime.handle_remote_owner_launch_complete(completion);
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
+}
+
 fn owner_fixture_agent_command(
     owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
     root: &Path,

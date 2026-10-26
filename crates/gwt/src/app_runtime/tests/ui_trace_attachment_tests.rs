@@ -849,9 +849,12 @@ fn app_runtime_agent_window_initial_title_uses_linked_issue_title() {
         .linked_issue_number(2359)
         .build();
 
-    runtime
-        .spawn_agent_window("tab-1", config, None)
-        .expect("spawn agent window");
+    spawn_owner_title_fixture(
+        &mut runtime,
+        "tab-1",
+        config,
+        "SPEC: Workspace purpose titles",
+    );
 
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab

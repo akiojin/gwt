@@ -510,6 +510,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         agent_id: None,
         agent_name: None,
         display_name: None,
+        purpose_title: None,
         branch: None,
         worktree_path: None,
         closing: false,

@@ -6445,33 +6445,16 @@ mod bounded_cache_merge_tests {
             .add_window(gwt::WindowPreset::Agent);
         assert!(!window.is_pm, "the stored PM flag is wire-only");
         let window_id = format!("tab-1::{}", window.id);
-        let session_id = "registered-pm";
-        runtime
-            .tab_mut("tab-1")
-            .unwrap()
-            .workspace
-            .set_session_id(&window.id, Some(session_id.to_string()));
-        runtime.active_agent_sessions.insert(
-            window_id.clone(),
-            ActiveAgentSession {
-                window_id: window_id.clone(),
-                session_id: session_id.into(),
-                agent_id: "claude".into(),
-                branch_name: "work".into(),
-                display_name: "Claude Code".into(),
-                worktree_path: context.project_root.clone(),
-                agent_project_root: context.project_root.display().to_string(),
-                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-                tab_id: "tab-1".into(),
-            },
-        );
+        runtime.register_window("tab-1", &window.id);
+        super::super::tests::init_repo_with_initial_commit(&context.project_root);
         let _pane = super::super::tests::attach_live_pm_pane(&mut runtime, &window_id);
-        runtime.register_pm_after_launch(
-            &context.project_root,
-            session_id,
-            "claude",
-            &context.project_root,
-        );
+        let prefs = gwt::pm_registry::load_pm_prefs(
+            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+        )
+        .unwrap();
+        runtime.sync_pm_session_cache(&context.project_root, prefs.registration.as_ref());
+        assert!(runtime.active_agent_sessions.contains_key(&window_id));
+        assert!(!runtime.tab("tab-1").unwrap().workspace.persisted().windows[0].is_pm);
 
         let candidates = runtime.local_agent_activity_candidates("tab-1");
         assert_eq!(candidates.len(), 1);
