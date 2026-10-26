@@ -3135,6 +3135,25 @@ fn owner_monitor_admission_error(
     workspace_resume_context: Option<WorkspaceResumeContext>,
 ) -> String {
     use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
+    let physical_identities = |inventory: &serde_json::Value| {
+        let mut identities = inventory["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pane| {
+                serde_json::json!([
+                    pane["id"],
+                    pane["incarnation"],
+                    pane["session_id"],
+                    pane["child_pid"]
+                ])
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        identities.sort();
+        identities
+    };
+    let before = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
     let id = owner.pane_id("admission");
     let outcome = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
         tab_id: id.split_once("::").unwrap().0.into(),
@@ -3157,9 +3176,10 @@ fn owner_monitor_admission_error(
             .to_owned(),
     };
     let inventory = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
-    assert!(
-        inventory["panes"].as_array().unwrap().is_empty(),
-        "a refused or pre-provider failed admission must leave no physical pane: {inventory}"
+    assert_eq!(
+        physical_identities(&inventory),
+        physical_identities(&before),
+        "a refused or pre-provider failed admission must preserve the physical inventory"
     );
     assert!(inventory["pending"].as_array().unwrap().is_empty());
     detail
@@ -3183,30 +3203,33 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
     fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
-    // The helper pins mock providers. Fail before provider/PTY preparation so
-    // this test observes pane admission without starting an agent process.
-    fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
-    fs::write(gwt_core::paths::gwt_config_path(), "invalid = [")
-        .expect("write malformed fixture profile");
+    // Keep native roster preparation valid, then fail the selected runner's
+    // health check before any Session or PTY is created.
+    Settings::default()
+        .save(&gwt_core::paths::gwt_config_path())
+        .unwrap();
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            enabled: true,
-            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
-            // A saved accepted zero holds admission until a fresh positive sample.
-            max_active_agents: 0,
-            ..Default::default()
-        },
-    )
-    .expect("save Auto prefs");
+    let mut prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Auto,
+        // A saved accepted zero holds admission until a fresh positive sample.
+        max_active_agents: 0,
+        ..Default::default()
+    };
+    prefs.set_launch_profile_pool(vec![pool_profile("claude")]);
+    gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save Auto prefs");
     let machine_policy_before =
         gwt::machine_agent_settings::ensure_migrated().expect("saved machine policy");
     let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
     let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
         .working_dir(&repo)
         .build();
+    config.command = temp
+        .path()
+        .join("missing-selected-runner")
+        .display()
+        .to_string();
     let mut feedback = issue_monitor_feedback(43);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
@@ -3285,7 +3308,7 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     assert!(prepared.is_current(std::slice::from_ref(&repo)));
     let completion = owner_monitor_admission_error(&owner, config, Some(feedback), None);
     assert!(
-        completion.contains("config parse error"),
+        completion.contains("installed runner failed its health check"),
         "fresh shared capacity must reach provider preparation: {completion}"
     );
     assert!(runtime.runtimes.is_empty(), "no provider PTY was created");
@@ -3311,6 +3334,18 @@ fn issue_monitor_final_spawn_reads_fresh_shared_auto_capacity() {
     // The roster owns the requested count; legacy on-disk compatibility
     // mirrors are not additional project settings.
     prefs_before_typed.max_active_agents = roster.enabled_count();
+    let original = prefs_before_typed.launch_profile_pool().remove(0);
+    let profiles = roster
+        .members
+        .iter()
+        .map(|member| {
+            assert_eq!(member.agent_id.as_deref(), Some("claude"));
+            let mut expected = original.clone();
+            expected.agent_member_id = Some(member.agent_member_id.clone());
+            expected
+        })
+        .collect();
+    prefs_before_typed.set_launch_profile_pool(profiles);
     assert_eq!(after, prefs_before_typed);
     assert_eq!(
         gwt::machine_agent_settings::load().unwrap(),
@@ -3350,17 +3385,16 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
         fs::create_dir_all(gwt_core::paths::gwt_sessions_dir()).unwrap();
         let owner = owner_fixture_block_on(production_owner_fixture(&repo));
-        fs::create_dir_all(gwt_core::paths::gwt_home()).unwrap();
-        fs::write(gwt_core::paths::gwt_config_path(), "invalid = [")
-            .expect("stop admitted launches before provider preparation");
-        let mut monitor = test_monitor_with_prefs(
-            Default::default(),
-            gwt::IssueMonitorPrefs {
-                max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
-                max_active_agents: 3,
-                ..Default::default()
-            },
-        );
+        Settings::default()
+            .save(&gwt_core::paths::gwt_config_path())
+            .unwrap();
+        let mut prefs = gwt::IssueMonitorPrefs {
+            max_active_agents_mode: gwt::issue_monitor::IssueMonitorMaxActiveMode::Manual,
+            max_active_agents: 3,
+            ..Default::default()
+        };
+        prefs.set_launch_profile_pool(vec![pool_profile("claude")]);
+        let mut monitor = test_monitor_with_prefs(Default::default(), prefs);
         monitor.record_candidate(gwt::IssueMonitorIssue {
             author_login: None,
             number: 42,
@@ -3391,11 +3425,16 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
         gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save wait");
         let prefs_before = fs::read(&prefs_path).expect("prefs before admission");
-        let prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let mut prefs_before_typed = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
             .working_dir(&repo)
             .linked_issue_number(42)
             .build();
+        config.command = temp
+            .path()
+            .join("missing-selected-runner")
+            .display()
+            .to_string();
         let mut feedback = issue_monitor_feedback(42);
         feedback.issue_monitor_project_root = Some(repo.clone());
         feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
@@ -3426,7 +3465,7 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
             assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
         } else {
             assert!(
-                result.contains("config parse error"),
+                result.contains("installed runner failed its health check"),
                 "expired/invalidated waits and review must reach provider preparation: {result}"
             );
             // Check the same immediate GUI projection from the immutable intent;
@@ -3468,6 +3507,20 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
                 .members
                 .iter()
                 .all(|member| member.assignment.is_none()));
+            // Native profiles bind to the materialized people; retain every
+            // original model, reasoning, permission and runtime setting.
+            let original = prefs_before_typed.launch_profile_pool().remove(0);
+            let profiles = roster
+                .members
+                .iter()
+                .map(|member| {
+                    assert_eq!(member.agent_id.as_deref(), Some("claude"));
+                    let mut expected = original.clone();
+                    expected.agent_member_id = Some(member.agent_member_id.clone());
+                    expected
+                })
+                .collect();
+            prefs_before_typed.set_launch_profile_pool(profiles);
             assert_eq!(after, prefs_before_typed);
         } else {
             assert_eq!(
@@ -3481,135 +3534,156 @@ fn issue_monitor_final_spawn_preserves_live_wait_and_exempts_review() {
 
 #[test]
 fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
+    use gwt::project_runtime::events::OwnerCommand;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).unwrap();
-    init_repo_with_initial_commit(&repo);
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (repo, owner, _) =
+        owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
+    let resize = |size| {
+        gwt::agent_names::mutate_project_roster(
+            &repo,
+            &gwt_core::paths::gwt_sessions_dir(),
+            gwt::agent_names::AgentRosterAction::Resize { size },
+            None,
+        )
+        .unwrap();
+    };
+    resize(1);
+    let mut config = pane_control_tests::control_launch_config(&repo, 42);
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    let held = pane_control_tests::control_owner_launch(&owner, "agent", config);
+    assert!(
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+            .unwrap()
+            .launched_issues
+            .is_empty(),
+        "the retained physical implementation has no Monitor launch binding"
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
-    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
-        enabled: true,
-        max_active: 1,
-        ..Default::default()
-    });
-    monitor.complete_active_launch(42, "tab-1::agent-1");
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .unwrap();
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .branch("work/issue-43")
-        .build();
     let mut feedback = issue_monitor_feedback(43);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
+    let detail = owner_monitor_admission_error(
+        &owner,
+        pane_control_tests::control_launch_config(&repo, 43),
+        Some(feedback.clone()),
+        None,
+    );
     assert!(
-        result
-            .as_ref()
-            .is_err_and(|reason| reason.contains("max_active")),
-        "Monitor legacy/manual dispatch must honor capacity before creating a pane: {result:?}"
+        detail.contains("max_active"),
+        "actual owner refusal: {detail}"
     );
-    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
 
-    // A retained Monitor pane in a sibling local tab is still a physical slot.
+    // A sibling GUI tab observes the real retained owner pane, including its
+    // Session. It never supplies a substitute physical runtime or capacity gate.
     let empty_tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-    let mut sibling = sample_project_tab(
+    let sibling = sample_project_tab_with_window_at(
         "tab-2",
-        "Repo",
+        "agent",
         repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
+        WindowPreset::Agent,
+        held.status,
     );
-    let raw_id = sibling.workspace.persisted().windows[0].id.clone();
-    sibling
-        .workspace
-        .set_status(&raw_id, WindowProcessStatus::Error);
     let mut runtime = sample_runtime(temp.path(), vec![empty_tab, sibling], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
+    let context = runtime.project_context("tab-2").unwrap();
+    let client = owner.client();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = client.identity().cloned();
+    let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+        id: held.id.clone(),
+        incarnation: held.incarnation,
+    }))
+    .unwrap();
+    let gui_id = combined_window_id("tab-2", "agent");
+    runtime.install_remote_owner_projection(
+        &context,
+        &gui_id,
+        client,
+        serde_json::from_value(snapshot).unwrap(),
+        held.session.clone(),
+    );
     runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
-    let mut retained = issue_monitor_feedback(42);
-    retained.issue_monitor_project_root = Some(repo.clone());
-    runtime
-        .pending_launch_feedback_contexts
-        .insert(combined_window_id("tab-2", &raw_id), retained);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: held.id.clone(),
+            incarnation: held.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("retained owner fixture error".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    relay_approval_owner_events(&mut runtime, &gui_id, &mut source);
     let snapshot = runtime
-        .issue_monitor_window_snapshot_for_tab("tab-1", "2026-10-06T00:00:00Z")
+        .issue_monitor_window_snapshot_for_tab("tab-1", &Utc::now().to_rfc3339())
         .unwrap();
     assert_eq!(
         snapshot.windows.len(),
         1,
-        "the physical snapshot covers every local project tab"
+        "all local project tabs are observed"
     );
+    assert_eq!(snapshot.windows[0].window_id, gui_id);
     assert_eq!(
-        snapshot.windows[0].window_id,
-        combined_window_id("tab-2", &raw_id)
+        snapshot.windows[0].session_id,
+        held.session.as_ref().map(|s| s.id.clone())
     );
-    let monitor = test_monitor(gwt::IssueMonitorConfig {
-        enabled: true,
-        max_active: 1,
-        ..Default::default()
-    });
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
+    assert_eq!(snapshot.windows[0].issue_number, Some(42));
+    assert_eq!(snapshot.windows[0].status, WindowProcessStatus::Error);
+    assert!(held.pty.try_wait().unwrap().is_none());
+    let detail = owner_monitor_admission_error(
+        &owner,
+        pane_control_tests::control_launch_config(&repo, 43),
+        Some(feedback),
+        None,
+    );
+    assert!(
+        detail.contains("max_active"),
+        "retained physical slot: {detail}"
+    );
+
+    // A same-Issue implementation still blocks duplication when another native
+    // slot is available, even though this manual request has no delivery token.
+    resize(3);
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: held.id.clone(),
+            incarnation: held.incarnation,
+            status: WindowProcessStatus::Running,
+            detail: None,
+            exit_confirmed: false,
+        }),
     )
     .unwrap();
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .branch("work/issue-43")
-        .build();
-    let mut feedback = issue_monitor_feedback(43);
+    relay_approval_owner_events(&mut runtime, &gui_id, &mut source);
+    let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|reason| reason.contains("max_active")),
-        "a sibling retained pane exhausts capacity: {result:?}"
+    let detail = owner_monitor_admission_error(
+        &owner,
+        pane_control_tests::control_launch_config(&repo, 42),
+        Some(feedback),
+        None,
     );
-    assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
-
-    // Binding-free same-Issue panes also prevent duplication while the cap has room.
-    runtime.tabs[1]
-        .workspace
-        .set_status(&raw_id, WindowProcessStatus::Running);
-    let monitor = test_monitor(gwt::IssueMonitorConfig {
-        max_active: 3,
-        ..Default::default()
-    });
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
-        &monitor.prefs(),
-    )
-    .unwrap();
-    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
-        .branch("work/issue-42")
-        .build();
-    let mut feedback = issue_monitor_feedback(42);
-    feedback.issue_monitor_project_root = Some(repo);
-    feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let result = runtime.spawn_agent_window_with_feedback("tab-1", config, None, feedback);
     assert!(
-        result
-            .as_ref()
-            .is_err_and(|reason| reason.contains("already")),
-        "a sibling implementation blocks the same Issue before adding a pane: {result:?}"
+        detail.contains("already"),
+        "same-Issue owner refusal: {detail}"
     );
+    let current = owner_fixture_block_on(owner.probe(&held.id, held.incarnation)).unwrap();
+    assert!(Arc::ptr_eq(&current.pty, &held.pty));
+    assert!(current.pty.try_wait().unwrap().is_none());
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
     assert_eq!(runtime.tabs[1].workspace.persisted().windows.len(), 1);
+    pane_control_tests::control_close(&owner, &held);
+    assert!(held.pty.try_wait().unwrap().is_some());
+    owner_fixture_block_on(owner.shutdown());
 }
 
 fn spawned_agent_placement(runtime: &AppRuntime, tab_id: &str) -> WindowPlacement {
