@@ -268,3 +268,46 @@ Session/Monitor work and GUI. They do not establish shipping CPU, large-ledger
 scaling, eight real Agents for sixty minutes, PM-prompt failures or long-duration
 memory acceptance. Parent AC-1/2/3 remain unchecked. Final fresh canonical and
 isolated checkout debug headed dark/light results belong to the delivery PR.
+
+## Reuse validated generation snapshots
+
+Within `validate_generation_ledger`, the first generation loop decodes and
+hydrates every immutable `execution_control_json`, validates its owner, status,
+integrity, settlement timestamp and predecessor chain, then drops the parsed
+record. Later the same function decodes and hydrates the same bytes again to
+build `effective_projections`. Move the validated record into that existing
+operation-local map after its original checks, and remove the second decode.
+All fresh reads, hash/history validation, error priority and later lifecycle
+and takeover projection updates remain in place. The map owns the records
+earlier; no persistent cache or new authority API is introduced.
+
+The existing actual-reader projection regression passed before changes. Its
+test-only thread-local snapshot counter then failed with four decodes instead
+of two. After the change it passes with two, while the separate full-validation
+counter still proves two strict fresh validations. Existing hash/predecessor/
+terminal mutation, projection-event truncate/reorder/mutation, contiguous
+takeover writer/exact projection and missing/malformed/stale-pointer authority
+regressions pass. Independent source review found no blocking issue.
+
+`generation-snapshot-decode.json` retains the complete probe, source/input
+hashes, both linked binary hashes and twenty alternating paired rounds. The
+same probe source links against the actual before and after checkout debug
+libraries. Both read an identical captured strict-valid five-generation ledger
+and perform five warmup validations before measuring fifty real validator
+calls. Process startup and input parsing are outside the sample. Every
+validation succeeds and the complete ledger and fixture bytes stay unchanged.
+
+Allocation/reallocation requests fell from 40,350 to 39,200 per fifty
+validations (2.85%), and cumulative requested bytes from 10,221,000 to
+10,180,200 (0.40%), identically in all twenty pairs. These are allocation
+requests, not retained memory or RSS. Median elapsed time was 226.4727ms before
+and 224.6686ms after; the overlapping samples do not establish a material wall
+time improvement. No elapsed-time assertion is used.
+
+A separate installed PID 33132 observation remains in the artifact with its
+binary hash and sample times; it is an older executable, not this candidate or
+a causal before/after comparison. The validator probe does not establish full
+strict-load/diagnosis latency, whole-GUI or release CPU, real eight-Agent
+sixty-minute budgets, PM-prompt failure rates or long-duration memory. Parent
+AC-1/2/3 remain unchecked. Fresh canonical and isolated checkout debug headed
+dark/light evidence belongs to the delivery record.
