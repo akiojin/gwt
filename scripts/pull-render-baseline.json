@@ -1,4 +1,1 @@
-[
-  "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/picker_started|picker_selected|picker_cancelled|picker_error|picker_busy\"]",
-  "[\"crates/gwt/web/project-shell-surface.js\",\"receive\",\"/project_opened\"]"
-]
+[]

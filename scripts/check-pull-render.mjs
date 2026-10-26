@@ -1,6 +1,6 @@
 // AC-12: receiver roots may update models, but must not acquire new DOM paths.
 // This is a scoped syntax guard, not a whole-program/type analysis. Only local
-// named helpers and one-hop named imports/factory return aliases are resolved.
+// named helpers and up to two hops of named imports/factory return aliases are resolved.
 // Other external/dynamic calls produce findings instead
 // of being silently trusted; their internals are outside this guard's scope.
 // Known data API spellings are trusted. Event/subscription handlers are not
@@ -47,7 +47,7 @@ function factoryHandlers(source, name) {
     .map(node => [node.key.name || node.key.value, node.value.name]));
 }
 
-export function scanModule(source, file, { modules, rootName } = {}) {
+export function scanModule(source, file, { modules, rootName, importDepth = 0 } = {}) {
   const ast = parse(source, { ecmaVersion: "latest", sourceType: "module", locations: true });
   const scopes = new WeakMap(), names = new WeakMap(), mutatedFunctions = new WeakSet(), roots = [], findings = new Map();
   const scope = parent => ({ parent, bindings: new Map(), models: new Set() });
@@ -191,11 +191,12 @@ export function scanModule(source, file, { modules, rootName } = {}) {
         const model = callee.object?.type === "Identifier" && resolve(node, callee.object.name).model;
         if (domCalls.has(method) || /\.(style|classList)\./.test(spelling)) add("dom-call", node, path, context);
         else if (local) follow(local, path + ">" + names.get(local), context);
-        else if (handler) {
+        else if (handler && importDepth < 2) {
           const key = handler.file + ":" + handler.name;
-          // Deliberately one hop: imported helpers inside the resolved handler
-          // remain unresolved, while its local closure/model bindings are read.
-          if (!handlerCache.has(key)) handlerCache.set(key, scanModule(handler.source, handler.file, { rootName: handler.name }));
+          // Two hops cover app -> surface -> controller. Further delegation,
+          // including import cycles, remains unresolved instead of recursing.
+          if (!handlerCache.has(key)) handlerCache.set(key, scanModule(handler.source, handler.file,
+            { modules, rootName: handler.name, importDepth: importDepth + 1 }));
           for (const finding of handlerCache.get(key)) {
             const key = JSON.stringify([finding.file, names.get(root), context + finding.context, finding.kind, finding.hash]);
             findings.set(key, { ...finding, key, root: names.get(root), context: context + finding.context,
