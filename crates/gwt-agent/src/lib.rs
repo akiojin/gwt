@@ -75,10 +75,10 @@ pub use presets::{
     PresetDefinition, PresetError, PresetId,
 };
 pub use session::{
-    active_launch_handshake_path, begin_session_active_launch_handshake_under_lease,
-    begin_session_manual_handoff_under_lease, clear_session_active_launch_handshake_under_lease,
-    clear_session_manual_handoff_under_lease, current_thread_holds_session_lease,
-    inspect_session_path, manual_handoff_path,
+    acquire_session_path_leases, active_launch_handshake_path,
+    begin_session_active_launch_handshake_under_lease, begin_session_manual_handoff_under_lease,
+    clear_session_active_launch_handshake_under_lease, clear_session_manual_handoff_under_lease,
+    current_thread_holds_session_lease, inspect_session_path, manual_handoff_path,
     mark_session_active_launch_handshake_child_spawned_under_lease, persist_agent_session_id,
     persist_session_completed_stop, persist_session_execution_binding, persist_session_exit,
     persist_session_hook_event, persist_session_hook_metadata_with_wait,
@@ -104,10 +104,10 @@ pub use session::{
     DockerRuntimeBinding, ExecutionBindingIdentity, PendingDiscussionResume, Session,
     SessionActiveLaunchHandshake, SessionActiveLaunchPhase, SessionExecutionBinding,
     SessionExecutionIdentity, SessionExitReceipt, SessionLaunchOrigin, SessionManualHandoffFence,
-    SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome, ToolRuntimeProvenance,
-    ToolRuntimeResolutionReason, ToolRuntimeRunnerKind, EXECUTION_BINDING_OWNER_MISMATCH,
-    GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV, GWT_HOOK_FORWARD_TOKEN_ENV,
-    GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
+    SessionPathLeases, SessionPathState, SessionRuntimeState, SessionSnapshotUpdateOutcome,
+    ToolRuntimeProvenance, ToolRuntimeResolutionReason, ToolRuntimeRunnerKind,
+    EXECUTION_BINDING_OWNER_MISMATCH, GWT_BIN_PATH_ENV, GWT_CONTINUE_WORK_READY_NONCE_ENV,
+    GWT_HOOK_FORWARD_TOKEN_ENV, GWT_HOOK_FORWARD_URL_ENV, GWT_PANE_WS_URL_ENV, GWT_SESSION_ID_ENV,
     GWT_SESSION_RUNTIME_PATH_ENV,
 };
 pub use store::{
