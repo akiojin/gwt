@@ -21179,11 +21179,12 @@ exit 1
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
-                max_active_agents: 4,
+                max_active_agents: 5,
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 queued_launch_session_strategies: std::collections::BTreeMap::from([
                     (42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                     (45, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
+                    (46, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                 ]),
                 ..Default::default()
             },
@@ -21191,7 +21192,7 @@ exit 1
         monitor.set_source_repository(Some(("akiojin", "gwt")));
         let now = chrono::Utc::now().to_rfc3339();
         let mut candidates = Vec::new();
-        for number in [42, 43, 44, 45] {
+        for number in [42, 43, 44, 45, 46] {
             let mut issue = sample_issue_monitor_issue(number);
             issue.author_login = Some("akiojin".into());
             issue.labels.push("gwt-spec".into());
@@ -21207,14 +21208,20 @@ exit 1
                 &format!("effect-{number}"),
                 &now
             ));
-            if number != 45 {
+            if number < 45 {
                 issue.readiness = crate::IssueMonitorReadiness::NotReady;
             }
-            if number != 42 {
+            if (43..=45).contains(&number) {
                 issue.body = Some("<!-- gwt-feedback:receipt -->".into());
+            }
+            if number == 46 {
+                issue.body = Some("Blocked-by: #47".into());
             }
             candidates.push(issue);
         }
+        let mut blocker = sample_issue_monitor_issue(47);
+        blocker.author_login = Some("akiojin".into());
+        candidates.push(blocker);
         let mut scanned = monitor.clone();
         crate::scan_issue_monitor_candidates_with_provenance(
             &mut scanned,
@@ -21223,6 +21230,11 @@ exit 1
             temp.path(),
             &now,
         );
+        let unprobed = scanned.clone();
+        scanned.observe_dependency_completions(&std::collections::BTreeMap::from([(
+            47,
+            scanned.dependency_observation(47, Some(false)).unwrap(),
+        )]));
         // Ownership can change after the scan reads its candidates.
         assert!(monitor.claim_launch_delivery(
             43,
@@ -21236,12 +21248,44 @@ exit 1
         let latest = monitor.prefs();
         let mut observer = scanned.clone();
         observer.rebase_gui_observer_prefs(&latest);
+        // The dependency proof can be sealed without changing launch ownership.
         assert_eq!(
-            observer.prefs().pending_launch_deliveries,
-            latest.pending_launch_deliveries,
+            observer.prefs().pending_launch_deliveries.len(),
+            latest.pending_launch_deliveries.len()
+        );
+        assert_eq!(
+            observer.prefs().pending_launch_deliveries[..4],
+            latest.pending_launch_deliveries[..4],
             "an old GUI candidate cannot cancel a newer claim"
         );
+        assert_eq!(
+            observer.pending_launch_delivery_id(46).as_deref(),
+            Some("launch:effect-46")
+        );
         assert!(observer.pending_effects().is_empty());
+        for (index, completed) in [None, Some(Some(true)), Some(None)].into_iter().enumerate() {
+            let mut pending = unprobed.clone();
+            if let Some(completed) = completed {
+                pending.observe_dependency_completions(&std::collections::BTreeMap::from([(
+                    47,
+                    pending.dependency_observation(47, completed).unwrap(),
+                )]));
+            }
+            let path = temp.path().join(format!("dependency-{index}.json"));
+            crate::save_issue_monitor_prefs(&path, &latest).unwrap();
+            let mut driver = monitor.clone();
+            assert!(super::commit_issue_monitor_scan_if_current(
+                temp.path(),
+                &path,
+                &mut driver,
+                pending,
+                monitor.effect_authority_epoch()
+            ));
+            assert_eq!(
+                driver.pending_launch_delivery_id(46).as_deref(),
+                Some("launch:effect-46")
+            );
+        }
         let mut cached = monitor.clone();
         crate::scan_issue_monitor_candidates_with_provenance(
             &mut cached,
@@ -21250,6 +21294,10 @@ exit 1
             temp.path(),
             &now,
         );
+        cached.observe_dependency_completions(&std::collections::BTreeMap::from([(
+            47,
+            cached.dependency_observation(47, Some(false)).unwrap(),
+        )]));
         let cache_path = temp.path().join("cached-monitor.json");
         crate::save_issue_monitor_prefs(&cache_path, &latest).unwrap();
         let mut cached_driver = monitor.clone();
@@ -21262,8 +21310,16 @@ exit 1
             epoch
         ));
         assert_eq!(
-            cached_driver.prefs().pending_launch_deliveries,
-            latest.pending_launch_deliveries
+            cached_driver.prefs().pending_launch_deliveries.len(),
+            latest.pending_launch_deliveries.len()
+        );
+        assert_eq!(
+            cached_driver.prefs().pending_launch_deliveries[..4],
+            latest.pending_launch_deliveries[..4]
+        );
+        assert_eq!(
+            cached_driver.pending_launch_delivery_id(46).as_deref(),
+            Some("launch:effect-46")
         );
         assert!(cached_driver.pending_effects().is_empty());
         crate::save_issue_monitor_prefs(&prefs_path, &latest).unwrap();
@@ -21276,6 +21332,20 @@ exit 1
         ));
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            monitor.pending_launch_delivery_id(46),
+            None,
+            "a confirmed dependency blocker must free the unowned slot before timeout"
+        );
+        assert!(!monitor.active_issue_numbers().contains(&46));
+        let view = monitor.inbox_view_at(&now);
+        let blocked = view.iter().find(|item| item.issue.number == 46).unwrap();
+        assert_eq!(blocked.state, crate::MonitorInboxState::BlockedByDependency);
+        assert!(blocked.exclusion_reason.as_deref().unwrap().contains("#47"));
+        assert_eq!(persisted.pending_effects.iter().filter(|effect| matches!(
+            &effect.payload, crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 46, claim_id, owner }
+                if claim_id == "claim-46" && owner == "owner"
+        )).count(), 1);
         assert_eq!(
             monitor.pending_launch_delivery_id(45),
             None,
@@ -21337,6 +21407,31 @@ exit 1
         }
         assert_eq!(monitor.effect_authority_epoch(), epoch);
         observer.rebase_gui_observer_prefs(&persisted);
+        assert!(!observer.active_issue_numbers().contains(&46));
+        assert!(!observer.claim_launch_delivery(
+            46,
+            "launch:effect-46",
+            "late-gui",
+            46,
+            "tab-1::agent-46",
+            |_| false
+        ));
+        assert!(!observer.apply_confirmed_claim(
+            46,
+            "blocked-claim",
+            "owner",
+            "blocked-effect",
+            &now
+        ));
+        assert_eq!(
+            observer
+                .inbox_view_at(&now)
+                .iter()
+                .find(|item| item.issue.number == 46)
+                .unwrap()
+                .state,
+            crate::MonitorInboxState::BlockedByDependency
+        );
         assert!(!observer.active_issue_numbers().contains(&45));
         assert_eq!(
             observer.inbox_item(45).unwrap().state,
@@ -21366,6 +21461,27 @@ exit 1
         ));
         let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         restored.set_source_repository(Some(("akiojin", "gwt")));
+        let mut unblocked = candidates[4].clone();
+        unblocked.body = None;
+        restored.record_candidate(unblocked);
+        assert!(restored.apply_confirmed_claim(
+            46,
+            "unblocked-claim",
+            "owner",
+            "unblocked-effect",
+            &now
+        ));
+        assert_eq!(restored.attempt_count(46), 1);
+        assert_eq!(
+            restored
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|d| d.issue_number == 46)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         restored.record_candidate(candidates[3].clone());
         assert_eq!(restored.pending_launch_delivery_id(45), None);
         assert!(!restored.apply_confirmed_claim(

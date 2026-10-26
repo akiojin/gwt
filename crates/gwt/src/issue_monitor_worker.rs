@@ -8200,6 +8200,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn issue_6394_prune_expiry_keeps_new_queued_candidate_launchable() {
+        use gwt_core::operation_deadline::{ScopedOperationClock, ScopedOperationDeadline};
+        use std::time::{Duration, Instant};
+
+        let started = Instant::now();
+        let _clock = ScopedOperationClock::set(started);
+        let scan_deadline = started + Duration::from_secs(11);
+        let _scan = ScopedOperationDeadline::enter(scan_deadline);
+        let mut monitor = test_monitor(crate::IssueMonitorConfig {
+            enabled: true,
+            max_active: 1,
+            ..Default::default()
+        });
+        let now = "2026-10-26T00:00:00Z";
+        monitor.terminal_queue_push(&[42], "operator", now);
+        monitor.set_gui_connected(true);
+        assert!(monitor.inbox_item(42).is_none());
+        crate::scan_issue_monitor_candidates(&mut monitor, &[issue(42)], now);
+
+        // Model maintenance exhausting its own budget under load. Use the real
+        // prune Git boundary: it must refuse before touching this non-repo.
+        let temp = tempfile::tempdir().unwrap();
+        let failure = run_budgeted_readback_stage(IssueMonitorScanStage::BranchPrune, || {
+            let _spent =
+                ScopedOperationClock::set(gwt_core::operation_deadline::current().unwrap());
+            gwt_git::merged_branch_prune::refresh_remote_refs(temp.path())
+        })
+        .unwrap_err();
+        assert!(failure.detail.contains("deadline expired"), "{failure}");
+        let _after_prune = ScopedOperationClock::set(scan_deadline - ISSUE_MONITOR_LAUNCH_RESERVE);
+        ensure_scan_deadline(IssueMonitorScanStage::ProposalReturn).unwrap();
+
+        let client = FakeIssueClient::new();
+        client.seed(github_issue(42));
+        let launches =
+            monitor.claim_next_launch_requests_with_probe(&client, "host:1", now, 1, |_| false);
+        assert_eq!(launches.len(), 1);
+        assert_eq!(launches[0].issue_number, 42);
+        assert!(monitor.inbox_item(42).is_some());
+        assert!(!monitor.agent_status().scan_aborted);
+    }
+
+    #[test]
     fn issue_5557_failed_stages_record_timing_without_losing_the_error() {
         let subscriber = tracing_subscriber::fmt()
             .without_time()

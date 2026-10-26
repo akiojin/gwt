@@ -17414,13 +17414,22 @@ impl IssueMonitorState {
             .iter()
             .filter(|item| {
                 let number = item.issue.number;
-                matches!(
+                // Keep reservations while dependency proof is pending. Only a
+                // current negative can turn dependency waiting into compensation.
+                let confirmed_dependency_blocker =
+                    self.dependency_status(number, None).is_some_and(|status| {
+                        status.blocked_by.iter().any(|blocker| {
+                            self.dependency_outcome(blocker.number, None) == Some(Some(false))
+                        })
+                    });
+                (matches!(
                     issue_monitor_candidate_exclusion(&item.issue, self.source_repository),
                     Some((
                         MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
                         _
                     ))
-                ) && !self.launched_windows.contains_key(&number)
+                ) || confirmed_dependency_blocker)
+                    && !self.launched_windows.contains_key(&number)
                     && !self.process_held_issues.contains(&number)
                     && !self.has_monitor_pane_for_issue(number)
                     && self

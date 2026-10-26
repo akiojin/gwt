@@ -408,12 +408,15 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
   const requestForA = sent.at(-1).request_id;
 
   // Responses arrive in reverse order: A (latest) first, then stale B.
+  const detail = { ...detailFor(ROW_A, "Fresh alpha body"),
+    labels: ["bug"], related_works: [{ id: "work-alpha", title: "Original work",
+      agents: [{ session_id: "session-alpha", purpose: "Original purpose" }] }] };
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: requestForA,
-    detail: detailFor(ROW_A, "Fresh alpha body"),
+    detail,
   });
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
@@ -423,6 +426,12 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
     detail: detailFor(ROW_B, "Stale beta body"),
   });
 
+  detail.labels.push("caller");
+  detail.related_works[0].agents[0].purpose = "Caller mutation";
+  detail.related_works.pop();
+  assert.deepEqual(state.detail.labels, ["bug"]);
+  assert.equal(state.detail.related_works[0].agents[0].purpose, "Original purpose");
+  assert.ok(Object.isFrozen(state.detail.related_works[0].agents));
   assert.equal(state.selectedNumber, ROW_A.number);
   assert.equal(
     state.detail?.number,

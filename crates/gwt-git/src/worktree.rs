@@ -98,10 +98,10 @@ pub enum ResidentBranchMaterialization {
     RetainedBranchHead { head: String },
 }
 
-struct GitOutput {
-    success: bool,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(crate) struct GitOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 /// Issue #4378 AC-4: told about every `git worktree list` run so the host can
@@ -116,7 +116,7 @@ pub fn set_worktree_list_observer(observer: fn(std::time::Instant)) {
     let _ = WORKTREE_LIST_OBSERVER.set(observer);
 }
 
-fn run_git_observing_operation_deadline(
+pub(crate) fn run_git_observing_operation_deadline(
     args: &[&str],
     current_dir: &Path,
 ) -> std::io::Result<GitOutput> {
