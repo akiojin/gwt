@@ -3549,10 +3549,17 @@ fn worktree_binding_hash(worktree: &Path) -> String {
     sha256_hex(normalized)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static GENERATION_LEDGER_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn validate_generation_ledger(
     ledger: &ExecutionGenerationLedger,
     expected_owner: ExecutionOwnerKey,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    GENERATION_LEDGER_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
     if ledger.schema_version != GENERATION_LEDGER_SCHEMA_VERSION {
         return Err(invalid_generation_data(format!(
             "unsupported execution generation ledger schema {}",
@@ -13636,7 +13643,9 @@ fn diagnose_with_mode(
         number: record.owner_number,
     };
     match load_generation_ledger(worktree, owner) {
-        Ok(Some(ledger)) if generation_ledger_integrity_ok(&ledger) => {
+        // The strict loader has already validated this immutable ledger and
+        // its worktree pointer/projection. Revalidating adds no fresh facts.
+        Ok(Some(ledger)) => {
             snapshot.generation_id = Some(ledger.current_generation_id.clone());
             let mut continuation_evidence = Vec::new();
             if let Some(attempt) = ledger
@@ -13769,13 +13778,6 @@ fn diagnose_with_mode(
                     }
                 },
             }
-        }
-        Ok(Some(_)) => {
-            snapshot.binding_state = ExecutionBindingState::Corrupt;
-            snapshot.binding_cause = "generation_ledger_integrity_failure".to_string();
-            snapshot
-                .warnings
-                .push("generation ledger integrity validation failed".to_string());
         }
         Ok(None) => {
             snapshot.binding_state = ExecutionBindingState::Missing;
@@ -29797,7 +29799,13 @@ exit 1
             );
             assert_projection_has_no_protected_recovery(&active);
 
+            GENERATION_LEDGER_VALIDATION_COUNT.with(|count| count.set(0));
             let blocked = diagnose_for_projection(blocked_repo.path(), Some("projection-blocked"));
+            assert_eq!(
+                GENERATION_LEDGER_VALIDATION_COUNT.with(std::cell::Cell::get),
+                2,
+                "each strict load validates once; diagnosis must not revalidate its loaded ledger"
+            );
             assert_eq!(blocked.ecr_status, ExecutionDiagnosisState::Blocked);
             assert_eq!(blocked.binding_state, ExecutionBindingState::Terminal);
             assert_eq!(

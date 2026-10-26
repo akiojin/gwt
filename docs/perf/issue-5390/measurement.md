@@ -230,3 +230,41 @@ The microprobe does not establish whole-GUI CPU, large-ledger scaling, real
 eight-Agent sixty-minute budgets, four-hour memory or PM-prompt acceptance.
 Parent AC-1/2/3 remain unchecked. Final fresh canonical and isolated checkout
 headed dark/light results belong to the delivery evidence.
+
+## Duplicate validation of a freshly loaded ledger
+
+The terminal observer and Work projection call `diagnose_with_mode`. Its
+`load_generation_ledger` call already validates the complete owner ledger,
+generation hashes, snapshot JSON/integrity and history chains, then the
+worktree pointer/projection. Immediately validating the returned immutable
+ledger with `generation_ledger_integrity_ok` repeats that entire computation
+without another read or freshness guarantee. Remove that guard and its
+unreachable invalid-`Some` arm. Existing loader errors still produce a corrupt
+diagnosis; every strict load, caller binding and close/restore predicate stays.
+
+The existing actual-reader projection regression passed before changes. A
+test-only thread-local full-validation counter added to its blocked case
+then failed with 3 validations instead of the expected 2. The two strict
+fresh loads are retained; only the third validation of the already loaded
+ledger is removed. Existing Active/Blocked/Corrupt, no-Git, ledger hash and
+history mutation, missing/malformed projection and terminal regressions are
+included in final verification. The counter adds no production state and
+does not depend on elapsed time. Independent diff review found no blocking
+issue.
+
+After the change the same actual-reader regression passed with exactly two
+validations. The five existing hash/history and missing/malformed/stale-pointer
+authority cases also passed before final canonical verification.
+
+`duplicate-ledger-validation.json` retains the complete read-only Rust probe,
+source/input hashes and twenty alternating paired rounds after warmup. Both
+variants use the same debug library, unchanged valid four-generation authority
+and twelve actual strict loads per sample. The old path additionally validates
+each returned ledger; the new path consumes it directly. All initial/final
+ledger fields and record/ledger hashes match. Additional validations fell
+from 12 to 0, with median elapsed time 137.7083ms before and 95.7519ms after.
+These shared-host command-path observations exclude the other diagnosis reads,
+Session/Monitor work and GUI. They do not establish shipping CPU, large-ledger
+scaling, eight real Agents for sixty minutes, PM-prompt failures or long-duration
+memory acceptance. Parent AC-1/2/3 remain unchecked. Final fresh canonical and
+isolated checkout debug headed dark/light results belong to the delivery PR.
