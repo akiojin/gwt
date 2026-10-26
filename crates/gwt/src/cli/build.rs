@@ -67,7 +67,32 @@ fn run_action<E: CliEnv>(
     {
         let worktree = gwt_core::paths::resolve_current_worktree_root(env.repo_path());
         let session_id = std::env::var(gwt_agent::GWT_SESSION_ID_ENV).unwrap_or_default();
-        let build_state = gwt_core::skill_state::load(&worktree, SKILL_NAME).map_err(|error| {
+        let build_state = gwt_core::skill_state::load(&worktree, SKILL_NAME);
+        if let Err(error) = &build_state {
+            // An exact Completed execution can confirm its delivery through
+            // canonical replay even when auxiliary build bookkeeping is unreadable.
+            if matches!(&action, SkillStateAction::Complete { .. })
+                && super::execution_state::load(&worktree)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|record| {
+                        record.status == super::execution_state::ExecutionControlStatus::Completed
+                            && record.owner_number == *spec
+                            && record.primary_session_id == session_id.trim()
+                            && super::execution_state::integrity_ok(&record)
+                    })
+            {
+                out.push_str(&format!(
+                    "{VERB}: warning — build bookkeeping is unreadable ({error}); confirming the completed execution through canonical replay\n"
+                ));
+                return super::execution_state::run(
+                    env,
+                    super::execution_state::ExecutionCommand::Complete,
+                    out,
+                );
+            }
+        }
+        let build_state = build_state.map_err(|error| {
             gwt_github::SpecOpsError::from(gwt_github::client::ApiError::Unexpected(
                 error.to_string(),
             ))
