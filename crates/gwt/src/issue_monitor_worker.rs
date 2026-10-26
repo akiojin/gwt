@@ -5812,6 +5812,7 @@ pub(crate) mod tests {
     /// a freshly saved profile carries.
     fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,

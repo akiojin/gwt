@@ -225,15 +225,6 @@ export function applyTelemetryCounts(doc, counts = {}) {
   setText("op-strip-waiting", counts.waiting ?? 0);
   setText("op-strip-error", counts.error ?? 0);
   if ("branches" in counts) setText("op-strip-branches", counts.branches ?? "—");
-  // SPEC-3038 AS-1.4: the rail Windows item badges the open-window count.
-  if ("windows" in counts) {
-    const badge = doc.getElementById("op-rail-window-count");
-    if (badge) {
-      const value = Number(counts.windows) || 0;
-      badge.textContent = String(value);
-      badge.hidden = value <= 0;
-    }
-  }
 }
 
 export function subscribeIssueMonitorStatus(doc, model) {

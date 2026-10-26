@@ -1434,6 +1434,21 @@ fn default_launch_usage_threshold_percent() -> u8 {
     DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT
 }
 
+/// A registered person owns a candidate; old provider-only inputs keep their key.
+pub(crate) fn launch_profile_identity(profile: &IssueMonitorLaunchProfile) -> String {
+    profile
+        .agent_member_id
+        .as_ref()
+        .map(|id| format!("member:{id}"))
+        .unwrap_or_else(|| {
+            format!(
+                "provider:{}",
+                normalize_issue_monitor_provider(&profile.agent_id)
+                    .unwrap_or_else(|| profile.agent_id.trim().to_ascii_lowercase())
+            )
+        })
+}
+
 /// Drop later candidates that resolve to a provider an earlier one already
 /// covers. The pool is unique per provider (FR-003) and the first mention wins.
 fn dedupe_launch_profile_pool(
@@ -1442,8 +1457,7 @@ fn dedupe_launch_profile_pool(
     let mut seen = BTreeSet::new();
     pool.into_iter()
         .filter(|profile| {
-            let key = normalize_issue_monitor_provider(&profile.agent_id)
-                .unwrap_or_else(|| profile.agent_id.trim().to_ascii_lowercase());
+            let key = launch_profile_identity(profile);
             seen.insert(key)
         })
         .collect()
@@ -1496,6 +1510,62 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
+    /// Resolve only selected people with the primary's fixed tool. Exact queue
+    /// and delivery pins wait when unavailable instead of changing their owner.
+    pub fn registered_launch_profiles_for_issue(
+        &self,
+        issue_number: u64,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let pool = self.launch_profile_pool();
+        let Some(primary) = pool
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        else {
+            return pool;
+        };
+        let tool = normalize_issue_monitor_provider(&primary.agent_id);
+        let host = crate::process::current_hostname();
+        let scheduled = self
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .and_then(|delivery| delivery.agent_member_id.as_deref())
+            .or_else(|| {
+                self.agent_issue_schedule
+                    .reservations
+                    .iter()
+                    .find(|entry| entry.issue_number == issue_number && entry.host_id == host)
+                    .map(|entry| entry.agent_member_id.as_str())
+            });
+        pool.iter()
+            .filter(|profile| {
+                normalize_issue_monitor_provider(&profile.agent_id) == tool
+                    && scheduled.is_none_or(|scheduled| {
+                        profile.agent_member_id.as_deref() == Some(scheduled)
+                    })
+                    && self.agent_roster.as_ref().is_some_and(|roster| {
+                        roster.members.iter().any(|member| {
+                            profile.agent_member_id.as_deref()
+                                == Some(member.agent_member_id.as_str())
+                                && (member.enabled
+                                    || member.assignment.as_ref().is_some_and(|assignment| {
+                                        assignment.issue_number == Some(issue_number)
+                                    }))
+                                && member
+                                    .agent_id
+                                    .as_deref()
+                                    .and_then(normalize_issue_monitor_provider)
+                                    == tool
+                                && member.assignment.as_ref().is_none_or(|assignment| {
+                                    assignment.issue_number == Some(issue_number)
+                                })
+                        })
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// SPEC #3914 FR-001: replace the pool and keep `launch_profile` in sync
     /// with its head so pre-#3914 readers see the primary candidate.
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
@@ -1518,11 +1588,19 @@ impl IssueMonitorPrefs {
     /// only when the head keeps its provider (the form has no tag input).
     pub fn set_head_launch_profile(&mut self, mut profile: IssueMonitorLaunchProfile) {
         let mut pool = self.launch_profile_pool();
+        if profile.agent_member_id.is_none() {
+            profile.agent_member_id = pool
+                .iter()
+                .find(|candidate| {
+                    normalize_issue_monitor_provider(&candidate.agent_id)
+                        == normalize_issue_monitor_provider(&profile.agent_id)
+                })
+                .and_then(|candidate| candidate.agent_member_id.clone());
+        }
         match pool.first_mut() {
             Some(head) => {
                 if profile.prefer_for.is_empty()
-                    && normalize_issue_monitor_provider(&head.agent_id)
-                        == normalize_issue_monitor_provider(&profile.agent_id)
+                    && launch_profile_identity(head) == launch_profile_identity(&profile)
                 {
                     profile.prefer_for = std::mem::take(&mut head.prefer_for);
                 }
@@ -2122,6 +2200,8 @@ const REQUEUE_AUDIT_CAP: usize = 100;
 struct IssueMonitorLaunchProfileRepr {
     agent_id: String,
     #[serde(default)]
+    agent_member_id: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
@@ -2159,6 +2239,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
         };
         Self {
             agent_id,
+            agent_member_id: repr.agent_member_id,
             model: repr.model,
             reasoning: repr.reasoning,
             version: repr.version,
@@ -2178,6 +2259,8 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
 #[serde(from = "IssueMonitorLaunchProfileRepr")]
 pub struct IssueMonitorLaunchProfile {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -2210,6 +2293,7 @@ pub struct IssueMonitorLaunchProfile {
 impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
     fn from(config: &gwt_agent::LaunchConfig) -> Self {
         Self {
+            agent_member_id: None,
             agent_id: config.agent_id.command().to_string(),
             model: config.model.clone(),
             reasoning: config.reasoning_level.clone(),
@@ -2327,6 +2411,8 @@ impl IssueMonitorProfilesSetRequest {
             &self.patches,
         );
         crate::cli::issue::validate_monitor_profiles_set(&result.0, None)?;
+        crate::agent_names::validate_registered_profiles(prefs, &result.0)
+            .map_err(io::Error::other)?;
         Ok(result)
     }
 }
@@ -2360,7 +2446,8 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 11] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
+    "agent_member_id",
     "model",
     "reasoning",
     "version",
@@ -2408,8 +2495,11 @@ fn launch_profile_object(
         .ok()
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    // `prefer_for` is skipped when empty, but the merge needs every field
-    // present so an omitted key can be told from an absent value.
+    // Serialization skips unbound legacy identity and empty routing tags,
+    // but the merge needs their values to report inheritance accurately.
+    object
+        .entry("agent_member_id".to_string())
+        .or_insert(serde_json::Value::Null);
     object
         .entry("prefer_for".to_string())
         .or_insert_with(|| serde_json::json!([]));
@@ -2436,11 +2526,15 @@ pub fn merge_issue_monitor_profiles_set(
     let mut changes = Vec::new();
     let shared = saved_head.map(launch_profile_object);
     for (index, patch) in patches.iter().enumerate() {
-        let key = normalize_issue_monitor_provider(&patch.profile.agent_id);
         let base = current_pool
             .iter()
             .find(|candidate| {
-                key.is_some() && normalize_issue_monitor_provider(&candidate.agent_id) == key
+                if patch.profile.agent_member_id.is_some() {
+                    launch_profile_identity(candidate) == launch_profile_identity(&patch.profile)
+                } else {
+                    normalize_issue_monitor_provider(&candidate.agent_id)
+                        == normalize_issue_monitor_provider(&patch.profile.agent_id)
+                }
             })
             .map(launch_profile_object);
         let mut object = launch_profile_object(&patch.profile);
@@ -4661,8 +4755,19 @@ pub fn select_launch_profile(
     let avoid_provider = avoid_provider.and_then(normalize_issue_monitor_provider);
     let mut selection = LaunchProfileSelection::default();
     let mut eligible = Vec::new();
+    let fixed_tool = pool
+        .first()
+        .filter(|profile| profile.agent_member_id.is_some())
+        .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id));
     for (index, profile) in pool.iter().enumerate() {
         let provider = normalize_issue_monitor_provider(&profile.agent_id);
+        if fixed_tool
+            .as_ref()
+            .is_some_and(|fixed| provider.as_ref() != Some(fixed))
+        {
+            selection.skipped.push(LaunchProfileSkip { index, agent_id: profile.agent_id.clone(), reason: "Waiting for the selected member's fixed tool; automatic tool switching is disabled".into() });
+            continue;
+        }
         if let Some(reset_at) = provider
             .as_deref()
             .and_then(|provider| hold_reset_after(holds, provider, now))
@@ -14044,6 +14149,15 @@ impl IssueMonitorState {
     /// SPEC #3914 FR-008: every distinct provider in the candidate pool, in
     /// pool order.
     fn saved_launch_providers(&self) -> Vec<String> {
+        if let Some(primary) = self
+            .launch_profiles
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        {
+            return normalize_issue_monitor_provider(&primary.agent_id)
+                .into_iter()
+                .collect();
+        }
         if self.launch_auto {
             launch_pool_providers(
                 &self
@@ -27141,6 +27255,7 @@ mod tests {
 
     fn test_launch_profile(agent_id: &str) -> IssueMonitorLaunchProfile {
         IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -28336,6 +28451,7 @@ mod tests {
             },
         );
         let profile = IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: "claude".to_string(),
             model: Some("sonnet".to_string()),
             reasoning: None,
@@ -28841,6 +28957,7 @@ mod tests {
         assert!(!monitor.has_launch_profile());
         let disk = IssueMonitorPrefs {
             launch_profile: Some(IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "claude".to_string(),
                 model: None,
                 reasoning: None,
@@ -29446,6 +29563,62 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"agent_id": agent_id})).unwrap();
             assert_eq!(profile.agent_id, expected);
         }
+    }
+
+    #[test]
+    fn registered_candidates_share_a_tool_but_never_a_member() {
+        let profiles = ["ada", "bob"].map(|member| {
+            serde_json::from_value::<IssueMonitorLaunchProfile>(serde_json::json!({
+                "agent_id":"codex", "agent_member_id":member, "model":member
+            }))
+            .unwrap()
+        });
+        assert!(crate::cli::issue::validate_monitor_profiles_set(&profiles, None).is_ok());
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(profiles.to_vec());
+        assert_eq!(prefs.launch_profile_pool().len(), 2);
+        assert_eq!(
+            serde_json::to_value(&prefs.launch_profile_pool()[1]).unwrap()["agent_member_id"],
+            "bob"
+        );
+        prefs.agent_roster = Some(serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members": [
+            {"agent_member_id":"ada","agent_id":"codex","name":"Ada","enabled":true,"created_at":"2026-10-26T00:00:00Z"},
+            {"agent_member_id":"bob","agent_id":"codex","name":"Bob","enabled":true,"created_at":"2026-10-26T00:00:00Z"}
+        ]})).unwrap());
+        assert!(crate::agent_names::validate_registered_profiles(&prefs, &profiles).is_ok());
+        assert_eq!(
+            prefs.effective_launch_tiers(),
+            vec![profiles.to_vec()],
+            "ordinary saved candidates keep each person's model"
+        );
+        let mut wrong = profiles[0].clone();
+        wrong.agent_id = "claude".into();
+        assert!(crate::agent_names::validate_registered_profiles(&prefs, &[wrong]).is_err());
+        let patch =
+            serde_json::from_value(serde_json::json!({"agent_id":"codex","agent_member_id":"bob"}))
+                .unwrap();
+        assert_eq!(
+            merge_issue_monitor_profiles_set(&profiles, Some(&profiles[0]), &[patch]).0[0]
+                .model
+                .as_deref(),
+            Some("bob")
+        );
+        assert!(crate::cli::issue::validate_monitor_profiles_set(
+            &[profiles[0].clone(), profiles[0].clone()],
+            None
+        )
+        .is_err());
+        let selected = select_launch_profile(
+            &[profiles[0].clone(), test_launch_profile("claude")],
+            &BTreeMap::from([("codex".into(), "2099-01-01T00:00:00Z".into())]),
+            &[],
+            None,
+            "2026-10-26T00:00:00Z",
+        );
+        assert!(
+            selected.selected.is_none(),
+            "registered primary never changes tools on a hold"
+        );
     }
 
     #[test]

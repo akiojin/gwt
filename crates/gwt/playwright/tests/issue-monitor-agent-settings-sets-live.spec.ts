@@ -39,8 +39,72 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       await sendLiveGwtEvent(page, {
         kind: "issue_monitor_profiles_set",
         profiles: [{ agent_id: "codex" }],
+        request_id: 491101,
       });
+      const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .find(({ payload }: any) => ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+          && payload.request_id === 491101)?.payload).then(handle => handle.jsonValue());
+      expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
+      expect(seeded.profiles.length).toBeGreaterThan(0);
+      expect(seeded.profiles.every((profile: any) => profile.agent_id === "codex")).toBe(true);
+
+      // A fresh browser-check project can have only one enabled member.
+      // Produce the migrated roster, then register two more people through
+      // the UI without expanding the already-bound one-candidate pool.
+      const sequence = () => page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      const freshRoster = async (cursor: number, revision = -1) => page.waitForFunction(({ cursor, revision }) =>
+        ((window as any).__gwtPlaywrightMessages ?? []).find(({ sequence, payload }: any) =>
+          sequence > cursor && payload.kind === "agent_roster" && payload.roster.revision > revision)?.payload.roster,
+      { cursor, revision }).then(handle => handle.jsonValue());
+      const rosterCursor = await sequence();
+      await page.locator('.op-rail [data-surface="agents"]').click();
+      await sendLiveGwtEvent(page, { kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+      let roster = await freshRoster(rosterCursor);
+      const registeredIds = new Set(roster.members.map((member: any) => member.agent_member_id));
+      expect(registeredIds.size).toBe(roster.members.length);
+      expect(roster.members.every((member: any) => member.agent_member_id && member.agent_id)).toBe(true);
+      // Legacy import can expand existing people on a shared theme server.
+      // Bind one explicit owner before adding people, keeping this form at1.
+      const owner = roster.members.find((member: any) => member.enabled && member.agent_id === "codex");
+      expect(owner).toBeTruthy();
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 491102,
+        profiles: [{ agent_member_id: owner.agent_member_id, agent_id: "codex" }] });
+      const bound = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+        .find(({ payload }: any) => ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
+          && payload.request_id === 491102)?.payload).then(handle => handle.jsonValue());
+      expect(bound.kind, bound.message).toBe("issue_monitor_profiles");
+      expect(bound.profiles.map((profile: any) => profile.agent_member_id)).toEqual([owner.agent_member_id]);
       await expectSavedAgents(page, ["codex"]);
+      const initialCapacity = roster.capacity;
+      const newMembers: string[] = [];
+      for (let index = 0; index < 2; index += 1) {
+        await page.getByLabel("Tool for new member", { exact: true }).selectOption("codex");
+        const cursor = await sequence();
+        await page.locator('.roster-capacity [data-action="add"]').click();
+        const next = await freshRoster(cursor, roster.revision);
+        const addedMembers = next.members.filter((member: any) => !registeredIds.has(member.agent_member_id));
+        expect(addedMembers).toHaveLength(1);
+        const member = addedMembers[0];
+        expect(member.agent_member_id).toBeTruthy();
+        expect(member.agent_id).toBe("codex");
+        expect(member.enabled).toBe(true);
+        expect(next.capacity).toBe(roster.capacity + 1);
+        registeredIds.add(member.agent_member_id);
+        newMembers.push(member.agent_member_id);
+        roster = next;
+      }
+      expect(roster.capacity).toBe(initialCapacity + 2);
+      expect(new Set(newMembers).size).toBe(2);
+      const profilesCursor = await sequence();
+      await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
+      const singlePool = await page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? [])
+        .find(({ sequence, payload }: any) => sequence > cursor && payload.kind === "issue_monitor_profiles")?.payload.profiles,
+      profilesCursor).then(handle => handle.jsonValue());
+      expect(singlePool).toHaveLength(1);
+      expect(singlePool[0].agent_member_id).toBeTruthy();
+      expect(singlePool[0].agent_id).toBe("codex");
+      expect(registeredIds.has(singlePool[0].agent_member_id)).toBe(true);
+      expect(newMembers).not.toContain(singlePool[0].agent_member_id);
 
       await sendLiveGwtEvent(page, { kind: "issue_monitor_configure_profile" });
       const modal = page.locator("#wizard-modal");
@@ -49,6 +113,10 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       const sets = modal.locator(".launch-agent-set");
       await expect(sets).toHaveCount(1);
       await expect(sets.first()).toHaveAttribute("data-agent-id", "codex");
+      const firstMember = await sets.first().getAttribute("data-agent-member-id");
+      expect(firstMember).toBeTruthy();
+      expect(firstMember).toBe(singlePool[0].agent_member_id);
+      await expect(modal.getByLabel("Agent", { exact: true })).toHaveValue(firstMember!);
       // AC-6: the last set stays, and the form says why.
       await expect(
         modal.getByRole("button", { name: "Remove Agent Settings 1", exact: true }),
@@ -62,16 +130,19 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       await expect(sets).toHaveCount(2);
       await expect(sets.nth(1)).toHaveClass(/is-open/);
       await expect(sets.nth(1).locator(".launch-section").first()).toContainText("Launch");
-      const added = await sets.nth(1).getAttribute("data-agent-id");
+      const added = await sets.nth(1).getAttribute("data-agent-member-id");
+      const addedTool = await sets.nth(1).getAttribute("data-agent-id");
       expect(added).toBeTruthy();
-      expect(added).not.toBe("codex");
+      expect(added).not.toBe(firstMember);
+      expect(addedTool).toBe("codex");
+      await expect(modal.getByLabel("Agent", { exact: true })).toHaveValue(added!);
       await expect(sets.nth(0)).toContainText("Codex");
 
       // AC-3: the order of the sets is the launch order.
       await modal.getByRole("button", { name: "Move Agent Settings 2 up", exact: true }).click();
-      await expect(sets.nth(0)).toHaveAttribute("data-agent-id", added!);
+      await expect(sets.nth(0)).toHaveAttribute("data-agent-member-id", added!);
       await expect(sets.nth(0)).toHaveClass(/is-open/);
-      await expect(sets.nth(1)).toHaveAttribute("data-agent-id", "codex");
+      await expect(sets.nth(1)).toHaveAttribute("data-agent-member-id", firstMember!);
 
       // AC-2: `−` removes a set.
       await modal.getByRole("button", { name: "Add Agent Settings" }).click();
@@ -79,17 +150,17 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       await modal.getByRole("button", { name: "Remove Agent Settings 3", exact: true }).click();
       await expect(sets).toHaveCount(2);
       await expect(sets.nth(1)).toHaveClass(/is-open/);
-      await expect(sets.nth(1)).toHaveAttribute("data-agent-id", "codex");
+      await expect(sets.nth(1)).toHaveAttribute("data-agent-member-id", firstMember!);
       await modal.getByRole("button", { name: "Edit Agent Settings 1", exact: true }).click();
       await expect(sets.nth(0)).toHaveClass(/is-open/);
-      await expect(modal.locator(".launch-agent-sets__order")).toContainText(`auto (2): ${added}`);
+      await expect(modal.locator(".launch-agent-sets__order")).toContainText("auto (2):");
 
       await expect(page.locator("html")).toHaveAttribute(
         "data-theme",
         testInfo.project.name.endsWith("light") ? "light" : "dark",
       );
       await testInfo.attach(`agent-settings-sets-live-${testInfo.project.name}`, {
-        body: await modal.screenshot(),
+        body: await modal.screenshot({ path: testInfo.outputPath("agent-settings-members.png") }),
         contentType: "image/png",
       });
 
@@ -100,19 +171,26 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       await expect(submit).toBeEnabled();
       await submit.click();
       await expect(submit).toHaveText("Save settings");
-      await expect(modal.locator(".launch-agent-sets__order")).toContainText(`auto (2): ${added}`);
+      await expect(modal.locator(".launch-agent-sets__order")).toContainText("auto (2):");
       await submit.click();
       // Windows publishes the saved status after its Issue Scan completes.
       await expect(modal).not.toHaveClass(/open/, { timeout: 90_000 });
 
       // AC-5: the saved pool reads back in the same order through the status
       // the JSON operation reports, and the reopened form agrees with it.
-      await expectSavedAgents(page, [added!, "codex"]);
+      await expectSavedAgents(page, [addedTool!, "codex"]);
+      await gotoLiveGwt(page, BASE, { enableTestBridge: true });
+      const readbackCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+      await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
+      const profiles = await page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? [])
+        .find(({ sequence, payload }: any) => sequence > cursor && payload.kind === "issue_monitor_profiles")?.payload.profiles, readbackCursor)
+        .then(handle => handle.jsonValue());
+      expect(profiles.map((profile: any) => profile.agent_member_id)).toEqual([added, firstMember]);
       await sendLiveGwtEvent(page, { kind: "issue_monitor_configure_profile" });
       await expect(modal).toHaveClass(/open/, { timeout: 30_000 });
       await expect(sets).toHaveCount(2);
-      await expect(sets.nth(0)).toHaveAttribute("data-agent-id", added!);
-      await expect(sets.nth(1)).toHaveAttribute("data-agent-id", "codex");
+      await expect(sets.nth(0)).toHaveAttribute("data-agent-member-id", added!);
+      await expect(sets.nth(1)).toHaveAttribute("data-agent-member-id", firstMember!);
       await page.locator("#wizard-cancel-button").click();
       await expect(modal).not.toHaveClass(/open/);
       expect(errors).toEqual([]);

@@ -210,8 +210,24 @@ fn reconcile(
         .get(host)
         .map(|queue| prefs.urgent_queue.projection(queue).entries)
         .unwrap_or_default();
+    let pool = prefs.launch_profile_pool();
+    let selected = pool
+        .first()
+        .filter(|profile| profile.agent_member_id.is_some())
+        .map(|primary| {
+            pool.iter()
+                .filter(|profile| {
+                    normalize_issue_monitor_provider(&profile.agent_id)
+                        == normalize_issue_monitor_provider(&primary.agent_id)
+                })
+                .filter_map(|profile| profile.agent_member_id.as_deref())
+                .collect::<BTreeSet<_>>()
+        });
     let eligible = |member: &&AgentMember| {
         member.enabled
+            && selected
+                .as_ref()
+                .is_none_or(|ids| ids.contains(member.agent_member_id.as_str()))
             && member.assignment.as_ref().is_none_or(|assignment| {
                 assignment.host_id.is_empty() || assignment.host_id == host
             })
@@ -237,6 +253,7 @@ fn reconcile(
                         .any(|queued| queued.number == entry.issue_number)
                     && !prefs.scheduled_issue_in_flight(entry.issue_number)
                     && (prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+                        || entry.reason == AgentScheduleReason::AssignedByYou
                         || prefs.agent_switch_intents.values().any(|intent| {
                             intent.has_admission_pin()
                                 && intent.request.target_issue_number == entry.issue_number
@@ -591,7 +608,25 @@ impl IssueMonitorState {
                 .iter()
                 .find(|member| member.agent_member_id == id)
         });
-        let available = member.is_some_and(|member| match &member.assignment {
+        let selected = self
+            .launch_profiles
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some());
+        let tool_matches = selected.is_none_or(|primary| {
+            member.is_some_and(|member| {
+                member
+                    .agent_id
+                    .as_deref()
+                    .and_then(normalize_issue_monitor_provider)
+                    == normalize_issue_monitor_provider(&primary.agent_id)
+                    && self.launch_profiles.iter().any(|profile| {
+                        profile.agent_member_id.as_deref() == Some(id)
+                            && normalize_issue_monitor_provider(&profile.agent_id)
+                                == normalize_issue_monitor_provider(&primary.agent_id)
+                    })
+            })
+        });
+        let available = tool_matches && member.is_some_and(|member| match &member.assignment {
             None => member.enabled,
             Some(assignment) => assignment.issue_number == Some(number)
                 && (assignment.host_id.is_empty() || assignment.host_id == host)

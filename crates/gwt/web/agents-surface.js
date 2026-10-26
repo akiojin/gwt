@@ -6,18 +6,42 @@ const activityPresentation = state => JSON.stringify([state.count, (state.agents
   .sort((left, right) => String(left[0]).localeCompare(String(right[0])))]);
 const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString().replace("T", " ").slice(0, 16) : "—";
 
-export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel,
+export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
   onAddMember = () => {}, onRestMember = () => {}, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><button type="button" data-action="add">＋ Add member</button></div>
-    <p class="roster-description">Named members are reused across issues. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Tool for new member<select aria-label="Tool for new member" title="This tool stays fixed after registration."></select></label><button type="button" data-action="add">＋ Add member</button></div>
+    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
+  const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
+  let registrationTools = [], renderedTools = "";
+  function syncTools() {
+    const builtins = supportedAgentsModel?.read().agents;
+    const custom = customAgentsModel?.read().catalog;
+    registrationTools = builtins && custom?.loaded ? [...builtins,
+      ...custom.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id }))] : [];
+    const key = JSON.stringify(registrationTools.map(tool => [tool.id, tool.name]));
+    if (key !== renderedTools) {
+      const selected = toolSelect.value; toolSelect.replaceChildren();
+      for (const tool of registrationTools) {
+        const option = document.createElement("option"); option.value = tool.id; option.textContent = tool.name || tool.id;
+        option.selected = tool.id === selected; toolSelect.append(option);
+      }
+      if (!registrationTools.some(tool => tool.id === selected) && toolSelect.firstElementChild) toolSelect.firstElementChild.selected = true;
+      renderedTools = key;
+    }
+    toolSelect.disabled = registrationTools.length === 0;
+    for (const button of element.querySelectorAll('[data-action="add"]')) {
+      button.disabled = registrationTools.length === 0;
+      button.title = registrationTools.length ? "Register a member with the selected fixed tool." : "Loading supported and custom coding tools…";
+    }
+  }
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
   let renderedPlans = null;
+  let renderedDetail = null;
   const memberRows = new Map();
   let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
   const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
@@ -192,24 +216,31 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   }
   function renderDetail(member) {
     const panel = element.querySelector(".roster-detail"), plans = member ? renderPlans(member) : null;
-    // Keep unchanged native plan controls attached while telemetry and current
-    // work refresh around them, preserving selection and browser keyboard focus.
-    for (const child of [...panel.childNodes]) if (child !== plans) child.remove();
+    const current = liveWork(member), key = member ? JSON.stringify([member.member_id,
+      current?.window_id, current?.session_id, current?.runtime_incarnation]) : null;
+    if (renderedDetail?.key !== key) renderedDetail = null;
+    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions;
+    // Refresh presentation around unchanged native controls without detaching
+    // their keyboard targets. A different member/runtime retires those controls.
+    for (const child of [...panel.childNodes]) if (child !== plans && child !== currentWork && child !== actions) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
-    if (plans.parentElement !== panel) panel.append(plans);
+    if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     const head = document.createElement("header"); head.className = "roster-detail-heading";
     const who = document.createElement("div"); const name = document.createElement("h3"), meta = document.createElement("p");
-    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.insertBefore(head, plans); panel.insertBefore(stats(member), plans);
+    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.insertBefore(head, currentWork || plans); panel.insertBefore(stats(member), currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
-    const ol = history.querySelector("ol"), current = liveWork(member);
+    const ol = history.querySelector("ol");
     if (current) {
-      const currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
-      currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
-      const li = document.createElement("li"); li.className = "roster-now";
-      const label = document.createElement("small"), button = document.createElement("button"), result = document.createElement("span");
-      label.textContent = "Now"; button.type = "button"; button.textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
-      button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result);
-      currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
+      if (!currentWork) {
+        currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
+        currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
+        const li = document.createElement("li"); li.className = "roster-now";
+        const label = document.createElement("small"), button = document.createElement("button"), result = document.createElement("span");
+        label.textContent = "Now"; button.type = "button";
+        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result);
+        currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
+      }
+      currentWork.querySelector("button").textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
@@ -221,10 +252,14 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     if (member.assignment?.session_id && activityModel.read().count === null) {
       const unavailable = document.createElement("p"); unavailable.className = "roster-description"; unavailable.textContent = "Activity unavailable"; panel.append(unavailable);
     }
-    panel.append(history);
-    const actions = document.createElement("div"); actions.className = "roster-actions";
-    if (current) { const open = document.createElement("button"); open.type = "button"; open.className = "roster-open"; open.textContent = "Open terminal in Works"; open.addEventListener("click", () => openCurrent(member.member_id, current)); actions.append(open); }
-    const rest = document.createElement("button"); rest.type = "button"; rest.dataset.action = "rest"; rest.textContent = "Rest member"; rest.disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1; rest.addEventListener("click", restSelected); actions.append(rest); panel.append(actions);
+    if (!actions) {
+      actions = document.createElement("div"); actions.className = "roster-actions";
+      if (current) { const open = document.createElement("button"); open.type = "button"; open.className = "roster-open"; open.textContent = "Open terminal in Works"; open.addEventListener("click", () => openCurrent(member.member_id, current)); actions.append(open); }
+      const rest = document.createElement("button"); rest.type = "button"; rest.dataset.action = "rest"; rest.textContent = "Rest member"; rest.addEventListener("click", restSelected); actions.append(rest); panel.append(actions);
+    }
+    actions.querySelector('[data-action="rest"]').disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1;
+    panel.insertBefore(history, actions);
+    renderedDetail = { key, currentWork, actions };
   }
   function renderPast(contributors, complete) {
     const kpis = element.querySelector(".roster-past-kpis"); kpis.replaceChildren();
@@ -331,14 +366,18 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     element.dataset.catalogVersion = String(catalog.version);
     renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; renderedSchedule = schedule; renderedSwitch = switchState(); syncPreview();
   }
-  for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => onAddMember());
+  for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
+    if (registrationTools.some(tool => tool.id === toolSelect.value)) onAddMember(toolSelect.value);
+  });
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
   for (const button of element.querySelectorAll("[data-tab]")) {
     button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });
     button.addEventListener("keydown", event => { if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return; event.preventDefault(); tab = event.key === "Home" ? "team" : event.key === "End" ? "past" : tab === "team" ? "past" : "team"; sync(); element.querySelector(`[data-tab="${tab}"]`).focus(); });
   }
-  sync();
+  sync(); syncTools();
   const unsubscribers = [rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) sync(); }), activityModel.subscribeFrame(activityPresentation, value => { if (value !== renderedActivity) sync(); }), windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) sync(); })];
+  if (supportedAgentsModel) unsubscribers.push(supportedAgentsModel.subscribeFrame(state => state.agents, syncTools));
+  if (customAgentsModel) unsubscribers.push(customAgentsModel.subscribeFrame(state => state.catalog, syncTools));
   if (scheduleModel) unsubscribers.push(scheduleModel.subscribeFrame(state => state, value => { if (value !== renderedSchedule) { scheduleNotice = ""; sync(); } }));
   if (switchModel) unsubscribers.push(switchModel.subscribeFrame(state => state, value => { if (value !== renderedSwitch) sync(); }));
   return { element, sync, selectMember, setPreviewHost, dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); disposed = true; } };

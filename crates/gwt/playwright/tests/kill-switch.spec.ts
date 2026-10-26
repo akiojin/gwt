@@ -12,9 +12,9 @@ const errors = new WeakMap<Page, string[]>();
 //
 // Drives the embedded frontend against a WebSocket stub that captures every
 // event the frontend sends. Asserts the FR-040..044 controls:
-//   - FR-041: window-chrome STOP sends stop_window (window stays on canvas)
-//   - FR-044: a stopped window swaps STOP for RESTART -> restart_window
-//   - FR-042: STOP ALL rail item confirms then sends stop_all_windows
+//   - FR-041/3885: STOP is in the Issue menu; window chrome has no STOP
+//   - FR-044: a stopped window exposes RESTART -> restart_window
+//   - FR-042: palette STOP ALL confirms then sends stop_all_windows
 //   - FR-043: the palette send-input entry routes pane_send_input by session_id
 //   - FR-040: a needs_input transition pops an in-app attention toast that
 //     frames the window on click
@@ -115,10 +115,11 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
       timeout: 10_000,
     });
 
-    const stopAll = page.locator('.op-rail__item[data-cmd="stop-all-windows"]');
-    await expect(stopAll).toBeVisible();
+    await expect(page.locator('.op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
+    await page.locator("#op-palette-button").click();
+    await page.locator("#op-palette-input").fill("Stop all agents");
     page.once("dialog", (dialog) => dialog.accept());
-    await stopAll.click();
+    await page.locator("#op-palette-list .op-palette__row", { hasText: "Stop All Running Agents" }).click();
 
     await expect
       .poll(() => page.evaluate(() => window.__sentKinds))
@@ -292,11 +293,9 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // `agent-3` models a pane launched by Issue Monitor. WindowState has no
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
-    // to it through the Windows list before exercising its cues.
-    await page.locator("#window-list-button").click();
-    await page.locator(".window-list-row")
-      .filter({ has: page.locator(".window-list-title", { hasText: "Cedar — Monitor-linked Agent" }) })
-      .click();
+    // to it through Works before exercising its cues.
+    await page.locator('.works-full [data-action="back"]').click();
+    await page.locator('.work-row[data-window-id="agent-3"] .work-open').click();
     await expect(monitor.tile).toBeVisible();
     await expect(manual.tile).toBeHidden();
     // Issue #4887: start the next state in the same browser task after the

@@ -9,7 +9,6 @@ type LiveGwtOptions = {
   hub?: boolean;
   /** Issue #4538: open this Project route (`/p/<key>`) explicitly. */
   projectKey?: string;
-  keepPresetModal?: boolean;
   suppressProjectSurfaces?: boolean;
   suppressUpdateApplyStart?: boolean;
 };
@@ -170,9 +169,6 @@ async function prepareLiveGwtPage(page: Page, options: LiveGwtOptions): Promise<
   const hiddenStartupSelectors = ["#op-briefing"];
   if (options.suppressProjectSurfaces) {
     hiddenStartupSelectors.push("#project-picker", "#project-onboarding");
-  }
-  if (!options.keepPresetModal) {
-    hiddenStartupSelectors.push("#preset-modal");
   }
   await page.addStyleTag({
     content: `
