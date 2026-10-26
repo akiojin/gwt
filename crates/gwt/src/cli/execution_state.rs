@@ -34108,6 +34108,22 @@ exit 1
                     fs::set_permissions(&path, readonly).unwrap();
                     assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
                 }
+                let complete_build = |spec| {
+                    let mut env = TestEnv::new(dir.path().to_path_buf());
+                    run_collect(
+                        &mut env,
+                        CliCommand::Build(crate::cli::SkillStateAction::Complete {
+                            spec,
+                            pr: None,
+                        }),
+                    )
+                };
+                if read_failure {
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "Active execution stays protected"
+                    );
+                }
 
                 let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete)
                     .expect("Completed build bookkeeping failures must only warn");
@@ -34133,6 +34149,58 @@ exit 1
                 );
                 assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
                 if read_failure {
+                    assert!(
+                        complete_build(999).is_err(),
+                        "another owner stays protected"
+                    );
+                    {
+                        let _foreign =
+                            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                        assert!(
+                            complete_build(3248).is_err(),
+                            "another Session stays protected"
+                        );
+                    }
+                    let original = completed_bytes.as_deref().unwrap();
+                    let tampered = original.replace(&completed.content_hash, "tampered");
+                    fs::write(state_path(dir.path()), &tampered).unwrap();
+                    assert!(!integrity_ok(&load(dir.path()).unwrap().unwrap()));
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "invalid integrity stays protected"
+                    );
+                    assert_eq!(
+                        record_contents(dir.path()).unwrap().as_deref(),
+                        Some(tampered.as_str())
+                    );
+                    fs::write(state_path(dir.path()), original).unwrap();
+                    for _ in 0..2 {
+                        let (code, out) = complete_build(3248).expect(
+                            "completed build replay must only warn on unreadable bookkeeping",
+                        );
+                        assert_eq!(code, 0, "{out}");
+                        assert!(out.contains("warning"), "{out}");
+                        assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                        assert!(path.is_dir());
+                        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                        assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+                    }
+                    crate::cli::action_obligation::mark_from_prompt(
+                        dir.path(),
+                        "sess-op",
+                        "Issue #1 にコメントを追加して",
+                    )
+                    .unwrap();
+                    let (code, out) = complete_build(3248).unwrap();
+                    assert_eq!(code, 2, "new prompt obligations stay protected: {out}");
+                    assert!(out.contains("open action obligations"), "{out}");
+                    assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                    crate::cli::action_obligation::settle_kinds_best_effort(
+                        dir.path(),
+                        "sess-op",
+                        &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+                        "issue.comment fixture",
+                    );
                     assert!(path.is_dir());
                     assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
                     assert_eq!(fs::read(&backup).unwrap(), original_bytes);
