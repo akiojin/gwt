@@ -948,51 +948,84 @@ fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     assert!(!encoded.contains("private-ready-nonce"));
 }
 
+fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {
+    let repo = temp.join("hook-project");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Hook project", repo, ProjectKind::Git, &[]);
+    let mut runtime = sample_runtime(temp, vec![tab], Some("tab-1"));
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/runtime-hook-fixture")
+        .build();
+    let id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    (runtime, id)
+}
+
+fn runtime_state_hook_events(
+    runtime: &mut AppRuntime,
+    window_id: &str,
+    status: &str,
+    count: usize,
+) -> Vec<OutboundEvent> {
+    use gwt::project_runtime::events::OwnerCommand;
+    let owner = project_owner_fixture(runtime, window_id);
+    let probe = owner_runtime_probe(runtime, window_id);
+    let session = probe.session.as_ref().unwrap();
+    let mut hook = runtime_hook_state(status, &session.id);
+    hook.project_root = Some(
+        probe
+            .grant
+            .as_ref()
+            .unwrap()
+            .principal()
+            .canonical_project_root()
+            .display()
+            .to_string(),
+    );
+    hook.branch = Some(session.branch.clone());
+    hook.agent_session_id.clone_from(&session.agent_session_id);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(async {
+        for _ in 0..count {
+            hook.occurred_at = Utc::now().to_rfc3339();
+            assert_eq!(
+                probe.runtime_hook(&hook).await.unwrap(),
+                reqwest::StatusCode::NO_CONTENT
+            );
+        }
+        // The listener has accepted every hook before this ordinary mailbox ACK.
+        owner.command(OwnerCommand::Health).await.unwrap();
+    });
+    relay_approval_owner_events(runtime, window_id, &mut source)
+}
+
 #[test]
 fn app_runtime_runtime_state_bursts_emit_no_browser_hook_events() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
 
-    let browser_hook_events = (0..1_000)
-        .flat_map(|_| runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1")))
+    let browser_hook_events = runtime_state_hook_events(&mut runtime, &window_id, "Waiting", 1_000)
+        .into_iter()
         .filter(|event| matches!(event.event, BackendEvent::RuntimeHookEvent { .. }))
         .count();
 
     assert_eq!(browser_hook_events, 0);
+    // This existing Stop + Waiting payload is normalized to Idle by the owner.
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Idle)
+    );
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
 
-    let events = (0..1_000)
-        .flat_map(|_| runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1")))
-        .collect::<Vec<_>>();
+    let events = runtime_state_hook_events(&mut runtime, &window_id, "Waiting", 1_000);
 
     assert_eq!(
         events
@@ -1015,6 +1048,7 @@ fn app_runtime_duplicate_runtime_state_hooks_emit_status_events_only_once() {
             .count(),
         1
     );
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -2037,25 +2071,11 @@ fn app_runtime_terminal_state_clears_approval_wait_tracking() {
 fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
 
-    let first_events =
-        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
-    let duplicate_events =
-        runtime.handle_runtime_hook_event(runtime_hook_state("Waiting", "session-1"));
-    let changed_events =
-        runtime.handle_runtime_hook_event(runtime_hook_state("Running", "session-1"));
+    let first_events = runtime_state_hook_events(&mut runtime, &window_id, "Waiting", 1);
+    let duplicate_events = runtime_state_hook_events(&mut runtime, &window_id, "Waiting", 1);
+    let changed_events = runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
 
     assert!(first_events
         .iter()
@@ -2078,6 +2098,7 @@ fn app_runtime_runtime_state_change_after_duplicate_burst_emits_status_events() 
             ..
         }
     )));
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
