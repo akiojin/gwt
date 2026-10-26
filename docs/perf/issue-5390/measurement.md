@@ -190,3 +190,43 @@ prompt criteria. The earlier 56 observed Git lifetimes are a normal-load lower
 bound, not an exact scan count, and halving calls within this reader does not
 imply halving whole-GUI CPU. Final canonical regression and isolated checkout
 headed dark/light evidence are recorded with the delivery PR.
+
+## Additional terminal identity read
+
+The terminal observer first obtains fresh execution diagnosis, which already
+loads the ECR and validates the generation ledger. It then performed another
+`execution_state::load` for every linked window to populate
+`session_matches_execution`. That load repeats pointer/ledger reads, JSON
+parsing, ledger and generation hashes, snapshot validation and ECR parsing.
+The close predicate consumes this identity field only for a `Completed`
+diagnosis. Limit that additional read to `Completed`, preserving its fresh
+integrity, Session, owner and status checks. Every original diagnosis still
+runs; there is no new cache, TTL, timer or authority policy.
+
+The focused identity-reader regression failed before the guard: an `Active`
+diagnosis invoked the additional reader once when zero was expected. After the
+guard, Active/Blocked/Missing/Corrupt invoke it zero times. Existing terminal
+tests (13 including the new case) and startup/expiry tests (24), including
+Completed predecessor rejection and actual Completed restore/Monitor settlement
+and exact close, pass. A concurrent Active-to-Completed transition cannot
+authorize close through the earlier Active diagnosis. Independent diff review
+found no blocking issue.
+
+`active-terminal-read.json` contains the complete read-only Rust command-path
+probe, input record/ledger hashes, source Git blob identities and twenty
+alternating paired rounds after warmup. Both variants use the same compiled
+checkout debug library and unchanged valid Active authority with three
+generations. Twelve identity checks require 12 additional ECR loads before and
+zero after; their median elapsed time was 155.0712ms and 0.00025ms. The near-zero
+branch time measures the omitted command path, not the whole observer. No
+elapsed-time assertion is used. The production reader seam independently
+checks the no-read behavior, while the existing Completed tests check safety.
+
+A separate installed PID 33132 sample still observed 63.125 CPU seconds over
+30.9839357 wall seconds (2.03735 logical cores), with working set 4,395,114,496
+bytes. Its executable hash and sample time are retained separately in the
+artifact. This is neither the checkout candidate nor a causal comparison.
+The microprobe does not establish whole-GUI CPU, large-ledger scaling, real
+eight-Agent sixty-minute budgets, four-hour memory or PM-prompt acceptance.
+Parent AC-1/2/3 remain unchecked. Final fresh canonical and isolated checkout
+headed dark/light results belong to the delivery evidence.
