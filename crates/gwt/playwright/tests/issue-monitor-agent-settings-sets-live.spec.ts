@@ -80,7 +80,8 @@ test.describe("Issue Monitor Agent Settings sets", () => {
       for (let index = 0; index < 2; index += 1) {
         await page.getByLabel("Tool for new member", { exact: true }).selectOption("codex");
         const cursor = await sequence();
-        await page.getByLabel("Name for new member", { exact: true }).fill(`Settings member ${index}`);
+        await page.getByLabel("Name for new member", { exact: true }).fill(`Settings member ${roster.revision}`);
+        await expect(page.locator('.roster-capacity [data-action="add"]')).toBeEnabled();
         await page.locator('.roster-capacity [data-action="add"]').click();
         const next = await freshRoster(cursor, roster.revision);
         const addedMembers = next.members.filter((member: any) => !registeredIds.has(member.agent_member_id));
