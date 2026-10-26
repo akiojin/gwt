@@ -13117,7 +13117,10 @@ impl AppRuntime {
             FrontendEvent::AgentRoster {
                 action,
                 expected_revision,
-            } => self.agent_roster_events(context, &client_id, action, expected_revision),
+                request_id,
+            } => {
+                self.agent_roster_events(context, &client_id, action, expected_revision, request_id)
+            }
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
             }

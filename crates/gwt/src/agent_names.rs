@@ -60,6 +60,10 @@ pub enum AgentRosterAction {
     Rest {
         member_id: String,
     },
+    Rename {
+        member_id: String,
+        name: String,
+    },
     Resize {
         size: usize,
     },
@@ -563,6 +567,35 @@ pub fn mutate_project_roster(
                     .find(|member| member.agent_member_id == *member_id)
                     .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?
                     .enabled = false;
+            }
+            AgentRosterAction::Rename {
+                ref member_id,
+                ref name,
+            } => {
+                let index = roster
+                    .members
+                    .iter()
+                    .position(|member| member.agent_member_id == *member_id)
+                    .ok_or_else(|| std::io::Error::other("Agent member no longer exists"))?;
+                let name = name.trim();
+                if name.is_empty() {
+                    return Err(std::io::Error::other("Enter a display name"));
+                }
+                if roster.members.iter().enumerate().any(|(other, member)| {
+                    other != index && member.name.trim().to_lowercase() == name.to_lowercase()
+                }) {
+                    return Err(std::io::Error::other(
+                        "This name is already registered, including resting members",
+                    ));
+                }
+                if roster.members[index].name != name {
+                    remember(
+                        &history_for_prefs(&path).map_err(std::io::Error::other)?,
+                        &HashSet::from([name.to_string()]),
+                    )
+                    .map_err(std::io::Error::other)?;
+                    roster.members[index].name = name.to_string();
+                }
             }
         }
         if *roster != before {
@@ -1519,6 +1552,87 @@ pub fn allocate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_preserves_member_and_session_facts_and_rejects_invalid_or_stale_drafts() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let original = read_project_roster(&root, &sessions).unwrap();
+        let member =
+            reserve_project_member(&root, &sessions, "rename", None, None, None, None).unwrap();
+        let mut session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+        session.agent_member_id = Some(member.agent_member_id.clone());
+        session.agent_name = Some(member.name.clone());
+        session.save(&sessions).unwrap();
+        bind_project_member_session(&root, &member.agent_member_id, "rename", &session.id).unwrap();
+        let before = read_project_roster(&root, &sessions).unwrap();
+        let session_path = sessions.join(format!("{}.toml", session.id));
+        let session_bytes = std::fs::read(&session_path).unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let prefs_before = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let rename = |name: &str, revision| {
+            let action = serde_json::from_value(serde_json::json!({
+                "kind": "rename", "member_id": member.agent_member_id, "name": name,
+            }))
+            .expect("registered members accept rename actions");
+            mutate_project_roster(&root, &sessions, action, Some(revision))
+        };
+        let renamed = rename("  Maple  ", before.revision).unwrap();
+        let mut expected = before.clone();
+        expected.revision += 1;
+        expected
+            .members
+            .iter_mut()
+            .find(|m| m.agent_member_id == member.agent_member_id)
+            .unwrap()
+            .name = "Maple".into();
+        assert_eq!(renamed, expected);
+        assert_eq!(read_project_roster(&root, &sessions).unwrap(), renamed);
+        assert_eq!(std::fs::read(&session_path).unwrap(), session_bytes);
+        let prefs_after = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            prefs_after.launch_profile_pool(),
+            prefs_before.launch_profile_pool()
+        );
+        assert_eq!(
+            prefs_after.max_active_agents,
+            prefs_before.max_active_agents
+        );
+        assert_eq!(rename(" Maple ", renamed.revision).unwrap(), renamed);
+        for (name, revision) in [
+            ("", renamed.revision),
+            ("  ", renamed.revision),
+            ("Cedar", original.revision),
+        ] {
+            assert!(rename(name, revision).is_err());
+            assert_eq!(read_project_roster(&root, &sessions).unwrap(), renamed);
+        }
+        let added = mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Add {
+                agent_id: None,
+                name: Some("Cedar".into()),
+            },
+            Some(renamed.revision),
+        )
+        .unwrap();
+        let rested = mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Rest {
+                member_id: added.members.last().unwrap().agent_member_id.clone(),
+            },
+            Some(added.revision),
+        )
+        .unwrap();
+        assert!(rename(" CEDAR ", rested.revision).is_err());
+        assert_eq!(read_project_roster(&root, &sessions).unwrap(), rested);
+        assert_eq!(std::fs::read(session_path).unwrap(), session_bytes);
+    }
 
     #[test]
     fn explicit_registration_preserves_name_identity_and_rejects_invalid_or_stale_writes() {

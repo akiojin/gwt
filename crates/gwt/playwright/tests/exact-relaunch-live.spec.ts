@@ -161,7 +161,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
-  test("named registration persists its UUID through rejection, reload and native restart", async ({ page }, info) => {
+  test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
     const fixture = await startExactRelaunchFixture(info);
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -184,7 +184,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const added = await rosterAfter(page, sequence, before.revision);
       expect(added.error).toBeNull();
       expect(added.members).toHaveLength(before.members.length + 1);
-      const member = added.members.find(member => member.name === "Maple contributor")!;
+      let member = added.members.find(member => member.name === "Maple contributor")!;
       expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
       expect(member.agent_id).toBe("codex");
       expect(member.assignment).toBeNull();
@@ -207,9 +207,26 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const retried = await rosterAfter(page, retrySequence, added.revision);
       expect(retried.error).toBeNull();
       expect(retried.members.find(member => member.name === "Retry contributor")?.agent_member_id).toBeTruthy();
+      await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+      const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
+      const renameSequence = await cursor(page);
+      await displayName.fill("  Maple renamed  ");
+      const renamed = await rosterAfter(page, renameSequence, retried.revision);
+      expect(renamed.error).toBeNull();
+      const updated = renamed.members.find(value => value.agent_member_id === member.agent_member_id)!;
+      expect(updated).toEqual({ ...member, name: "Maple renamed" });
+      member = updated;
+      await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
+      await expect(displayName).toHaveValue("Maple renamed");
+      await displayName.fill(" Retry contributor ");
+      await expect(displayName).toHaveAttribute("aria-invalid", "true");
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      await expect(displayName).toHaveValue(" Retry contributor ");
+      await displayName.fill("Maple renamed");
       await page.setViewportSize({ width: 400, height: 1000 });
       await expect.poll(() => surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await displayName.scrollIntoViewIfNeeded();
       await page.screenshot({ path: info.outputPath(`named-registration-${theme}.png`) });
       await page.reload();
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
@@ -221,7 +238,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
       expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
         .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
-      expect(errors, "actual registration/reload/restart console and page errors").toEqual([]);
+      expect(errors, "actual registration/rename/reload/restart console and page errors").toEqual([]);
     } finally {
       await fixture.stop();
     }

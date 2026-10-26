@@ -4366,6 +4366,7 @@ impl AppRuntime {
         client_id: &ClientId,
         action: gwt::agent_names::AgentRosterAction,
         expected_revision: Option<u64>,
+        request_id: Option<String>,
     ) -> Vec<OutboundEvent> {
         if !matches!(action, gwt::agent_names::AgentRosterAction::Read)
             && expected_revision.is_none()
@@ -4375,6 +4376,7 @@ impl AppRuntime {
                 BackendEvent::AgentRosterError {
                     project_key: context.project_key.to_string(),
                     message: "Load the Agent roster before changing members".into(),
+                    request_id,
                 },
             )];
         }
@@ -4382,6 +4384,7 @@ impl AppRuntime {
         let reply_to = client_id.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
+        let reply_request_id = request_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = gwt::agent_names::mutate_project_roster(
                 &context_owned.project_root,
@@ -4417,11 +4420,15 @@ impl AppRuntime {
                             &sessions_dir,
                         );
                         view.error = error;
-                        BackendEvent::AgentRoster { roster: view }
+                        BackendEvent::AgentRoster {
+                            roster: view,
+                            request_id: reply_request_id,
+                        }
                     }
                     Err(error) => BackendEvent::AgentRosterError {
                         project_key: context_owned.project_key.to_string(),
                         message: error.to_string(),
+                        request_id: reply_request_id,
                     },
                 }
             } else {
@@ -4429,6 +4436,7 @@ impl AppRuntime {
                     project_key: context_owned.project_key.to_string(),
                     message: error
                         .unwrap_or_else(|| "Agent roster unavailable; refresh and retry".into()),
+                    request_id: reply_request_id,
                 }
             };
             proxy.send(UserEvent::ProjectDispatch {
@@ -4443,6 +4451,7 @@ impl AppRuntime {
                 BackendEvent::AgentRosterError {
                     project_key: context.project_key.to_string(),
                     message,
+                    request_id,
                 },
             )],
         }

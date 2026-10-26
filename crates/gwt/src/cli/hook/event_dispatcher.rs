@@ -2453,13 +2453,17 @@ mod tests {
         })
         .to_string();
 
-        handle_with_input(
-            "UserPromptSubmit",
-            &prompt_input,
-            worktree.path(),
-            Some(&session_id),
-        )
-        .expect("prompt hook output");
+        {
+            // This fixture tests Stop gates, not the prompt's wall-clock budget.
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
+            handle_with_input(
+                "UserPromptSubmit",
+                &prompt_input,
+                worktree.path(),
+                Some(&session_id),
+            )
+            .expect("prompt hook output");
+        }
 
         let output = handle_with_input("Stop", &stop_input, worktree.path(), Some(&session_id))
             .expect("stop hook output");
