@@ -2046,6 +2046,9 @@ pub struct AgentRosterMemberView {
     pub member: crate::agent_names::AgentMember,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Saved manual candidate input, distinct from Auto tiers and Session facts.
+    #[serde(default)]
+    pub saved_manual_profile: Option<crate::IssueMonitorLaunchProfile>,
     pub history: Vec<AgentAssignmentHistoryView>,
     pub issue_count: Option<usize>,
     pub landed_count: Option<usize>,

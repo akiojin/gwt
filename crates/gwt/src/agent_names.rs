@@ -492,6 +492,17 @@ pub fn mutate_project_roster(
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> Result<AgentRoster, String> {
+    mutate_project_roster_snapshot(root, sessions_dir, action, expected_revision)
+        .map(|prefs| prefs.agent_roster.expect("initialized roster"))
+}
+
+/// Read the roster and its saved manual candidates from the same locked commit.
+pub fn mutate_project_roster_snapshot(
+    root: &Path,
+    sessions_dir: &Path,
+    action: AgentRosterAction,
+    expected_revision: Option<u64>,
+) -> Result<crate::IssueMonitorPrefs, String> {
     if let AgentRosterAction::Add {
         agent_id: Some(id), ..
     } = &action
@@ -506,7 +517,7 @@ pub fn mutate_project_roster(
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let dead = dead_project_assignments(root, &path, sessions_dir)?;
-    let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+    let (prefs, ()) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         let default_tool = prefs
@@ -605,11 +616,11 @@ pub fn mutate_project_roster(
                 .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
         }
         prefs.max_active_agents = roster.enabled_count();
-        Ok(roster.clone())
+        Ok(())
     })
     .map_err(|error| error.to_string())?;
     drop(dead);
-    Ok(roster)
+    Ok(prefs)
 }
 
 /// A reservation becomes reusable only after exact physical absence is known.

@@ -16,6 +16,7 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
   assignment: { session_id: string | null; issue_number: number | null } | null;
+  saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 
@@ -245,7 +246,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
-  test("recorded assignment facts survive member rename, reload and native restart", async ({ page }, info) => {
+  test("saved manual settings and recorded assignment facts stay separate through rename, reload and native restart", async ({ page }, info) => {
     const fixture = await startExactRelaunchFixture(info);
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -261,6 +262,40 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       const memberId = tomlString(record, "agent_member_id")!;
       const facts = { name: tomlString(record, "agent_name"), provider: "codex", model: tomlString(record, "model") };
       expect(memberId).toBeTruthy(); expect(facts.name).toBeTruthy();
+      const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await readRoster(page);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      const savedCandidate = { agent_id: "codex", agent_member_id: memberId, model: "gpt-6-sol", reasoning: "medium", runtime_target: "Host", skip_permissions: false };
+      expect(savedCandidate.model).not.toBe(facts.model);
+      const beforeSave = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477752, profiles: [savedCandidate] });
+      const savedReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477752
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeSave).then(handle => handle.jsonValue());
+      expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
+      expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
+      const assertSaved = async () => {
+        const roster = await readRoster(page);
+        expect(roster.members.find(value => value.agent_member_id === memberId)?.saved_manual_profile).toMatchObject(savedCandidate);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
+      };
+      await assertSaved();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      const afterSaveRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      expect(tomlString(afterSaveRecord, "model")).toBe(facts.model);
+      expect(tomlString(afterSaveRecord, "reasoning_level")).toBe(tomlString(record, "reasoning_level"));
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertSaved(); await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`saved-current-native-${theme}.png`) });
       await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
       await expect.poll(async () => tomlString(await sessionRecord(fixture.home, launch.gwt_session_id), "status"),
         { timeout: 60_000 }).toBe("Stopped");
@@ -276,8 +311,8 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(renamed.error).toBeNull();
       expect(renamed.members.find(value => value.agent_member_id === memberId)?.history).toEqual(member.history);
       expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(beforeRename);
-      const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
       const assertHistory = async () => {
+        await assertSaved();
         const roster = await readRoster(page);
         const saved = roster.members.find(value => value.agent_member_id === memberId)!;
         expect(saved.name).toBe("Current renamed member");

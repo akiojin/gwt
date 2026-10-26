@@ -80,6 +80,9 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
       .find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
     return assignment.current_task || data?.dynamic_title || data?.title || (assignment.issue_number ? `Issue #${assignment.issue_number}` : "—");
   }
+  function recordedConfig(item) {
+    return `Recorded name: ${item?.name || "—"} · Tool: ${item?.provider || "—"} · Recorded model: ${item?.model || "—"}`;
+  }
   function openCurrent(memberId, expected) {
     const member = rosterModel.read().members.find(member => member.member_id === memberId);
     const current = liveWork(member);
@@ -250,6 +253,13 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     if (head.parentElement !== panel) panel.prepend(head);
     panel.insertBefore(stats(member), currentWork || plans);
+    const saved = document.createElement("section"); saved.className = "roster-history roster-saved-settings";
+    saved.innerHTML = "<h4>Saved manual candidate</h4><p class=\"roster-description\"></p><p class=\"roster-description\">Automatic launches use tier settings. Current work uses its own recorded launch settings.</p>";
+    const profile = member.saved_manual_profile;
+    saved.querySelector("p").textContent = profile
+      ? `Tool: ${profile.agent_id || "—"} · Model: ${profile.model || "—"} · Reasoning: ${profile.reasoning || "—"} · Runtime: ${profile.runtime_target || "—"}${profile.runtime_target === "Docker" && profile.docker_service ? ` (${profile.docker_service})` : ""} · Permissions: ${profile.skip_permissions === true ? "Skip prompts" : profile.skip_permissions === false ? "Ask" : "—"}`
+      : "Unavailable";
+    panel.insertBefore(saved, currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol");
     if (current) {
@@ -257,19 +267,21 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
         currentWork = document.createElement("section"); currentWork.className = "roster-history roster-current-work";
         currentWork.innerHTML = "<h4>Current work</h4><ol></ol>";
         const li = document.createElement("li"); li.className = "roster-now";
-        const label = document.createElement("small"), button = document.createElement("button"), result = document.createElement("span");
+        const label = document.createElement("small"), button = document.createElement("button"), config = document.createElement("small"), result = document.createElement("span");
+        config.className = "roster-current-config";
         label.textContent = "Now"; button.type = "button";
-        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, result);
+        button.addEventListener("click", () => openCurrent(member.member_id, current)); result.textContent = "Current work"; li.append(label, button, config, result);
         currentWork.querySelector("ol").append(li); panel.insertBefore(currentWork, plans);
       }
       currentWork.querySelector("button").textContent = `${current.issue_number ? `#${current.issue_number}` : "—"} ${workTitle(current)}`;
+      currentWork.querySelector(".roster-current-config").textContent = recordedConfig((member.history || []).find(item => item.session_id === current.session_id));
     }
     const historyEntries = [...(member.history || [])].filter(item => !current || item.session_id !== current.session_id).sort((a, b) => (Date.parse(b.ended_at || b.started_at) || 0) - (Date.parse(a.ended_at || a.started_at) || 0));
     for (const item of historyEntries) {
       const li = document.createElement("li"), time = document.createElement("small"), title = document.createElement("span"), result = document.createElement("small");
       time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
       const config = document.createElement("small"); config.className = "roster-history-config";
-      config.textContent = `Recorded name: ${item.name || "—"} · Tool: ${item.provider || "—"} · Recorded model: ${item.model || "—"}`;
+      config.textContent = recordedConfig(item);
       li.append(time, title, config, result); ol.append(li);
     }
     if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
@@ -312,7 +324,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const edit = rosterModel.read().name_edits?.[member.member_id];
     field.head.querySelector("h3").textContent = member.name;
     field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
-    field.head.querySelector("p").textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`;
+    field.head.querySelector("p").textContent = `Registered tool: ${member.provider || "—"} · Member since ${date(member.created_at)} UTC`;
     const value = edit?.value ?? member.name;
     if (field.input.value !== value) field.input.value = value;
     field.input.disabled = !Number.isSafeInteger(rosterModel.read().revision);
