@@ -21322,6 +21322,95 @@ exit 1
             Some("launch:effect-46")
         );
         assert!(cached_driver.pending_effects().is_empty());
+        let held = cached_driver.prefs();
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        let status = cached_driver.agent_status_at(&now);
+        let waiting = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(waiting.readiness, crate::IssueMonitorReadiness::NotReady);
+        assert!(waiting
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("plan/tasks")));
+        assert_eq!(
+            cached_driver.prefs().pending_launch_deliveries,
+            held.pending_launch_deliveries
+        );
+        let mut ready = candidates[0].clone();
+        ready.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        cached_driver.record_candidate(ready);
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert!(cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        // Readiness can change again after claim but before the pane exists.
+        cached_driver.record_candidate(candidates[0].clone());
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| true
+        ));
+        // An exact existing pane can still be adopted and replay its ACK.
+        let mut existing = monitor.clone();
+        existing.record_candidate(candidates[0].clone());
+        existing.complete_active_launch(42, "tab-1::agent-42");
+        assert!(existing.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(existing.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            "tab-1::agent-42"
+        ));
+        assert!(existing
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert_eq!(cached_driver.attempt_count(42), 1);
+        assert_eq!(
+            cached_driver
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == 42)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         crate::save_issue_monitor_prefs(&prefs_path, &latest).unwrap();
         assert!(super::commit_issue_monitor_scan_if_current(
             temp.path(),

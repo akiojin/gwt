@@ -14871,6 +14871,21 @@ impl IssueMonitorState {
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
                             (!reasons.is_empty()).then(|| reasons.join("; "))
+                        } else if item.state == MonitorInboxState::Launching
+                            && !self.has_observed_monitor_runtime(item.issue.number)
+                            && !self.has_monitor_pane_for_issue(item.issue.number)
+                            && self.pending_launch_deliveries.iter().any(|delivery| {
+                                delivery.issue_number == item.issue.number
+                                    && delivery.materialized_window_id.is_none()
+                            })
+                        {
+                            item.exclusion_reason.clone().or_else(|| {
+                                issue_monitor_candidate_exclusion(
+                                    &item.issue,
+                                    self.source_repository,
+                                )
+                                .map(|(_, reason)| reason)
+                            })
                         } else {
                             item.exclusion_reason.clone()
                         },
@@ -19069,6 +19084,14 @@ impl IssueMonitorState {
                 .is_some_and(|existing| matches_window(existing))
         {
             return true;
+        }
+        // Holding a new pane requires no cancellation authority. A cached
+        // readiness regression must wait even before a complete Live scan
+        // can compensate the claim; existing-pane ACKs above stay valid.
+        if self.inbox_item(delivery.issue_number).is_some_and(|item| {
+            issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+        }) {
+            return false;
         }
         if self
             .agent_schedule_launch_exclusion(delivery.issue_number)
