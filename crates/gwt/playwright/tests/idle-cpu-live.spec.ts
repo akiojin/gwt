@@ -394,6 +394,28 @@ async function wizardRequest(page: Page, detail: unknown, requireOpen = false): 
 
 async function launchAgent(page: Page, theme: string, index: number, before: string[]): Promise<Agent> {
   expect(process.env.GWT_IDLE_FIXTURE_BRANCH, "shared clone source branch").toBeTruthy();
+  if (index === 0) {
+    // Normal Launch binds a fixed-tool member; provider registration alone
+    // does not make this disposable command tool available in the roster.
+    const rosterRequest = async (action: unknown) => {
+      const after = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", action });
+      const roster = await page.waitForFunction(after => {
+        const message = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) =>
+          entry.sequence > after && entry.payload.kind === "agent_roster");
+        return message?.payload.roster || null;
+      }, after, { timeout: 30_000 }).then(handle => handle.jsonValue());
+      expect(roster.error, "disposable workload member preparation").toBeFalsy();
+      return roster;
+    };
+    let roster = await rosterRequest({ kind: "read" });
+    const available = () => roster.members.filter((member: any) =>
+      member.agent_id === agentId && member.enabled && !member.assignment).length;
+    for (let added = 0; available() < paneCount && added < paneCount; added += 1) {
+      roster = await rosterRequest({ kind: "add", agent_id: agentId });
+    }
+    expect(available(), "twelve normally allocated command-tool members").toBe(paneCount);
+  }
   // Current Add Agent route: a regular Launch Wizard without a legacy Work
   // surface or an extra owner window. Launch materializes each new worktree.
   await wizardRequest(page, { kind: "open_active_work_launch_wizard",

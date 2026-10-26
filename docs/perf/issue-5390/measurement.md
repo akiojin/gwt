@@ -71,6 +71,24 @@ provider identity, bound Session independence, PM/missing rejection,
 named-legacy Session backfill and custom provider classification.
 The legacy unnamed-window regression is also included in final verification.
 
+## Headed fixture prerequisite
+
+The first canonical run, `vrr-f835dfd9025a478cb85387a9b713a573`, passed the
+Rust, format, Clippy, naming, legacy and hygiene commands. Both headed themes
+failed before their first Agent launch with `No idle Agent member is available`.
+The historical twelve-Agent fixture registered its custom command provider
+but did not allocate fixed-tool members required by the current normal Launch
+contract. This is preparation failure, not a CPU or responsiveness result.
+Console/page error arrays were empty; owned GUI PID 18704 and daemon PID 716
+exited. The failed run and traces remain in the verification record and
+`crates/gwt/playwright/test-results/issue-5658-after-6e989044bc31418f8afb2babc6e1515c`.
+
+Before the first normal launch, use the existing frontend roster read/add
+operations to allocate twelve enabled custom-tool members in the disposable
+project. No Session, capability or roster identity is forged. Keep all existing
+twelve-pane, authenticated IPC, quiet output, input responsiveness, CPU budget
+and theme/error assertions. The production fix remains the single predicate.
+
 ## Residual work
 
 A separate 15-second/19-snapshot observation found 56 distinct GUI-child Git
