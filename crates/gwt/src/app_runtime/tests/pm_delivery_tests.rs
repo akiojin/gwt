@@ -15,6 +15,9 @@ pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
         control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
     };
     let repo = temp.join("project");
+    super::pane_control_tests::control_init_repo(&repo);
+    seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["pane-contract-fixture", "codex"]);
     let (owner, pm) = control_owner_agent(&repo, "pm", 42);
     control_register_pm(&repo, &pm);
     let runner = temp.join(if cfg!(windows) {

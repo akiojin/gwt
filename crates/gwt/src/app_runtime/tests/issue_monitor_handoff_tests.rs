@@ -4898,7 +4898,7 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
     for exit_code in [0, 1] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false);
+        let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false, &["codex"]);
         let runner = write_fake_codex(temp.path());
         #[cfg(unix)]
         fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf 'quota-fixture-ready\\n'\nread value\nprintf '%s\\n' \"{}\"\nexit {exit_code}\n", CODEX_USAGE_LIMIT_SCREEN)).unwrap();

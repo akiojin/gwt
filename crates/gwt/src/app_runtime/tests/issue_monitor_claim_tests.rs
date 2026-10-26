@@ -5582,7 +5582,8 @@ fn assert_expired_launch_ack_cleanup(
     };
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery_id) = owner_monitor_fixture(temp.path(), 42, true);
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 42, true, &["pane-contract-fixture"]);
     if preserve_successor {
         let old = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id.clone());
         super::pane_control_tests::control_close(&owner, &old);
@@ -5724,15 +5725,40 @@ fn assert_expired_launch_ack_cleanup(
         .unwrap();
         None
     } else {
-        owner_fixture_block_on(owner.expire_monitor_windowless_launches_at(
-            (Utc::now() + chrono::Duration::seconds(121)).to_rfc3339(),
-        ))
+        // The real scan commit rebases and expires at real now. Age only this
+        // exact fixture delivery so expiry survives that canonical recheck.
+        let created_at = (Utc::now() - chrono::Duration::seconds(121)).to_rfc3339();
+        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let delivery = prefs
+                .pending_launch_deliveries
+                .iter_mut()
+                .find(|pending| Some(&pending.delivery_id) == delivery_id.as_ref())
+                .expect("the exact paused materializer delivery");
+            assert_eq!(delivery.issue_number, 42);
+            assert_eq!(
+                delivery.materializer_window_id.as_deref(),
+                Some(id.as_str())
+            );
+            delivery.created_at = created_at.clone();
+            prefs
+                .launching_issues
+                .iter_mut()
+                .find(|launch| launch.issue_number == 42)
+                .unwrap()
+                .claimed_at = Some(created_at.clone());
+            Ok(())
+        })
+        .unwrap();
+        owner_fixture_block_on(
+            owner.expire_monitor_windowless_launches_at(Utc::now().to_rfc3339()),
+        )
         .unwrap();
         let expired = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
         assert!(
             expired.pending_launch_deliveries.is_empty(),
             "the real daemon expired its windowless delivery"
         );
+        assert!(expired.launching_issues.is_empty());
         Some(expired)
     };
     let mut events = owner.subscribe();
@@ -5803,7 +5829,12 @@ fn assert_expired_launch_ack_cleanup(
         assert_eq!(prefs.pending_effects, expired.pending_effects);
         assert_eq!(prefs.requeue_audit, expired.requeue_audit);
         assert!(prefs.pending_launch_deliveries.is_empty());
-        assert!(prefs.launching_issues.is_empty());
+        assert!(
+            prefs.launching_issues.is_empty(),
+            "late ACK changed expired launch rows: before={:?}, after={:?}",
+            expired.launching_issues,
+            prefs.launching_issues
+        );
         assert!(prefs.launched_issues.is_empty());
     }
 }
@@ -5832,7 +5863,8 @@ fn issue_5415_post_ack_startup_timeout_requeues_the_exact_window_without_reusing
 fn issue_5642_consumed_delivery_ack_replay_preserves_the_exact_live_pane() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery_id) = owner_monitor_fixture(temp.path(), 42, true);
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 42, true, &["pane-contract-fixture"]);
     let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id.clone());
     let session_id = pane.session.as_ref().unwrap().id.clone();
     let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml"));

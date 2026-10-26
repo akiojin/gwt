@@ -7155,20 +7155,49 @@ fn owner_monitor_fixture(
     temp: &Path,
     issue: u64,
     delivery: bool,
+    agent_ids: &[&str],
 ) -> (
     PathBuf,
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     Option<String>,
 ) {
+    owner_monitor_fixture_with_prefs(temp, issue, delivery, agent_ids, |_| {})
+}
+
+fn owner_monitor_fixture_with_prefs(
+    temp: &Path,
+    issue: u64,
+    delivery: bool,
+    agent_ids: &[&str],
+    configure: impl FnOnce(&mut gwt::IssueMonitorPrefs),
+) -> (
+    PathBuf,
+    gwt::project_runtime::test_support::ProjectOwnerHarness,
+    Option<String>,
+) {
+    assert!(!agent_ids.is_empty());
     let root = temp.join("monitor-project");
     fs::create_dir_all(&root).unwrap();
     init_repo_with_initial_commit(&root);
     let now = Utc::now().to_rfc3339();
-    let mut monitor = test_monitor(gwt::IssueMonitorConfig {
-        enabled: true,
-        max_active: 8,
-        ..Default::default()
-    });
+    let mut prefs = gwt::IssueMonitorPrefs::default();
+    prefs.enabled = true;
+    prefs.max_active_agents = 8;
+    prefs.set_launch_profile_pool(
+        agent_ids
+            .iter()
+            .map(|agent_id| pool_profile(agent_id))
+            .collect(),
+    );
+    configure(&mut prefs);
+    let mut monitor = test_monitor_with_prefs(
+        gwt::IssueMonitorConfig {
+            enabled: true,
+            max_active: 8,
+            ..Default::default()
+        },
+        prefs,
+    );
     monitor.terminal_queue_push(&[issue], "operator", &now);
     monitor.record_candidate(owner_monitor_issue(issue));
     let delivery_id = delivery.then(|| format!("launch:effect-{issue}"));
@@ -7315,7 +7344,8 @@ fn owner_monitor_fresh_fixture(
     delivery: bool,
     prepty_failure: bool,
 ) -> OwnerFreshLaunchFixture {
-    let (root, owner, delivery_id) = owner_monitor_fixture(temp, 2359, delivery);
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp, 2359, delivery, &["fixture", "pane-contract-fixture"]);
     let owner = Arc::new(owner);
     let selected = pane_control_tests::control_launch_config(&root, 2359);
     let repo = selected.working_dir.unwrap();
@@ -7583,6 +7613,37 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
         .collect(),
     });
     gwt::save_issue_monitor_prefs(&path, &prefs).unwrap();
+}
+
+/// Declare the actual fixed tools before any fixture Session is admitted.
+/// Keep the caller's slot count and names; never retarget an assigned person.
+pub(super) fn configure_owner_fixture_tools(project: &Path, tools: &[&str]) {
+    assert!(!tools.is_empty());
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(project),
+        |prefs| {
+            let roster = prefs.agent_roster.as_mut().expect("fixture roster");
+            assert!(roster
+                .members
+                .iter()
+                .all(|member| member.assignment.is_none()));
+            let profiles = roster
+                .members
+                .iter_mut()
+                .enumerate()
+                .map(|(index, member)| {
+                    let tool = tools[index % tools.len()];
+                    member.agent_id = Some(tool.into());
+                    let mut profile = pool_profile(tool);
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect();
+            prefs.set_launch_profile_pool(profiles);
+            Ok(())
+        },
+    )
+    .unwrap();
 }
 
 /// A pane mid-turn, exactly as the two windows in Issue #4584's report were:

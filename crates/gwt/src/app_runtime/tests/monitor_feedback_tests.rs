@@ -881,7 +881,8 @@ fn issue5596_same_project_preparation_overlaps_after_pane_registration() {
     use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, _) = owner_monitor_fixture(temp.path(), 3165, false);
+    let (root, owner, _) =
+        owner_monitor_fixture(temp.path(), 3165, false, &["pane-contract-fixture"]);
     let pause = owner_fixture_block_on(owner.pause_next_agent_launch()).unwrap();
     let id = owner.pane_id("first-materialization");
     let operation_id = "first-monitor-materialization".to_string();
@@ -1998,7 +1999,22 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
         });
         fs::create_dir_all(&case).unwrap();
         let _home = ScopedGwtHome::set(&case);
-        let (project, owner, delivery) = owner_monitor_fixture(&case, 4774, false);
+        let (project, owner, delivery) = owner_monitor_fixture_with_prefs(
+            &case,
+            4774,
+            false,
+            &["pane-contract-fixture"],
+            |prefs| {
+                prefs.autonomous_mode = true;
+                prefs.launch_auto = true;
+                prefs.autonomous_records = vec![issue_monitor_autonomous_record(
+                    4774,
+                    gwt::AutonomousPhase::Implementing,
+                    0,
+                )];
+                prefs.record_tier_launch(4774, 0);
+            },
+        );
         let mut config = super::pane_control_tests::control_launch_config(&project, 4774);
         *config.args.last_mut().unwrap() = if cfg!(windows) {
             "$null = [Console]::ReadLine(); exit 1".into()
@@ -2010,11 +2026,22 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
         let actual = pane.session.as_ref().unwrap();
         let runtime_path =
             gwt_agent::runtime_state_path(&gwt_core::paths::gwt_sessions_dir(), &actual.id);
-        gwt_agent::SessionBridgeObservation::capture(&runtime_path, &actual.id)
-            .unwrap()
-            .unwrap()
-            .record(gwt_agent::HostBridgeKind::WorkspaceUpdate, fault)
-            .unwrap();
+        assert!(
+            gwt_agent::SessionBridgeObservation::capture(&runtime_path, &actual.id)
+                .unwrap()
+                .unwrap()
+                .record(gwt_agent::HostBridgeKind::WorkspaceUpdate, fault)
+                .unwrap()
+        );
+        assert_eq!(
+            gwt_agent::has_unresolved_host_bridge_fault(
+                &runtime_path,
+                &gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap()
+            )
+            .unwrap(),
+            fault,
+            "the exact actual launch must carry the bridge observation"
+        );
         let mut app = sample_runtime(
             &case,
             vec![sample_project_tab_with_window_at(
@@ -2032,19 +2059,6 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
         app.launch_wizard_cache.forget_session(&actual.id);
         assert!(app.launch_wizard_cache.session_by_id(&actual.id).is_none());
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            prefs.enabled = true;
-            prefs.autonomous_mode = true;
-            prefs.launch_auto = true;
-            prefs.autonomous_records = vec![issue_monitor_autonomous_record(
-                4774,
-                gwt::AutonomousPhase::Implementing,
-                0,
-            )];
-            prefs.record_tier_launch(4774, 0);
-            Ok(())
-        })
-        .unwrap();
         let mut completed = owner.subscribe();
         owner_fixture_block_on(
             owner.command(gwt::project_runtime::events::OwnerCommand::Input {

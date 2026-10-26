@@ -1378,7 +1378,8 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
     use std::collections::BTreeSet;
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, owner, delivery_id) = owner_monitor_fixture(temp.path(), 5248, false);
+    let (project, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 5248, false, &["pane-contract-fixture"]);
     let target = owner_monitor_launch(&project, &owner, 5248, "agent-closed", delivery_id);
     let mut config = control_launch_config(&project, 5249);
     config.launch_route = gwt_agent::LaunchRoute::Autonomous;

@@ -743,7 +743,7 @@ fn assert_owner_continue_cancellation(
 fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_order() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true);
+    let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true, &["codex"]);
     let mut config = super::pane_control_tests::control_launch_config(&root, 42);
     config.model = Some("worker-profile".into());
     let mut profile = gwt::IssueMonitorLaunchProfile::from(&config);

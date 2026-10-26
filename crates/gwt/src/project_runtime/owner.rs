@@ -1894,6 +1894,7 @@ impl OwnerState {
             {
                 return;
             }
+            tracing::info!(operation_id = %exited.operation_id, window_id = %id, "retiring exact exited Switch source in project owner");
             let mut runtime = self.runtimes.remove(id).unwrap();
             self.capture_close_monitor_snapshot(id, &mut runtime);
             let (reply, _) = oneshot::channel();

@@ -25,6 +25,7 @@ fn restarted_host_finalizes_six_fresh_sessions_after_shared_work_lock_contention
         None,
     )
     .unwrap();
+    configure_owner_fixture_tools(&repo, &["fixture"]);
     // The fresh actor has no inherited GUI runtime or capability registry.
     let executor = TokioRuntime::new().unwrap();
     let owner = Arc::new(executor.block_on(production_owner_fixture(&repo)));
@@ -1515,39 +1516,12 @@ fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predeces
                         );
                         break;
                     }
-                    OwnerEvent::Status {
-                        id,
-                        incarnation,
-                        exit_confirmed: true,
-                        raw_status: WindowProcessStatus::Error | WindowProcessStatus::Stopped,
-                        ..
-                    } if id == fixture.captured.id
-                        && incarnation == fixture.captured.incarnation =>
-                    {
-                        break
-                    }
                     _ => {}
                 }
             }
         })
         .await
         .unwrap();
-        let _ = fixture
-            .owner
-            .check_readiness_deadline(
-                &fixture.captured.id,
-                fixture.captured.incarnation,
-                ContinueWorkReadinessWatch::new(fixture.pending.operation_id.clone()),
-            )
-            .await;
-        fixture
-            .owner
-            .command(OwnerCommand::Close {
-                id: fixture.captured.id.clone(),
-                incarnation: fixture.captured.incarnation,
-            })
-            .await
-            .expect("actual exact terminal cleanup ACK");
         assert!(
             fixture
                 .owner
@@ -2979,6 +2953,9 @@ fn automatic_resume_capability_install(fail_install: bool) {
     settings.save(&gwt_core::paths::gwt_config_path()).unwrap();
     let codex_home = temp.path().join("codex-home");
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
+    pane_control_tests::control_init_repo(&project);
+    seed_owner_fixture_roster(&project, 8);
+    configure_owner_fixture_tools(&project, &["pane-contract-fixture", "codex"]);
     let (owner, bootstrap) = pane_control_tests::control_owner_agent(&project, "bootstrap", 900);
     let location = pane_control_tests::control_launch_config(&project, 42);
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)

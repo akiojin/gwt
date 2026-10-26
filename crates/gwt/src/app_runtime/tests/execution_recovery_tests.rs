@@ -2564,7 +2564,7 @@ fn app_runtime_issue_monitor_launch_error_emits_monitor_failure_events() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true);
+    let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true, &["codex"]);
     let (detail, evidence, owner_events) = owner_monitor_fail_before_pty(
         &root,
         &owner,
@@ -2621,7 +2621,8 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true);
+    let (root, owner, delivery) =
+        owner_monitor_fixture(temp.path(), 42, true, &["pane-contract-fixture"]);
     let raw = owner_monitor_git_auth_failure(&root, &owner, 42, delivery);
     assert!(raw.contains("could not read Username"), "{raw}");
     let monitor = owner_monitor_read(&root, 42);
@@ -2674,7 +2675,8 @@ fn app_runtime_issue_monitor_git_auth_launch_failure_is_actionable() {
 fn app_runtime_issue_monitor_launch_complete_marks_issue_launched_and_keeps_active_capacity() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery_id) = owner_monitor_fixture(temp.path(), 42, false);
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
     let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id);
     let monitor = owner_monitor_read(&root, 42);
     let status = monitor.status_view();
@@ -2759,7 +2761,8 @@ fn app_runtime_close_finalizer_completes_while_a_live_pty_reader_is_attached() {
 fn app_runtime_closing_issue_monitor_window_returns_issue_to_pending() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (root, owner, delivery_id) = owner_monitor_fixture(temp.path(), 42, false);
+    let (root, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 42, false, &["pane-contract-fixture"]);
     let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery_id);
     assert_eq!(owner_monitor_read(&root, 42).status_view().active_count, 1);
     super::pane_control_tests::control_close(&owner, &pane);
@@ -2798,7 +2801,7 @@ fn owner_monitor_runtime_failure(
 ) -> (String, Vec<OutboundEvent>, gwt::IssueMonitorPrefs) {
     use gwt::project_runtime::events::OwnerCommand;
     use gwt_core::daemon::{ClientFrame, DaemonFrame};
-    let (root, owner, delivery) = owner_monitor_fixture(temp, 42, true);
+    let (root, owner, delivery) = owner_monitor_fixture(temp, 42, true, &["pane-contract-fixture"]);
     let mut physical_output = owner.subscribe();
     let mut config = super::pane_control_tests::control_launch_config(&root, 42);
     let expected_detail = if from_hook {
@@ -3961,7 +3964,8 @@ fn runtime_hook_agent_failure_enqueue_error_does_not_commit_local_fallback() {
         events: traces.clone(),
     });
     let (warning, before, after) = tracing::subscriber::with_default(subscriber, || {
-        let (root, owner, delivery) = owner_monitor_fixture(temp.path(), 42, true);
+        let (root, owner, delivery) =
+            owner_monitor_fixture(temp.path(), 42, true, &["pane-contract-fixture"]);
         let pane = owner_monitor_launch(&root, &owner, 42, "agent", delivery);
         owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
