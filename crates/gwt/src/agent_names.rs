@@ -2150,12 +2150,14 @@ mod tests {
         let root = temp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
-        let mut prefs = crate::IssueMonitorPrefs::default();
-        prefs.max_active_agents = 4;
-        prefs.launch_profile = Some(
-            serde_json::from_value(serde_json::json!({"agent_id":"claude", "model":"sonnet"}))
-                .unwrap(),
-        );
+        let prefs = crate::IssueMonitorPrefs {
+            max_active_agents: 4,
+            launch_profile: Some(
+                serde_json::from_value(serde_json::json!({"agent_id":"claude", "model":"sonnet"}))
+                    .unwrap(),
+            ),
+            ..Default::default()
+        };
         crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
         let roster = read_project_roster(&root, &gwt_core::paths::gwt_sessions_dir()).unwrap();
         let saved = crate::load_issue_monitor_prefs(&path).unwrap();
