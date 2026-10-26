@@ -89,7 +89,7 @@ impl AgentRoster {
         let language = gwt_config::Settings::load()
             .map(|settings| settings.ai.effective_language())
             .unwrap_or("en");
-        let name = allocate(history, language, &HashSet::new(), &known)?;
+        let name = allocate(history, language, &known, &known)?;
         self.members.push(AgentMember {
             agent_member_id: uuid::Uuid::new_v4().to_string(),
             name,
@@ -272,7 +272,8 @@ pub fn mutate_project_roster(
     expected_revision: Option<u64>,
 ) -> Result<AgentRoster, String> {
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
-    let dead = dead_project_assignments(&path, sessions_dir)?;
+    reconcile_aborted_missing_assignments(root, sessions_dir)?;
+    let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
@@ -334,7 +335,11 @@ pub fn mutate_project_roster(
 }
 
 /// A reservation becomes reusable only after exact physical absence is known.
-fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -> bool {
+fn assignment_is_busy(
+    root: &Path,
+    assignment: &AgentMemberAssignment,
+    sessions_dir: &Path,
+) -> bool {
     if !assignment.host_id.is_empty() && assignment.host_id != crate::process::current_hostname() {
         return true;
     }
@@ -342,6 +347,15 @@ fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -
         let sessions = sessions_dir;
         match gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))) {
             Ok(session) if session.id == *session_id => {
+                if gwt_core::paths::project_scope_hash(
+                    session
+                        .project_state_root
+                        .as_deref()
+                        .unwrap_or(&session.worktree_path),
+                ) != gwt_core::paths::project_scope_hash(root)
+                {
+                    return true;
+                }
                 let observed = crate::session_inventory::observe_session(&session, sessions);
                 if !observed.sessions.is_empty() || !observed.uncertainties.is_empty() {
                     return true;
@@ -408,6 +422,7 @@ fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -
 }
 
 fn dead_project_assignments(
+    root: &Path,
     path: &Path,
     sessions_dir: &Path,
 ) -> Result<Vec<AgentMemberAssignment>, String> {
@@ -417,8 +432,182 @@ fn dead_project_assignments(
         .into_iter()
         .flat_map(|roster| roster.members)
         .filter_map(|member| member.assignment)
-        .filter(|assignment| !assignment_is_busy(assignment, sessions_dir))
+        .filter(|assignment| !assignment_is_busy(root, assignment, sessions_dir))
         .collect())
+}
+
+fn runtime_records_absent(sessions: &Path, session_id: &str) -> std::io::Result<bool> {
+    let absent = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    if !absent(&gwt_agent::active_launch_handshake_path(
+        sessions, session_id,
+    )) {
+        return Ok(false);
+    }
+    let entries = match std::fs::read_dir(sessions.join("runtime")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_symlink()
+            || entry.file_name() == format!("{session_id}.json").as_str()
+            || !absent(&entry.path().join(format!("{session_id}.json")))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A missing file is not proof. Recover only the exact, integrity-valid
+/// aborted candidate whose remaining launch and canvas evidence is absent.
+fn reconcile_aborted_missing_assignments(root: &Path, sessions: &Path) -> Result<(), String> {
+    use crate::cli::execution_state as execution;
+    let path = crate::issue_monitor_prefs_path_for_repo_path(root);
+    let prefs = crate::load_issue_monitor_prefs(&path).map_err(|error| error.to_string())?;
+    for member in prefs.agent_roster.iter().flat_map(|roster| &roster.members) {
+        let Some(assignment) = member.assignment.as_ref().filter(|assignment| {
+            assignment.host_id == crate::process::current_hostname()
+                && assignment.host_pid > 0
+                && assignment
+                    .host_started_at
+                    .is_some_and(|started| started > 0)
+        }) else {
+            continue;
+        };
+        let Some(session_id) = assignment.session_id.as_deref() else {
+            continue;
+        };
+        if !matches!(
+            gwt_agent::inspect_session_path(&sessions.join(format!("{session_id}.toml"))),
+            gwt_agent::SessionPathState::Missing
+        ) {
+            continue;
+        }
+        let owner = match assignment.spec_number.or(assignment.issue_number) {
+            Some(number) if number > 0 => execution::ExecutionOwnerKey {
+                kind: if assignment.spec_number.is_some() {
+                    execution::ExecutionOwnerKind::Spec
+                } else {
+                    execution::ExecutionOwnerKind::Issue
+                },
+                number,
+            },
+            _ => continue,
+        };
+        let reconciled = execution::commit_if_session_missing_with_owner_lease(
+            root,
+            owner,
+            sessions,
+            session_id,
+            || {
+                let Some(ledger) = execution::load_owner_generation_ledger(root, owner)? else {
+                    return Ok(());
+                };
+                let Some(attempt) = ledger
+                    .continuation_attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.request.initial_session_id == session_id)
+                else {
+                    return Ok(());
+                };
+                if attempt.status != execution::ContinuationAttemptStatus::Aborted
+                    || attempt.request.session_binding_id.is_empty()
+                    || ledger.generations.iter().any(|generation| {
+                        generation.identity.initial_session_id == session_id
+                            || generation.identity.generation_id == attempt.candidate_generation_id
+                    })
+                    || ledger
+                        .takeovers
+                        .iter()
+                        .any(|takeover| takeover.to_session_id == session_id)
+                    || !runtime_records_absent(sessions, session_id)?
+                {
+                    return Ok(());
+                }
+                let Some(holder) = execution::owner_generation_hold_from_ledger(sessions, &ledger)
+                else {
+                    return Ok(());
+                };
+                match gwt_agent::inspect_session_path(
+                    &sessions.join(format!("{}.toml", holder.holder_session_id)),
+                ) {
+                    gwt_agent::SessionPathState::Present(current) => {
+                        let inventory =
+                            crate::session_inventory::observe_session(&current, sessions);
+                        if !inventory.sessions.is_empty() || !inventory.uncertainties.is_empty() {
+                            return Ok(());
+                        }
+                    }
+                    gwt_agent::SessionPathState::Missing
+                        if runtime_records_absent(sessions, &holder.holder_session_id)? => {}
+                    _ => return Ok(()),
+                }
+                // Decode rows individually: the normal restore loader intentionally
+                // drops malformed rows, which cannot prove absence for recovery.
+                let bytes = match std::fs::read(crate::persistence::workspace_state_path(root)) {
+                    Ok(bytes) => bytes,
+                    Err(_) => return Ok(()),
+                };
+                let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let Some(windows) = raw.get("windows").and_then(serde_json::Value::as_array) else {
+                    return Ok(());
+                };
+                for row in windows {
+                    let Ok(row) = serde_json::from_value::<crate::persistence::PersistedWindowState>(
+                        row.clone(),
+                    ) else {
+                        return Ok(());
+                    };
+                    if row
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|id| id == session_id || id == holder.holder_session_id)
+                    {
+                        return Ok(());
+                    }
+                }
+                crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+                    if prefs
+                        .launching_issues
+                        .iter()
+                        .any(|entry| Some(entry.issue_number) == assignment.issue_number)
+                        || prefs
+                            .launched_issues
+                            .iter()
+                            .any(|entry| Some(entry.issue_number) == assignment.issue_number)
+                        || prefs.pending_launch_deliveries.iter().any(|entry| {
+                            Some(entry.issue_number) == assignment.issue_number
+                                || entry.agent_member_id.as_deref()
+                                    == Some(member.agent_member_id.as_str())
+                        })
+                    {
+                        return Ok(());
+                    }
+                    let Some(roster) = prefs.agent_roster.as_mut() else {
+                        return Ok(());
+                    };
+                    if let Some(current) = roster.members.iter_mut().find(|current| {
+                        current.agent_member_id == member.agent_member_id
+                            && current.assignment.as_ref() == Some(assignment)
+                    }) {
+                        current.assignment = None;
+                        roster.revision = roster.revision.checked_add(1).ok_or_else(|| {
+                            std::io::Error::other("Agent roster revision exhausted")
+                        })?;
+                    }
+                    Ok(())
+                })?;
+                Ok(())
+            },
+        );
+        if let Err(error) = reconciled {
+            tracing::debug!(session_id, %error, "missing Agent assignment remains unconfirmed");
+        }
+    }
+    Ok(())
 }
 
 /// History supplies a preference, never evidence that a member is idle.
@@ -505,7 +694,8 @@ pub fn reserve_project_member(
     inherited_member_id: Option<&str>,
 ) -> Result<AgentMember, String> {
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
-    let dead = dead_project_assignments(&path, sessions_dir)?;
+    reconcile_aborted_missing_assignments(root, sessions_dir)?;
+    let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let historical_member = if inherited_member_id.is_none() {
         spec_number.and_then(|spec| previous_spec_member(root, sessions_dir, spec))
@@ -747,10 +937,13 @@ pub fn adopt_project_member_session(
     .map_err(|error| error.to_string())?;
     let previous = session.clone();
     session.agent_member_id = Some(member_id.clone());
-    if !session
-        .save_if_unchanged(sessions_dir, &previous)
-        .map_err(|error| error.to_string())?
-    {
+    let saved = if gwt_agent::current_thread_holds_session_lease() {
+        session.save_if_unchanged_under_lease(sessions_dir, &previous)
+    } else {
+        session.save_if_unchanged(sessions_dir, &previous)
+    }
+    .map_err(|error| error.to_string())?;
+    if !saved {
         return Err("Session changed during Agent member migration".into());
     }
     Ok(Some(member_id))
@@ -837,6 +1030,96 @@ pub fn release_project_member(
     })
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Release only the reservation captured by the physical owner after its
+/// exact process tree has been reaped. A rolled-back Session may already be
+/// absent; generic roster readers must not infer this proof from absence.
+pub(crate) fn release_reaped_project_member(
+    root: &Path,
+    sessions_dir: &Path,
+    captured: &gwt_agent::Session,
+    reservation_id: &str,
+    pty: &gwt_terminal::PtyHandle,
+) -> Result<(), String> {
+    let Some(member_id) = captured.agent_member_id.as_deref() else {
+        return Ok(());
+    };
+    if !pty.tree_exit_confirmed() || pty.process_id().is_none_or(|pid| pid == 0) {
+        return Err("Agent reservation has no exact reaped project process".into());
+    }
+    // The real owner captured the Session before Git metadata could disappear.
+    // Do not redirect its close into a new path-derived project store.
+    let project_key = match captured.repo_hash.as_deref() {
+        Some(key) => {
+            gwt_core::repo_hash::ProjectKey::parse(key).map_err(|error| error.to_string())?
+        }
+        None if root.exists() => gwt_core::paths::project_scope_hash(root),
+        None => return Ok(()),
+    };
+    if root.exists() && project_key != gwt_core::paths::project_scope_hash(root) {
+        return Err("Agent reservation belongs to another project".into());
+    }
+    let prefs_path =
+        gwt_core::paths::gwt_project_dir(&project_key).join("project-state/issue-monitor.json");
+    gwt_agent::with_session_path_lease(sessions_dir, &captured.id, |state| {
+        match state {
+            gwt_agent::SessionPathState::Missing => {
+                if !runtime_records_absent(sessions_dir, &captured.id)? {
+                    return Err(std::io::Error::other(
+                        "Agent reservation retains unconfirmed runtime evidence",
+                    ));
+                }
+            }
+            gwt_agent::SessionPathState::Present(current)
+                if current.created_at == captured.created_at
+                    && current.agent_member_id == captured.agent_member_id
+                    && current.execution_binding == captured.execution_binding
+                    && current.worktree_path == captured.worktree_path
+                    && current.agent_id == captured.agent_id =>
+            {
+                let observed = crate::session_inventory::observe_session(&current, sessions_dir);
+                if !observed.sessions.is_empty() || !observed.uncertainties.is_empty() {
+                    return Err(std::io::Error::other(
+                        "Agent reservation retains live or uncertain runtime evidence",
+                    ));
+                }
+            }
+            gwt_agent::SessionPathState::Present(_) => return Ok(()),
+            gwt_agent::SessionPathState::Error(error) => return Err(error),
+        }
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            let Some(roster) = prefs.agent_roster.as_mut() else {
+                return Ok(());
+            };
+            let Some(member) = roster.members.iter_mut().find(|member| {
+                member.agent_member_id == member_id
+                    && member.assignment.as_ref().is_some_and(|assignment| {
+                        assignment.reservation_id == reservation_id
+                            && assignment.session_id.as_deref() == Some(captured.id.as_str())
+                            && assignment.host_id == crate::process::current_hostname()
+                            && assignment.host_pid == std::process::id()
+                            && assignment.host_started_at.is_some_and(|started| {
+                                started > 0
+                                    && Some(started)
+                                        == crate::process::host_process_start_time(
+                                            std::process::id(),
+                                        )
+                            })
+                    })
+            }) else {
+                return Ok(());
+            };
+            member.assignment = None;
+            roster.revision = roster
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("Agent roster revision exhausted"))?;
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 // Keep the catalog in the same language as the visible identity. Each catalog
@@ -1070,9 +1353,359 @@ pub fn allocate(
     Ok(name)
 }
 
+/// A current retained pane identity supplied by a GUI read-only projection.
+#[derive(Clone)]
+pub struct RetainedAgentName {
+    pub project_root: std::path::PathBuf,
+    pub window_id: String,
+    pub session_id: Option<String>,
+    pub name: String,
+}
+
+/// Keep this guard until the assigned name is durably published.
+/// Acquire before ECR/Session/registry leases, and release before a new spawn lease.
+pub struct GlobalAgentNameReservation {
+    name: String,
+    _lock: gwt_core::operation_deadline::NamedFileLock,
+}
+impl GlobalAgentNameReservation {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+pub fn lock_global_agent_names() -> Result<gwt_core::operation_deadline::NamedFileLock, String> {
+    std::fs::create_dir_all(gwt_core::paths::gwt_home()).map_err(|error| error.to_string())?;
+    gwt_core::operation_deadline::NamedFileLock::try_acquire(
+        &gwt_core::paths::gwt_home().join("agent-name-assignment.lock"),
+        "agent.name.reserve",
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Coordinate initials across project daemons using existing retained windows
+/// and physically observed Sessions; historical Session files do not reserve names.
+pub fn reserve_global_agent_name(
+    root: &Path,
+    sessions_dir: &Path,
+    replacing_window_id: Option<&str>,
+    excluding_session_id: Option<&str>,
+    inherited: Option<String>,
+    additional_retained: &[RetainedAgentName],
+) -> Result<GlobalAgentNameReservation, String> {
+    let lock = lock_global_agent_names()?;
+    let own_key = gwt_core::paths::project_scope_hash(root);
+    let raw_id = replacing_window_id.map(|id| id.split_once("::").map_or(id, |(_, raw)| raw));
+    let mut known = HashSet::new();
+    let mut active = HashSet::new();
+    let mut retain = |name: String| {
+        known.insert(name.clone());
+        active.insert(name);
+    };
+    for pane in additional_retained {
+        if (gwt_core::paths::project_scope_hash(&pane.project_root) == own_key
+            && pane
+                .session_id
+                .as_deref()
+                .is_some_and(|id| Some(id) == excluding_session_id))
+            || (gwt_core::paths::project_scope_hash(&pane.project_root) == own_key
+                && raw_id.is_some_and(|id| {
+                    pane.window_id == id
+                        || pane
+                            .window_id
+                            .split_once("::")
+                            .is_some_and(|(_, raw)| raw == id)
+                }))
+        {
+            continue;
+        }
+        retain(pane.name.clone());
+    }
+    let projects = match std::fs::read_dir(gwt_core::paths::gwt_projects_dir()) {
+        Ok(projects) => Some(projects),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    if let Some(projects) = projects {
+        for project in projects {
+            let project = project.map_err(|error| error.to_string())?;
+            let path = project.path().join("workspace.json");
+            if !path.is_file() {
+                continue;
+            }
+            let registry = crate::persistence::load_workspace_state(&path)
+                .map_err(|error| error.to_string())?;
+            for pane in registry
+                .windows
+                .into_iter()
+                .filter(|pane| pane.preset.is_agent_terminal())
+            {
+                if (project.file_name() == own_key.as_str()
+                    && pane
+                        .session_id
+                        .as_deref()
+                        .is_some_and(|id| Some(id) == excluding_session_id))
+                    || (project.file_name() == own_key.as_str() && raw_id == Some(pane.id.as_str()))
+                {
+                    continue;
+                }
+                let name = pane.agent_name.or_else(|| {
+                    pane.session_id
+                        .as_deref()
+                        .and_then(|id| {
+                            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+                        })
+                        .and_then(|session| session.agent_name)
+                });
+                if let Some(name) = name {
+                    retain(name);
+                }
+            }
+        }
+    }
+    for observed in crate::session_inventory::observe_machine_sessions(sessions_dir).sessions {
+        if Some(observed.session.session_id.as_str()) == excluding_session_id
+            && gwt_core::paths::project_scope_hash(&observed.project_root) == own_key
+        {
+            continue;
+        }
+        if let Ok(session) = gwt_agent::Session::load(
+            &sessions_dir.join(format!("{}.toml", observed.session.session_id)),
+        ) {
+            if let Some(name) = session.agent_name {
+                retain(name);
+            }
+        }
+    }
+    let history = gwt_core::paths::gwt_project_dir_for_repo_path(root).join("agent-names.jsonl");
+    let name = if let Some(name) = inherited {
+        // Reopening a canonical saved identity must not rename legacy peers
+        // whose initials already collide. New names still reserve initials,
+        // and a different live identity may never reuse the full saved name.
+        let saved_name = excluding_session_id.is_some_and(|id| {
+            gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).is_ok_and(
+                |session| {
+                    session.id == id
+                        && session.agent_name.as_deref() == Some(name.as_str())
+                        && gwt_core::paths::project_scope_hash(
+                            session
+                                .project_state_root
+                                .as_deref()
+                                .unwrap_or(&session.worktree_path),
+                        ) == own_key
+                },
+            )
+        });
+        let conflicts = active
+            .iter()
+            .filter(|other| !saved_name || other.eq_ignore_ascii_case(&name))
+            .cloned()
+            .collect();
+        ensure_available_initial(&name, &conflicts)?;
+        known.insert(name.clone());
+        remember(&history, &known)?;
+        name
+    } else {
+        let language = gwt_config::Settings::load()
+            .map(|settings| settings.ai.effective_language())
+            .unwrap_or("en");
+        allocate(&history, language, &active, &known)?
+    };
+    Ok(GlobalAgentNameReservation { name, _lock: lock })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aborted_missing_session_releases_only_its_exact_local_member_and_restores_schedule() {
+        use crate::cli::execution_state as execution;
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/fixture/missing-assignment.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let owner = execution::ExecutionOwnerKey {
+            kind: execution::ExecutionOwnerKind::Spec,
+            number: 5016,
+        };
+        execution::materialize_at_launch(
+            &root,
+            owner.kind,
+            owner.number,
+            "previous-holder",
+            "gwt-execute",
+            false,
+        )
+        .unwrap();
+        execution::ensure_generation_ledger(&root, owner, execution::LegacyActiveDisposition::Live)
+            .unwrap();
+        let request = execution::SuccessorRequest {
+            operation_id: "missing-member-launch".into(),
+            principal_id: "gwt-host-launch".into(),
+            work_id: None,
+            source: execution::CONCURRENT_LINKED_OWNER_LAUNCH_SOURCE.into(),
+            session_binding_id: "candidate-binding".into(),
+            initial_session_id: "aborted-member-session".into(),
+            entrypoint: "gwt-execute".into(),
+            requested_at: chrono::Utc::now(),
+        };
+        execution::prepare_concurrent_linked_owner_launch_successor(&root, owner, &request)
+            .unwrap();
+        execution::abort_successor(&root, owner, &request, "physical launch cleanup completed")
+            .unwrap();
+        let member = reserve_project_member(
+            &root,
+            &sessions,
+            "exact-reservation",
+            Some(5016),
+            Some(5016),
+            None,
+            None,
+        )
+        .unwrap();
+        bind_project_member_session(
+            &root,
+            &member.agent_member_id,
+            "exact-reservation",
+            &request.initial_session_id,
+        )
+        .unwrap();
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&root),
+            &crate::persistence::empty_workspace_state(),
+        )
+        .unwrap();
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let saved = || {
+            crate::load_issue_monitor_prefs(&prefs_path)
+                .unwrap()
+                .agent_roster
+                .unwrap()
+                .members
+                .into_iter()
+                .find(|m| m.agent_member_id == member.agent_member_id)
+                .unwrap()
+        };
+        let original = saved().assignment.unwrap();
+        // Missing alone is insufficient: an existing handshake and corrupt
+        // Session each retain the assignment without rewriting the roster.
+        let handshake =
+            gwt_agent::active_launch_handshake_path(&sessions, &request.initial_session_id);
+        std::fs::create_dir_all(handshake.parent().unwrap()).unwrap();
+        std::fs::write(&handshake, b"unconfirmed launch").unwrap();
+        read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(saved().assignment.as_ref(), Some(&original));
+        std::fs::remove_file(handshake).unwrap();
+        let session_path = sessions.join(format!("{}.toml", request.initial_session_id));
+        std::fs::write(&session_path, b"malformed = [").unwrap();
+        read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(saved().assignment.as_ref(), Some(&original));
+        std::fs::remove_file(&session_path).unwrap();
+        update_member_assignment(&root, &member.agent_member_id, "exact-reservation", |a| {
+            a.host_id = "foreign-host".into()
+        })
+        .unwrap();
+        read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(saved().assignment.as_ref().unwrap().host_id, "foreign-host");
+        update_member_assignment(&root, &member.agent_member_id, "exact-reservation", |a| {
+            a.host_id = crate::process::current_hostname()
+        })
+        .unwrap();
+        let runtime = gwt_agent::runtime_state_path_for_pid(
+            &sessions,
+            original.host_pid,
+            &request.initial_session_id,
+        );
+        std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        std::fs::write(&runtime, b"unreadable runtime evidence").unwrap();
+        read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(saved().assignment.as_ref(), Some(&original));
+        std::fs::remove_file(runtime).unwrap();
+        let mut queue = crate::IssueMonitorState::with_prefs(
+            crate::IssueMonitorConfig::default(),
+            crate::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        queue.terminal_queue_push(&[5016], "operator", &chrono::Utc::now().to_rfc3339());
+        crate::save_issue_monitor_prefs(&prefs_path, &queue.prefs()).unwrap();
+        let recovered = crate::issue_monitor::mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            crate::issue_monitor::AgentScheduleAction::Read,
+        )
+        .unwrap();
+        assert!(
+            saved().assignment.is_none(),
+            "an aborted, absent exact candidate must release its member"
+        );
+        assert!(
+            recovered
+                .members
+                .iter()
+                .any(|m| m.issues.iter().any(|i| i.issue_number == 5016)),
+            "the canonical queue regains its member plan"
+        );
+        let stable = read_project_roster(&root, &sessions).unwrap().revision;
+        read_project_roster(&root, &sessions).unwrap();
+        assert_eq!(
+            read_project_roster(&root, &sessions).unwrap().revision,
+            stable
+        );
+    }
+
+    #[test]
+    fn global_initial_guard_covers_publish_and_retained_foreign_project_windows() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let own = home.path().join("own");
+        let foreign = home.path().join("foreign");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let first = reserve_global_agent_name(&own, &sessions, None, None, None, &[]).unwrap();
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(gwt_core::paths::gwt_home().join("agent-name-assignment.lock"))
+            .unwrap();
+        assert!(
+            probe.try_lock_exclusive().is_err(),
+            "reservation guard must retain the machine name lock through publish"
+        );
+        let mut registry = crate::persistence::default_workspace_state();
+        registry.windows[0].preset = crate::WindowPreset::Agent;
+        registry.windows[0].agent_name = Some(first.name().to_string());
+        crate::persistence::save_workspace_state(
+            &crate::persistence::workspace_state_path(&own),
+            &registry,
+        )
+        .unwrap();
+        let initial = first.name().chars().next().unwrap().to_ascii_lowercase();
+        drop(first);
+        let second = reserve_global_agent_name(&foreign, &sessions, None, None, None, &[]).unwrap();
+        assert_ne!(
+            initial,
+            second.name().chars().next().unwrap().to_ascii_lowercase(),
+            "a retained foreign pane reserves its initial without a historical Session ledger"
+        );
+    }
 
     #[test]
     fn an_exited_physical_child_releases_an_idle_session_for_its_member_restart() {
@@ -1155,13 +1788,13 @@ mod tests {
                 .unwrap();
         runtime.runtime_incarnation = None;
         runtime.save(&path).unwrap();
-        assert!(assignment_is_busy(&assignment, &sessions));
+        assert!(assignment_is_busy(&root, &assignment, &sessions));
         runtime.runtime_incarnation = Some(7);
         runtime.save(&path).unwrap();
         let handshake = gwt_agent::active_launch_handshake_path(&sessions, &session.id);
         std::fs::create_dir_all(handshake.parent().unwrap()).unwrap();
         std::fs::write(&handshake, b"preparing or unreadable").unwrap();
-        assert!(assignment_is_busy(&assignment, &sessions));
+        assert!(assignment_is_busy(&root, &assignment, &sessions));
         std::fs::remove_file(handshake).unwrap();
         let restarted = reserve_project_member(
             &root,
