@@ -432,6 +432,16 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(() => {
         try { process.kill(launch.pid, 0); return false; } catch { return true; }
       }, { timeout: 60_000, message: "the predecessor provider really exited" }).toBe(true);
+      // Provider exit precedes the Host's PTY exit event and durable failure.
+      // Observe the guard's state before the single force-requeue write.
+      await expect.poll(async () => {
+        const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+        const ownsIssue = (entry: any) => entry.issue_number === fixture.issueNumber;
+        return !prefs.launched_issues?.some(ownsIssue)
+          && !prefs.pending_launch_deliveries?.some(ownsIssue)
+          && prefs.failed_issues?.some((entry: any) => ownsIssue(entry)
+            && entry.window_id === firstObservation.agent.window_id);
+      }, { timeout: 60_000, message: "the Host records the exact predecessor exit and releases its launch" }).toBe(true);
       const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
       const requeued = fixture.fixtureOperation("issue.monitor.requeue", {
         number: fixture.issueNumber, reason: "Issue #6362 real observer force-requeue regression", force: true,
