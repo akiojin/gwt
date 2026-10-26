@@ -868,10 +868,46 @@ fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
     runtime
         .window_hook_states
         .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    runtime.window_last_output_at.insert(
+        pm_window_id.clone(),
+        "2026-08-10T00:59:59Z".parse().unwrap(),
+    );
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "an old loop clock must not interrupt a PM that is still producing output"
+    );
+    runtime.window_last_output_at.remove(&pm_window_id);
     let decision = runtime
         .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .expect("a Running pane past the deferral bound is woken anyway");
     assert_eq!(decision.window_id, pm_window_id);
+    assert!(
+        decision.prompt.is_ascii(),
+        "the canonical system prompt must survive the real Windows provider unchanged"
+    );
+
+    seed_quiet_standing_supervision(&repo);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "pm-session-live");
+    let mut observed = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    observed.runtime_incarnation = Some(runtime.runtimes[&pm_window_id].incarnation);
+    observed.source_event = Some("Stop".into());
+    observed.last_activity_at = "2026-08-10T00:00:00Z".parse().unwrap();
+    observed.active_tool_calls = Some(Default::default());
+    observed.save(&runtime_path).unwrap();
+    assert!(runtime.pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z").is_none(),
+        "a real Running turn, including resident Stop continuation, must not be aged into an idle prompt");
+    observed.status = gwt_agent::AgentStatus::Idle;
+    observed.last_completed_hook_event_at = Some(observed.updated_at);
+    observed.save(&runtime_path).unwrap();
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "an exact completed Idle sidecar recovers a stale GUI Running observation"
+    );
 }
 
 #[test]

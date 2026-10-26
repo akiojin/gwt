@@ -1905,6 +1905,9 @@ pub(crate) struct PmDeliveryReplayGuard {
     target_session_id: String,
     ordinary_revision: u64,
     transaction_revision: u64,
+    // A wake keeps queued user input separate until its exact submit ACK.
+    // The boolean records a complete body; partial writes are readback-only.
+    retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
 }
 
 type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
