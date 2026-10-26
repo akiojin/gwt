@@ -964,7 +964,8 @@ fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
     let target = control_owner_launch(&owner, "target", inspection);
     control_register_pm(&project, &pm);
     let observer = control_owner_launch(&owner, "observer", control_launch_config(&project, 44));
-    let mut human_runtime = sample_runtime(temp.path(), Vec::new(), None);
+    let human_tab = sample_project_tab("human", "Project", project.clone(), ProjectKind::Git, &[]);
+    let mut human_runtime = sample_runtime(temp.path(), vec![human_tab], Some("human"));
     let human = human_runtime.handle_frontend_event(
         "close-client".into(),
         FrontendEvent::CloseFleetPane {
@@ -1636,20 +1637,11 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     init_repo(&project);
-    let tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-1",
-        project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let window_id = "tab-project::agent-1".to_string();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, _finalizers) = BlockingTaskSpawner::queued();
+    let tab = sample_project_tab("tab-project", "Project", project, ProjectKind::Git, &[]);
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    // The fixture tab already carries `agent-1`; close it so the loop below
-    // starts from an empty canvas and every round opens its own window.
-    assert!(runtime.close_window_outcome(&window_id).closed);
 
     let baseline = runtime.window_scoped_state_entry_count();
     let mut opened = Vec::new();
@@ -1663,8 +1655,13 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
         let id = combined_window_id("tab-project", &raw_id);
         runtime.register_window("tab-project", &raw_id);
         insert_test_pane_runtime(&mut runtime, &id);
+        let pty = owner_runtime_probe(&runtime, &id).pty;
         seed_window_scoped_state(&mut runtime, &id);
         assert!(runtime.close_window_outcome(&id).closed);
+        // The same physical id becomes reusable only after the real close ACK.
+        drain_queued_blocking_tasks(&finalizers);
+        apply_recorded_window_close_finalized(&mut runtime, &recorded);
+        assert!(pty.try_wait().unwrap().is_some());
         opened.push(id);
     }
 
@@ -1968,10 +1965,16 @@ fn agent_pane_sync_skips_a_contended_runtime_without_hiding_error_panes() {
     let caller = control_owner_launch(&owner, "reader", control_launch_config(&project, 375502));
     let error_id = owner.pane_id("failed");
     let mut failed = control_launch_config(&project, 375503);
-    failed.command = project
-        .join("nonexistent-agent-executable")
-        .display()
-        .to_string();
+    // Retained manual diagnostics are inspection launches. A failed producing
+    // genesis correctly compensates its Session instead of retaining this row.
+    failed.linked_issue_number = None;
+    failed.explicit_follow_up = false;
+    // A missing target can fail after the real PTY gate has started. Fail the
+    // gate executable itself to exercise the pre-PTY installation diagnostic.
+    owner_fixture_block_on(
+        owner.set_pty_start_gate(project.join("nonexistent-agent-executable"), Vec::new()),
+    )
+    .unwrap();
     let result = owner_fixture_block_on(owner.command(
         gwt::project_runtime::events::OwnerCommand::LaunchAgent {
             id: error_id.clone(),
@@ -1983,10 +1986,25 @@ fn agent_pane_sync_skips_a_contended_runtime_without_hiding_error_panes() {
             rows: 24,
         },
     ));
-    assert!(
-        result.is_err(),
-        "the actual launch must fail before a PTY is installed"
-    );
+    let receipt = result.expect("actual retained manual launch-failure receipt");
+    let failure: gwt::project_runtime::events::OwnerLaunchFailure =
+        serde_json::from_value(receipt["launch_failure"].clone())
+            .unwrap_or_else(|error| panic!("exact manual diagnostic required: {error}; {receipt}"));
+    assert_eq!(failure.id, error_id);
+    assert_eq!(receipt["incarnation"], failure.incarnation);
+    assert_eq!(receipt["session_id"], failure.session_id);
+    assert!(failure.detail.contains("nonexistent-agent-executable"));
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(inventory["panes"].as_array().unwrap().len(), 2);
+    assert!(inventory["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|pane| pane["id"] != error_id));
+    assert!(inventory["pending"].as_array().unwrap().is_empty());
     let (locked_tx, locked_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let pane = busy.pane.clone();
@@ -2739,6 +2757,9 @@ fn current_peer_pane_close_releases_caller_grant_lock_before_target_handoff() {
         .any(|event| event["kind"] == "workspace_state"));
     assert!(!target.current.load(std::sync::atomic::Ordering::Acquire));
     assert!(target.pty.try_wait().unwrap().is_some());
+    // The fixture rotated this bearer outside the owner's runtime. Release
+    // that exact fixture capability before the caller's normal teardown.
+    assert!(pane.issuer.revoke_token(&issued.token));
     control_close(&owner, &pane);
 }
 
