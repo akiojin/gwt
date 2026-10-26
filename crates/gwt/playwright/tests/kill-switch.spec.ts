@@ -294,7 +294,7 @@ test.describe("Anshin Phase 1 kill-switch + attention", () => {
     // launch-source field by design, so the fixture deliberately uses the same
     // Agent window schema and exact event projection as the manual pane. Switch
     // to it through Works before exercising its cues.
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await page.locator('.works-full [data-action="back"]').click();
     await page.locator('.work-row[data-window-id="agent-3"] .work-open').click();
     await expect(monitor.tile).toBeVisible();
     await expect(manual.tile).toBeHidden();

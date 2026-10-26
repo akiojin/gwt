@@ -44,9 +44,11 @@ test.describe("Agent window navigation without tabs", () => {
     const target = page.locator(".works-terminal[data-window-id='agent-2']");
     const source = page.locator(".workspace-window[data-id='agent-2']");
     await expect(target).toBeHidden();
-    await page.getByRole("button", { name: "Works", exact: true }).click();
+    await target.locator(".xterm").evaluate(node => { (window as any).__legacyGroupedTerminal = node; });
+    await page.locator('.works-full [data-action="back"]').click();
     await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
     await expect(active).toBeHidden();
     await expect(page.locator(".works-full-name")).toHaveText("Birch");
     // Read-only list caches intentionally omit the startup performance beacon;
@@ -69,6 +71,7 @@ test.describe("Agent window navigation without tabs", () => {
     await page.getByRole("button", { name: "Works", exact: true }).click();
     await page.locator('.work-row[data-window-id="agent-2"] .work-open').click();
     await expect(target).toBeVisible();
+    expect(await target.locator(".xterm").evaluate(node => node === (window as any).__legacyGroupedTerminal)).toBe(true);
   });
 
   test("provider runtime pushes update Works and fleet counts within one second", async ({ page }, info) => {

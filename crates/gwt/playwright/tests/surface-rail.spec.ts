@@ -504,8 +504,30 @@ test.describe("Surface rail", () => {
     });
     await page.locator('.op-rail__surface[data-surface="settings"]').click();
     const settings = page.locator('.workspace-window[data-preset="settings"]');
+    const railPopup = page.locator("#rail-control-explanation");
+    const systemTab = settings.getByRole("tab", { name: "System", exact: true });
+    await page.locator('.op-rail__surface[data-surface="works"]').hover();
+    await expect(railPopup).toBeVisible();
+    const popupBounds = await railPopup.boundingBox(), tabBounds = await systemTab.boundingBox();
+    expect(popupBounds && tabBounds).toBeTruthy();
+    const left = Math.max(popupBounds!.x, tabBounds!.x), right = Math.min(popupBounds!.x + popupBounds!.width, tabBounds!.x + tabBounds!.width);
+    const top = Math.max(popupBounds!.y, tabBounds!.y), bottom = Math.min(popupBounds!.y + popupBounds!.height, tabBounds!.y + tabBounds!.height);
+    expect(right - left).toBeGreaterThan(0); expect(bottom - top).toBeGreaterThan(0);
+    const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    await page.mouse.move(point.x, point.y);
+    await expect(railPopup).toBeVisible();
+    // This is an ordinary native click at a point inside both existing UI
+    // rectangles; the explanation must not consume the underlying tab action.
+    await systemTab.click({ position: { x: point.x - tabBounds!.x, y: point.y - tabBounds!.y } });
+    await expect(systemTab).toHaveAttribute("aria-selected", "true");
+    await expect(railPopup).toBeHidden();
     await settings.getByRole("tab", { name: "Issues", exact: true }).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
+    await page.locator('.op-rail__surface[data-surface="agents"]').hover();
+    await expect(railPopup).toBeVisible();
+    await issues.locator(".knowledge-monitor-pill").focus();
+    await expect(railPopup).toBeHidden();
+    await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
     await issues.getByRole("button", {name:"Issues settings",exact:true}).click();
     await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
     await clearMessages(page);
@@ -564,8 +586,10 @@ test.describe("Surface rail", () => {
     const tip = await explanation.boundingBox(), railBox = await page.locator(".op-rail").boundingBox();
     expect(tip && railBox).toBeTruthy();
     expect(tip!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
-    await explanation.hover();
+    await page.mouse.move(tip!.x + tip!.width / 2, tip!.y + tip!.height / 2);
     await expect(explanation).toBeVisible();
+    await page.mouse.move(1439, 899);
+    await expect(explanation).toBeHidden();
     await agents.click();
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
     await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible();
@@ -576,7 +600,7 @@ test.describe("Surface rail", () => {
     expect(narrowTip && narrowRail).toBeTruthy();
     expect(narrowTip!.y).toBeGreaterThanOrEqual(narrowRail!.y + narrowRail!.height);
     expect(narrowTip!.x + narrowTip!.width).toBeLessThanOrEqual(392);
-    await explanation.hover();
+    await page.mouse.move(narrowTip!.x + narrowTip!.width / 2, narrowTip!.y + narrowTip!.height / 2);
     await expect(explanation).toBeVisible();
     await page.mouse.move(399, 699);
     await works.focus();

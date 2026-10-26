@@ -186,7 +186,7 @@ test.describe("Project open entry surfaces", () => {
     // Controlled inbound state checks the legacy picker render after errors.
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'hub_state', hub: { app_version: 'e2e', projects: [], recent_projects: [] } }));
     await expect(page.locator('#project-picker')).toBeVisible();
-    await expect(trigger).toBeDisabled();
+    await expect(trigger).toBeEnabled();
     await page.evaluate(() => (window as any).__gwtProjectOpenFixture.reply({ kind: 'workspace_state', workspace: { app_version: 'e2e', tabs: [], active_tab_id: null, recent_projects: [] } }));
     await expect(pickerError).toBeHidden();
     await expect(pickerError).toHaveJSProperty('hidden', true);

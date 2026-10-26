@@ -206,7 +206,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       for (const control of rail.querySelectorAll("button[title]")) {
         setControlExplanation(control, control.title);
       }
-      const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right" });
+      const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right", passThrough: true });
 
       // The rail owns PM navigation and launches a missing PM.
       for (const id of ["op-pm-entry"]) {

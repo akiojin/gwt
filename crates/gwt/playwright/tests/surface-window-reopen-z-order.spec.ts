@@ -19,7 +19,12 @@ test.describe("surface reopen", () => {
     await expect(page.locator("#split-surfaces")).toBeVisible();
     await expect(page.locator("#canvas, #canvas-stage, #fleet-minimap")).toHaveCount(0);
 
-    await page.locator('.op-rail__surface[data-surface="board"]').click();
+    await page.locator("#op-palette-button").click();
+    const paletteInput = page.locator("#op-palette-input");
+    await expect(paletteInput).toBeFocused();
+    await paletteInput.fill("Focus Board surface");
+    await expect(page.getByRole("option", { name: /^Focus Board surface/ })).toBeVisible();
+    await paletteInput.press("Enter");
 
     await expect(board).toHaveClass(/focused/);
     await expect(page.getByRole("region", { name: "Main pane", exact: true })).toHaveAttribute("data-surface", "board");

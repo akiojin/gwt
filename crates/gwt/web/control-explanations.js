@@ -11,12 +11,13 @@ export function setControlExplanation(node, text, key, focusable = true) {
   return node;
 }
 
-export function bindControlExplanations({ document, root, id, placement = "bottom" }) {
+export function bindControlExplanations({ document, root, id, placement = "bottom", passThrough = false }) {
   const popup = document.createElement("div");
   popup.className = "op-runtime-health-detail issue-control-explanation";
   popup.id = id;
   popup.setAttribute("role", "tooltip");
   popup.hidden = true;
+  if (passThrough) popup.style.pointerEvents = "none";
   document.body.appendChild(popup);
   let anchor = null;
   let focused = null;
@@ -35,6 +36,13 @@ export function bindControlExplanations({ document, root, id, placement = "botto
     }
     anchor = null;
     popup.hidden = true;
+    if (passThrough) popupHovered = false;
+  };
+  const insidePopup = event => {
+    const rect = popup.getBoundingClientRect();
+    return Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      && event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
   };
   const show = node => {
     if (!node?.isConnected || !root.contains(node) || node.closest("[hidden], .hidden")) { hide(); return; }
@@ -86,6 +94,7 @@ export function bindControlExplanations({ document, root, id, placement = "botto
     if (!boundary.contains(event.target) || boundary.contains(event.relatedTarget)) return;
     hovered = null;
     if (popup.contains(event.relatedTarget)) return;
+    if (passThrough && insidePopup(event)) { popupHovered = true; return; }
     if (focused) show(focused); else hide();
   };
   const focus = event => { focused = pointerActive ? null : target(event); if (focused && !restoringFocus) show(focused); };
@@ -111,6 +120,18 @@ export function bindControlExplanations({ document, root, id, placement = "botto
   };
   const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
   const pointerEnd = () => { pointerActive = false; };
+  const pointerMove = event => {
+    if (popup.hidden) return;
+    popupHovered = insidePopup(event);
+    if (root.contains(event.target) || popupHovered) return;
+    hovered = null;
+    if (focused) show(focused); else hide();
+  };
+  const outsideFocus = event => {
+    if (root.contains(event.target)) return;
+    focused = null; hovered = null; hide();
+  };
+  const outsidePress = event => { if (!root.contains(event.target)) pointerDown(); };
   const dragStart = () => { dragging = true; pointerDown(); };
   const dragEnd = () => { dragging = false; pointerEnd(); };
   const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
@@ -124,6 +145,11 @@ export function bindControlExplanations({ document, root, id, placement = "botto
   document.addEventListener("scroll", refresh, true);
   document.addEventListener("pointerup", pointerEnd);
   document.addEventListener("pointercancel", pointerEnd);
+  if (passThrough) {
+    document.addEventListener("pointermove", pointerMove);
+    document.addEventListener("focusin", outsideFocus, true);
+    document.addEventListener("pointerdown", outsidePress, true);
+  }
   document.defaultView?.addEventListener("resize", hide);
   return {
     get visible() { return !popup.hidden; },
@@ -141,6 +167,11 @@ export function bindControlExplanations({ document, root, id, placement = "botto
       document.removeEventListener("keydown", escape, true);
       document.removeEventListener("pointerup", pointerEnd);
       document.removeEventListener("pointercancel", pointerEnd);
+      if (passThrough) {
+        document.removeEventListener("pointermove", pointerMove);
+        document.removeEventListener("focusin", outsideFocus, true);
+        document.removeEventListener("pointerdown", outsidePress, true);
+      }
       document.defaultView?.removeEventListener("resize", hide);
       popup.remove();
     },
