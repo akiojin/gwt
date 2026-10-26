@@ -655,6 +655,15 @@ test("Candidates follow the shared roster before version metadata and retain dir
   rosterModel.update(state => ({ revision: 2, members: state.members.map(member => ({ ...member, name: `New ${member.name}` })) })); flush();
   assert.ok(panel.querySelector('[data-profile-field="model"]') === model);
   assert.equal(model.value, "draft");
+  surface.applyIssueSettingsStatus({ enabled: true, autonomous_mode: true }, "/A");
+  const labels = document.querySelector('[aria-label="Allowed labels"]');
+  labels.value = "unfinished labels";
+  Object.defineProperty(document, "activeElement", { value: labels, configurable: true });
+  surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
+  assert.equal(document.querySelector('[aria-label="Allowed labels"]'), labels);
+  assert.equal(labels.value, "unfinished labels");
+  assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
+  assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
