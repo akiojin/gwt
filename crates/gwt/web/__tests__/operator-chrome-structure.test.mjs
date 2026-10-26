@@ -5046,15 +5046,15 @@ test("Terminal output decode is deferred out of the receive path", () => {
   );
 });
 
-test("Hidden window output is gated while Agents retain shared preview buffers", () => {
+test("Hidden window output is gated while PM and Agents retain their VT buffers", () => {
   const batcherConfig = appSource.match(
     /const\s+terminalOutputBatcher\s*=\s*createTerminalOutputBatcher\(\{([\s\S]*?)\n\s{6}\}\);/,
   );
   assert.ok(batcherConfig, "app.js must configure the terminal output batcher");
   assert.match(
     batcherConfig[1],
-    /canWrite:\s*\(windowId\)\s*=>\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
-    "Agents must keep shared Issue preview buffers current while other hidden windows retain output gating",
+    /canWrite:\s*\(windowId\)\s*=>\s*pmChatViews\.has\(windowId\)\s*\|\|\s*\(worksHost\s*&&\s*worksSurface\?\.contains\(windowId\)\)\s*\|\|\s*canRefreshTerminalViewport\(windowId\)/,
+    "PM and Agents must keep their VT buffers current while other hidden windows retain output gating",
   );
 
   const renderWorkspaceBody = extractFunctionBody(appSource, "renderWorkspace");
