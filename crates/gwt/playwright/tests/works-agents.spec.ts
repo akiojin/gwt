@@ -450,6 +450,7 @@ test.describe("Works and Agents approved baseline", () => {
     const newMemberTool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
     await expect(newMemberTool.locator("option")).toHaveText(["Codex", "Claude Code"]);
     await newMemberTool.selectOption("codex");
+    await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
     await roster(page).locator('.roster-capacity [data-action="add"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("4");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
@@ -459,7 +460,7 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
 
@@ -471,12 +472,18 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
     await expect(roster(page).locator(".roster-now, .roster-row[data-member-id='m-one'] .roster-current")).toHaveCount(0);
     await page.evaluate(() => (window as any).__worksAgentsFixture.error("Roster readback unavailable"));
-    await expect(roster(page).locator(".roster-error")).toHaveText("Roster readback unavailable");
+    await expect(roster(page).locator(":scope > .roster-error")).toHaveText("Roster readback unavailable");
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
 
     await page.setViewportSize({ width: 400, height: 1000 });
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
     await page.screenshot({ path: info.outputPath("agents-approved-400.png") });
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    const previewName = page.locator('.agents-surface--preview [aria-label="Name for new member"]');
+    await expect(previewName).toBeDisabled();
+    await expect(previewName).toHaveAttribute("tabindex", "-1");
+    await page.getByRole("button", { name: "Close split", exact: true }).click();
     await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
     await openRail(page, "works");
@@ -646,7 +653,7 @@ async function installWorksAgentsBackend(page: Page) {
         if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
         if (message.kind === "agent_roster") {
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: "Dahlia", enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           this.emit(rosterSnapshot());
         }

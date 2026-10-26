@@ -12,11 +12,32 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
-    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Tool for new member<select aria-label="Tool for new member" title="This tool stays fixed after registration."></select></label><button type="button" data-action="add">＋ Add member</button></div>
-    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Add a member · Increase concurrent capacity by one</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
+    <p class="roster-error" role="status" hidden></p><section class="roster-team" id="roster-team" role="tabpanel" aria-labelledby="roster-tab-team"><div class="roster-capacity"><div><b class="roster-count">—</b><span> enabled members<br>Concurrent capacity <b class="roster-capacity-value">—</b></span></div><div class="roster-capacity-scale"><div class="roster-capacity-bar" role="meter" aria-label="Enabled members"><span class="roster-capacity-fill"></span><span class="roster-capacity-limit"></span></div><small class="roster-capacity-note"></small></div><button type="button" data-action="rest">− Rest member</button><label class="settings-field">Name for new member<input class="settings-input" type="text" aria-label="Name for new member" aria-describedby="roster-registration-error" autocomplete="off" required></label><label class="settings-field">Tool for new member<select aria-label="Tool for new member"></select></label><button type="button" data-action="add">Register</button><p id="roster-registration-error" class="roster-error" role="status" hidden></p></div>
+    <p class="roster-description">Named members are reused across issues with their registered tool. Current work and terminals are in Works.</p><div class="roster-split"><div><div class="roster-list" role="list" aria-label="Team members"></div><button type="button" class="roster-add" data-action="add"><span aria-hidden="true">＋</span> Register a member · Choose a name and tool above</button></div><aside class="roster-detail" aria-label="Selected member"></aside></div></section>
     <section class="roster-past" id="roster-past" role="tabpanel" aria-labelledby="roster-tab-past" hidden><div class="roster-past-kpis"></div><p class="roster-description">Previous contributors recorded in sessions and Board. Periods are shown in UTC.</p><table><thead><tr><th>Agent</th><th>Kind</th><th>Issues</th><th>Period (UTC)</th><th>Posts</th></tr></thead><tbody></tbody></table><p class="roster-past-empty">No previous contributors are recorded.</p></section>`;
   const toolSelect = element.querySelector('[aria-label="Tool for new member"]');
+  const nameInput = element.querySelector('[aria-label="Name for new member"]');
+  let nameTouched = false, registeredDraft = null;
   let registrationTools = [], renderedTools = "";
+  function syncRegistration() {
+    const roster = rosterModel.read(), name = nameInput.value.trim();
+    if (roster.error) registeredDraft = null;
+    if (registeredDraft && roster.members.some(member => !registeredDraft.ids.has(member.member_id)
+      && member.name === registeredDraft.name)) {
+      if (name === registeredDraft.name) { nameInput.value = ""; nameTouched = false; }
+      registeredDraft = null;
+    }
+    const draft = nameInput.value.trim();
+    const error = !draft ? "Enter a display name." : roster.members.some(member => member.name.trim().toLowerCase() === draft.toLowerCase())
+      ? "This name is already registered, including resting members." : "";
+    const message = element.querySelector("#roster-registration-error");
+    message.textContent = nameTouched ? error : ""; message.hidden = !message.textContent;
+    nameInput.setAttribute("aria-invalid", String(nameTouched && !!error));
+    for (const button of element.querySelectorAll('[data-action="add"]')) {
+      button.disabled = !!error || registrationTools.length === 0 || !Number.isSafeInteger(roster.revision);
+      button.title = registrationTools.length ? "Register this name with the selected tool." : "Loading supported and custom coding tools…";
+    }
+  }
   function syncTools() {
     const builtins = supportedAgentsModel?.read().agents;
     const custom = customAgentsModel?.read().catalog;
@@ -33,10 +54,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
       renderedTools = key;
     }
     toolSelect.disabled = registrationTools.length === 0;
-    for (const button of element.querySelectorAll('[data-action="add"]')) {
-      button.disabled = registrationTools.length === 0;
-      button.title = registrationTools.length ? "Register a member with the selected fixed tool." : "Loading supported and custom coding tools…";
-    }
+    syncRegistration();
   }
   let selectedId = null, tab = "team", previewElement = null, disposed = false;
   let renderedRoster, renderedActivity, renderedCatalog, renderedSchedule, renderedSwitch;
@@ -282,7 +300,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     if (!previewElement) return;
     const clone = element.cloneNode(true); clone.classList.add("agents-surface--preview"); clone.setAttribute("aria-label", "Agents read-only preview");
     for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
-    for (const control of clone.querySelectorAll("button, select")) { control.disabled = true; control.tabIndex = -1; }
+    for (const control of clone.querySelectorAll("button, select, input")) { control.disabled = true; control.tabIndex = -1; }
     for (const row of clone.querySelectorAll(".roster-row")) row.tabIndex = -1;
     previewElement.replaceChildren(clone);
   }
@@ -364,11 +382,16 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     for (const button of element.querySelectorAll("[data-tab]")) { const active = button.dataset.tab === tab; button.setAttribute("aria-selected", String(active)); button.tabIndex = active ? 0 : -1; }
     element.querySelector(".roster-team").hidden = tab !== "team"; element.querySelector(".roster-past").hidden = tab !== "past";
     element.dataset.catalogVersion = String(catalog.version);
+    syncRegistration();
     renderedRoster = roster; renderedActivity = activityPresentation(activity); renderedCatalog = catalog; renderedSchedule = schedule; renderedSwitch = switchState(); syncPreview();
   }
   for (const button of element.querySelectorAll('[data-action="add"]')) button.addEventListener("click", () => {
-    if (registrationTools.some(tool => tool.id === toolSelect.value)) onAddMember(toolSelect.value);
+    nameTouched = true; syncRegistration();
+    if (button.disabled || !registrationTools.some(tool => tool.id === toolSelect.value)) return;
+    registeredDraft = { name: nameInput.value.trim(), ids: new Set(rosterModel.read().members.map(member => member.member_id)) };
+    onAddMember(toolSelect.value, registeredDraft.name);
   });
+  nameInput.addEventListener("input", () => { nameTouched = true; syncRegistration(); syncPreview(); });
   element.querySelector('.roster-capacity [data-action="rest"]').addEventListener("click", restSelected);
   for (const button of element.querySelectorAll("[data-tab]")) {
     button.addEventListener("click", () => { tab = button.dataset.tab; sync(); });

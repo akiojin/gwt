@@ -2594,6 +2594,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         &repo,
         &runtime.sessions_dir,
         gwt::agent_names::AgentRosterAction::Add {
+            name: None,
             agent_id: Some("claude".into()),
         },
         None,

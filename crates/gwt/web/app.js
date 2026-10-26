@@ -5581,7 +5581,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return worksSurface.openWork(live);
       }
       agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
-        onAddMember: agentId => requestAgentRoster({ kind: "add", agent_id: agentId }),
+        onAddMember: (agentId, name) => {
+          applyAgentRosterError({ project_key: routeProjectKey, message: null });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+        },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
