@@ -119,7 +119,7 @@ test(SEQUENTIAL ? `Issue #6096/#6393: ${LAUNCH_COUNT} sequential admitted launch
       sequential_launches: fixture.sequential ? JSON.parse(await readFile(join(HOME, 'sequential-launches.json'), 'utf8').catch(() => '[]')) : undefined,
       launches: await launches(), browser_errors: errors,
       'User Verification Result': 'n/a (autonomous)', 'Agent Visual Check': passed ? 'pass' : 'fail',
-      limitations: 'Offline already-admitted delivery replay excludes upstream claim/admission and model execution. Sequential mode times provider/hook handoff within 120 seconds. Cargo-load mode instead times exact durable claim/delivery materialization, a session-bound running window and terminal readiness within 120 seconds; all provider/hook assertions remain required after the three timed windows and load pause. The real build script records identical Cargo/build-script PIDs and increasing CPU/work counters across each loaded window interval. Both themes inspect the same owned launch batch.',
+      limitations: 'Offline already-admitted delivery replay excludes upstream claim/admission and model execution. Sequential mode times provider/hook handoff within 120 seconds. Cargo-load mode instead times exact durable claim/delivery materialization, a session-bound running window and native terminal runtime presence within 120 seconds; hidden-terminal fit is recorded separately because it waits for reveal. All provider/hook assertions remain required after the three timed windows and load pause. The real build script records identical Cargo/build-script PIDs and increasing CPU/work counters across each loaded window interval. Both themes inspect the same owned launch batch.',
     };
     const json = JSON.stringify(evidence, null, 2) + '\n';
     await writeFile(join(fixture.evidence_directory, `launch-${theme}.json`), json);
@@ -178,11 +178,13 @@ async function sequentialLaunches(page: any, fixture: any): Promise<void> {
             const bound = await page.evaluate(({ id, cursor }: any) => {
               const reply = ((window as any).__gwtPlaywrightMessages || []).filter((entry: any) => entry.sequence > cursor && entry.payload.kind === 'window_list').at(-1);
               const candidate = reply?.payload.windows?.find((entry: any) => entry.id === id && entry.session_id && ['running', 'idle'].includes(entry.status));
-              return (window as any).__gwtTerminalTestApi?.metrics(id)?.isReady === true ? candidate : null;
+              // SPEC-2008 FR-057 intentionally defers fit for hidden hosts.
+              const terminal = (window as any).__gwtTerminalTestApi?.metrics(id);
+              return candidate && terminal?.hasRuntime ? { candidate, terminal } : null;
             }, { id: ack.window_id, cursor });
             if (!bound) return false;
-            Object.assign(receipt, { window_id: ack.window_id, session_id: bound.session_id,
-              materialization: ack, terminal_ready: true });
+            Object.assign(receipt, { window_id: ack.window_id, session_id: bound.candidate.session_id,
+              materialization: ack, terminal_metrics: bound.terminal });
             return true;
           }
           const providers = (await launches()).filter(provider => provider.argv.join(' ').includes(`#${expected.issue_number}`));
