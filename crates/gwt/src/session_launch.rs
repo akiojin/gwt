@@ -59,6 +59,16 @@ pub fn launch_config_from_persisted_session(
     let agent_id = session.agent_id.clone();
     let pm_scratch = crate::pm_registry::pm_scratch_dir_for_pm_worktree(&session.worktree_path);
     let mut builder = gwt_agent::AgentLaunchBuilder::new(agent_id);
+    if let gwt_agent::AgentId::Custom(id) = &session.agent_id {
+        if let Some(agent) =
+            gwt_agent::load_custom_agents_from_path(&gwt_core::paths::gwt_config_path())
+                .unwrap_or_default()
+                .into_iter()
+                .find(|agent| agent.id == *id)
+        {
+            builder = builder.custom_agent(agent);
+        }
+    }
     builder = builder.working_dir(session.worktree_path.clone());
     if !session.branch.is_empty() {
         builder = builder.branch(session.branch.clone());
