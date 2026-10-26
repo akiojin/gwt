@@ -2889,6 +2889,11 @@ fn try_apply_issue_monitor_control(
             {
                 return None;
             }
+            if crate::agent_names::validate_registered_profiles(&monitor.prefs(), &profiles)
+                .is_err()
+            {
+                return None;
+            }
             let mut candidate = monitor.clone();
             // Same revocation as the GUI save: proposals prepared against the
             // previous pool must not commit under the new one.
@@ -10758,6 +10763,7 @@ exit 0
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: "claude".to_string(),
             model: Some("sonnet".to_string()),
             reasoning: None,
@@ -14955,6 +14961,7 @@ exit 0
 
         let saved = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
@@ -15072,6 +15079,7 @@ exit 0
         let seed = crate::IssueMonitorPrefs {
             enabled: true,
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 ..sample_issue_monitor_profile()
             }),
@@ -24215,6 +24223,7 @@ exit 1
         // The GUI wrote a launch_profile + custom tuning straight to disk.
         let on_disk = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "claude".to_string(),
                 model: None,
                 reasoning: None,

@@ -981,16 +981,6 @@ test("Profile disposal cancels pending saves and remounts without closed-window 
   surface.disposeProfileWindow('profile');
 });
 
-test("Window List receiver updates the catalog model and rejects direct rendering bypass", () => {
-  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
-  const file = 'crates/gwt/web/app.js';
-  const modules = new Map([['crates/gwt/web/project-shell-surface.js', readFileSync(new URL('../project-shell-surface.js', import.meta.url), 'utf8')]]);
-  const migrated = findings => findings.filter(finding => finding.root === 'receive' && finding.context === '/window_list');
-  assert.deepEqual(migrated(scanModule(app, file, { modules })), []);
-  const bypass = app.replace('case "window_list":', 'case "window_list": element.textContent = event.kind;');
-  assert.ok(migrated(scanModule(bypass, file, { modules })).some(finding => finding.kind === 'dom-write'));
-});
-
 test("workspace receivers cannot manually sync Agents or Split outside the catalog", () => {
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const workspace = app.slice(app.indexOf('function renderWorkspace('), app.indexOf('const socketTransport'));

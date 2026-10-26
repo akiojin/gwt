@@ -2320,6 +2320,7 @@ fn sample_agent_options() -> Vec<gwt::AgentOption> {
 
 fn sample_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
     gwt::IssueMonitorLaunchProfile {
+        agent_member_id: None,
         agent_id: "claude".to_string(),
         model: Some("gpt-5.5".to_string()),
         reasoning: Some("high".to_string()),
@@ -6903,6 +6904,7 @@ fn prepare_monitor_relaunch(
 
 fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
     gwt::IssueMonitorLaunchProfile {
+        agent_member_id: None,
         agent_id: "codex".to_string(),
         model: Some("gpt-5.5".to_string()),
         reasoning: Some("high".to_string()),
@@ -6920,6 +6922,7 @@ fn codex_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
 
 fn claude_issue_monitor_launch_profile() -> gwt::IssueMonitorLaunchProfile {
     gwt::IssueMonitorLaunchProfile {
+        agent_member_id: None,
         agent_id: "claude".to_string(),
         model: Some("sonnet".to_string()),
         reasoning: Some("low".to_string()),
@@ -7379,6 +7382,7 @@ fn convert_monitor_relaunch_fixture_to_grok(
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load Monitor prefs");
     prefs.launch_profile = Some(gwt::IssueMonitorLaunchProfile {
+        agent_member_id: None,
         agent_id: "grok".to_string(),
         model: Some("grok-4.20-beta".to_string()),
         reasoning: Some("high".to_string()),
@@ -7697,6 +7701,7 @@ fn assert_monitor_fresh_successor(result: AgentLaunchResult, fixture: &MonitorRe
 
 fn pool_profile(agent_id: &str) -> gwt::IssueMonitorLaunchProfile {
     gwt::IssueMonitorLaunchProfile {
+        agent_member_id: None,
         agent_id: agent_id.to_string(),
         model: None,
         reasoning: None,
@@ -7733,6 +7738,26 @@ fn open_agent_settings_sets(
     seeded.set_launch_profile_pool(pool);
     gwt::save_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(repo), &seeded)
         .expect("seed pool");
+    // Settings chooses registered people, while detection only supplies tool capabilities.
+    let sessions = temp.join("sessions");
+    let mut roster = gwt::agent_names::read_project_roster(repo, &sessions).unwrap();
+    for tool in ["codex", "claude", "grok"] {
+        if !roster
+            .members
+            .iter()
+            .any(|member| member.agent_id.as_deref() == Some(tool))
+        {
+            roster = gwt::agent_names::mutate_project_roster(
+                repo,
+                &sessions,
+                gwt::agent_names::AgentRosterAction::Add {
+                    agent_id: Some(tool.into()),
+                },
+                None,
+            )
+            .unwrap();
+        }
+    }
     let tab = sample_project_tab("tab-1", "Repo", repo.to_path_buf(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) = sample_runtime_with_events(temp, vec![tab], Some("tab-1"));
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load_with_agent_options(

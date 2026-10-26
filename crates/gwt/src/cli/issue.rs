@@ -4985,7 +4985,8 @@ pub fn validate_monitor_profiles_set(
             }
             Some(agent_id) => agent_id.command().to_ascii_lowercase(),
         };
-        if !providers.insert(provider.clone()) {
+        let identity = crate::issue_monitor::launch_profile_identity(profile);
+        if !providers.insert(identity) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("duplicate launch candidate for provider {provider}"),
@@ -5011,6 +5012,7 @@ fn apply_monitor_profiles_set(
     usage_threshold_percent: Option<u8>,
 ) -> io::Result<()> {
     validate_monitor_profiles_set(profiles, usage_threshold_percent)?;
+    crate::agent_names::validate_registered_profiles(prefs, profiles).map_err(io::Error::other)?;
     let mut candidate =
         crate::IssueMonitorState::with_prefs(crate::IssueMonitorConfig::default(), prefs.clone());
     // Same revocation the GUI save performs: proposals prepared against the
@@ -14373,6 +14375,7 @@ mod tests {
 
     fn pool_profile(agent_id: &str, prefer_for: &[&str]) -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -18570,6 +18573,7 @@ command = "my-agent-cli"
             &crate::IssueMonitorPrefs {
                 enabled: true,
                 launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                    agent_member_id: None,
                     agent_id: "codex".to_string(),
                     model: Some("gpt-5.5".to_string()),
                     reasoning: Some("high".to_string()),

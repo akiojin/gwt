@@ -772,6 +772,7 @@ mod tests {
             schema_version: 1,
             revision: 1,
             members: vec![crate::agent_names::AgentMember {
+                agent_id: None,
                 agent_member_id: "member".into(),
                 name: "Member".into(),
                 enabled: true,

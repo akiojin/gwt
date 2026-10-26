@@ -1751,9 +1751,14 @@ async function installBackend(page: Page, { includeAgent = false, observeSkipped
             max_active_agents_mode:message.max_active_agents == null ? "auto" : "manual"});
           this.emit({kind:"issue_monitor_status",status});
         }
+        else if(message.kind==="agent_roster") {
+          this.emit({kind:"agent_roster",roster:{project_key:projectKey,revision:1,capacity:1,members:[
+            {agent_member_id:"queue-member",name:"Aster",agent_id:"codex",provider:"codex",enabled:true,assignment:null}
+          ],past_contributors:[],by_session:{}}});
+        }
         else if(message.kind==="get_issue_monitor_profiles") {
           this.emit({kind:"issue_monitor_profiles",request_id:message.request_id,project_root:"/fixture",
-            profiles:[{agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
+            profiles:[{agent_member_id:"queue-member",agent_id:"codex",model:"gpt-6-sol",prefer_for:[]}],usage_threshold_percent:80});
         }
         else if(message.kind==="list_issue_monitor") {
           this.emit({kind:"issue_monitor_status",status});

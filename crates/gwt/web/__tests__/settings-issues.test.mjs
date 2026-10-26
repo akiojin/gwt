@@ -26,6 +26,10 @@ const candidateChoices = {
   ], docker_services: ["dev", "worker"], default_docker_service: "dev",
 };
 
+const candidateMembers = ["codex", "claude", "hermes", "custom"].map(agent_id => ({
+  member_id: `m-${agent_id}`, agent_member_id: `m-${agent_id}`, agent_id, name: agent_id, enabled: true,
+}));
+
 function selectValue(control, value) {
   let option = [...control.options].find(option => option.value === value);
   if (!option) {
@@ -46,7 +50,8 @@ function load(name, bindings = {}) {
     if (source[end] === "}") depth--;
     end++;
   }
-  return Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
+  const loaded = Function(...Object.keys(bindings), `return (${source.slice(start, end)})`)(...Object.values(bindings));
+  return name === "renderAgentsSettingsPanel" ? (panel, options) => loaded(panel, { availableMembers: candidateMembers, ...options }) : loaded;
 }
 
 test("Settings entry points reuse only the requested surface owner", () => {
@@ -344,6 +349,69 @@ test("AC-6: Issues Settings exposes explanations for capacity, refill and target
   assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
   assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
   assert.deepEqual(sent, [], "registering explanations does not change settings");
+  const viewport = document.defaultView;
+  const previousViewport = { width: viewport.innerWidth, height: viewport.innerHeight };
+  t.after(() => { viewport.innerWidth = previousViewport.width; viewport.innerHeight = previousViewport.height; });
+  viewport.innerWidth = 400; viewport.innerHeight = 800;
+  replacement.getBoundingClientRect = () => ({ left: 100, right: 200, top: 50, bottom: 74 });
+  const settingsPopup = document.getElementById("settings-explanation");
+  settingsPopup.getBoundingClientRect = () => ({ width: 120, height: 80 });
+  explanations.refresh();
+  assert.equal(settingsPopup.style.left, "100px", "the default placement remains aligned below the control");
+  assert.equal(settingsPopup.style.top, "73px");
+
+  const rail = document.createElement("nav"), control = document.createElement("button");
+  rail.appendChild(control); document.body.appendChild(rail);
+  setControlExplanation(control, "Works: live output and terminals");
+  let railRect = { left: 0, right: 72, top: 44, bottom: 772, width: 72, height: 728 };
+  rail.getBoundingClientRect = () => railRect;
+  control.getBoundingClientRect = () => ({ left: 4, right: 68, top: 140, bottom: 184 });
+  const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-explanation", placement: "right", passThrough: true });
+  t.after(() => railExplanations.dispose());
+  const railPopup = document.getElementById("rail-explanation");
+  railPopup.getBoundingClientRect = () => {
+    const left = parseFloat(railPopup.style.left) || 0, top = parseFloat(railPopup.style.top) || 0;
+    const width = Math.min(360, parseFloat(railPopup.style.maxWidth) || 360);
+    return { left, right: left + width, top, bottom: top + 80, width, height: 80 };
+  };
+  assert.equal(railPopup.style.pointerEvents, "none", "rail explanations let native main controls receive pointer input");
+  control.dispatchEvent(new viewport.Event("mouseover", { bubbles: true }));
+  assert.equal(railPopup.style.left, "72px", "a side explanation clears every rail control");
+  assert.equal(railPopup.style.maxWidth, "320px", "the popup shrinks to the available right space at 400px");
+  const toPadding = new viewport.Event("mouseout", { bubbles: true });
+  Object.assign(toPadding, { relatedTarget: rail }); control.dispatchEvent(toPadding);
+  assert.equal(railExplanations.visible, true, "rail padding bridges the pointer into the hoverable popup");
+  const toPopup = new viewport.Event("mouseout", { bubbles: true });
+  Object.assign(toPopup, { relatedTarget: panel, clientX: 80, clientY: 150 }); rail.dispatchEvent(toPopup);
+  const readPopup = new viewport.Event("pointermove", { bubbles: true });
+  Object.assign(readPopup, { clientX: 80, clientY: 150 }); document.dispatchEvent(readPopup);
+  assert.equal(railExplanations.visible, true, "a transparent popup stays readable from its real pointer coordinates");
+  const leavePopup = new viewport.Event("pointermove", { bubbles: true });
+  Object.assign(leavePopup, { clientX: 399, clientY: 799 }); document.dispatchEvent(leavePopup);
+  assert.equal(railExplanations.visible, false, "leaving both rail and popup dismisses the explanation");
+  control.dispatchEvent(new viewport.Event("focusin", { bubbles: true }));
+  replacement.dispatchEvent(new viewport.Event("focusin", { bubbles: true }));
+  assert.equal(railExplanations.visible, false, "outside keyboard focus dismisses the rail explanation");
+  assert.equal(settingsPopup.hidden, false, "the focused main control retains its own explanation");
+  assert.equal(document.querySelectorAll('[role="tooltip"]:not([hidden])').length, 1);
+  control.dispatchEvent(new viewport.Event("mouseover", { bubbles: true }));
+  let nativePointerDown = 0;
+  replacement.addEventListener("pointerdown", () => { nativePointerDown += 1; });
+  const press = new viewport.Event("pointerdown", { bubbles: true, cancelable: true }); replacement.dispatchEvent(press);
+  assert.equal(nativePointerDown, 1, "outside pointer input proceeds through its original handler");
+  assert.equal(press.defaultPrevented, false);
+  assert.equal(railExplanations.visible, false);
+  control.dispatchEvent(new viewport.Event("mouseover", { bubbles: true }));
+  const escape = new viewport.Event("keydown", { bubbles: true, cancelable: true });
+  Object.assign(escape, { key: "Escape" }); control.dispatchEvent(escape);
+  assert.equal(railExplanations.visible, false);
+  document.dispatchEvent(readPopup); railExplanations.refresh();
+  assert.equal(railExplanations.visible, false, "pointer geometry and refresh never reopen an Escape-dismissed explanation");
+  control.dispatchEvent(new viewport.Event("mouseover", { bubbles: true }));
+  railRect = { left: 0, right: 400, top: 44, bottom: 180, width: 400, height: 136 };
+  railExplanations.refresh();
+  assert.ok(parseFloat(railPopup.style.top) >= railRect.bottom, "the wrapped top strip stays clear of explanations");
+  assert.ok(parseFloat(railPopup.style.left) + Math.min(360, parseFloat(railPopup.style.maxWidth)) <= 392);
 });
 
 test("Manual starts at one when Auto has no available capacity", () => {
@@ -366,13 +434,13 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   const { document, Event } = parseHTML("<html><body><section id=a></section><section id=b></section></body></html>");
   const a = document.getElementById("a"), b = document.getElementById("b"), sent = [];
   const profiles = [
-    { agent_id: "codex", model: "gpt-6", reasoning: "high", runtime_target: "Docker", docker_service: "dev", prefer_for: ["type:fix"] },
-    { agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
+    { agent_member_id: "m-codex", agent_id: "codex", model: "gpt-6", reasoning: "high", runtime_target: "Docker", docker_service: "dev", prefer_for: ["type:fix"] },
+    { agent_member_id: "m-claude", agent_id: "claude", model: "opus", reasoning: "medium", prefer_for: [] },
   ];
   const renderer = load("renderAgentsSettingsPanel");
   const render = (panel, options) => renderer(panel, { choices: candidateChoices, ...options });
   render(a, { project: { project_root: "/A", name: "A" }, profiles, status: { usage_threshold_percent: 73 }, send: m => sent.push(m) });
-  render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
+  render(b, { project: { project_root: "/B", name: "B" }, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "B model" }], send: () => assert.fail("wrong project") });
   const model = a.querySelector('[aria-label="Model codex"]');
   assert.equal(model.value, "gpt-6");
   assert.deepEqual([...a.querySelector('[aria-label="Runtime codex"]').options].map(o => o.value), ["Host", "Docker"]);
@@ -386,7 +454,7 @@ test("Agents Settings edits full profiles while preserving runtime fields and pr
   assert.deepEqual(sent[0].profiles[0].prefer_for, ["type:fix"]);
   assert.equal(Object.hasOwn(sent[0], "usage_threshold_percent"), false);
   assert.equal(a.querySelector('[data-profile-field="threshold"]'), null);
-  assert.match(a.textContent, /next candidate when a provider rejects a launch due to a rate limit/);
+  assert.match(a.textContent, /The first member in the list fixes the launch tool\. Only selected members using that tool are tried in order\. If none is available, new launches wait; tools never switch automatically\./);
   assert.equal(b.querySelector('[aria-label="Model codex"]').value, "B model");
   a.querySelector('[aria-label="Move down codex"]').click();
   assert.deepEqual(sent.at(-1).profiles.map(p => p.agent_id), ["claude", "codex"]);
@@ -399,24 +467,24 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel", { crypto: {} })(panel, {
-    profiles: [{ agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
-      { agent_id: "custom", fast_mode: true }, { agent_id: "saved-unknown-agent", model: "historic" }],
-    availableAgents: null, choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "retired-model", reasoning: "retired-effort", docker_service: "saved-service" },
+      { agent_member_id: "m-custom", agent_id: "custom", fast_mode: true }, { agent_member_id: "m-saved-unknown-agent", agent_id: "saved-unknown-agent", model: "historic" }],
+    choices: candidateChoices,
     send: message => sent.push(message),
   });
   const control = key => panel.querySelector(`fieldset [data-profile-field="${key}"]`);
-  for (const key of ["agent_id", "model", "reasoning", "docker_service"]) {
+  for (const key of ["agent_member_id", "model", "reasoning", "docker_service"]) {
     assert.equal(control(key).localName, "select", key);
     assert.equal(control(key).className, "settings-select", "reuse Operator controls");
   }
   assert.equal(control("model").value, "retired-model");
   assert.equal(control("reasoning").value, "retired-effort");
-  assert.ok([...control("agent_id").options].some(option => option.value === "hermes"),
+  assert.ok([...control("agent_member_id").options].some(option => option.value === "m-hermes"),
     "shared choices populate Agent before the separate catalog response arrives");
-  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
-    "adding candidates waits for the complete named custom-agent catalog");
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
+    "registered members do not wait for provider detection catalogs");
   const unknown = panel.querySelector('[data-agent-id="saved-unknown-agent"]');
-  assert.equal(unknown.querySelector('[data-profile-field="agent_id"]').value, "saved-unknown-agent");
+  assert.equal(unknown.querySelector('[data-profile-field="agent_member_id"]').value, "m-saved-unknown-agent");
   assert.equal(unknown.querySelector('[data-profile-field="model"]').value, "historic");
   assert.equal(control("docker_service").disabled, true);
   selectValue(control("runtime_target"), "Docker");
@@ -430,15 +498,15 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   const custom = panel.querySelector('[data-agent-id="custom"]');
   for (const key of ["reasoning", "fast_mode", "skip_permissions"]) assert.equal(custom.querySelector(`[data-profile-field="${key}"]`).disabled, true, key);
   assert.equal(custom.querySelector('[data-profile-field="fast_mode"]').checked, true, "disabled saved values survive unrelated edits");
-  selectValue(control("agent_id"), "claude");
-  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  selectValue(control("agent_member_id"), "m-claude");
+  control("agent_member_id").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("model").value, "", "Claude default is the empty CLI alias");
   selectValue(control("model"), "haiku");
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("reasoning").disabled, true);
   assert.equal(sent.at(-1).profiles[0].reasoning, null, "unsupported models do not inherit the previous model's effort");
-  selectValue(control("agent_id"), "hermes");
-  control("agent_id").dispatchEvent(new Event("change", { bubbles: true }));
+  selectValue(control("agent_member_id"), "m-hermes");
+  control("agent_member_id").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(control("model").localName, "input", "Hermes retains arbitrary model input");
   const suggestions = document.getElementById(control("model").getAttribute("list"));
   assert.ok(suggestions, "Hermes offers the configured default provider's model suggestions");
@@ -447,7 +515,7 @@ test("Candidates restore shared choices, preserve saved values, and gate depende
   control("model").dispatchEvent(new Event("change", { bubbles: true }));
   assert.equal(sent.at(-1).profiles[0].model, "custom-hermes-model");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: null, reasoning: null }], choices: candidateChoices,
     send: message => sent.push(message),
   });
   assert.equal(control("model").value, "gpt-6-astra");
@@ -462,7 +530,7 @@ test("candidate fields save exactly once on change, never on incomplete input", 
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "gpt-6-astra" }], choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "gpt-6-astra" }], choices: candidateChoices,
     send: message => sent.push(message),
   });
   for (const input of panel.querySelectorAll('fieldset [data-profile-field]')) {
@@ -487,7 +555,7 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", model: "old", reasoning: "high" }], choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "old", reasoning: "high" }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "7"; panel.dataset.saving = "true"; },
   });
   const model = panel.querySelector('[data-profile-field="model"]');
@@ -497,25 +565,25 @@ test("a correlated save reconciles untouched fields and preserves newer input", 
   selectValue(reasoning, "unfinished");
   reasoning.dispatchEvent(new Event("input", { bubbles: true }));
   const reconcile = load("reconcileCandidateSave");
-  reconcile(panel, { request_id: 6, profiles: [{ agent_id: "codex", model: "stale" }] });
+  reconcile(panel, { request_id: 6, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "stale" }] });
   assert.equal(model.value, "saved", "stale ACK is ignored");
-  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "normalized", reasoning: "high" }] });
   assert.equal(model.value, "normalized");
   assert.equal(reasoning.value, "unfinished");
   assert.equal(panel.dataset.dirty, "true");
   assert.equal(panel.dataset.saving, "false");
   selectValue(reasoning, "high");
   model.dispatchEvent(new Event("change", { bubbles: true }));
-  reconcile(panel, { request_id: 7, profiles: [{ agent_id: "codex", model: "normalized", reasoning: "high" }] });
+  reconcile(panel, { request_id: 7, profiles: [{ agent_member_id: "m-codex", agent_id: "codex", model: "normalized", reasoning: "high" }] });
   assert.equal(panel.dataset.dirty, "false");
-  assert.match(panel.querySelector('[role="status"]').textContent, /Saved candidates/);
+  assert.match(panel.querySelector('[data-candidate-status]').textContent, /Saved candidates/);
 });
 
 test("a rejected autosave identifies the edited field and retains its value", () => {
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "codex", prefer_for: [] }, { agent_id: "claude", prefer_for: [] }], choices: candidateChoices,
+    profiles: [{ agent_member_id: "m-codex", agent_id: "codex", prefer_for: [] }, { agent_member_id: "m-claude", agent_id: "claude", prefer_for: [] }], choices: candidateChoices,
     send: () => { panel.dataset.pendingRequest = "1"; },
   });
   const input = panel.querySelector('[data-profile-field="prefer_for"]');
@@ -537,7 +605,7 @@ test("structural saves wait for their correlated response before allowing row ed
   const { document, Event } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "claude", model: "sonnet" }, { agent_id: "codex", model: "gpt" }],
+    profiles: [{ agent_member_id: "m-claude", agent_id: "claude", model: "sonnet" }, { agent_member_id: "m-codex", agent_id: "codex", model: "gpt" }],
     send: message => { sent.push(message); panel.dataset.pendingRequest = "1"; },
   });
   panel.querySelector('[aria-label="Move up codex"]').click();
@@ -549,86 +617,61 @@ test("structural saves wait for their correlated response before allowing row ed
     "structural ACK requests an authoritative redraw");
 });
 
-test("Candidates use shared built-ins and the fresh custom catalog before version metadata arrives", () => {
-  const { document, window } = parseHTML("<html><body><main></main></body></html>"), sent = [];
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
-    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "")
-      .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
-  );
-  const surface = factory({
-    send: message => sent.push(message),
-    createNode(tag, className, text) {
-      const node = document.createElement(tag);
-      if (className) node.className = className;
-      if (text) node.textContent = text;
-      return node;
-    },
-    focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {},
-    renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
-    mountIssues(_windowData, host) {
-      host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>';
-    },
+test("Candidates follow the shared roster before version metadata and retain dirty controls", () => {
+  const { document, Event } = parseHTML("<html><body><main></main></body></html>");
+  const window = document.defaultView, sent = [];
+  const frames = new Set(), flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
+  const rosterModel = createUiStateStore({ revision: null, members: [] }, { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } });
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
+    "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor);
+  const surface = factory({ send: message => sent.push(message), rosterModel,
+    createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
+    focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {}, renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
+    mountIssues(_windowData, host) { host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>'; },
   });
   surface.renderSettingsWindow(document.querySelector("main"), { id: "settings" });
-  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "ClaudeCode" }], choices: {
-    ...candidateChoices, agents: [...candidateChoices.agents,
-      { id: "team-agent", name: "Stale custom name", is_custom: true, models: [], session_modes: ["Normal"] }],
-  } });
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices });
   const panel = document.querySelector("[data-settings-candidates]");
-  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true,
-    "custom agents must settle before Add treats an empty list as authoritative");
-  const initialCatalog = surface.customAgentsModel.read().catalog;
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Pending custom" } });
-  const pendingCatalog = surface.customAgentsModel.read().catalog;
   assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, true);
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
-  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false,
-    "the shared built-in choices do not wait for installed/update version probes");
-  assert.equal(initialCatalog.loaded, false);
-  assert.equal(pendingCatalog.loaded, false, "a save reply is not the complete catalog");
-  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
-  assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value),
-    ["", "codex", "hermes", "team-agent"]);
-  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="codex"]').textContent, "Codex (codex)");
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_saved", agent: { id: "team-agent", display_name: "Renamed team" } });
-  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
-  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]').textContent, "Renamed team (team-agent)");
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "team-agent" });
-  assert.equal(surface.customAgentsModel.read().catalog.loaded, true);
-  assert.equal(panel.querySelector('[data-profile-field="new"] option[value="team-agent"]'), null,
-    "the cached choices must not restore a deleted custom agent");
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [] });
-  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false, "an empty custom list is settled");
-  surface.applySupportedAgentList({ agents: [{ id: "claude", name: "Claude Code" }, { id: "codex", name: "Codex" }] });
-  surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [{ id: "team-agent", display_name: "Team agent" }] });
-  sent.length = 0;
-  const picker = panel.querySelector('[aria-label="Add candidate candidate"]');
-  assert.equal(picker.localName, "select");
-  assert.deepEqual([...picker.options].map(option => option.value), ["", "codex", "team-agent"]);
-  const add = panel.querySelector('[data-action="add-candidate"]');
-  add.click();
-  assert.match(panel.querySelector('[role="alert"]').textContent, /Select an agent/);
-  picker.querySelector('[value="team-agent"]').selected = true;
-  add.click();
-  assert.deepEqual(sent[0].profiles.map(profile => profile.agent_id), ["ClaudeCode", "team-agent"]);
-  selectValue(panel.querySelector('[aria-label="Agent ClaudeCode"]'), "Codex");
-  picker.querySelector('[value="codex"]').selected = true;
-  add.click();
-  assert.match(panel.querySelector('[role="alert"]').textContent, /already in the candidate pool/);
-  assert.equal(sent.length, 1, "a legacy alias in the draft is already the same provider");
-  assert.ok(panel.querySelector(".settings-status"), "feedback uses the shared Settings primitive");
+  assert.equal(typeof surface.refreshProfilesAfterRoster, "function");
+  const readCount = () => sent.filter(message => message.kind === "get_issue_monitor_profiles").length;
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "claude" }], choices: candidateChoices });
+  rosterModel.update(() => ({ project_key: "p", revision: 1, members: candidateMembers }));
+  const beforeAck = readCount();
+  surface.refreshProfilesAfterRoster({ project_key: "other", revision: 1 });
+  assert.equal(readCount(), beforeAck, "another project's ACK cannot authorize reads");
+  surface.refreshProfilesAfterRoster({ project_key: "p", revision: 1 });
+  assert.equal(readCount(), beforeAck + 1);
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "claude" }], choices: candidateChoices });
+  assert.equal(readCount(), beforeAck + 1, "a stale unbound response cannot create a retry loop");
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices });
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_id: "claude" }], choices: candidateChoices });
+  assert.equal(readCount(), beforeAck + 2, "an unbound reply arriving after the ACK uses the same readback path");
+  surface.refreshProfilesAfterRoster({ project_key: "p", revision: 1 });
+  assert.equal(readCount(), beforeAck + 3, "a completed profile-only migration authorizes readback without a roster revision change");
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [], choices: candidateChoices });
+  surface.refreshProfilesAfterRoster({ project_key: "p", revision: 1 });
+  assert.equal(readCount(), beforeAck + 3, "an empty saved pool is complete and does not request another read");
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices });
+  flush();
+  assert.equal(panel.querySelector('[data-profile-field="new"]').disabled, false);
+  assert.deepEqual([...panel.querySelector('[data-profile-field="new"]').options].map(option => option.value), ["", "m-codex", "m-hermes", "m-custom"]);
+  const model = panel.querySelector('[data-profile-field="model"]'); selectValue(model, "draft"); model.dispatchEvent(new Event("input", { bubbles: true }));
+  rosterModel.update(state => ({ revision: 2, members: state.members.map(member => ({ ...member, name: `New ${member.name}` })) })); flush();
+  assert.ok(panel.querySelector('[data-profile-field="model"]') === model);
+  assert.equal(model.value, "draft");
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section");
   load("renderAgentsSettingsPanel")(panel, {
-    profiles: [{ agent_id: "Codex" }], availableAgents: [{ id: "codex", name: "Codex" }],
+    profiles: [{ agent_member_id: "m-codex", agent_id: "Codex" }], availableMembers: [candidateMembers[0]],
     send: () => assert.fail("no available candidate"),
   });
   assert.equal(panel.querySelector('[data-action="add-candidate"]').disabled, true);
-  assert.match(panel.querySelector('[role="status"]').textContent, /All known agents.*candidate pool/);
+  assert.match(panel.querySelector('[data-candidate-status]').textContent, /All registered members.*candidate pool/);
 });
 
 test("a rejected candidate save shows its reason inline and preserves the draft", () => {
@@ -739,4 +782,53 @@ test("persistent roster edits project member capacity while retaining the separa
   assert.match(max.dataset.issueExplanation, /members.*project/i);
   panel.updateMaxActiveStatus({ agent_roster_capacity: 6, agent_roster_revision: 4, max_active_agents: 1 });
   assert.equal(max.value, "6");
+});
+
+
+test("Agents Settings binds registered members and keeps tool choices fixed", () => {
+  const { document, Event } = parseHTML("<section></section>");
+  const panel = document.querySelector("section"), sent = [];
+  const availableMembers = [
+    { member_id: "a", name: "Aster", agent_id: "codex", enabled: true },
+    { member_id: "b", name: "Birch", agent_id: "codex", enabled: true },
+    { member_id: "c", name: "Cedar", agent_id: "claude", enabled: true },
+  ];
+  load("renderAgentsSettingsPanel")(panel, { availableMembers, choices: candidateChoices,
+    profiles: [{ agent_member_id: "a", agent_id: "codex", model: "gpt-6-astra", reasoning: "high" }],
+    send: message => sent.push(message) });
+  const member = panel.querySelector('[data-profile-field="agent_member_id"]');
+  assert.ok(member, "Agent selects registered member identity");
+  assert.deepEqual([...member.options].map(option => option.value), ["a", "b", "c"]);
+  assert.equal(panel.querySelector('[data-profile-field="agent_id"]'), null, "tool is not editable");
+  assert.equal(panel.querySelector('[data-profile-tool]').textContent, "Codex");
+  selectValue(member, "b"); member.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(panel.querySelector("legend").textContent, "1. Birch");
+  assert.equal(member.getAttribute("aria-label"), "Agent Birch");
+  assert.ok(panel.querySelector('[aria-label="Model Birch"]'));
+  assert.equal(panel.querySelector('[aria-label="Move up Birch"]').textContent, "Move up Birch");
+  assert.ok(panel.querySelector('[aria-label="Remove Birch"]'));
+
+  assert.deepEqual(sent.at(-1).profiles[0], { agent_member_id: "b", agent_id: "codex", model: "gpt-6-astra", reasoning: "high", docker_service: null, prefer_for: [], session_mode: "Normal", runtime_target: "Host", windows_shell: null, skip_permissions: false, fast_mode: false });
+  selectValue(member, "c"); member.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(sent.at(-1).profiles[0].agent_id, "claude");
+  assert.equal(sent.at(-1).profiles[0].model, null, "different tools use their own default");
+  assert.equal(sent.at(-1).profiles[0].reasoning, "auto");
+  assert.equal(panel.querySelector('[data-profile-tool]').textContent, "Claude Code");
+  const add = panel.querySelector('[data-profile-field="new"]');
+  selectValue(add, "a"); panel.querySelector('[data-action="add-candidate"]').click();
+  assert.deepEqual(sent.at(-1).profiles.map(profile => profile.agent_member_id), ["c", "a"]);
+  assert.equal(sent.at(-1).profiles[1].agent_id, "codex");
+});
+
+test("Agents Settings preserves unavailable and resting members without provider substitution", () => {
+  const { document } = parseHTML("<section></section>");
+  const panel = document.querySelector("section");
+  load("renderAgentsSettingsPanel")(panel, { choices: candidateChoices,
+    availableMembers: [{ member_id: "rest", name: "Resting member", agent_id: "codex", enabled: false }],
+    profiles: [{ agent_member_id: "rest", agent_id: "codex" }, { agent_member_id: "missing", agent_id: "claude", model: "saved-model" }],
+    send: () => assert.fail("rendering must not substitute a member") });
+  assert.match(panel.querySelector('[data-agent-member-id="rest"]').textContent, /Resting/);
+  assert.match(panel.querySelector('[data-agent-member-id="missing"]').textContent, /unavailable/i);
+  assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="agent_member_id"]').value, "missing");
+  assert.equal(panel.querySelector('[data-agent-member-id="missing"] [data-profile-field="model"]').value, "saved-model");
 });
