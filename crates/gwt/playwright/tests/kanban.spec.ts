@@ -539,11 +539,35 @@ test.describe("Issue Bridge load recovery", () => {
 
   test("renders cached issues as an Issue list instead of lifecycle Kanban", async ({
     page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page);
-
-    await page.goto(APP_URL);
+  }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().entriesReceipt;
+            if (receipt) window.__knowledgeEntriesReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
     await expect(page.locator(".surface-knowledge .knowledge-list")).toHaveAttribute(
@@ -570,6 +594,45 @@ test.describe("Issue Bridge load recovery", () => {
     ).toBeVisible();
     await expect(page.getByText("Design-required work item shares Issue list")).toBeVisible();
     await expect(page.getByText("(plain)")).toHaveCount(0);
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.entries),
+        Object.isFrozen(receipt.entries[0]), Object.isFrozen(receipt.entries[0].labels)];
+    })).toEqual([true, true, true, true]);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    const pane = surface.locator(".knowledge-detail-pane");
+    await expect(pane).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await row.evaluate(element => element.setAttribute("data-list-retained", "true"));
+    await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      window.__issueBridgeFixtureSocket.emit({ ...receipt, selected_number: 3273 });
+    });
+    await expect(row).toHaveAttribute("data-list-retained", "true");
+    await expect(row).toHaveClass(/selected/);
+    await expect(pane).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      window.__issueBridgeFixtureSocket.emit({ ...receipt, request_id: -1, entries: [
+        { number: 3096, title: "Stale list must be rejected", state: "open", labels: ["bug"] },
+      ] });
+      // FIFO marker also exercises mutable local slots after a frozen list receipt.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated", id: receipt.id,
+        issue_number: 3096, result: { kind: "ok", fresh_entry: {
+          number: 3096, title: "List survived stale response", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human",
+        } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("List survived stale response");
+    await expect(surface.locator(".knowledge-row")).toHaveCount(5);
+    await expect(row).toHaveClass(/selected/);
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-list-receipt.png") });
   });
 
   // SPEC #4499 AC-1 / AC-18: the open/closed/all filter is gone; the Done column
