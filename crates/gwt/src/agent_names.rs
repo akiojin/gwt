@@ -474,10 +474,11 @@ pub fn mutate_project_roster(
         canonical_tool(id)?;
     }
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
-    let dead = dead_project_assignments(&path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
+    let dead = dead_project_assignments(&path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
+        let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         let default_tool = prefs
             .launch_profile_pool()
             .first()
@@ -544,6 +545,7 @@ pub fn mutate_project_roster(
         Ok(roster.clone())
     })
     .map_err(|error| error.to_string())?;
+    drop(dead);
     Ok(roster)
 }
 
@@ -621,18 +623,106 @@ fn assignment_is_busy(assignment: &AgentMemberAssignment, sessions_dir: &Path) -
     }
 }
 
+struct DeadProjectAssignments {
+    assignments: Vec<AgentMemberAssignment>,
+    _leases: gwt_agent::SessionPathLeases,
+}
+
+fn path_is_absent(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+// The caller keeps this Session's path lease through the prefs transaction.
+fn missing_session_is_absent(sessions: &Path, id: &str) -> std::io::Result<bool> {
+    if !path_is_absent(&sessions.join(format!("{id}.toml")))?
+        || !path_is_absent(&gwt_agent::active_launch_handshake_path(sessions, id))?
+    {
+        return Ok(false);
+    }
+    let namespaces = match std::fs::read_dir(sessions.join("runtime")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    for namespace in namespaces {
+        let namespace = namespace?;
+        if namespace.file_type()?.is_dir()
+            && !path_is_absent(&namespace.path().join(format!("{id}.json")))?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn dead_project_assignments(
     path: &Path,
     sessions_dir: &Path,
-) -> Result<Vec<AgentMemberAssignment>, String> {
+) -> Result<DeadProjectAssignments, String> {
     let prefs = crate::load_issue_monitor_prefs(path).map_err(|error| error.to_string())?;
-    Ok(prefs
+    let assignments: Vec<_> = prefs
         .agent_roster
         .into_iter()
         .flat_map(|roster| roster.members)
         .filter_map(|member| member.assignment)
-        .filter(|assignment| !assignment_is_busy(assignment, sessions_dir))
-        .collect())
+        .collect();
+    // Missing recovery is deferred inside an existing Session operation;
+    // Session leases always precede the prefs writer lock.
+    let host = crate::process::current_hostname();
+    let local = |assignment: &AgentMemberAssignment| {
+        assignment.host_id.is_empty() || assignment.host_id == host
+    };
+    let recover_missing = !gwt_agent::current_thread_holds_session_lease();
+    let ids: std::collections::BTreeSet<_> = assignments
+        .iter()
+        .filter(|assignment| recover_missing && local(assignment))
+        .filter_map(|assignment| assignment.session_id.as_ref())
+        .filter(|id| path_is_absent(&sessions_dir.join(format!("{id}.toml"))).unwrap_or(false))
+        .cloned()
+        .collect();
+    let leases = gwt_agent::acquire_session_path_leases(
+        sessions_dir,
+        &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+    .map_err(|error| error.to_string())?;
+    let assignments = assignments
+        .into_iter()
+        .filter(|assignment| {
+            !assignment_is_busy(assignment, sessions_dir)
+                || local(assignment)
+                    && assignment.session_id.as_ref().is_some_and(|id| {
+                        ids.contains(id)
+                            && missing_session_is_absent(sessions_dir, id).unwrap_or(false)
+                    })
+        })
+        .collect();
+    Ok(DeadProjectAssignments {
+        assignments,
+        _leases: leases,
+    })
+}
+
+fn unpinned_dead_assignments(
+    prefs: &crate::IssueMonitorPrefs,
+    dead: &[AgentMemberAssignment],
+) -> Vec<AgentMemberAssignment> {
+    // A switch's source remains uncertain until its exact runtime exit is
+    // confirmed. Recheck under the prefs writer lock: the pin can appear after
+    // physical absence was observed without changing the assignment itself.
+    dead.iter()
+        .filter(|assignment| {
+            !prefs.agent_switch_intents.values().any(|intent| {
+                intent.has_admission_pin()
+                    && !intent.runtime_exit_confirmed
+                    && &intent.source.assignment == *assignment
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 /// History supplies a preference, never evidence that a member is idle.
@@ -778,15 +868,16 @@ fn reserve_project_member_inner(
     };
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let host = crate::process::current_hostname();
-    let dead = dead_project_assignments(&path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let historical_member = if inherited_member_id.is_none() {
         spec_number.and_then(|spec| previous_spec_member(root, sessions_dir, spec))
     } else {
         None
     };
+    let dead = dead_project_assignments(&path, sessions_dir)?;
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
         ensure_roster(prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
+        let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref() == Some(&profile.agent_id))) {
             return Err(std::io::Error::other("Selected registered Agent profile changed; wait and reload before launching"));
         }
@@ -939,6 +1030,7 @@ fn reserve_project_member_inner(
         Ok(result)
     })
     .map_err(|error| error.to_string())?;
+    drop(dead);
     Ok(member)
 }
 
@@ -1383,6 +1475,107 @@ pub fn allocate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue_6413_missing_session_cannot_be_recreated_during_roster_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let root = temp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Resize { size: 2 },
+            None,
+        )
+        .unwrap();
+        let mut removed = Vec::new();
+        for token in ["removed-a", "removed-b"] {
+            let member =
+                reserve_project_member(&root, &sessions, token, None, None, None, None).unwrap();
+            let session = gwt_agent::Session::new(&root, "main", gwt_agent::AgentId::Codex);
+            session.save(&sessions).unwrap();
+            bind_project_member_session(&root, &member.agent_member_id, token, &session.id)
+                .unwrap();
+            removed.push(session);
+        }
+        for session in &removed {
+            std::fs::remove_file(sessions.join(format!("{}.toml", session.id))).unwrap();
+        }
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        gwt_agent::with_session_path_lease(&sessions, "another-session", |_| {
+            assert!(
+                dead_project_assignments(&path, &sessions)
+                    .unwrap()
+                    .assignments
+                    .is_empty(),
+                "nested Session operations defer Missing recovery"
+            );
+            Ok(())
+        })
+        .unwrap();
+        let dead = dead_project_assignments(&path, &sessions).unwrap();
+        assert_eq!(dead.assignments.len(), 2);
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            for session in &removed {
+                let concurrent = std::thread::scope(|scope| scope.spawn(|| {
+                    gwt_agent::with_session_path_lease_wait(
+                        &sessions, &session.id, std::time::Duration::ZERO, |_| Ok(()),
+                    )
+                }).join().unwrap());
+                assert!(matches!(concurrent, Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                    "Session genesis must stay fenced until the prefs transaction commits");
+            }
+            for member in &mut prefs.agent_roster.as_mut().unwrap().members {
+                member.assignment = None;
+            }
+            Ok(())
+        }).unwrap();
+        drop(dead);
+        for session in removed {
+            session
+                .save(&sessions)
+                .expect("Session lease is released after the roster commit");
+        }
+    }
+
+    #[test]
+    fn issue_6413_new_switch_pin_fences_an_older_dead_assignment_observation() {
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        let intent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":"switch","member_id":"member","expected_roster_revision":1,"target_issue_number":42},
+            "source":{"assignment":{"reservation_id":"source","session_id":"removed-session",
+                "issue_number":41,"spec_number":null,"delivery_id":null,"host_id":"host","host_pid":1,"host_started_at":2},
+                "window_id":"window","claim_id":"claim",
+                "confirmation":{"window_id":"window","claim_id":"claim","confirmed_at":"2026-10-26T00:00:00Z"}},
+            "stage":"checkpoint_verified","runtime_exit_confirmed":false
+        })).unwrap();
+        prefs.agent_switch_intents.insert("switch".into(), intent);
+        let observed_dead = vec![prefs.agent_switch_intents["switch"]
+            .source
+            .assignment
+            .clone()];
+        assert_eq!(
+            unpinned_dead_assignments(&prefs, &observed_dead),
+            observed_dead
+        );
+
+        // The switch can advance after absence is observed without changing
+        // the assignment. The writer must consult this newer pin state.
+        prefs.agent_switch_intents.get_mut("switch").unwrap().stage =
+            crate::issue_monitor::AgentSwitchStage::StoppingCurrent;
+        assert!(unpinned_dead_assignments(&prefs, &observed_dead).is_empty());
+        prefs
+            .agent_switch_intents
+            .get_mut("switch")
+            .unwrap()
+            .runtime_exit_confirmed = true;
+        assert_eq!(
+            unpinned_dead_assignments(&prefs, &observed_dead),
+            observed_dead
+        );
+    }
 
     #[test]
     fn an_exited_physical_child_releases_an_idle_session_for_its_member_restart() {

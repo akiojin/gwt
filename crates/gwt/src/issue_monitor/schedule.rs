@@ -1087,6 +1087,74 @@ mod tests {
         assert!(pin.runtime_exit_confirmed && pin.checkpoint.is_some());
     }
     #[test]
+    fn issue_6413_deleted_session_assignment_recovers_on_the_next_schedule_scan() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let member = &roster.members[0].agent_member_id;
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "closed-window",
+            Some(41),
+            None,
+            None,
+            Some(member),
+        )
+        .unwrap();
+        let mut session =
+            gwt_agent::Session::new(&root, "work/issue-41", gwt_agent::AgentId::Codex);
+        session.update_status(gwt_agent::AgentStatus::Idle);
+        session.save(&sessions).unwrap();
+        crate::agent_names::bind_project_member_session(
+            &root,
+            member,
+            "closed-window",
+            &session.id,
+        )
+        .unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor
+            .agent_schedule_launch_exclusion(41)
+            .unwrap()
+            .starts_with("agent_plan_missing"));
+        // A deleted window can leave its assignment behind while the GUI host lives.
+        fs::remove_file(sessions.join(format!("{}.toml", session.id))).unwrap();
+        let handshake = gwt_agent::active_launch_handshake_path(&sessions, &session.id);
+        fs::create_dir_all(handshake.parent().unwrap()).unwrap();
+        fs::write(&handshake, b"preparing or unreadable").unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        fs::remove_file(handshake).unwrap();
+        let runtime = gwt_agent::runtime_state_path(&sessions, &session.id);
+        fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+        fs::write(&runtime, b"unreadable runtime still fences reuse").unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        fs::remove_file(runtime).unwrap();
+        monitor.synchronize_agent_issue_schedule(&root).unwrap();
+        assert!(
+            monitor.agent_schedule_launch_exclusion(41).is_none(),
+            "a removed Session without runtime or launch evidence must not strand the queue head"
+        );
+        let snapshot =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert!(snapshot.members[0]
+            .issues
+            .iter()
+            .any(|entry| entry.issue_number == 41));
+        mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            move_action(&snapshot, 41, member, &roster.members[1].agent_member_id),
+        )
+        .expect("schedule.reassign must provide a canonical recovery path after cleanup");
+    }
+
+    #[test]
     fn agent_schedule_reassignment_is_atomic_and_stale_observations_preserve_bytes() {
         let (_temp, _home, root, sessions, roster) = fixture();
         let before =

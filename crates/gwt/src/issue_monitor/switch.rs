@@ -102,7 +102,7 @@ pub struct AgentSwitchSnapshot {
 }
 
 impl AgentSwitchIntent {
-    pub(super) fn has_admission_pin(&self) -> bool {
+    pub(crate) fn has_admission_pin(&self) -> bool {
         matches!(
             self.stage,
             AgentSwitchStage::StoppingCurrent
