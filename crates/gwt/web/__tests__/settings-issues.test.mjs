@@ -349,6 +349,39 @@ test("AC-6: Issues Settings exposes explanations for capacity, refill and target
   assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
   assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
   assert.deepEqual(sent, [], "registering explanations does not change settings");
+  const viewport = document.defaultView;
+  const previousViewport = { width: viewport.innerWidth, height: viewport.innerHeight };
+  t.after(() => { viewport.innerWidth = previousViewport.width; viewport.innerHeight = previousViewport.height; });
+  viewport.innerWidth = 400; viewport.innerHeight = 800;
+  replacement.getBoundingClientRect = () => ({ left: 100, right: 200, top: 50, bottom: 74 });
+  const settingsPopup = document.getElementById("settings-explanation");
+  settingsPopup.getBoundingClientRect = () => ({ width: 120, height: 80 });
+  explanations.refresh();
+  assert.equal(settingsPopup.style.left, "100px", "the default placement remains aligned below the control");
+  assert.equal(settingsPopup.style.top, "73px");
+
+  const rail = document.createElement("nav"), control = document.createElement("button");
+  rail.appendChild(control); document.body.appendChild(rail);
+  setControlExplanation(control, "Works: live output and terminals");
+  let railRect = { left: 0, right: 72, top: 44, bottom: 772, width: 72, height: 728 };
+  rail.getBoundingClientRect = () => railRect;
+  control.getBoundingClientRect = () => ({ left: 4, right: 68, top: 140, bottom: 184 });
+  const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-explanation", placement: "right" });
+  t.after(() => railExplanations.dispose());
+  const railPopup = document.getElementById("rail-explanation");
+  railPopup.getBoundingClientRect = () => ({ width: Math.min(360, parseFloat(railPopup.style.maxWidth) || 360), height: 80 });
+  control.dispatchEvent(new viewport.Event("mouseover", { bubbles: true }));
+  assert.equal(railPopup.style.left, "72px", "a side explanation clears every rail control");
+  assert.equal(railPopup.style.maxWidth, "320px", "the popup shrinks to the available right space at 400px");
+  const toPadding = new viewport.Event("mouseout", { bubbles: true });
+  Object.assign(toPadding, { relatedTarget: rail }); control.dispatchEvent(toPadding);
+  assert.equal(railExplanations.visible, true, "rail padding bridges the pointer into the hoverable popup");
+  railPopup.dispatchEvent(new viewport.Event("mouseenter"));
+  assert.equal(railExplanations.visible, true);
+  railRect = { left: 0, right: 400, top: 44, bottom: 180, width: 400, height: 136 };
+  railExplanations.refresh();
+  assert.ok(parseFloat(railPopup.style.top) >= railRect.bottom, "the wrapped top strip stays clear of explanations");
+  assert.ok(parseFloat(railPopup.style.left) + Math.min(360, parseFloat(railPopup.style.maxWidth)) <= 392);
 });
 
 test("Manual starts at one when Auto has no available capacity", () => {

@@ -555,9 +555,36 @@ test.describe("Surface rail", () => {
     await expect(page.locator('.work-row')).toHaveCount(3);
     await expect(page.locator('.agents-grid, .agents-tabs')).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
-    await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.reload();
+    const works = page.locator('.op-rail__surface[data-surface="works"]');
+    const agents = page.locator('.op-rail__surface[data-surface="agents"]');
+    const explanation = page.locator("#rail-control-explanation");
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const tip = await explanation.boundingBox(), railBox = await page.locator(".op-rail").boundingBox();
+    expect(tip && railBox).toBeTruthy();
+    expect(tip!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
+    await explanation.hover();
+    await expect(explanation).toBeVisible();
+    await agents.click();
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible(); expect(errors).toEqual([]);
+    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 400, height: 700 });
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const narrowTip = await explanation.boundingBox(), narrowRail = await page.locator(".op-rail").boundingBox();
+    expect(narrowTip && narrowRail).toBeTruthy();
+    expect(narrowTip!.y).toBeGreaterThanOrEqual(narrowRail!.y + narrowRail!.height);
+    expect(narrowTip!.x + narrowTip!.width).toBeLessThanOrEqual(392);
+    await explanation.hover();
+    await expect(explanation).toBeVisible();
+    await page.mouse.move(399, 699);
+    await works.focus();
+    await expect(works).toHaveAttribute("aria-describedby", "rail-control-explanation");
+    await expect(explanation).toBeVisible();
+    await agents.click();
+    await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
   });
 
   test("Work previous and next retain direct input without terminal tabs", async ({ page }) => {

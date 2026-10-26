@@ -11,7 +11,7 @@ export function setControlExplanation(node, text, key, focusable = true) {
   return node;
 }
 
-export function bindControlExplanations({ document, root, id }) {
+export function bindControlExplanations({ document, root, id, placement = "bottom" }) {
   const popup = document.createElement("div");
   popup.className = "op-runtime-health-detail issue-control-explanation";
   popup.id = id;
@@ -50,6 +50,20 @@ export function bindControlExplanations({ document, root, id }) {
     const viewport = document.defaultView || {};
     const width = viewport.innerWidth || 1024;
     const height = viewport.innerHeight || 768;
+    if (placement === "right") {
+      const boundary = root.getBoundingClientRect();
+      const beside = boundary.right <= width - 8;
+      const left = beside ? Math.max(8, boundary.right) : 8;
+      const top = beside ? rect.top : Math.max(8, boundary.bottom);
+      // Constrain before measuring: wrapping changes the popup's height.
+      // A full-width top strip uses its bottom edge to clear every control.
+      popup.style.maxWidth = `${Math.max(0, width - left - 8)}px`;
+      popup.style.maxHeight = `${Math.max(0, beside ? height - 16 : height - top - 8)}px`;
+      const size = popup.getBoundingClientRect();
+      popup.style.left = `${left}px`;
+      popup.style.top = `${beside ? Math.max(8, Math.min(top, height - size.height - 8)) : top}px`;
+      return;
+    }
     const size = popup.getBoundingClientRect?.() || { width: 0, height: 0 };
     popup.style.left = `${Math.max(8, Math.min(rect.left, width - size.width - 8))}px`;
     const top = rect.bottom + size.height <= height - 8
@@ -68,7 +82,7 @@ export function bindControlExplanations({ document, root, id }) {
   };
   const out = event => {
     if (!hovered) return;
-    const boundary = hovered.closest(".knowledge-row") || hovered;
+    const boundary = placement === "right" ? root : hovered.closest(".knowledge-row") || hovered;
     if (!boundary.contains(event.target) || boundary.contains(event.relatedTarget)) return;
     hovered = null;
     if (popup.contains(event.relatedTarget)) return;
