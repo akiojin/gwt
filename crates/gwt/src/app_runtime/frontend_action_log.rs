@@ -153,6 +153,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::AgentSchedule { .. } => {
             FrontendUserActionLog::new("agent_schedule", "agents")
         }
+        FrontendEvent::AgentSwitch { .. } => FrontendUserActionLog::new("agent_switch", "agents"),
         FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")
@@ -719,6 +720,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         } => FrontendUserActionLog::new("set_issue_monitor_tier", "issue_monitor")
             .target(issue_number.to_string())
             .mode(tier.to_string()),
+        FrontendEvent::OpenIssueMonitor => {
+            FrontendUserActionLog::new("open_issue_monitor", "issue_monitor")
+        }
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }

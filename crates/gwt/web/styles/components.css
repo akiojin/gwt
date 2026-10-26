@@ -682,8 +682,9 @@ body::after {
   padding: var(--space-3) 0;
   background: var(--color-surface);
   border-right: 1px solid var(--color-border);
-  /* Flyout chips + popovers (window list, update CTA) extend over the workspace. */
-  overflow: visible;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   z-index: var(--z-rail);
 }
 
@@ -692,6 +693,7 @@ body::after {
   flex-direction: column;
   align-items: center;
   gap: var(--space-1);
+  flex-shrink: 0;
 }
 
 .op-rail__divider {
@@ -811,7 +813,7 @@ body::after {
   padding: 0 var(--space-1);
 }
 
-/* AS-1.4 — open-window count badge on the Windows rail item. */
+/* Notification unread count. */
 .op-rail__badge {
   position: absolute;
   top: 2px;
@@ -881,8 +883,7 @@ body::after {
 }
 
 /* Issue 4777 T-1 — at 860px and below the rail becomes a strip across the
-   top of the workspace. Groups wrap instead of scrolling so the popovers
-   anchored to rail items (window list, PM gear) are never clipped. */
+   top of the workspace. Groups wrap to keep every entry reachable. */
 @media (max-width: 860px) {
   #app {
     grid-template-columns: minmax(0, 1fr);
@@ -908,6 +909,8 @@ body::after {
 
   .op-rail__group--surfaces {
     align-self: auto;
+    flex-wrap: wrap;
+    max-width: 100%;
   }
 
   .op-rail__divider {
@@ -928,15 +931,6 @@ body::after {
 
   .op-rail__flyout {
     display: none;
-  }
-
-  /* The window list popover hangs below its trigger instead of beside it,
-     right-aligned so it stays inside the viewport. */
-  .op-rail .window-list-panel {
-    top: calc(100% + 10px);
-    bottom: auto;
-    left: auto;
-    right: 0;
   }
 }
 
@@ -3271,128 +3265,6 @@ button.workspace-board-ref:focus-visible {
   color: var(--color-display-fg);
 }
 
-/* Preset modal (Add window) — SPEC-2356 "Surface Deck".
-   Three categorized bands, each binding --cat-accent so the section tick,
-   icon chip, hover/keyboard glow and focus all read from one accent token.
-   surface=cyan, knowledge=amber, config=muted. */
-:root[data-theme] .preset-section-label {
-  color: var(--color-text-muted);
-  font-family: var(--font-display);
-  font-stretch: 75%;
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-display);
-}
-:root[data-theme] .preset-button[data-category="surface"],
-:root[data-theme] .preset-section[data-category="surface"] {
-  --cat-accent: var(--color-state-active);
-}
-:root[data-theme] .preset-button[data-category="knowledge"],
-:root[data-theme] .preset-section[data-category="knowledge"] {
-  --cat-accent: var(--agent-claude);
-}
-:root[data-theme] .preset-button[data-category="config"],
-:root[data-theme] .preset-section[data-category="config"] {
-  --cat-accent: var(--color-text-muted);
-}
-/* SPEC-2356 landscape deck — give each category column a faint accent wash plus
-   an accent-tinted section-label underline so the weighted columns read as
-   distinct bands. Tokens only; light/dark swap stays automatic. */
-:root[data-theme] .preset-deck .preset-section[data-category="surface"] {
-  background: color-mix(in oklab, var(--color-state-active) 4%, transparent);
-}
-:root[data-theme] .preset-deck .preset-section[data-category="knowledge"] {
-  background: color-mix(in oklab, var(--agent-claude) 4%, transparent);
-}
-:root[data-theme] .preset-deck .preset-section[data-category="config"] {
-  background: color-mix(in oklab, var(--color-text-muted) 3%, transparent);
-}
-:root[data-theme] .preset-deck .preset-section-label {
-  padding-bottom: var(--space-2);
-  margin-bottom: var(--space-3);
-  border-bottom: 1px solid
-    color-mix(in oklab, var(--cat-accent, var(--color-text-muted)) 40%, transparent);
-}
-:root[data-theme] .preset-button {
-  background: var(--color-surface);
-  color: var(--color-text);
-  border-color: var(--color-border);
-}
-:root[data-theme] .preset-button:hover,
-:root[data-theme] .preset-button.is-active {
-  background: var(--color-surface-elevated);
-  border-color: var(--cat-accent);
-  box-shadow: 0 0 0 1px var(--cat-accent),
-              0 0 18px 0 color-mix(in oklab, var(--cat-accent) 35%, transparent);
-  transform: translateY(-1px);
-}
-:root[data-theme] .preset-button:hover .preset-button__icon,
-:root[data-theme] .preset-button.is-active .preset-button__icon {
-  background: color-mix(in oklab, var(--cat-accent) 22%, transparent);
-  box-shadow: 0 0 10px 0 color-mix(in oklab, var(--cat-accent) 45%, transparent);
-}
-:root[data-theme] .preset-button strong {
-  color: var(--color-text-strong);
-}
-
-/* Operator atmosphere — depth glow + faint scan grid behind the deck.
-   Keyed off the `.is-surface-deck` modifier (never a bare modal-shell
-   rule) so the shared modal-frame primitive contract keeps owning the
-   first plain modal-shell match in the bundled stylesheet. */
-:root[data-theme] .modal-shell.is-surface-deck {
-  position: relative;
-  isolation: isolate;
-  /* SPEC-2356 landscape redesign: clip the horizontal atmosphere bleed but keep
-     a vertical scroll safety net so very short viewports can still reach every
-     deck tile (the deck fits without scroll on normal viewports). */
-  overflow-x: hidden;
-  overflow-y: auto;
-}
-:root[data-theme] .modal-shell.is-surface-deck::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  background:
-    var(--bg-depth-glow),
-    repeating-linear-gradient(
-      0deg,
-      var(--bg-scan-grid) 0,
-      var(--bg-scan-grid) 1px,
-      transparent 1px,
-      transparent 24px
-    );
-  opacity: 0.6;
-}
-
-/* Stagger reveal on open. Each button rises with an index-based delay so
-   the deck "deploys" rather than snapping in. reduced-motion keeps it still. */
-@keyframes presetRise {
-  from { opacity: 0; transform: translateY(6px); }
-  to { opacity: 1; transform: none; }
-}
-:root[data-theme] #preset-modal.open .preset-button {
-  animation: presetRise var(--motion-medium) var(--motion-curve) both;
-}
-:root[data-theme] #preset-modal.open .preset-button:nth-child(1) { animation-delay: 30ms; }
-:root[data-theme] #preset-modal.open .preset-button:nth-child(2) { animation-delay: 60ms; }
-:root[data-theme] #preset-modal.open .preset-button:nth-child(3) { animation-delay: 90ms; }
-:root[data-theme] #preset-modal.open .preset-button:nth-child(4) { animation-delay: 120ms; }
-:root[data-theme] #preset-modal.open .preset-button:nth-child(5) { animation-delay: 150ms; }
-@media (prefers-reduced-motion: reduce) {
-  :root[data-theme] #preset-modal.open .preset-button {
-    animation: none;
-  }
-}
-
-/* Window list panel (in floating actions) */
-:root[data-theme] .window-list-panel {
-  background: var(--color-surface-elevated);
-  color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
-  box-shadow: var(--shadow-2);
-}
-
 /* Connection dot */
 
 /* ============================================================
@@ -3496,7 +3368,6 @@ button.workspace-board-ref:focus-visible {
 :root[data-theme] .arrange-button:focus-visible,
 :root[data-theme] .op-rail__item:focus-visible,
 :root[data-theme] .wizard-button:focus-visible,
-:root[data-theme] .preset-button:focus-visible,
 :root[data-theme] .branch-filter-button:focus-visible,
 :root[data-theme] .branch-cleanup-toggle:focus-visible,
 :root[data-theme] .branch-row-action:focus-visible,
@@ -3813,7 +3684,6 @@ button.workspace-board-ref:focus-visible {
    take a click action. Smooth enough not to be distracting but clearly
    responsive. reduced-motion env keeps the original snap. */
 :root[data-theme] .recent-project-row,
-:root[data-theme] .preset-button,
 :root[data-theme] .live-session-button,
 :root[data-theme] .launch-choice-button,
 :root[data-theme] .arrange-button,
@@ -3826,7 +3696,6 @@ button.workspace-board-ref:focus-visible {
 
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme] .recent-project-row,
-  :root[data-theme] .preset-button,
   :root[data-theme] .live-session-button,
   :root[data-theme] .launch-choice-button,
   :root[data-theme] .arrange-button,
@@ -4797,28 +4666,6 @@ button.workspace-board-ref:focus-visible {
   min-width: 0;
 }
 
-:root[data-theme] .settings-issues-panel,
-:root[data-theme] .settings-issues-host {
-  height: 100%;
-  min-height: 0;
-}
-
-:root[data-theme] .settings-issues-host {
-  position: relative;
-}
-
-:root[data-theme] .settings-issues-options {
-  flex: 0 0 auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-3);
-}
-
-:root[data-theme] .settings-issues-options[open] {
-  max-height: 65%;
-  overflow: auto;
-}
-
 :root[data-theme] [data-settings-issues-controls] .settings-field {
   grid-template-columns: 140px minmax(0, 1fr);
   min-height: 32px;
@@ -4857,14 +4704,46 @@ button.workspace-board-ref:focus-visible {
   white-space: nowrap;
 }
 
-:root[data-theme] [data-settings-launch-action] .knowledge-monitor-switch__label {
-  display: none;
-}
+@media (max-width: 600px) {
+  :root[data-theme] .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
 
-:root[data-theme] .settings-issues-options > summary {
-  cursor: pointer;
-  font-size: var(--type-xs);
-  color: var(--color-text-secondary);
+  :root[data-theme] .settings-tabs {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  :root[data-theme] .settings-tabs .settings-label {
+    flex-basis: 100%;
+    margin-top: 0;
+  }
+
+  :root[data-theme] .settings-tab {
+    height: auto;
+    min-height: 30px;
+    max-width: 100%;
+  }
+
+  :root[data-theme] .settings-body {
+    padding: var(--space-2);
+  }
+
+  :root[data-theme] .settings-field,
+  :root[data-theme] [data-settings-issues-controls] .settings-field {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-1);
+  }
+
+  :root[data-theme] .settings-field > :last-child,
+  :root[data-theme] [data-settings-issues-controls] .settings-field > :last-child {
+    grid-column: 1;
+  }
 }
 
 :root[data-theme] .settings-input {
@@ -5770,7 +5649,7 @@ button.workspace-board-ref:focus-visible {
 
 .pm-launcher-gear {
   position: absolute;
-  right: calc(-1 * var(--space-1, 4px));
+  right: var(--space-1);
   top: calc(-1 * var(--space-1, 4px));
   display: inline-flex;
   align-items: center;

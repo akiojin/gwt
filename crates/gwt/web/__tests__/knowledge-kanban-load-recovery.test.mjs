@@ -323,16 +323,32 @@ test("a late initial load cannot move a newer explicit selection (AS-17.5)", asy
 
   // The initial load completes late, still claiming row A as selected and
   // no longer containing row B.
+  const entries = [{ ...ROW_A, labels: ["bug"] }];
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_entries",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: staleLoadRequestId,
-    entries: [ROW_A],
+    entries,
     selected_number: ROW_A.number,
     empty_message: "",
     refresh_enabled: true,
   });
+
+  entries[0].labels.push("caller");
+  entries.push(ROW_B);
+  assert.equal(state.baseEntries.length, 1, "the list receipt must own its outer array");
+  assert.deepEqual(state.baseEntries[0].labels, ["bug"], "nested caller mutation must be isolated");
+  assert.ok(Object.isFrozen(state.baseEntries[0].labels));
+  assert.equal(Object.isFrozen(state.baseEntries), false, "Phase ACKs replace local list slots");
+  assert.equal(Object.isFrozen(state.entries), false);
+  const fresh = { ...ROW_A, title: "Confirmed Alpha" };
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+    result: { kind: "ok", fresh_entry: fresh },
+  });
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.entries[0], fresh);
 
   assert.equal(
     state.selectedNumber,
@@ -362,24 +378,37 @@ test("a search completion cannot move a newer explicit selection (AS-17.5)", asy
     // The user explicitly selects B while the search is in flight.
     surface.requestKnowledgeDetail("win-1", "issue", ROW_B.number);
 
+    const entries = [{ ...ROW_A, labels: ["bug"] }, { ...ROW_B }];
     surface.applyKnowledgeReceiveEvent({
       kind: "knowledge_search_results",
       id: "win-1",
       knowledge_kind: "issue",
       query: "alpha",
       request_id: searchRequestId,
-      entries: [ROW_A, ROW_B],
+      entries,
       selected_number: ROW_A.number,
       empty_message: "",
       refresh_enabled: true,
     });
 
+    entries[0].title = "Caller mutation";
+    entries[0].labels.push("caller");
+    entries.pop();
+    assert.equal(state.entries.length, 2);
+    assert.equal(state.entries[0].title, ROW_A.title);
+    assert.deepEqual(state.entries[0].labels, ["bug"]);
+    assert.ok(Object.isFrozen(state.entries[0].labels));
     assert.equal(
       state.selectedNumber,
       ROW_B.number,
       "a search completion may refresh its rows but must not move the newer explicit selection (FR-101)",
     );
     assert.equal(state.detail?.number, ROW_B.number);
+    surface.applyKnowledgeReceiveEvent({
+      kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+      result: { kind: "ok", fresh_entry: { ...ROW_A, title: "Updated phase" } },
+    });
+    assert.equal(state.entries[0].title, "Updated phase");
   });
 });
 
@@ -395,12 +424,15 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
   const requestForA = sent.at(-1).request_id;
 
   // Responses arrive in reverse order: A (latest) first, then stale B.
+  const detail = { ...detailFor(ROW_A, "Fresh alpha body"),
+    labels: ["bug"], related_works: [{ id: "work-alpha", title: "Original work",
+      agents: [{ session_id: "session-alpha", purpose: "Original purpose" }] }] };
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: requestForA,
-    detail: detailFor(ROW_A, "Fresh alpha body"),
+    detail,
   });
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_detail",
@@ -410,6 +442,12 @@ test("A→B→A reverse-order detail completions leave the latest selection auth
     detail: detailFor(ROW_B, "Stale beta body"),
   });
 
+  detail.labels.push("caller");
+  detail.related_works[0].agents[0].purpose = "Caller mutation";
+  detail.related_works.pop();
+  assert.deepEqual(state.detail.labels, ["bug"]);
+  assert.equal(state.detail.related_works[0].agents[0].purpose, "Original purpose");
+  assert.ok(Object.isFrozen(state.detail.related_works[0].agents));
   assert.equal(state.selectedNumber, ROW_A.number);
   assert.equal(
     state.detail?.number,

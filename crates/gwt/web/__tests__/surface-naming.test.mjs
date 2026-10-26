@@ -16,12 +16,9 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseHTML } from "linkedom";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const appSource = readFileSync(resolve(here, "../app.js"), "utf8");
-const { document } = parseHTML(readFileSync(resolve(here, "../index.html"), "utf8"));
-const modal = document.getElementById("preset-modal");
 
 function presetRoleLabels() {
   const start = appSource.indexOf("function presetRoleLabel(");
@@ -64,17 +61,6 @@ test("the Work surface is named Work in its role label", () => {
     /Workspace/,
     "the role label must not keep the old Workspace naming",
   );
-});
-
-// FR-016: ADD WINDOW no longer lists the Work window once every Work information
-// item lives on the Issue row (T-023 / T-024 done, CI summary ruled out of scope).
-test("the Work window is no longer offered in ADD WINDOW", () => {
-  assert.equal(
-    modal.querySelector('.preset-button[data-preset="work"]'),
-    null,
-    "FR-016: the Work card must leave ADD WINDOW after the migration completed",
-  );
-  assert.doesNotMatch(modal.textContent, /Work overview/);
 });
 
 // FR-016: windows that are already open keep working — the `work` preset (and

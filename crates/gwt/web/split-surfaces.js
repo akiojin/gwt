@@ -1,7 +1,7 @@
 import { surfaceForWindow } from "./surface-rail.js";
 
 const SURFACES = { issues: "Issues", works: "Works", agents: "Agents", board: "Board", settings: "Settings" };
-const PRESETS = { issues: "settings", board: "board", settings: "settings" };
+const PRESETS = { issues: "issue", board: "board", settings: "settings" };
 
 // A client-local layout: move live views, never clone terminals or persist
 // geometry. One or two panes share the same host; inactive live views stay
@@ -120,7 +120,6 @@ export function createSplitSurfaces({
     }
     for (const { index, pane } of visiblePanes) {
       const surface = selections[index];
-      const changedSurface = pane.dataset.surface !== surface;
       pane.dataset.surface = surface;
       for (const option of pane.querySelector(".split-pane__header select").options) {
         option.selected = option.value === surface;
@@ -142,13 +141,6 @@ export function createSplitSurfaces({
       if (data) {
         const element = getElement(data.id);
         if (element) {
-          if (surface === "issues" && data.settingsSection !== "issues" &&
-            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
-            element.querySelector('[data-settings-tab="issues"]')?.click();
-          } else if (surface === "settings" && data.settingsSection === "issues" &&
-            (changedSurface || element.parentElement !== pane.querySelector(".split-pane__body"))) {
-            element.querySelector('[data-settings-tab="system"]')?.click();
-          }
           desired.set(data.id, { element, index });
           selectedWindowIds[index] = data.id;
         }

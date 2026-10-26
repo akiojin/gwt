@@ -27,7 +27,7 @@ Agent workspace を materialize するために worktree を使いますが、�
 - **Managed workflow skills** — discussion、Issue routing、planning、
   TDD implementation、PR、architecture review、project search、agent 管理用の
   bundled `gwt-*` skills を使えます。
-- **Operator workspace** — レールから Issues、Agents、Board、Settings を切り替え、
+- **Operator workspace** — レールから Issues、Works、Agents、Board、Settings を切り替え、
   必要に応じて Split view と独立した PM 入口を使えます。
 - **Provider usage** — USAGE にホバーすると、Claude の Fable weekly 枠や、
   有効な Usage credits の使用率・使用量/上限・通貨を確認できます。
@@ -434,7 +434,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
 - `Issue` — semantic search、detail pane、design-required tag、Launch Agent handoff
   を備えた cache-backed Work Item Knowledge Bridge。legacy `SPEC` window も同じ
   Work Item view を開きます。Issue Monitor が自動起動した Agent は、
-  Settings の Issues 右ペインに読み取り専用でミラー表示されます。入力
+  独立した Issues 面の右ペインに読み取り専用でミラー表示されます。入力
   したいときは `Windowize` で同じセッションを Works のネイティブ端末に開けます。各行には対応する Work
   の lifecycle・注意理由・PR 状態が表示され、`Continue work` / `Resume` /
   `Clean Up` をその場で実行できます
@@ -446,7 +446,7 @@ pane の生成は GUI 側が担うため、Service 化してもヘッドレス�
   (Auto は OS locale を参照し、`C` / `POSIX` や未設定時は English にフォール
   バック)。設定はグローバルで `~/.gwt/config.toml` の `[ai].language` に保存
   されます。UI 文言は引き続き英語固定です (SPEC-1933 NFR-005)。
-  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues` では
+  アプリ全体とプロジェクトごとの設定は区別して表示します。`Issues execution settings` では
   Autonomous、Max active、キュー補充、許可ラベル、起動プロファイルと候補の
   順序・優先条件を同じ欄で編集できます。
   起動候補の変更は確定時に自動保存され、テキスト欄はフォーカスを外すと保存されます。
@@ -477,7 +477,8 @@ Board は各ウィンドウで最大1,000件を保持します。先頭までス
 新しい Issue では空いているメンバーを再利用し、SPEC の続きでは前回の担当が空いていれば優先します。
 新しいメンバー名はプロジェクト内で重複せず、候補が尽きると言語に合う姓で候補を広げます。
 復元や再起動でもメンバー ID と名前を維持します。Works、Agents、Fleet、Kanban、Board、
-Issue コメント、PR の担当者表示に名前が現れ、常駐 PM は役割としての表示を維持します。
+Issue コメント、PR の担当者表示に名前が現れます。常駐 PM は PM・Works・Agents の各面で、
+割り当てられた名前と PM バッジをあわせて表示します。
 
 Windows の Host 起動では、Launch Agent で Command Prompt、Windows PowerShell、
 PowerShell 7 を選択できます。Docker 起動では引き続きコンテナ内のシェルを使います。
@@ -489,7 +490,7 @@ Linux では `Ctrl+Shift+C` でも現在の選択をコピーできます。
 
 ## Issue サーフェスと Issue Monitor
 
-**Settings → Project → Issues**、または左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
+左ナビの **Issues** から、キャッシュ済み GitHub Issue を Backlog / Queued /
 Active / Done の 4 列で表示します。各行の実行状態と操作はそのまま利用できます。
 Backlog から Queued へドラッグすると実行対象に追加され、逆方向でキューから外れます。
 Queued 内では順序を変更でき、複数選択の移動は 1 回のキュー操作で送信されます。
@@ -522,10 +523,11 @@ Active バッジは PM を含むエージェント人数を数え、Issue 数と
 Waiting（Full / Hold / Empty）、Stopped（停止）、Error の状態、Active / Queue の件数、
 容量通知へのリンク、隣り合う Auto-refill と Autonomous、Start / Stop、**Issues settings** を表示します。
 スイッチの On / Off はサーバーで確定した状態を示します。現在の障害だけを赤く表示し、
-エラーの詳細と履歴は通知センターで確認できます。**Issues settings** で同じペインの設定行を展開し、
-**Launch control（起動制御）**で Autonomous・Max active・Start / Stop、**Refill（補充）**で Auto-refill と上限、
+エラーの詳細と履歴は通知センターで確認できます。**Issues settings** から **Settings → Project → Issues execution settings** を開き、
+**Launch control（起動制御）**で Autonomous・Max active・Monitoring、**Refill（補充）**で Auto-refill と上限、
 **Target（対象）**で Allowed labels を設定します。その下に候補プロファイルが並びます。
-設定を閉じても要約帯のスイッチを操作できます。Auto-apply updates は **System** で設定します。
+Issues と Settings は独立した面で、Split view で並べても Issue の検索・選択と設定の編集中入力を保持します。
+Auto-apply updates は **System** で設定します。
 Agents 名簿のあるプロジェクトでは **Max active** で有効メンバー数を編集し、**Apply** で名簿を増減します。**Auto** は選べません。
 名簿のない旧設定では **Manual** で数値を編集できます。**Auto** では編集できず、実効上限を表示し、計測が未完了なら **Measuring capacity…** と表示します。
 稼働数より小さい上限に下げても既存エージェントは継続し、稼働数が上限未満になるまで新規起動を待ちます。
@@ -567,7 +569,7 @@ PM 窓の会計は別に表示し、Settings には自プロジェクトの割�
 `max_active_last_change` は最後の明示的な設定変更の `changed_at` と
 `source`（`gui` / `json_operation`）を返し、自動計測による上限更新ではこの記録を保持します。
 
-**Settings → Issues** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
+**Settings → Issues execution settings** の **Allowed labels** にラベルをカンマ区切りで指定し、保存済みリストのいずれかに一致する Issue が対象になります。
 大文字・小文字と前後の空白は区別しません。空のリストは全ラベルを許可し、従来の対象条件を
 維持します。変更は次の scan で反映され、実行中のエージェントは中止しません。
 自動化からは
@@ -1636,12 +1638,19 @@ project 固有の規約を明示的に渡すには、
 ## サーフェス操作
 
 - レールから **Issues**、**Works**、**Agents**、**Board**、**Settings** を選びます。
-- **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。
+- **Logs**・**Index**・**Profile** はサイドバーの各項目から直接開けます。高さが足りないときはサイドバーを縦にスクロールします。全停止は Command Palette から実行でき、個別エージェントの停止・再起動も既存の操作から実行できます。
+- **PM** は独立したレール入口から単一ペインで開け、Works の先頭にも表示します。割り当てられた名前と PM バッジは Agents の先頭にも表示します。
 - **Works** は端末上で稼働する Agent を1人1行で表示し、直近3行の出力を載せます。行のクリック・Enter・Space で同じネイティブ端末を開き、**Back to Works** で一覧へ戻ります。矢印で前後の Agent へ移り、Esc などのキーは端末へ渡します。
 - **Agents** の **Team** には固定メンバー、担当履歴と実測集計を、**Past** には過去の実際の担当を表示します。Works の名前から該当メンバーへ、Agents の現在タスクからその Works 端末へ移動できます。
+- **Agents** でメンバーを追加するときに利用ツールを選び、以後はそのツールに固定します。**Agents Settings** では登録済みの人物を名前で選び、固定ツールを確認します。候補ごとのモデル・実行環境も設定できます。選択したツールが利用できないときは待機理由を表示し、別ツールへ自動切替しません。既存の候補は起動設定と設定済みの同時実行容量を保って取り込みます。
 - **Team** でメンバーを選ぶと、詳細の **Next planned issues** に次の担当予定と割当理由を順番に表示します。別のメンバーを選んで **Reassign** で未開始の Issue を移し、競合や応答失敗の後は **Refresh plans** で最新の予定を読み直せます。
+- **Switch to next issue** は現在の作業が静止するまで待ち、エージェントが区切りのよい状態を保存・push してから、同じメンバーで選択した Issue を開始します。静止や保存を確認できなければ現在のタスクを保持します。停止前は **Cancel switch** で取り消せ、次の起動に失敗した場合は **Continue saved work** から保存済みタスクの通常の継続操作へ進めます。Host の再起動では未実行の切替要求を破棄します。
 - **Add member** はプロジェクトの希望同時実行数を1人増やします。**Rest member** は1人減らし、現在の作業は完了まで続けます。有効メンバーは最低1人を保ち、端末の安全上限により実際の割当数が少なくなる場合があります。
 - **Split view** では左右の面を独立して選び、**Close split** で選択中の面を残します。Shell は補助端末として開け、メンバー人数や稼働 Agent 数へ含めません。
+
+**Active** は PM を含む、この端末で稼働中の Agent 数です。**Busy**・**Team**・同時実行数は
+実装メンバーだけを数えます。メンバー ID・有効人数・確定した担当予定の再割当は、
+アプリの再起動後も保持します。
 
 Works には Session に帰属する入力・キャッシュ・出力、直近30分の活動グラフ、
 ブランチと検証の状態を表示します。取得できない値は **—** とし、コンテキスト残量は
@@ -1700,15 +1709,15 @@ Contrast) では system colors にフォールバックします。
 | `⌘?` | Hotkey Overlay (cheat sheet) を toggle |
 | `Esc` | 開いている Palette / Overlay / Drawer / Dropdown を閉じる |
 
-レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Agents**、
-**Board**、**Settings** が並びます。選択したサーフェスは固定ペインに表示し、
+レールには **PM** の独立した入口と、ラベル付きの **Issues**、**Works**、**Agents**、
+**Board**、**Settings**、**Logs**、**Index**、**Profile** が並びます。選択したサーフェスは固定ペインに表示し、
 **Split view** で必要に応じて2つ目のペインを追加できます。Status Strip は
 コンテンツ領域の下に表示します。その他の操作は Command Palette またはホットキーから使えます。
 
 ### アクセシビリティ
 
 すべてのモーダルダイアログ (Command Palette / Hotkey Overlay / Branch
-Cleanup / Worktree Migration / Launch Wizard / Add Window) は WAI-ARIA
+Cleanup / Worktree Migration / Launch Wizard) は WAI-ARIA
 dialog convention に従います。`role="dialog"` + accessible name、
 `aria-modal`、open 時にフォーカスがダイアログ内へ移動し close 時に
 トリガーへ戻る、Tab がダイアログ内で循環 (キーボードトラップなしの

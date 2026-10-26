@@ -151,3 +151,116 @@ test("member tokens use measured conversations and never count Codex cache twice
   assert.equal(result.by_member.m2, 17);
   assert.equal(result.by_member.m3, null);
 });
+
+
+test("switch requests retain their identity until matching project receipts and reject duplicates", async () => {
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  assert.equal(typeof createAgentSwitchModel, "function");
+  const { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError } = createAgentSwitchModel("project");
+  const action = { kind: "request", operation_id: "operation-one", member_id: "m1", expected_roster_revision: 3, target_issue_number: 5002 };
+  assert.equal(beginAgentSwitchRequest(action), true);
+  assert.deepEqual(model.read().pending, action);
+  assert.equal(beginAgentSwitchRequest(action), false);
+  applyAgentSwitchError({ project_key: "project", operation_id: "older-operation", message: "Earlier request failed" });
+  applyAgentSwitchError({ project_key: "project", message: "An earlier read failed" });
+  assert.deepEqual(model.read().pending, action, "uncorrelated errors cannot acknowledge a switch");
+  assert.equal(model.read().error, null);
+  const intent = { operation_id: action.operation_id, member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "requested", reason: "Waiting for a safe checkpoint" };
+  applyAgentSwitchSnapshot({ project_key: "other", intents: [intent] });
+  applyAgentSwitchError({ project_key: "other", message: "No" });
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [{ ...intent, operation_id: "older-operation", stage: "completed" }] });
+  assert.deepEqual(model.read().pending, action);
+  assert.equal(model.read().intents.length, 0, "a delayed unrelated receipt cannot become this switch");
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [intent] });
+  assert.equal(model.read().pending, null);
+  assert.deepEqual(model.read().intents, [intent]);
+  assert.equal(beginAgentSwitchRequest({ ...action, operation_id: "another" }), false, "an active switch owns the member");
+});
+
+test("switch cancellation and disconnect preserve unknown outcomes without stale progress or success", async () => {
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  assert.equal(typeof createAgentSwitchModel, "function");
+  const { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, clearAgentSwitch } = createAgentSwitchModel("project");
+  const intent = { operation_id: "operation-one", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "checkpoint_verified" };
+  const receipt = value => applyAgentSwitchSnapshot({ project_key: "project", intents: [value] });
+  receipt(intent);
+  assert.equal(beginAgentSwitchRequest({ kind: "cancel", operation_id: intent.operation_id }), true);
+  assert.equal(beginAgentSwitchRequest({ kind: "cancel", operation_id: intent.operation_id }), false);
+  receipt({ ...intent, stage: "checkpointing" });
+  assert.equal(model.read().intents[0].stage, "checkpoint_verified");
+  assert.equal(model.read().pending.kind, "cancel", "an old progress event does not acknowledge cancellation");
+  receipt({ ...intent, stage: "cancelled" });
+  assert.equal(model.read().pending, null);
+  const action = { kind: "request", operation_id: "operation-two", member_id: "m1", expected_roster_revision: 3, target_issue_number: 5003 };
+  assert.equal(beginAgentSwitchRequest(action), true);
+  clearAgentSwitch();
+  assert.equal(model.read().disconnected, true);
+  assert.deepEqual(model.read().pending, action, "response loss retains the request identity");
+  receipt({ ...intent, stage: "completed" });
+  assert.deepEqual(model.read().pending, action, "an older operation cannot confirm a new switch");
+  receipt({ ...intent, operation_id: action.operation_id, target_issue_number: 5003, stage: "stopping_current" });
+  assert.equal(model.read().disconnected, false);
+  assert.equal(model.read().pending, null);
+  assert.equal(beginAgentSwitchRequest({ kind: "cancel", operation_id: action.operation_id }), false, "stopping is past the cancel boundary");
+});
+
+
+test("switch refresh selects the latest timestamped operation without terminal regression", async () => {
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  const { model, applyAgentSwitchSnapshot } = createAgentSwitchModel("project");
+  const old = { operation_id: "old", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "completed", created_at: "2026-10-25T00:00:00Z" };
+  const latest = { ...old, operation_id: "new", target_issue_number: 5003, stage: "failed", created_at: "2026-10-25T00:01:00Z" };
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [old] });
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [latest, old] });
+  assert.deepEqual(model.read().intents, [latest], "refresh observes a later switch by the same member");
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [old, { ...latest, stage: "stopping_current" }] });
+  assert.deepEqual(model.read().intents, [latest], "an old progress receipt cannot undo the final result");
+});
+
+
+test("only a correlated Unknown read may release an absent local switch for a new explicit request", async t => {
+  const crypto = globalThis.crypto, descriptor = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
+  t.after(() => {
+    if (descriptor) Object.defineProperty(crypto, "randomUUID", descriptor);
+    else delete crypto.randomUUID;
+  });
+  Object.defineProperty(crypto, "randomUUID", { configurable: true, value: undefined });
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  const { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, clearAgentSwitch } = createAgentSwitchModel("project");
+  const action = { kind: "request", operation_id: "operation-one", member_id: "m1", expected_roster_revision: 3, target_issue_number: 5002 };
+  beginAgentSwitchRequest(action);
+  const earlierRead = { kind: "read" }; beginAgentSwitchRequest(earlierRead);
+  assert.equal(typeof earlierRead.request_id, "string");
+  assert.ok(earlierRead.request_id.length > 0, "read correlation does not require the secure-context UUID API");
+  clearAgentSwitch();
+  applyAgentSwitchSnapshot({ project_key: "project", request_id: earlierRead.request_id, intents: [] });
+  assert.deepEqual(model.read().pending, action, "a read issued before Unknown is not recovery evidence");
+  const recoveryRead = { kind: "read" }; beginAgentSwitchRequest(recoveryRead);
+  assert.notEqual(recoveryRead.request_id, earlierRead.request_id);
+  applyAgentSwitchSnapshot({ project_key: "project", intents: [] });
+  applyAgentSwitchSnapshot({ project_key: "other", request_id: recoveryRead.request_id, intents: [] });
+  assert.deepEqual(model.read().pending, action, "tick and other-project snapshots cannot release the request");
+  applyAgentSwitchSnapshot({ project_key: "project", request_id: recoveryRead.request_id, intents: [] });
+  assert.equal(model.read().pending, null);
+  assert.equal(model.read().disconnected, false);
+  assert.equal(model.read().notice.message, "No saved request was observed. Request again to recheck the current member.");
+  assert.equal(model.read().intents.length, 0, "absence never fabricates a terminal result");
+  const next = { ...action, operation_id: "operation-two" };
+  assert.equal(beginAgentSwitchRequest(next), true, "only a fresh explicit click starts another operation");
+  applyAgentSwitchSnapshot({ project_key: "project", request_id: recoveryRead.request_id, intents: [] });
+  assert.deepEqual(model.read().pending, next, "the old correlated read cannot release a newer request");
+});
+
+
+test("server Unknown keeps saved-source recovery against old progress and accepts an explicit recovery receipt", async () => {
+  const { createAgentSwitchModel } = await import("../agent-activity-model.js");
+  const { model, applyAgentSwitchSnapshot } = createAgentSwitchModel("project");
+  const unknown = { operation_id: "operation", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002,
+    stage: "unknown", saved_work_id: "saved-source", can_resume_saved: true };
+  const receipt = intent => applyAgentSwitchSnapshot({ project_key: "project", intents: [intent] });
+  receipt(unknown);
+  receipt({ ...unknown, stage: "stopping_current", saved_work_id: null, can_resume_saved: false });
+  assert.deepEqual(model.read().intents, [unknown], "a delayed read cannot hide canonical Unknown recovery");
+  receipt({ ...unknown, stage: "cancelled", can_resume_saved: false });
+  assert.equal(model.read().intents[0].stage, "cancelled", "the explicit saved-source recovery receipt remains observable");
+});

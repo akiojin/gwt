@@ -431,6 +431,25 @@ pub const OPERATIONS: &[Operation] = &[
         name: "issue.monitor.schedule.reassign",
         aliases: &[],
     },
+    // The source Session acknowledges its own verified saved checkpoint.
+    Operation {
+        name: "issue.monitor.switch.ack",
+        aliases: &[],
+    },
+    // The registered PM may cancel before the captured runtime is stopped.
+    Operation {
+        name: "issue.monitor.switch.cancel",
+        aliases: &[],
+    },
+    Operation {
+        name: "issue.monitor.switch.read",
+        aliases: &[],
+    },
+    // The registered PM requests a checkpointed switch to the next planned Issue.
+    Operation {
+        name: "issue.monitor.switch.request",
+        aliases: &[],
+    },
     Operation {
         name: "issue.monitor.status",
         aliases: &[],

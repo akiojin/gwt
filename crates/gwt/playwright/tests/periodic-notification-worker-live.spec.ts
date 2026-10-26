@@ -35,7 +35,7 @@ test.describe("Periodic notification worker (live backend)", () => {
         await expect(page.locator("#close-project-button")).toBeVisible();
         await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
         await page.locator(".op-rail").getByRole("button", { name: "Issues", exact: true }).click();
-        const monitor = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="settings"]');
+        const monitor = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
         await expect(monitor).toBeVisible();
         windowId = await monitor.getAttribute("data-id") ?? undefined;
         await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])

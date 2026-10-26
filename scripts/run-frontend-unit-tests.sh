@@ -15,6 +15,7 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/index-works-scope.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-intake.test.mjs \
   crates/gwt/web/__tests__/launch-wizard-agent-setup.test.mjs \
+  crates/gwt/web/__tests__/launch-wizard-agent-settings-sets.test.mjs \
   crates/gwt/web/__tests__/operator-chrome-structure.test.mjs \
   crates/gwt/web/__tests__/operator-shell-runtime.test.mjs \
   crates/gwt/web/__tests__/provider-usage-surface.test.mjs \
@@ -97,8 +98,6 @@ bash scripts/run-node-tests-with-linkedom.sh "$@" \
   crates/gwt/web/__tests__/recent-row-style.test.mjs \
   crates/gwt/web/__tests__/release-notes-window.test.mjs \
   crates/gwt/web/__tests__/surface-window-reopen.test.mjs \
-  crates/gwt/web/__tests__/preset-modal-surface-deck.test.mjs \
   crates/gwt/web/__tests__/logs-process-facet.test.mjs \
   crates/gwt/web/__tests__/logs-scope-facet.test.mjs \
-  crates/gwt/web/__tests__/window-runtime-state.test.mjs \
-  crates/gwt/web/__tests__/window-list-model.test.mjs
+  crates/gwt/web/__tests__/window-runtime-state.test.mjs

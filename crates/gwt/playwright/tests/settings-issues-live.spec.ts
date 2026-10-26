@@ -38,7 +38,7 @@ test.afterEach(async ({ page }) => {
 
 test("Issue #5787 candidate choices preserve saved values and persist dependent selections", async ({ page }, info) => {
   const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
-  test.skip(!base, "requires browser-check's isolated checkout");
+  test.skip(!base || !process.env.GWT_PLAYWRIGHT_CHECK_HOME, "requires browser-check's isolated checkout and HOME");
   test.setTimeout(180_000);
   await withLiveGwtBackendLock(base!, info, async () => {
     const errors: string[] = [];
@@ -47,12 +47,28 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .some(({ payload }: any) => payload.kind === "workspace_state"));
+    const members = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .findLast(({ payload }: any) => payload.kind === "agent_roster")?.payload.roster.members ?? []);
+    const register = async (agentId: string) => {
+      await page.locator('.op-rail [data-surface="agents"]').click();
+      const before = new Set((await members()).map((member: any) => member.agent_member_id));
+      await page.getByLabel("Tool for new member", { exact: true }).selectOption(agentId);
+      await page.locator('.roster-capacity [data-action="add"]').click();
+      await expect.poll(async () => (await members()).find((member: any) => member.agent_id === agentId && !before.has(member.agent_member_id))?.agent_member_id).toBeTruthy();
+      return (await members()).find((member: any) => member.agent_id === agentId && !before.has(member.agent_member_id));
+    };
+    const openclawMember = await register("openclaw"), hermesMember = await register("hermes");
     await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 578701,
       profiles: [{ agent_id: "codex", model: "saved-unlisted-model", reasoning: "high", docker_service: "saved-service", runtime_target: "Host" }] });
     const seeded = await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .find(({ payload }: any) => ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(payload.kind)
         && payload.request_id === 578701)?.payload).then(handle => handle.jsonValue());
     expect(seeded.kind, seeded.message).toBe("issue_monitor_profiles");
+    const selectedMemberId = seeded.profiles[0].agent_member_id;
+    expect(selectedMemberId).toBeTruthy();
+    await expect.poll(async () => (await members()).find((member: any) => member.agent_member_id === selectedMemberId)?.name).toBeTruthy();
+    let selectedName = (await members()).find((member: any) => member.agent_member_id === selectedMemberId).name;
+
     const open = async () => {
       // Wait for project bootstrap; retained windows are awaited after reload.
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
@@ -63,7 +79,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await open();
     const windowId = await settings(page).getAttribute("data-id");
     const candidates = panel(page, "agents");
-    const control = (name: string) => candidates.getByLabel(`${name} codex`, { exact: true });
+    const control = (name: string) => candidates.getByLabel(`${name} ${selectedName}`, { exact: true });
     for (const name of ["Agent", "Model", "Reasoning", "Docker service"]) await expect(control(name)).toHaveJSProperty("tagName", "SELECT");
     await expect(control("Model")).toHaveValue("saved-unlisted-model");
     await expect(control("Reasoning")).toHaveValue("high");
@@ -102,13 +118,15 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await expect(control("Docker service")).toHaveValue(service!);
     await expect(control("Windows shell")).toBeDisabled();
     await info.attach(`candidate-selects-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
-    await select(control("Agent"), "openclaw");
+    await select(control("Agent"), openclawMember.agent_member_id);
+    selectedName = openclawMember.name;
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
-    await expect(candidates.getByLabel("Reasoning openclaw", { exact: true })).toBeDisabled();
-    await expect(candidates.getByLabel("Fast mode openclaw", { exact: true })).toBeDisabled();
-    await select(candidates.getByLabel("Agent openclaw", { exact: true }), "hermes");
+    await expect(control("Reasoning")).toBeDisabled();
+    await expect(control("Fast mode")).toBeDisabled();
+    await select(control("Agent"), hermesMember.agent_member_id);
+    selectedName = hermesMember.name;
     await candidates.getByRole("heading", { name: "Candidates", exact: true }).click();
-    const hermesModel = candidates.getByLabel("Model hermes", { exact: true });
+    const hermesModel = control("Model");
     await expect(hermesModel).toHaveJSProperty("tagName", "INPUT");
     // A catalog reply may rerender the row between separate locator calls.
     const suggestions = await hermesModel.evaluate((input: HTMLInputElement) => ({
@@ -120,7 +138,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
     await gotoLiveGwt(page, base!, { enableTestBridge: true });
     await expect(settings(page)).toHaveAttribute("data-id", windowId!);
     await open();
-    await expect(candidates.getByLabel("Model hermes", { exact: true })).toHaveValue("custom-hermes-model");
+    await expect(control("Model")).toHaveValue("custom-hermes-model");
     await expect(page.locator("html")).toHaveAttribute("data-theme", themeFor(info));
     await info.attach(`candidate-choices-${themeFor(info)}`, { body: await candidates.screenshot(), contentType: "image/png" });
     expect(errors).toEqual([]);
@@ -130,7 +148,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
 async function openSettings(page: Page, section: string): Promise<void> {
   await page.bringToFront();
   // The disposable Normal Git fixture may restore this unrelated focus trap.
-  // Release it before the first Settings disclosure pointer action.
+  // Release it before the first Settings pointer action.
   await closeFixtureMigrationDrawer(page);
   await page.evaluate(section => document.dispatchEvent(new CustomEvent("settings:open", {
     detail: { section },
@@ -138,10 +156,6 @@ async function openSettings(page: Page, section: string): Promise<void> {
   await expect(settings(page)).toBeVisible();
   const selectedSection = section === "agents" ? "issues" : section;
   await expect(settings(page).locator(`[data-settings-tab="${selectedSection}"]`)).toHaveAttribute("aria-selected", "true");
-  if (selectedSection === "issues") {
-    const options = panel(page, "issues").locator(".settings-issues-options");
-    if (!await options.evaluate(element => (element as HTMLDetailsElement).open)) await options.locator(":scope > summary").click();
-  }
   await expect(panel(page, section)).toBeVisible();
 }
 
@@ -227,7 +241,7 @@ async function assertIssuesLayout(page: Page): Promise<void> {
     const value = element.lastElementChild!.getBoundingClientRect();
     return { top: row.top, bottom: row.bottom, label: label.width, value: value.left, right: row.right };
   }));
-  const visible = await panel(page, "issues").locator(".settings-issues-options").boundingBox();
+  const visible = await controls.boundingBox();
   expect(visible).not.toBeNull();
   expect(new Set(bounds.map(row => Math.round(row.label))).size).toBe(1);
   expect(new Set(bounds.map(row => Math.round(row.value))).size).toBe(1);
@@ -238,7 +252,7 @@ async function assertIssuesLayout(page: Page): Promise<void> {
     expect(row.top).toBeGreaterThanOrEqual(visible!.y);
     expect(row.bottom).toBeLessThanOrEqual(visible!.y + visible!.height);
   }
-  for (const name of ["Autonomous mode", "Max active", "Max active mode", "Auto-refill", "Refill limit", "Allowed labels"]) {
+  for (const name of ["Autonomous", "Max active", "Max active mode", "Auto-refill", "Refill limit", "Allowed labels"]) {
     await expect(controls.getByLabel(name, { exact: true })).toBeInViewport({ ratio: 1 });
   }
   await expect(controls.locator('[data-action="monitor-toggle"]')).toBeInViewport({ ratio: 1 });
@@ -295,19 +309,21 @@ test.describe("Issue #5322 Settings", () => {
         const originalB = await readPreferences(b);
         const issues = panel(page, "issues");
         const issuesB = panel(pageB, "issues");
-        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
+        await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
 
         // AC-1/2: opening an existing Settings window selects, focuses and
-        // reveals Issues. The Monitor gear uses the same route.
+        // reveals Issues execution settings. The Monitor gear uses the same route.
         const originalWindow = await settings(page).getAttribute("data-id");
         expect(originalWindow).toBeTruthy();
         await openSettings(page, "agents");
         await panel(page, "agents").getByRole("button", { name: "Add candidate", exact: true }).scrollIntoViewIfNeeded();
         await page.locator('button[data-surface="issues"]').click();
-        await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
-        await expect(settings(page)).toHaveClass(/focused/);
+        const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
+        await expect(issueWindow).toHaveCount(1);
+        await expect(issueWindow.locator('.issue-bridge-root')).toBeVisible();
+        await expect(settings(page)).toBeHidden();
         await openSettings(page, "issues");
         await expect(settings(page)).toHaveCount(1);
         expect(await settings(page).getAttribute("data-id")).toBe(originalWindow);
@@ -315,30 +331,29 @@ test.describe("Issue #5322 Settings", () => {
         await expect(issues).toBeFocused();
         await expect(autonomous(page)).toBeInViewport();
         await page.locator('button[data-surface="issues"]').click();
-        const gear = page.locator('[data-action="monitor-settings"]');
+        const gear = issueWindow.locator('[data-action="monitor-settings"]');
         await expect(gear).toBeVisible();
-        const options = issues.locator(".settings-issues-options");
-        if (await options.evaluate(element => (element as HTMLDetailsElement).open)) await gear.click();
         await gear.click();
         await expect(settings(page).locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-        await expect(options).toHaveAttribute("open", "");
-        await expect(gear).toHaveAttribute("aria-expanded", "true");
-        await expect(gear).toBeFocused();
+        await expect(issues).toBeVisible();
+        await expect(issues.locator('.issue-bridge-root')).toHaveCount(0);
+        await expect(issues).toBeFocused();
         await expect(settings(page)).toHaveCount(1);
+        expect(await settings(page).getAttribute("data-id")).toBe(originalWindow);
         await screenshot(page, "issues", info);
         await assertIssuesLayout(page);
 
         // AC-1/5: a no-remote project with Autonomous and PM disabled can
         // persist Start/Stop without dispatching implementation work.
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
         await expect(issues.locator('[data-action="monitor-toggle"]')).toBeEnabled();
         await toggleMonitor(page, true);
         await expect(issues.locator('[data-action="monitor-toggle"]')).toBeFocused();
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(true);
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Stop");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).toBeChecked();
         await toggleMonitor(page, false);
         await expect.poll(async () => (await readPreferences(a)).enabled).toBe(false);
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
 
         // Edit the remaining project-local controls while Monitor is stopped.
         await autonomous(page).click();
@@ -365,7 +380,7 @@ test.describe("Issue #5322 Settings", () => {
         await issues.getByLabel("Allowed labels", { exact: true }).fill("auto-merge, bug");
         await issues.getByLabel("Allowed labels", { exact: true }).press("Tab");
         await expect.poll(async () => (await readPreferences(a)).allowed_labels).toEqual(["auto-merge", "bug"]);
-        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
+        await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
 
@@ -384,53 +399,55 @@ test.describe("Issue #5322 Settings", () => {
           await expect(agents).toHaveAttribute("data-saving", "false");
         };
         const editCandidate = async (name: string, value: string) => saveCandidate(async () => {
-          const control = agents.getByLabel(name, { exact: true });
+          const key = ({ Model: "model", Reasoning: "reasoning", "Prefer for": "prefer_for", "Docker service": "docker_service" } as Record<string, string>)[name.slice(0, name.lastIndexOf(" "))];
+          const control = agents.locator(`fieldset[data-agent-id="${name.split(" ").at(-1)}"] [data-profile-field="${key}"]`);
           if (await control.evaluate(node => node.tagName === "SELECT")) await control.selectOption(value);
           else await control.fill(value);
-          await agents.getByLabel(name, { exact: true }).press("Tab");
+          await control.press("Tab");
         });
         await expect(agents.getByRole("button", { name: "Save profiles", exact: true })).toHaveCount(0);
         await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
         await page.waitForFunction(root => ((window as any).__gwtPlaywrightMessages ?? []).some(({ payload }: any) =>
           payload.kind === "issue_monitor_profiles" && payload.project_root === root
           && payload.profiles[0]?.version === "1.2.3"), a.root);
-        await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-astra");
-        await expect(agents.getByLabel("Reasoning codex", { exact: true })).toHaveValue("high");
-        await expect(agents.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:fix");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="model"]')).toHaveValue("gpt-6-astra");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="reasoning"]')).toHaveValue("high");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="prefer_for"]')).toHaveValue("type:fix");
         await editCandidate("Model codex", "gpt-6-sol");
         await editCandidate("Reasoning codex", "medium");
-        await agents.getByLabel("Prefer for codex", { exact: true }).fill("bug");
-        await agents.getByLabel("Prefer for codex", { exact: true }).press("Tab");
+        await agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="prefer_for"]').fill("bug");
+        await agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="prefer_for"]').press("Tab");
         await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? []).some(({ payload }: any) =>
           payload.kind === "issue_monitor_toast" && payload.level === "error" && /prefer_for/.test(payload.message)));
         await sendLiveGwtEvent(page, { kind: "get_issue_monitor_profiles" });
-        await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-sol");
-        await expect(agents.getByLabel("Prefer for codex", { exact: true })).toHaveValue("bug");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="model"]')).toHaveValue("gpt-6-sol");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="prefer_for"]')).toHaveValue("bug");
         expect((await readPreferences(a)).launch_profiles[0]).toMatchObject({ model: "gpt-6-sol", prefer_for: ["type:fix"] });
         await editCandidate("Prefer for codex", "type:fix, kind:spec");
-        await saveCandidate(() => agents.getByLabel("Session mode codex", { exact: true }).selectOption("Continue"));
-        await saveCandidate(() => agents.getByLabel("Runtime codex", { exact: true }).selectOption("Docker"));
+        await saveCandidate(() => agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="session_mode"]').selectOption("Continue"));
+        await saveCandidate(() => agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="runtime_target"]').selectOption("Docker"));
         await editCandidate("Docker service codex", "fixture-service");
         await expect.poll(async () => (await readPreferences(a)).launch_profiles[0]).toMatchObject({
           agent_id: "codex", model: "gpt-6-sol", reasoning: "medium", prefer_for: ["type:fix", "kind:spec"],
           version: "1.2.3", runtime_target: "Docker", docker_service: "fixture-service", docker_lifecycle_intent: "Connect", session_mode: "Continue",
         });
-        await agents.getByRole("button", { name: "Move down codex", exact: true }).click();
+        await agents.locator('fieldset[data-agent-id="codex"] [data-action="down"]').click();
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "claude");
-        await agents.getByRole("button", { name: "Move up codex", exact: true }).click();
+        await agents.locator('fieldset[data-agent-id="codex"] [data-action="up"]').click();
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "codex");
-        await agents.getByRole("button", { name: "Remove claude", exact: true }).click();
+        const claudeMemberId = await agents.locator('fieldset[data-agent-id="claude"]').getAttribute("data-agent-member-id");
+        await agents.locator('fieldset[data-agent-id="claude"] [data-action="remove"]').click();
         await expect(agents.locator("fieldset[data-agent-id]")).toHaveCount(1);
-        await expect(agents.getByRole("button", { name: "Remove codex", exact: true })).toBeDisabled();
-        await agents.getByLabel("Add candidate candidate", { exact: true }).selectOption("claude");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-action="remove"]')).toBeDisabled();
+        await agents.getByLabel("Add candidate candidate", { exact: true }).selectOption(claudeMemberId!);
         await agents.getByRole("button", { name: "Add candidate", exact: true }).click();
         await expect(agents.locator("fieldset[data-agent-id]")).toHaveCount(2);
         await editCandidate("Model claude", "sonnet");
         await editCandidate("Reasoning claude", "medium");
         await expect.poll(async () => (await readPreferences(a)).launch_profiles[1].model).toBe("sonnet");
-        await agents.getByRole("button", { name: "Move down codex", exact: true }).click();
+        await agents.locator('fieldset[data-agent-id="codex"] [data-action="down"]').click();
         await expect.poll(async () => (await readPreferences(a)).launch_profiles.map((profile: any) => profile.agent_id)).toEqual(["claude", "codex"]);
-        await expect(agentsB.getByLabel("Model codex", { exact: true })).toHaveValue("project-b-model");
+        await expect(agentsB.locator('fieldset[data-agent-id="codex"] [data-profile-field="model"]')).toHaveValue("project-b-model");
 
         // PM ruling: the single global update toggle lives in System and
         // refreshes the other project without changing its project settings.
@@ -510,21 +527,21 @@ test.describe("Issue #5322 Settings", () => {
           await expect(current.locator("html")).toHaveAttribute("data-theme", themeFor(info));
         }
         await openSettings(page, "issues");
-        await expect(autonomous(page)).toHaveAttribute("aria-checked", "true");
+        await expect(autonomous(page)).toBeChecked();
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue("4");
         await expect(issues.getByRole("checkbox", { name: "Auto-refill", exact: true })).toBeChecked();
         await expect(issues.getByLabel("Refill limit", { exact: true })).toHaveValue("5");
         await expect(issues.getByLabel("Allowed labels", { exact: true })).toHaveValue("auto-merge, bug");
-        await expect(issues.locator('[data-action="monitor-toggle"]')).toHaveText("Start");
+        await expect(issues.locator('[data-action="monitor-toggle"]')).not.toBeChecked();
         await openSettings(page, "agents");
         await expect(agents.locator("fieldset[data-agent-id]").first()).toHaveAttribute("data-agent-id", "claude");
-        await expect(agents.getByLabel("Model codex", { exact: true })).toHaveValue("gpt-6-sol");
-        await expect(agents.getByLabel("Prefer for codex", { exact: true })).toHaveValue("type:fix, kind:spec");
-        await expect(agents.getByLabel("Session mode codex", { exact: true })).toHaveValue("Continue");
-        await expect(agents.getByLabel("Runtime codex", { exact: true })).toHaveValue("Docker");
-        await expect(agents.getByLabel("Docker service codex", { exact: true })).toHaveValue("fixture-service");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="model"]')).toHaveValue("gpt-6-sol");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="prefer_for"]')).toHaveValue("type:fix, kind:spec");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="session_mode"]')).toHaveValue("Continue");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="runtime_target"]')).toHaveValue("Docker");
+        await expect(agents.locator('fieldset[data-agent-id="codex"] [data-profile-field="docker_service"]')).toHaveValue("fixture-service");
         await openSettings(pageB, "issues");
-        await expect(autonomous(pageB)).toHaveAttribute("aria-checked", "false");
+        await expect(autonomous(pageB)).not.toBeChecked();
         await expect(issuesB.getByLabel("Max active", { exact: true })).toHaveValue("2");
         await expect(issuesB.getByLabel("Allowed labels", { exact: true })).toHaveValue("project-b");
         const finalA = await readPreferences(a), finalB = await readPreferences(b);

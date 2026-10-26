@@ -4540,11 +4540,9 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
 
 #[test]
 fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement() {
-    // Issue #4079 AC-2: with more than one provider in the pool the per-Issue
-    // form must say which candidate the save writes, and its preview of the
-    // resulting pool summary must be what the Monitor reports afterwards.
-    // (Issue #4911: the settings form edits every set instead; this form still
-    // switches the head.)
+    // AC41: the per-Issue form edits registered people and previews the full
+    // candidate pool. Reordering its head must save the same member order and
+    // summary that the operator saw, including people with the same tool.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4555,8 +4553,11 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut seeded = gwt::IssueMonitorPrefs::default();
-    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 2,
+        ..Default::default()
+    };
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
@@ -4568,6 +4569,23 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             issue_number: 3165,
             linked_issue_kind: Some(LinkedIssueKind::Spec),
         },
+    );
+    let registered_pool = gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("migrated registered pool")
+        .launch_profile_pool();
+    assert_eq!(registered_pool.len(), 2);
+    let expected_members = vec![
+        registered_pool[1].agent_member_id.clone(),
+        registered_pool[0].agent_member_id.clone(),
+    ];
+    assert!(expected_members.iter().all(Option::is_some));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::MoveAgentSettingsSet { index: 1, to: 0 },
+    );
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::SelectAgentSettingsSet { index: 0 },
     );
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
@@ -4586,22 +4604,29 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         view.fast_mode,
         "profile editing honors its own Fast preference"
     );
-    let impact = view
-        .issue_monitor_pool_impact
+    let pool = view
+        .issue_monitor_pool
         .as_ref()
-        .expect("Agent Settings must preview its effect on the candidate pool");
-    assert_eq!(impact.action, "replace_head");
-    assert_eq!(impact.agent_id, "codex");
+        .expect("Agent Settings must preview the registered candidate pool");
+    assert_eq!(pool.active_index, 0);
     assert_eq!(
-        impact.replaced_agent_id.as_deref(),
-        Some("claude"),
-        "the operator must see which candidate is switched out"
+        pool.sets
+            .iter()
+            .map(|profile| profile.agent_member_id.clone())
+            .collect::<Vec<_>>(),
+        expected_members,
+        "the preview retains the selected people in launch order"
     );
-    assert!(
-        impact.detail.contains(&impact.resulting_summary),
-        "the note states the summary the Monitor will report: {impact:?}"
+    assert_eq!(view.selected_agent_member_id, expected_members[0]);
+    assert_eq!(view.selected_agent_id, "codex");
+    assert_eq!(
+        pool.sets
+            .iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["codex", "codex"]
     );
-    let previewed_summary = impact.resulting_summary.clone();
+    let previewed_summary = pool.resulting_summary.clone();
 
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
@@ -4650,6 +4675,15 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    assert_eq!(
+        prefs
+            .launch_profile_pool()
+            .iter()
+            .map(|profile| profile.agent_member_id.clone())
+            .collect::<Vec<_>>(),
+        expected_members,
+        "saving preserves the exact previewed member order"
+    );
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
     let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
         .status_view()

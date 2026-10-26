@@ -200,6 +200,16 @@ pub enum IssueCommand {
         project_root: Option<std::path::PathBuf>,
         action: crate::issue_monitor::AgentScheduleAction,
     },
+    MonitorSwitch {
+        project_root: Option<std::path::PathBuf>,
+        action: crate::issue_monitor::AgentSwitchAction,
+    },
+    MonitorSwitchAck {
+        operation_id: String,
+        head: String,
+        work_id: String,
+        board_entry_id: String,
+    },
     MonitorQueuePush {
         project_root: Option<std::path::PathBuf>,
         issue_numbers: Vec<u64>,

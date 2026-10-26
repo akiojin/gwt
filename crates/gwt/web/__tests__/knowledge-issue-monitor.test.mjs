@@ -109,6 +109,33 @@ async function makeFixture(options = {}) {
   return { body, document, mod, sent, surface, load, windowMap, notices, opened, reports, setLiveAgents, activity };
 }
 
+test("Issue #3165: missing saved settings explain why Start has not launched an agent", async (t) => {
+  const { body, surface, sent } = await makeFixture();
+  t.after(() => surface.clearKnowledgeBridgeState("win-1"));
+  const guidance = body.querySelector('[data-role="monitor-setup-guidance"]');
+  assert.ok(guidance, "Monitor has contextual setup guidance");
+  assert.equal(guidance.hidden, true, "unknown profile status makes no launch claim");
+  assert.equal(guidance.getAttribute("role"), "status");
+  const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3 };
+  for (const source of ["default", "last_settings"]) {
+    surface.applyIssueMonitorStatus({ ...status, launch_profile_source: source });
+    assert.equal(guidance.hidden, false, "last settings are prefill, not a saved profile");
+    assert.equal(guidance.textContent,
+      "Agent not started: no saved Agent settings. Save Agent settings, then select Start.");
+  }
+  const cursor = sent.length;
+  body.querySelector('[data-action="monitor-toggle"]').click();
+  assert.deepEqual(sent.slice(cursor), [{ kind: "set_issue_monitor_enabled", enabled: true }]);
+  assert.equal(guidance.hidden, false, "opening settings is not monitoring success");
+  assert.equal(body.querySelector('[data-action="monitor-toggle"]').textContent, "Start");
+  surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "saved" });
+  assert.equal(guidance.hidden, true, "saving settings clears the recovery text");
+  surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "default", active_count: 1 });
+  assert.equal(guidance.hidden, true, "do not claim no launch while an agent is active");
+  surface.applyIssueMonitorStatus({ ...status, launch_profile_source: "default", enabled: true });
+  assert.equal(guidance.hidden, true, "do not claim stopped while monitoring is enabled");
+});
+
 test("Issue #5287: inbox-first startup renders every column despite GUI error and enriches late cache rows", async (t) => {
   const { body, surface, load } = await makeFixture();
   t.after(() => surface.clearKnowledgeBridgeState("win-1"));

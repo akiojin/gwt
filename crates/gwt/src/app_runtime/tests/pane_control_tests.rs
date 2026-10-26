@@ -1,5 +1,89 @@
 use super::*;
 
+#[test]
+fn dropping_window_runtime_reclaims_worker_owned_pty_without_the_pane_lock() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    super::super::pty_io::initialize_process_window_close_finalizer().unwrap();
+    let temp = tempdir().unwrap();
+    let (command, args) = if cfg!(windows) {
+        ("cmd", vec!["/d", "/s", "/c", "exit /b 0"])
+    } else {
+        ("/bin/cat", vec![])
+    };
+    // No frontend answers ConPTY's startup query: even this exit command
+    // remains alive until its owning runtime explicitly tears it down.
+    let pane = Arc::new(Mutex::new(
+        Pane::new(
+            "drop-runtime".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            HashMap::new(),
+            Some(temp.path().to_owned()),
+        )
+        .unwrap(),
+    ));
+    let pty = pane.lock().unwrap().shared_pty();
+    let _cleanup = TestPaneGuard {
+        pty: pty.clone(),
+        reader: None,
+    };
+    let (exit_tx, exit_rx) = mpsc::channel();
+    let output_tx = exit_tx.clone();
+    let mut runtime = WindowRuntime::new(1, pane.clone());
+    runtime.output_thread = Some(gwt::pane_runtime::spawn_output_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |event| {
+            if matches!(event, gwt::pane_runtime::PaneRuntimeEvent::Status { .. }) {
+                let _ = output_tx.send("output");
+            }
+        },
+    ));
+    runtime.status_thread = Some(gwt::pane_runtime::spawn_status_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |_| {
+            let _ = exit_tx.send("status");
+        },
+    ));
+    let pane_lock = pane.lock().unwrap();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let dropper = thread::spawn(move || {
+        drop(runtime);
+        let _ = dropped_tx.send(());
+    });
+    // test-hygiene: allow-wall-clock-deadline Bound a regressed pane mutex wait; the channel establishes Drop completion.
+    let dropped_without_pane_lock = dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    drop(pane_lock);
+    dropper.join().unwrap();
+    assert!(
+        dropped_without_pane_lock,
+        "runtime Drop must dispatch cleanup without taking the pane lock"
+    );
+    let mut exited = [
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual OS child exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must stop its owned child"),
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual PTY reader exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must release its PTY reader"),
+    ];
+    exited.sort_unstable();
+    assert_eq!(exited, ["output", "status"]);
+    assert!(
+        pty.try_wait().unwrap().is_some(),
+        "owned child must be reaped before verification ends"
+    );
+}
+
 fn issue_3713_read_board(project: &Path, session: &str) {
     let _session =
         gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);
@@ -4897,7 +4981,10 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.active_work_projection_broadcast_for_tab("tab");
-    tasks.lock().unwrap().remove(0)();
+    for _ in 0..2 {
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+    }
     let old_completion = recorded
         .lock()
         .unwrap()
@@ -5017,4 +5104,123 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         (reserved, retained, saved.agent_name.as_deref()),
         (true, true, Some("Falcon"))
     );
+}
+
+fn switch_source_retirement_fixture(
+    root: &Path,
+) -> (
+    AppRuntime,
+    Arc<Mutex<Vec<UserEvent>>>,
+    super::super::AgentSwitchSourceExited,
+) {
+    let project = root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_repo(&project);
+    let mut tab = sample_project_tab_with_window_at(
+        "source",
+        "agent",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    tab.workspace
+        .set_session_id("agent", Some("source-session".into()));
+    let (mut runtime, events) = sample_runtime_with_events(root, vec![tab], Some("source"));
+    let window_id = combined_window_id("source", "agent");
+    let mut active = sample_active_agent_session("source", &window_id);
+    active.session_id = "source-session".into();
+    active.worktree_path = project.clone();
+    runtime
+        .active_agent_sessions
+        .insert(window_id.clone(), active);
+    insert_test_pane_runtime(&mut runtime, &window_id);
+    let current = &runtime.runtimes[&window_id];
+    let pty = Arc::clone(&current.pty);
+    let child_pid = pty.process_id().unwrap();
+    let proof = serde_json::from_value(serde_json::json!({
+        "issue_number":43,"window_id":window_id,"session_id":"source-session","host_pid":std::process::id(),"host_started_at":gwt::process::host_process_start_time(std::process::id()).unwrap(),"runtime_incarnation":current.incarnation,"child_pid":child_pid,"child_started_at":gwt::process::host_process_start_time(child_pid).unwrap(),"requested_at":"2026-10-26T00:00:00Z",
+        "execution_identity":{"session_id":"source-session","worktree_path":project,"branch":"work/source","agent_id":{"type":"Codex"},"linked_issue_number":43,"execution_binding":{"schema_version":1,"session_id":"source-session","repo_hash":"project","owner_kind":"issue","owner_number":43,"identity":{"generation_id":"generation","binding_id":"binding","ledger_head_hash":"ledger"},"capability_generation":1}}
+    })).unwrap();
+    let lifecycle_generation = runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
+    (
+        runtime,
+        events,
+        super::super::AgentSwitchSourceExited {
+            operation_id: "operation".into(),
+            proof,
+            lifecycle_generation,
+            pty,
+        },
+    )
+}
+
+#[test]
+fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
+    for keep_runtime in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, events, exited) = switch_source_retirement_fixture(temp.path());
+        let id = exited.proof.window_id.clone();
+        let (spawner, finalizers) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        assert!(
+            runtime
+                .agent_switch_source_exited_events(exited.clone())
+                .is_empty(),
+            "a live tree is never retirement authority"
+        );
+        assert!(runtime.window_lookup.contains_key(&id));
+        assert!(exited
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        if !keep_runtime {
+            runtime.runtimes.remove(&id);
+            runtime.active_agent_sessions.remove(&id);
+        }
+        assert!(!runtime.agent_switch_source_exited_events(exited.clone()).is_empty(), "the exact physically exited source must leave the canvas even without a writer registration");
+        assert!(!runtime.window_lookup.contains_key(&id));
+        assert_eq!(finalizers.lock().unwrap().len(), 1);
+        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
+        assert_eq!(finalizers.lock().unwrap().len(), 1);
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, UserEvent::IssueMonitorScheduledTick)),
+            "normal admission must see the released canvas slot"
+        );
+    }
+}
+
+#[test]
+fn switch_source_exit_preserves_reused_session_and_runtime() {
+    for replace_session in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, _, exited) = switch_source_retirement_fixture(temp.path());
+        let id = exited.proof.window_id.clone();
+        assert!(exited
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        if replace_session {
+            runtime
+                .tab_mut("source")
+                .unwrap()
+                .workspace
+                .set_session_id("agent", Some("successor-session".into()));
+        } else {
+            insert_test_pane_runtime(&mut runtime, &id);
+        }
+        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
+        assert!(runtime.window_lookup.contains_key(&id));
+        if !replace_session {
+            runtime.runtimes[&id]
+                .pty
+                .terminate_and_wait_for_tree(Duration::from_secs(5))
+                .unwrap();
+        }
+    }
 }

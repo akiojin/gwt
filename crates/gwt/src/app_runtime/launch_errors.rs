@@ -296,7 +296,8 @@ impl AppRuntime {
             gwt::LaunchWizardAction::FocusExistingSession { .. }
             | gwt::LaunchWizardAction::MoveExistingPane { .. } => "focus_existing_session",
             gwt::LaunchWizardAction::StopAndStartSuccessor { .. } => "stop_and_start_successor",
-            gwt::LaunchWizardAction::SetAgent { .. } => "agent_select",
+            gwt::LaunchWizardAction::SetAgent { .. }
+            | gwt::LaunchWizardAction::SetAgentMember { .. } => "agent_select",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "launch_target_select",
             gwt::LaunchWizardAction::Select { .. } => "wizard_select",
             _ => "wizard_action",
@@ -324,6 +325,7 @@ impl AppRuntime {
             gwt::LaunchWizardAction::SetInitialPrompt { .. } => "set_initial_prompt",
             gwt::LaunchWizardAction::SetLaunchTarget { .. } => "set_launch_target",
             gwt::LaunchWizardAction::SetAgent { .. } => "set_agent",
+            gwt::LaunchWizardAction::SetAgentMember { .. } => "set_agent_member",
             gwt::LaunchWizardAction::SetModel { .. } => "set_model",
             gwt::LaunchWizardAction::SetReasoning { .. } => "set_reasoning",
             gwt::LaunchWizardAction::SetRuntimeTarget { .. } => "set_runtime_target",

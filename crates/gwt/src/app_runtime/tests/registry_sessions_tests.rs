@@ -58,8 +58,8 @@ fn handle_work_events_ingested_commits_prepared_state_and_refreshes_only_on_chan
     assert!(changed.is_empty());
     assert_eq!(
         tasks.lock().expect("queued tasks").len(),
-        1,
-        "changed ingest schedules exactly one background projection prepare",
+        2,
+        "changed ingest schedules one census and one background projection prepare",
     );
 }
 
@@ -159,7 +159,11 @@ fn inactive_project_completion_refreshes_projection_cache_before_tab_change() {
         events.is_empty(),
         "an inactive project cache refresh must not broadcast into the active tab"
     );
-    tasks.lock().expect("queued tasks").remove(0)();
+    // The independent census precedes the Work preparation in this fixture.
+    for _ in 0..2 {
+        let task = tasks.lock().expect("queued tasks").remove(0);
+        task();
+    }
     let completion = recorded_events
         .lock()
         .expect("recorded events")

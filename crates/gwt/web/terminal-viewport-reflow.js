@@ -90,6 +90,7 @@ export function createTerminalSnapshotWriteCoordinator({
   onError = () => {},
 }) {
   let writeInFlight = false;
+  let viewport = null;
 
   function reportError(error, stage) {
     if (!isRuntimeCurrent()) {
@@ -104,6 +105,7 @@ export function createTerminalSnapshotWriteCoordinator({
 
   function releaseFailedSnapshot(error, stage, { discardPending = false } = {}) {
     writeInFlight = false;
+    viewport = null;
     if (!isRuntimeCurrent()) {
       return;
     }
@@ -151,6 +153,10 @@ export function createTerminalSnapshotWriteCoordinator({
       return;
     }
     try {
+      if (!viewport) {
+        const buffer = terminal.buffer.active;
+        viewport = { line: buffer.viewportY, atBottom: buffer.viewportY >= buffer.baseY };
+      }
       terminal.reset();
     } catch (error) {
       releaseFailedSnapshot(error, "reset");
@@ -167,6 +173,13 @@ export function createTerminalSnapshotWriteCoordinator({
         }
 
         writeInFlight = false;
+        try {
+          if (viewport.atBottom) terminal.scrollToBottom();
+          else terminal.scrollToLine(viewport.line);
+        } catch (error) {
+          reportError(error, "viewport");
+        }
+        viewport = null;
         try {
           installLiveDecoder(nextLiveDecoder);
         } catch (error) {

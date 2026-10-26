@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
-import { setControlExplanation } from "../control-explanations.js";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -62,14 +62,20 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
   const sent = [];
   const frames = new Set();
   const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+  const frameScheduler = scheduleFrame || (callback => { frames.add(callback); return () => frames.delete(callback); });
+  const rosterModel = createUiStateStore({ revision: 1, members: [
+    { member_id: "member-codex", name: "Codex member", agent_id: "codex", enabled: true },
+    { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
+  ] }, { scheduleFrame: frameScheduler });
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor,
   );
   const surface = factory({
-    scheduleFrame: scheduleFrame || (callback => { frames.add(callback); return () => frames.delete(callback); }),
+    scheduleFrame: frameScheduler,
+    rosterModel,
     send: message => { onSend?.(message); sent.push(message); },
     createNode(tag, className, text) {
       const node = document.createElement(tag);
@@ -89,7 +95,7 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
   return { surface, body, document, window, sent, flush };
 }
 
-test("Custom Agent replies commit immutable snapshots shared by all mounts and candidates", () => {
+test("Custom Agent replies commit immutable snapshots shared by all mounts and registration catalogs", () => {
   const frames = new Set();
   const flush = () => { for (const callback of [...frames]) { frames.delete(callback); callback(); } };
   const { surface, body, document, sent } = createSettingsHarness({ scheduleFrame(callback) {
@@ -104,8 +110,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   surface.applyIssueMonitorProfiles({ project_root: "/projects/A", profiles: [] });
   const initial = surface.customAgentsModel.read();
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "unavailable", message: "Catalog unavailable" });
-  assert.ok(body.querySelector('[data-settings-candidates] option[value="codex"]'),
-    "a failed first custom-agent read must unblock the known built-in catalog");
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="member-codex"]'),
+    "registered candidate identities do not wait for a CLI catalog read");
   const agent = { id: "fixture-cli", display_name: "Fixture CLI", command: "fixture", env: { TOKEN: "***REDACTED***" } };
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_list", agents: [agent] });
   const loaded = surface.customAgentsModel.read();
@@ -117,7 +123,7 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   flush();
   for (const host of [body, second]) {
     assert.match(host.querySelector('[data-role="settings-scroll"]').textContent, /Fixture CLI/);
-    assert.ok(host.querySelector('[data-settings-candidates] option[value="fixture-cli"]'));
+    assert.ok(host.querySelector('[data-settings-candidates] option[value="member-custom"]'));
   }
   const scrolls = [body, second].map(host => host.querySelector('[data-role="settings-scroll"]'));
   const renders = [0, 0];
@@ -134,8 +140,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
     ] });
   }
   assert.equal(surface.customAgentsModel.read().catalog.agents[0].display_name, "Burst 49");
-  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Burst 49/,
-    "candidate controls retain their synchronous catalog contract");
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Custom member/,
+    "candidate names remain registered identities while CLI display metadata changes");
   assert.deepEqual(renders, [0, 0], "only the Custom Agents list waits for the frame");
   assert.equal(frames.size, 1, "the burst reserves one frame");
   flush();
@@ -186,7 +192,8 @@ test("Custom Agent replies commit immutable snapshots shared by all mounts and c
   second.remove();
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_deleted", agent_id: "fixture-cli" });
   assert.equal(second.textContent, detachedText, "detached mount is no longer rendered");
-  assert.equal(body.querySelector('[data-settings-candidates] option[value="fixture-cli"]'), null);
+  assert.ok(body.querySelector('[data-settings-candidates] option[value="member-custom"]'),
+    "removing a CLI catalog entry does not replace or remove its registered member");
   surface.applyCustomAgentsReceiveEvent({ kind: "custom_agent_error", code: "invalid", message: "Fixture rejected" });
   assert.equal(surface.customAgentsModel.read().catalog.loading, false);
   const reopened = document.createElement("main");
@@ -605,6 +612,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   surface.resyncSettings();
   assert.deepEqual(sent, [
     { kind: "list_issue_monitor" }, { kind: "get_issue_monitor_profiles" },
+    { kind: "agent_roster", action: { kind: "read" }, expected_revision: null },
     { kind: "list_supported_agents" }, { kind: "get_system_settings" },
     { kind: "get_update_settings" }, { kind: "get_board_auth_status" },
     { kind: "get_autostart_status" }, { kind: "list_custom_agents" },
@@ -852,8 +860,10 @@ test("Supported Agents batches catalogs while local operations and authoritative
   assert.deepEqual(draws, [0, 0], "catalog burst leaves DOM unchanged until the frame");
   assert.equal(panels[0].querySelector("table"), tables[0]);
   assert.equal(frames.size, 1);
-  assert.match(body.querySelector('[data-settings-candidates]').textContent, /OpenCode 49/,
-    "candidate catalog remains synchronous");
+  assert.equal(surface.supportedAgentsModel.read().agents[0].name, "OpenCode 49",
+    "registration catalog readers observe the latest immutable tool snapshot before paint");
+  assert.match(body.querySelector('[data-settings-candidates]').textContent, /Codex member/,
+    "candidate membership stays independent of provider catalog metadata");
   // The pending snapshot must not overwrite a later local checkbox edit.
   const automatic = panels[0].querySelector('[aria-label="Automatically update agents"]');
   automatic.checked = true;
@@ -1019,7 +1029,8 @@ test("Settings keeps grouped navigation beside a flexible content pane", () => {
   assert.match(tabsBlock[1], /overflow-y:\s*auto/);
   assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
   assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
-  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /\.settings-body\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /@media\s*\(max-width:\s*600px\)[\s\S]*?\.settings-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {
