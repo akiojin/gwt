@@ -10,7 +10,7 @@ const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "u
 const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
@@ -170,6 +170,15 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
+  assert.equal(history[1].querySelector(".roster-history-config")?.textContent, "Recorded name: — · Tool: — · Recorded model: —");
+  assert.equal(history[2].querySelector(".roster-history-config")?.textContent, "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model");
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, name: "Renamed current", provider: "codex", model: "current-model" })) })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "Renamed current");
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent), [
+    "Recorded name: — · Tool: — · Recorded model: —", "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+  ]);
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.deepEqual([...preview.querySelectorAll(".roster-history-config")].map(node => node.textContent), [...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent));
   assert.equal(f.surface.selectMember("m2"), true);
   assert.ok(f.document.activeElement === f.surface.element.querySelector('.roster-row[data-member-id="m2"]'), "selection restores keyboard focus to the new selected row");
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-detail .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);

@@ -268,7 +268,9 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     for (const item of historyEntries) {
       const li = document.createElement("li"), time = document.createElement("small"), title = document.createElement("span"), result = document.createElement("small");
       time.textContent = `${date(item.started_at)} – ${date(item.ended_at)} UTC`; title.textContent = `${item.issue_number ? `#${item.issue_number}` : "—"} ${item.title || "—"}`; result.textContent = item.result || "—";
-      li.append(time, title, result); ol.append(li);
+      const config = document.createElement("small"); config.className = "roster-history-config";
+      config.textContent = `Recorded name: ${item.name || "—"} · Tool: ${item.provider || "—"} · Recorded model: ${item.model || "—"}`;
+      li.append(time, title, config, result); ol.append(li);
     }
     if (!ol.childNodes.length) { const empty = document.createElement("li"); empty.textContent = "No assignment history yet."; ol.append(empty); }
     if (member.assignment?.session_id && activityModel.read().count === null) {

@@ -2056,6 +2056,14 @@ pub struct AgentRosterMemberView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAssignmentHistoryView {
     pub session_id: String,
+    /// Recorded Session facts, independent of the member's current settings.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Recorded launch configuration, not observed provider-internal changes.
+    #[serde(default)]
+    pub model: Option<String>,
     pub issue_number: Option<u64>,
     pub title: Option<String>,
     pub result: Option<String>,
