@@ -49,6 +49,13 @@ cross-project initial reservations, PM exclusion and explicit restore/launch
 membership validation remain in their original paths. No timer, cache,
 scheduler, CPU cap, authority or performance budget changes.
 
+Headed verification also exposed repeated same-size native PTY resize calls.
+Compare the requested full `PtySize` with the existing native master's
+`get_size` result before resizing. Query errors retain the original resize
+path; real changes and externally changed master sizes remain observable.
+This avoids ConPTY screen repaint output on unchanged geometry without
+adding a size cache or changing frontend snapshot recovery.
+
 ## Regression and route timing
 
 The focused test uses the same live Session/sidecar fixture, already bound
@@ -87,7 +94,7 @@ Before the first normal launch, use the existing frontend roster read/add
 operations to allocate twelve enabled custom-tool members in the disposable
 project. No Session, capability or roster identity is forged. Keep all existing
 twelve-pane, authenticated IPC, quiet output, input responsiveness, CPU budget
-and theme/error assertions. The production fix remains the single predicate.
+and theme/error assertions. The naming change remains the single predicate.
 
 The next run, `vrr-da5607ae39fc4f08b6bbd5e64b7cdeee`, exposed an omitted
 `expected_revision` in that preparation helper. The backend correctly rejects
@@ -95,6 +102,30 @@ member mutations without the freshly read revision; the helper waited for a
 success snapshot instead. Pass the current revision exactly as the application
 frontend does. Owned GUI PID 18508 and daemon PID 24460 exited; both failed
 theme traces remain under `issue-5658-after-994f14d8fc804142b936a6e50e7afd6e`.
+
+## Same-size native resize
+
+The third canonical run, `vrr-d49e495013f448d0883800186933da94`, successfully
+launched twelve genuine custom-tool Agent Sessions. Input probes reached the
+visible terminal in roughly 150ms, but quiet sampling failed: dark received
+one approximately 1,910-byte viewport repaint per pane, and light received
+two. These were ordinary `terminal_output` events, not `terminal_snapshot`
+messages. Provider code writes no stdout during sampling. Both-theme failure
+data and traces remain under `issue-5658-after-09679aa765534b9a96da93a1ebc4933a`;
+owned GUI 49656 and daemon 32884 exited.
+
+The dependency path is snapshot/viewport geometry reconciliation to
+`update_terminal_grid`, `Pane::resize`, then an unconditional native
+`MasterPty::resize` call. Reapplying the same grid makes ConPTY repaint its
+visible screen. Keep snapshot recovery and all quiet assertions; skip only
+a native resize whose existing master reports exactly the requested size.
+
+The existing native `pty::tests::test_resize` now covers initial/same-size
+requests, a real size change and an externally changed native master size.
+Its existing native-resize completion traces were 4 before the guard (RED)
+and 2 after (GREEN), with the final actual master size restored to 120×48.
+All 7 existing resize/parser/manager tests passed. No mock or dependency was
+added. The full canonical matrix now also includes these focused crate tests.
 
 ## Residual work
 
