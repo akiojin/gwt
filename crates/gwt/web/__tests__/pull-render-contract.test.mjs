@@ -1050,11 +1050,15 @@ test("checkout baseline satisfies the live and Git base contracts", () => {
 test("cleanup and branch error receivers commit shared data and reject direct rendering", () => {
   const appFile = 'crates/gwt/web/app.js';
   const surfaceFile = 'crates/gwt/web/branches-cleanup-surface.js';
+  const knowledgeFile = 'crates/gwt/web/knowledge-kanban-surface.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const surface = readFileSync(new URL('../branches-cleanup-surface.js', import.meta.url), 'utf8');
-  const modules = new Map([[surfaceFile, surface]]);
+  const knowledge = readFileSync(new URL('../knowledge-kanban-surface.js', import.meta.url), 'utf8');
+  const modules = new Map([[surfaceFile, surface], [knowledgeFile, knowledge]]);
   const selected = findings => findings.filter(finding =>
-    /\/(branch_cleanup_(progress|result)|branch_error)$/.test(finding.context));
+    finding.context.split('/').at(-1).split('|').some(kind =>
+      /^(branch_cleanup_(progress|result)|branch_error)$/.test(kind)));
+  assert.deepEqual(selected(scanModule(knowledge, knowledgeFile)), []);
   assert.deepEqual(selected(scanModule(surface, surfaceFile, { rootName: 'applyBranchCleanupReceiveEvent' })), []);
   assert.deepEqual(selected(scanModule(app, appFile, { modules })), []);
   const bypass = surface.replace('case "branch_cleanup_result": {',
