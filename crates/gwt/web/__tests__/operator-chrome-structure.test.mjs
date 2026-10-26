@@ -462,48 +462,20 @@ test("Sidebar retires the Active Works overview in favor of the Work surface (SP
   );
 });
 
-test("Command Rail groups items into Navigate / Windows / Agents / System (SPEC-3038 US-1)", () => {
-  // SPEC-3038 US-1: the rail is the single always-visible home for navigation
-  // (Start Work / Work / Board / Logs), window operations (Tile / Stack /
-  // Align / Windows / Add), and system actions (Palette / Update) — in that
-  // order. Groups carry aria-labels instead of visual headings. SPEC-2356
-  // Anshin (FR-042) inserts an Agents group (STOP ALL) before System.
-  // Issue #4777 T-1 puts the Surfaces group right under the PM.
+test("Command Rail retains navigation and direct surface entries without retired window groups (#4777)", () => {
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  // User verification 2026-06-12: the Update CTA returned to its fixed
-  // bottom-right home, so the sidebar no longer carries an Update section.
-  assert.deepEqual(
-    groups,
-    ["Navigate", "Surfaces", "Windows", "Agents", "System"],
-    "Rail order must be Navigate (PM) → Surfaces → Windows → Agents → System",
-  );
-});
-
-test("Command Rail Windows group carries the window-operation controls (SPEC-3038 US-1)", () => {
-  const windowsGroup = document.querySelector('.op-rail > .op-rail__group[aria-label="Windows"]');
-  assert.ok(windowsGroup, "expected a Windows group in the rail");
-  for (const id of ["window-list-button", "add-button"]) {
-    const control = document.getElementById(id);
-    assert.ok(control, `expected ${id}`);
-    assert.ok(
-      windowsGroup.contains(control),
-      `${id} must live inside the rail Windows group`,
-    );
-    assert.ok(
-      control.classList.contains("op-rail__item"),
-      `${id} must adopt the rail item vocabulary`,
-    );
+  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
+  for (const id of ["window-list-button", "window-list-panel", "op-rail-window-count", "add-button", "preset-modal"]) {
+    assert.equal(Boolean(document.getElementById(id)), false, `${id} must be removed`);
   }
-  // The window-list popover rides along with its trigger.
-  assert.ok(
-    windowsGroup.querySelector("#window-list-panel"),
-    "window-list-panel must anchor to its rail trigger",
-  );
-  // AS-1.4: the Windows item carries an open-window count badge.
-  const badge = windowsGroup.querySelector("#op-rail-window-count.op-rail__badge");
-  assert.ok(badge, "expected the Windows rail item to expose a window-count badge");
+  for (const [command, label] of [["open-logs", "Logs"], ["open-index", "Index"], ["open-profile", "Profile"]]) {
+    const entry = document.querySelector(`.op-rail__item[data-cmd="${command}"]`);
+    assert.ok(entry, `${label} must remain directly reachable`);
+    assert.equal(entry.textContent.trim().endsWith(label), true);
+  }
+  assert.match(componentsStyle, /\.op-rail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 
 test("Command Rail System group hosts the Command Palette trigger (SPEC-3038 US-1)", () => {
@@ -634,11 +606,6 @@ test("workspace windows expose role badges and hide panel runtime chips", () => 
     /\.status-chip\[hidden\]\s*\{[\s\S]*display:\s*none/,
     "hidden runtime chips must stay hidden even though .status-chip uses inline-flex",
   );
-  assert.match(
-    projectShellSurfaceSource,
-    /window-list-role/,
-    "expected window list rows to include a role badge",
-  );
 });
 
 test("workspace windows expose semantic worktree badges separately from agent color", () => {
@@ -667,16 +634,6 @@ test("workspace windows expose semantic worktree badges separately from agent co
     "workspace window render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
-    projectShellSurfaceSource,
-    /window-list-worktree/,
-    "window list rows must include the same worktree badge contract",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /class="window-worktree-badge window-list-worktree"[^>]*role="img"/,
-    "window list worktree badges must expose an image role for their accessible name",
-  );
-  assert.match(
     windowWorktreeFormSource,
     /badgeElement\.setAttribute\("role",\s*"img"\)/,
     "visible titlebar worktree badges must expose an image role",
@@ -685,11 +642,6 @@ test("workspace windows expose semantic worktree badges separately from agent co
     windowWorktreeFormSource,
     /badgeElement\.removeAttribute\("role"\)/,
     "hidden titlebar worktree badges must remove their image role",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /appendRenderKeyPart\(parts,\s*windowWorktreeForm\(entry\)\)/,
-    "window list render keys must use the same worktree-form adapter as the badge",
   );
   assert.match(
     inlineStyle,
@@ -1109,19 +1061,6 @@ test("Agent window chrome resolves dynamic purpose titles before legacy titles",
     /function\s+windowDisplayTitle\(windowData\)[\s\S]+dynamic_title[\s\S]+purpose_title[\s\S]+title/,
     "expected a shared display-title helper with dynamic > purpose > legacy title precedence",
   );
-  // FR-045 (anshin): the row now derives `displayTitle` from the shared helper
-  // (so the activity line can compare against it) and escapes that value into
-  // the title node. Assert both the helper binding and the escaped render.
-  assert.match(
-    projectShellSurfaceSource,
-    /const\s+displayTitle\s*=\s*windowDisplayTitle\(entry\)/,
-    "expected the Windows dropdown to bind the shared display-title helper",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /window-list-title">\$\{escapeHtml\(displayTitle\)\}/,
-    "expected the Windows dropdown to escape the shared display-title helper output",
-  );
   assert.match(
     appSource,
     /title-text"\)\.textContent\s*=\s*windowDisplayTitle\(windowData\)/,
@@ -1479,34 +1418,13 @@ test("Command Rail keeps real shortcuts on its keyshortcut items (SPEC-3038 AS-1
   assert.match(workspace.getAttribute("title") ?? "", /⌘G/);
 });
 
-test("Command Rail Navigate group drops Board / Logs but keeps their access paths (SPEC-3038 2026-06-20 Update)", () => {
-  // User feedback (2026-06-20): Board / Logs are noise in the rail. They are
-  // demoted out of the rail but stay reachable via the Add Window presets, the
-  // command palette, and the ⌘B / ⌘L hotkeys — no capability is removed.
-  assert.equal(
-    document.querySelector('.op-rail .op-rail__item[data-cmd="open-board"]'),
-    null,
-    "Board must not appear as a Command Rail item",
-  );
-  assert.equal(
-    document.querySelector('.op-rail .op-rail__item[data-cmd="open-logs"]'),
-    null,
-    "Logs must not appear as a Command Rail item",
-  );
-  // Access path 1: the Add Window preset deck still offers both surfaces.
-  assert.ok(
-    document.querySelector('[data-preset="board"]'),
-    "Add Window must keep the Board preset",
-  );
-  assert.ok(
-    document.querySelector('[data-preset="logs"]'),
-    "Add Window must keep the Logs preset",
-  );
-  // Access paths 2 + 3: command palette seeds and ⌘B / ⌘L hotkeys stay wired.
-  assert.match(operatorShellSource, /id:\s*"open-board"/, "palette must keep the Board entry");
-  assert.match(operatorShellSource, /id:\s*"open-logs"/, "palette must keep the Logs entry");
-  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/, "⌘B hotkey must stay wired");
-  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/, "⌘L hotkey must stay wired");
+test("Board and Logs retain their rail, palette and hotkey access paths (#4777)", () => {
+  assert.ok(document.querySelector('.op-rail__surface[data-surface="board"]'));
+  assert.ok(document.querySelector('.op-rail__item[data-cmd="open-logs"]'));
+  assert.match(operatorShellSource, /id:\s*"open-board"/);
+  assert.match(operatorShellSource, /id:\s*"open-logs"/);
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+b"/);
+  assert.match(operatorShellSource, /hotkey\.register\("cmd\+l"/);
 });
 
 test("Command Rail retires the pseudo kbd badges (SPEC-3038 FR-012)", () => {
@@ -1524,10 +1442,10 @@ test("Command Rail items are icon buttons with accessible names and flyout label
   // Issue #4777 T-1: the PM and the surface entries are labelled buttons,
   // not icon-only ones; surface-rail.test.mjs owns their contract.
   const items = Array.from(
-    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface])"),
+    document.querySelectorAll(".op-rail .op-rail__item:not([data-surface]):not(.op-rail__surface)"),
   );
-  // Windows: list/add. Agents: stop all. System: notifications/palette.
-  assert.equal(items.length, 5);
+  // System keeps its notification and palette controls.
+  assert.equal(items.length, 2);
   for (const item of items) {
     assert.ok(
       item.getAttribute("aria-label"),
@@ -1694,41 +1612,15 @@ test("renderWorkspace refreshes operator telemetry when windows mount/unmount (S
   assert.match(
     body,
     /recompute:\s*recomputeOperatorTelemetry/,
-    "window-count badge + empty state must update when windows mount/unmount",
+    "operator telemetry must update when windows mount/unmount",
   );
 });
 
-test("SPEC-3038 (2026-06-20): Windows badge counts windows across all project tabs", () => {
+test("#4777: retired Windows badge has no exclusive telemetry count", () => {
   const body = extractFunctionBody(appSource, "recomputeOperatorTelemetry");
-  assert.match(
-    body,
-    /windows:\s*allProjectWindowIds\(\)\.length/,
-    "the rail Windows badge must count the cross-tab open-window total",
-  );
-  assert.doesNotMatch(
-    body,
-    /windows:\s*windowMap\.size/,
-    "windowMap.size only counts windows mounted in visited tabs and undercounts the badge",
-  );
-});
-
-test("SPEC-3038 (2026-06-20): Windows popover renders the cross-tab window-list model", () => {
-  assert.match(
-    projectShellSurfaceSource,
-    /import\s*\{\s*groupProjectWindowList\s*\}\s*from\s*"\/window-list-model\.js"/,
-    "project-shell-surface must import the cross-tab window-list model",
-  );
-  const body = extractFunctionBody(projectShellSurfaceSource, "renderWindowList");
-  assert.match(
-    body,
-    /groupProjectWindowList\(catalog.appState,\s*windowListEntries\)/,
-    "renderWindowList must source rows from the shared cross-tab catalog",
-  );
-  assert.match(
-    body,
-    /window-list-group/,
-    "renderWindowList must render per-project group headers for multi-project shells",
-  );
+  assert.equal(/windows:\s*allProjectWindowIds\(\)\.length/.test(body), false);
+  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
+  assert.equal(/counts\?\.windows/.test(keyBody), false);
 });
 
 test("fixed rail surfaces have no canvas close, minimize or saved-placement rendering (Issue #4777 AC13/14)", () => {
@@ -1965,7 +1857,7 @@ test("Drawer + preset modals have role/aria-modal/aria-hidden wiring", () => {
   // modal-shell with role="dialog" + aria-modal="true". Without this, screen
   // readers don't recognize the modal as a dialog and the inert state isn't
   // signaled when closed.
-  for (const id of ["branch-cleanup-modal", "migration-modal", "preset-modal", "wizard-modal"]) {
+  for (const id of ["branch-cleanup-modal", "migration-modal", "wizard-modal"]) {
     const backdrop = document.getElementById(id);
     assert.ok(backdrop, `expected modal backdrop #${id}`);
     assert.equal(
@@ -2808,11 +2700,7 @@ test("Error regions declare role=\"alert\" so screen readers announce them", () 
   }
 });
 
-test("Wizard and preset modals activate focus-trap on open and release on close (app.js inline)", () => {
-  // The preset modal is rendered inline in app.js; the wizard renderer
-  // moved to launch-wizard-surface.js (SPEC-3064 E5). Both need
-  // closure-scoped trap-release variables. Pin both pairs.
-  assert.match(appSource, /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/);
+test("Wizard activates focus-trap on open and releases it on close", () => {
   assert.match(
     launchWizardSource,
     /import\s*\{\s*createFocusTrap\s*\}\s*from\s*"\/focus-trap\.js"/,
@@ -2829,18 +2717,7 @@ test("Wizard and preset modals activate focus-trap on open and release on close 
     /typeof\s+wizardFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*wizardFocusTrapRelease\(\)/,
     "wizard must release focus trap on close",
   );
-  // Preset
-  assert.match(appSource, /let\s+presetModalFocusTrapRelease\s*=\s*null/);
-  assert.match(
-    appSource,
-    /presetModalFocusTrapRelease\s*=\s*createFocusTrap\(presetShell,\s*\{\s*document\s*\}\)/,
-    "preset modal must activate focus trap on the shell",
-  );
-  assert.match(
-    appSource,
-    /typeof\s+presetModalFocusTrapRelease\s*===\s*"function"\s*\)\s*\{\s*presetModalFocusTrapRelease\(\)/,
-    "preset modal must release focus trap on close",
-  );
+
 });
 
 test("Drawer modal renderers activate focus-trap on open and release on close", () => {
@@ -3040,24 +2917,6 @@ test("Drawer modal renderers move focus into dialog on fresh open", () => {
   }
 });
 
-test("Preset (Add Window) modal manages focus on open and restores on close", () => {
-  // The "+" Add Window modal opens via openModal()/closeModal() in app.js.
-  // Verify the same focus-management pattern is wired: capture trigger,
-  // move focus to modal-shell on open, restore on close.
-  assert.match(appSource, /let\s+presetModalFocusReturn\s*=\s*null/);
-  assert.match(appSource, /presetModalFocusReturn\s*=\s*document\.activeElement/);
-  assert.match(
-    appSource,
-    /presetShell\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
-    "expected preset modal shell focus on open with preventScroll",
-  );
-  assert.match(
-    appSource,
-    /presetModalFocusReturn\.focus\(\{\s*preventScroll:\s*true\s*\}\)/,
-    "expected preset modal restore focus on close with preventScroll",
-  );
-});
-
 test("Wizard modal manages focus on open and restores on close", () => {
   // The wizard modal's renderer lives in launch-wizard-surface.js
   // (SPEC-3064 E5), so focus management is wired there. Verify the same
@@ -3126,28 +2985,6 @@ test("Drawer modals close on Escape — keyboard parity with backdrop click", ()
     launchWizardSource,
     /wizardModal\.classList\.contains\("open"\)[\s\S]*sendWizardAction\(\{\s*kind:\s*"cancel"/,
     "expected Esc to send cancel when wizard modal is open",
-  );
-  // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc branch delegates into
-  // the project shell surface, which owns the dropdown state.
-  assert.match(
-    projectShellSurfaceSource,
-    /if\s*\(windowListOpen\)\s*\{[\s\S]*windowListOpen\s*=\s*false[\s\S]*windowListButton\.focus/,
-    "expected Esc to close window list dropdown and restore focus to trigger",
-  );
-  // SPEC-2008 camera-focus: the Windows dropdown Esc branch is now guarded so
-  // a bare Esc that the dropdown did NOT consume can fall through to the
-  // camera overview (enterOverview) below it.
-  assert.match(
-    appSource,
-    /if\s*\(handleWindowListEscape\(event\)\)\s*\{\s*return;\s*\}/,
-    "expected the global Esc handler to delegate the Windows dropdown branch into the surface",
-  );
-  // SPEC-2356 — preset modal Esc-close: closes via closeModal() which
-  // handles both the .open class flip and focus restore.
-  assert.match(
-    appSource,
-    /if\s*\(modal\.classList\.contains\("open"\)\)\s*\{[\s\S]*closeModal\(\)/,
-    "expected Esc to call closeModal when preset modal is open",
   );
   assert.doesNotMatch(appSource, /enterOverview\(/);
 });
@@ -3346,10 +3183,10 @@ test("FR-044 (安心) / SPEC #3885 FR-015: fixed surface controls retain agent R
   assert.match(appSource, /updateWindowKillSwitchControls/);
 });
 
-test("FR-042 (安心): STOP ALL is reachable from the rail and the palette with a confirm", () => {
+test("#4777: STOP ALL is absent from the rail and remains in the palette with a confirm", () => {
   const railItem = document.querySelector('.op-rail__item[data-cmd="stop-all-windows"]');
-  assert.ok(railItem, "expected a Stop all agents rail item");
-  assert.equal(railItem.getAttribute("aria-label"), "Stop all agents");
+  assert.equal(Boolean(railItem), false, "Stop all agents must be absent from the rail");
+  assert.equal(Boolean(document.querySelector(".op-rail__item--stop-all")), false);
   // op:command + palette both route to requestStopAllWindows, which confirms
   // and emits stop_all_windows.
   assert.match(appSource, /case "stop-all-windows":/);
@@ -4200,197 +4037,6 @@ test("Workspace Windows render key avoids JSON stringify allocation", () => {
   );
 });
 
-test("Window List skips unchanged row rebuilds after updating open state", () => {
-  // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer, its render
-  // key, and its rendered-key slot live in the project shell surface.
-  const renderWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "renderWindowList",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /let\s+renderedWindowListKey\s*=/,
-    "the project shell surface must track the last rendered Window List row key",
-  );
-  assert.match(
-    projectShellSurfaceSource,
-    /function\s+windowListRenderKey\s*\(/,
-    "the project shell surface must define a Window List render key helper",
-  );
-
-  const hiddenIndex = renderWindowListBody.indexOf("windowListPanel.hidden");
-  const ariaIndex = renderWindowListBody.indexOf("aria-expanded");
-  const keyIndex = renderWindowListBody.indexOf(
-    "const nextWindowListKey = windowListRenderKey();",
-  );
-  const closedGuardIndex = renderWindowListBody.indexOf("if (!windowListOpen)");
-  const closedSentinelIndex = renderWindowListBody.indexOf(
-    'renderedWindowListKey = "__closed__";',
-  );
-  const guardIndex = renderWindowListBody.indexOf(
-    "if (renderedWindowListKey === nextWindowListKey)",
-  );
-  const clearIndex = renderWindowListBody.indexOf("windowListPanel.innerHTML = \"\";");
-
-  assert.notEqual(hiddenIndex, -1, "renderWindowList must update panel hidden state");
-  assert.notEqual(ariaIndex, -1, "renderWindowList must update trigger aria-expanded");
-  assert.notEqual(closedGuardIndex, -1, "renderWindowList must have a closed fast path");
-  assert.notEqual(
-    closedSentinelIndex,
-    -1,
-    "closed Window List fast path must store a stable sentinel key",
-  );
-  assert.ok(
-    closedGuardIndex > hiddenIndex && closedGuardIndex > ariaIndex,
-    "closed Window List fast path must run after chrome hidden/expanded updates",
-  );
-  assert.ok(
-    closedGuardIndex < keyIndex,
-    "closed Window List fast path must return before key generation",
-  );
-  assert.ok(
-    closedSentinelIndex > closedGuardIndex && closedSentinelIndex < keyIndex,
-    "closed Window List fast path must store the sentinel before any key generation",
-  );
-  assert.match(
-    renderWindowListBody.slice(closedGuardIndex, keyIndex),
-    /return\s*;/,
-    "closed Window List fast path must return before windowListRenderKey()",
-  );
-  assert.ok(
-    keyIndex > hiddenIndex && keyIndex > ariaIndex,
-    "open Window List key must run after open state updates",
-  );
-  assert.ok(guardIndex > keyIndex, "renderWindowList must guard on the Window List key");
-  assert.ok(
-    guardIndex < clearIndex,
-    "unchanged Window List key must return before row clearing/rebuild",
-  );
-  assert.match(
-    renderWindowListBody.slice(guardIndex, clearIndex),
-    /return\s*;/,
-    "unchanged Window List key guard must return before clearing rows",
-  );
-
-  const toggleWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "toggleWindowList",
-  );
-  const invalidateIndex = toggleWindowListBody.indexOf("renderedWindowListKey = \"\";");
-  const renderIndex = toggleWindowListBody.indexOf("renderWindowList();");
-  const requestIndex = toggleWindowListBody.indexOf("requestWindowList();");
-  assert.notEqual(invalidateIndex, -1, "toggleWindowList must invalidate the Window List key");
-  assert.ok(
-    invalidateIndex < renderIndex && renderIndex < requestIndex,
-    "opening Window List must render current rows before requesting backend entries",
-  );
-});
-
-test("Window List row source rebuild avoids mapped intermediate arrays", () => {
-  const renderWindowListBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "renderWindowList",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /workspaceWindows\.map\s*\(/,
-    "Window List row rebuild must not allocate a mapped workspace-window lookup source",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /windowListEntries[\s\S]*?\.map\s*\(/,
-    "Window List row rebuild must not map backend entries before filtering",
-  );
-  assert.doesNotMatch(
-    renderWindowListBody,
-    /\.filter\s*\(/,
-    "Window List row rebuild must avoid chained filter allocation",
-  );
-  // SPEC-3038 (2026-06-20): rows now come from the cross-tab window-list
-  // model grouped by project tab, rendered with direct loops (no inline alloc).
-  assert.match(
-    renderWindowListBody,
-    /for\s*\(\s*const\s+group\s+of\s+model\.groups\s*\)/,
-    "Window List row rebuild must iterate the cross-tab model groups with a direct loop",
-  );
-  assert.match(
-    renderWindowListBody,
-    /for\s*\(\s*const\s+entry\s+of\s+group\.entries\s*\)/,
-    "Window List row rebuild must derive per-group entries with a direct loop",
-  );
-});
-
-test("Window List render key ignores viewport and includes row shell fields", () => {
-  const keyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "windowListRenderKey",
-  );
-  // appendRenderKeyPart stays in app.js (shared with the render keys that
-  // remained there) and reaches the surface through the deps bag.
-  assert.match(
-    appSource,
-    /function\s+appendRenderKeyPart\s*\(/,
-    "app.js must expose the primitive render-key append helper",
-  );
-  assert.match(
-    keyBody,
-    /appendRenderKeyPart\s*\(/,
-    "Window List key must append primitive fields directly",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /JSON\.stringify\s*\(/,
-    "Window List key must not serialize an object graph while open",
-  );
-  assert.doesNotMatch(
-    keyBody,
-    /\.map\s*\(/,
-    "Window List key must not allocate mapped arrays while open",
-  );
-  assert.match(
-    keyBody,
-    /active_tab_id/,
-    "Window List key must include active tab identity",
-  );
-  assert.match(
-    keyBody,
-    /windowListEntries/,
-    "Window List key must include server-provided window_list entries",
-  );
-  assert.match(
-    keyBody,
-    /groupProjectWindowList\s*\(/,
-    "Window List key must include the cross-tab window-list model identity/order",
-  );
-  assert.match(
-    keyBody,
-    /runtimeStateForWindow\s*\(/,
-    "Window List key must include runtime state used by status chips",
-  );
-  for (const field of [
-    "id",
-    "preset",
-    "title",
-    "dynamic_title",
-    "dynamic_title_detail",
-    "purpose_title",
-    "agent_id",
-    "agent_color",
-    "status",
-  ]) {
-    assert.match(
-      keyBody,
-      new RegExp(`\\b${field}\\b`),
-      `Window List key must include ${field}`,
-    );
-  }
-  assert.doesNotMatch(
-    keyBody,
-    /\bviewport\b/,
-    "Window List key must ignore viewport-only state",
-  );
-});
-
 test("Static project chrome renderers guard unchanged DOM writes", () => {
   assert.match(
     appSource,
@@ -4411,8 +4057,8 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
   );
   assert.match(
     projectShellSurfaceSource,
-    /let\s+renderedActionAvailabilityKey\s*=/,
-    "the project shell surface must track the last rendered action availability key",
+    /let\s+renderedProjectPickerKey\s*=/,
+    "the project shell surface must track the last rendered picker key",
   );
 
   const renderAppVersionBody = extractFunctionBody(appSource, "renderAppVersion");
@@ -4465,23 +4111,7 @@ test("Static project chrome renderers guard unchanged DOM writes", () => {
     "renderProjectOnboarding must return before unchanged onboarding DOM writes",
   );
 
-  const updateActionAvailabilityBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "updateActionAvailability",
-  );
-  const actionKeyIndex = updateActionAvailabilityBody.indexOf(
-    "const nextActionAvailabilityKey = actionAvailabilityRenderKey(activeTab);",
-  );
-  const actionGuardIndex = updateActionAvailabilityBody.indexOf(
-    "if (renderedActionAvailabilityKey === nextActionAvailabilityKey)",
-  );
-  const disabledIndex = updateActionAvailabilityBody.indexOf("addButton.disabled");
-  assert.ok(
-    actionKeyIndex !== -1 &&
-      actionGuardIndex > actionKeyIndex &&
-      actionGuardIndex < disabledIndex,
-    "updateActionAvailability must return before unchanged disabled-state DOM writes",
-  );
+
 });
 
 test("App version label opens latest release notes when an update is available", () => {
@@ -4525,17 +4155,7 @@ test("Static project chrome keys ignore workspace geometry and include visible t
     );
   }
 
-  const actionKeyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "actionAvailabilityRenderKey",
-  );
-  assert.match(
-    actionKeyBody,
-    /activeTab/,
-    "Action Availability key must include active-tab availability",
-  );
-
-  for (const keyBody of [pickerKeyBody, onboardingKeyBody, actionKeyBody]) {
+  for (const keyBody of [pickerKeyBody, onboardingKeyBody]) {
     for (const workspaceField of ["viewport", "windows", "geometry"]) {
       assert.doesNotMatch(
         keyBody,
@@ -4566,7 +4186,6 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
   const renderAppStateBody = extractFunctionBody(appSource, "renderAppState");
   const tabLookupIndex = renderAppStateBody.indexOf("const tab = activeProjectTab();");
   const pickerCallIndex = renderAppStateBody.indexOf("renderProjectPicker(tab);");
-  const actionCallIndex = renderAppStateBody.indexOf("updateActionAvailability(tab);");
   const onboardingCallIndex = renderAppStateBody.indexOf("renderProjectOnboarding(tab);");
   const workspaceCallIndex = renderAppStateBody.indexOf(
     "renderWorkspace(tab?.workspace || emptyWorkspace());",
@@ -4574,7 +4193,6 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
   assert.ok(
     tabLookupIndex >= 0 &&
       pickerCallIndex > tabLookupIndex &&
-      actionCallIndex > tabLookupIndex &&
       onboardingCallIndex > tabLookupIndex &&
       workspaceCallIndex > tabLookupIndex,
     "renderAppState must resolve the active tab once and pass it through static chrome and workspace renderers",
@@ -4584,11 +4202,7 @@ test("Static project chrome reuses the renderAppState active tab lookup", () => 
     projectShellSurfaceSource,
     "projectPickerRenderKey",
   );
-  const actionKeyBody = extractFunctionBody(
-    projectShellSurfaceSource,
-    "actionAvailabilityRenderKey",
-  );
-  for (const keyBody of [pickerKeyBody, actionKeyBody]) {
+  for (const keyBody of [pickerKeyBody]) {
     assert.doesNotMatch(
       keyBody,
       /activeProjectTab\s*\(\s*\)/,
@@ -5168,17 +4782,6 @@ test("Operator telemetry key avoids JSON stringify allocation", () => {
   );
 });
 
-test("SPEC-3038 (2026-06-20): telemetry key includes windows so the badge updates on non-agent window changes", () => {
-  // Without `windows` in the cache key, adding/removing a surface (non-agent)
-  // window leaves the agent counts unchanged, so applyOperatorTelemetryCounts
-  // short-circuits and the rail Windows badge never refreshes.
-  const keyBody = extractFunctionBody(appSource, "operatorTelemetryRenderKey");
-  assert.match(
-    keyBody,
-    /appendRenderKeyPart\(parts,\s*"windows"\)/,
-    "telemetry render key must include the windows count",
-  );
-});
 
 // SPEC-2356 — branch telemetry forwards only `branches` through the guarded
 // applyOperatorTelemetryCounts helper; the dead Sidebar Layers `git` counter is
@@ -5269,7 +4872,7 @@ test("SPEC #3206 v2: the System rail group carries the notification bell with an
   const groups = Array.from(document.querySelectorAll(".op-rail > .op-rail__group")).map(
     (group) => group.getAttribute("aria-label"),
   );
-  assert.deepEqual(groups, ["Navigate", "Surfaces", "Windows", "Agents", "System"]);
+  assert.deepEqual(groups, ["Navigate", "Surfaces", "System"]);
 });
 
 test("SPEC #3206 v2: bell → op:command toggle-notifications → drawer toggle, Esc closes, badge is wired (FR-009 / FR-014)", () => {

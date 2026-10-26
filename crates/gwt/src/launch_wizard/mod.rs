@@ -375,6 +375,7 @@ pub struct LaunchWizardIssueMonitorPoolView {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LaunchWizardIssueMonitorPoolSetView {
+    pub agent_member_id: Option<String>,
     pub agent_id: String,
     /// Read-only rows for a set the form is not editing.
     pub summary: Vec<LaunchWizardSummaryView>,
@@ -414,6 +415,8 @@ pub struct LaunchWizardView {
     pub launch_target_options: Vec<LaunchWizardOptionView>,
     pub selected_launch_target: String,
     pub agent_options: Vec<LaunchWizardOptionView>,
+    pub agent_member_options: Vec<LaunchWizardOptionView>,
+    pub selected_agent_member_id: Option<String>,
     pub selected_agent_id: String,
     pub model_options: Vec<LaunchWizardOptionView>,
     pub selected_model: String,
@@ -1113,6 +1116,9 @@ pub enum LaunchWizardAction {
     },
     SetAgent {
         agent_id: String,
+    },
+    SetAgentMember {
+        agent_member_id: String,
     },
     SetModel {
         model: String,

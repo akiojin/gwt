@@ -251,9 +251,8 @@ test.describe("Profile environment variable grid", () => {
     await withLiveGwtBackendLock(base!, info, async () => {
       const theme = info.project.name.includes("light") ? "light" : "dark";
       await page.addInitScript(value => localStorage.setItem("gwt:ui:theme", value), theme);
-      await gotoLiveGwt(page, base!, { enableTestBridge: true, keepPresetModal: true });
-      await page.locator("#add-button").click();
-      await page.locator('#preset-modal [data-preset="profile"]').click();
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await page.locator('.op-rail__item[data-cmd="open-profile"]').click();
       const pane = page.locator('.workspace-window[data-preset="profile"]');
       const profile = pane;
       await expect(profile.getByText("Environment Variables", { exact: true })).toBeVisible();

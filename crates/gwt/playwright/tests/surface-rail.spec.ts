@@ -223,11 +223,6 @@ test.describe("Surface rail", () => {
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator('.op-rail__surface[data-surface="works"]').click();
     await expect(main.locator(".work-row")).toHaveCount(4);
-    await page.locator("#window-list-button").click();
-    await page.locator(".window-list-row").filter({ has: page.locator(".window-list-title", { hasText: "start-work-shell" }) }).click();
-    await expect(main.locator('[data-id="start-work-shell"] .xterm')).toBeVisible();
-    await main.locator('[data-id="start-work-shell"] .xterm-helper-textarea').press("s");
-    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
     await openPm();
     await page.locator("#op-pm-settings-button").click();
     await page.reload();
@@ -635,7 +630,7 @@ test.describe("Surface rail", () => {
 
   test("selects Issues / Works / Agents / Board / Settings and folds to a top strip when narrow", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -648,7 +643,7 @@ test.describe("Surface rail", () => {
     await page.goto(surfaceAppUrl);
 
     const rail = page.locator("#op-rail");
-    const surfaces = rail.locator(".op-rail__surface");
+    const surfaces = rail.locator(".op-rail__surface[data-surface]");
     const entry = (surface: string) => rail.locator(`[data-surface='${surface}']`);
 
     await expect(windowById(page, "board-window")).toBeVisible({ timeout: 10_000 });
@@ -674,6 +669,18 @@ test.describe("Surface rail", () => {
     await expect(pressedSurfaces(page)).resolves.toEqual(["board"]);
     const railWidth = await rail.evaluate((element) => element.getBoundingClientRect().width);
     expect(railWidth).toBe(64);
+    // Move from another rail entry so a fresh headed context cannot reuse
+    // an unchanged OS pointer position before Chromium receives hover state.
+    await entry("works").hover();
+    await entry("pm").hover();
+    const pmGear = page.locator("#op-pm-settings-button");
+    const railBounds = await rail.boundingBox();
+    const gearBounds = await pmGear.boundingBox();
+    expect(gearBounds!.x + gearBounds!.width + 2).toBeLessThanOrEqual(railBounds!.x + railBounds!.width);
+    await pmGear.focus();
+    await expect(pmGear).toHaveCSS("opacity", "1");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Escape");
     // The pressed entry carries a 2px accent edge, not only a color change.
     await expect(entry("board")).toHaveCSS("border-left-width", "2px");
     const accent = await entry("board").evaluate(
@@ -727,6 +734,36 @@ test.describe("Surface rail", () => {
     }
     await expect(entry("issues")).toHaveAttribute("title", /⌘G/);
 
+    // The retired picker/list/kill-switch do not leave hidden controls behind.
+    await expect(page.locator('#window-list-button, #window-list-panel, #op-rail-window-count, #add-button, #preset-modal, .op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
+    for (const preset of ["logs", "index", "profile"]) {
+      const tool = rail.locator(`[data-cmd="open-${preset}"]`);
+      await clearMessages(page);
+      await tool.click();
+      const opened = page.locator(`.workspace-window[data-preset="${preset}"]`);
+      await expect(opened).toBeVisible();
+      expect(await createdPresets(page)).toEqual([preset]);
+      await tool.click();
+      expect(await createdPresets(page)).toEqual([preset]);
+    }
+    await page.screenshot({ path: testInfo.outputPath("sidebar-direct-surfaces.png") });
+    await page.setViewportSize({ width: 1440, height: 400 });
+    await expect(rail).toHaveCSS("overflow-y", "auto");
+    expect(await rail.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+    await rail.locator("#op-palette-button").scrollIntoViewIfNeeded();
+    await rail.locator("#op-palette-button").hover();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await expect(page.locator("#rail-control-explanation")).toContainText("Command palette");
+    await rail.locator("#op-palette-button").focus();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await rail.locator("#op-palette-button").click();
+    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
+    await page.locator("#op-palette-input").fill("Stop All");
+    await expect(page.locator("#op-palette-list")).toContainText("Stop All Running Agents");
+    await page.keyboard.press("Escape");
+    await entry("issues").click();
+    await page.screenshot({ path: testInfo.outputPath("sidebar-short-scroll.png") });
+
     // At 860px and below the rail is a strip across the top of the surfaces.
     await page.setViewportSize({ width: 800, height: 900 });
     await expect
@@ -744,6 +781,12 @@ test.describe("Surface rail", () => {
     );
     expect(new Set(surfaceTops).size).toBe(1);
 
+    await page.setViewportSize({ width: 400, height: 900 });
+    for (const preset of ["logs", "index", "profile"]) {
+      await expect(rail.locator(`[data-cmd="open-${preset}"]`)).toBeInViewport({ ratio: 1 });
+    }
+
+    await page.screenshot({ path: testInfo.outputPath("sidebar-400.png") });
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });

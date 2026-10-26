@@ -19,6 +19,8 @@ pub struct AgentRoster {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentMember {
     pub agent_member_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub name: String,
     pub enabled: bool,
     pub created_at: String,
@@ -49,9 +51,16 @@ pub struct AgentMemberAssignment {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentRosterAction {
     Read,
-    Add,
-    Rest { member_id: String },
-    Resize { size: usize },
+    Add {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+    },
+    Rest {
+        member_id: String,
+    },
+    Resize {
+        size: usize,
+    },
 }
 
 impl AgentRoster {
@@ -80,7 +89,7 @@ impl AgentRoster {
         Ok(())
     }
 
-    fn add(&mut self, history: &Path) -> Result<(), String> {
+    fn add(&mut self, history: &Path, agent_id: Option<String>) -> Result<(), String> {
         let known = self
             .members
             .iter()
@@ -92,6 +101,7 @@ impl AgentRoster {
         let name = allocate(history, language, &HashSet::new(), &known)?;
         self.members.push(AgentMember {
             agent_member_id: uuid::Uuid::new_v4().to_string(),
+            agent_id,
             name,
             enabled: true,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -104,7 +114,12 @@ impl AgentRoster {
     }
 
     /// Change future admission only. Existing assignments are retained.
-    pub(crate) fn resize(&mut self, size: usize, history: &Path) -> Result<(), String> {
+    pub(crate) fn resize(
+        &mut self,
+        size: usize,
+        history: &Path,
+        agent_id: &str,
+    ) -> Result<(), String> {
         if size == 0 {
             return Err("At least one Agent member must remain enabled".into());
         }
@@ -112,7 +127,7 @@ impl AgentRoster {
             if let Some(member) = self.members.iter_mut().find(|member| !member.enabled) {
                 member.enabled = true;
             } else {
-                self.add(history)?;
+                self.add(history, Some(canonical_tool(agent_id)?))?;
             }
         }
         while self.enabled_count() > size {
@@ -136,28 +151,198 @@ fn history_for_prefs(path: &Path) -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "Agent roster preferences have no project parent".into())
 }
 
+fn canonical_tool(value: &str) -> Result<String, String> {
+    let tool = gwt_agent::resolve_agent_id(value).ok_or("Unknown Agent tool")?;
+    Ok(tool.command().to_string())
+}
+
+/// Upgrade provider-only preferences under the existing project writer lock.
+/// Current assignments keep their person and tool, including when their future
+/// slot is rested to preserve the configured capacity for the saved primary.
+fn synchronize_roster_tools(
+    prefs: &mut crate::IssueMonitorPrefs,
+    path: &Path,
+    sessions_dir: &Path,
+    requested_tool: Option<&str>,
+) -> Result<(), String> {
+    let pool = prefs.launch_profile_pool();
+    let tools: Vec<_> = pool
+        .iter()
+        .map(|profile| canonical_tool(&profile.agent_id))
+        .collect::<Result<_, _>>()?;
+    let Some(roster) = prefs.agent_roster.as_mut() else {
+        return Ok(());
+    };
+    let before = roster.clone();
+    let fallback = tools
+        .first()
+        .cloned()
+        .or_else(|| requested_tool.map(str::to_string))
+        .unwrap_or_else(|| "codex".into());
+    for (index, member) in roster.members.iter_mut().enumerate() {
+        let observed = member
+            .assignment
+            .as_ref()
+            .and_then(|assignment| assignment.session_id.as_ref())
+            .and_then(|id| gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok())
+            .map(|session| session.agent_id.command().to_string());
+        if let Some(fixed) = member.agent_id.as_deref() {
+            let fixed = canonical_tool(fixed)?;
+            if observed.as_ref().is_some_and(|observed| observed != &fixed) {
+                return Err(format!(
+                    "Agent {} has a different live tool; waiting for its exact assignment",
+                    member.name
+                ));
+            }
+            member.agent_id = Some(fixed);
+        } else {
+            member.agent_id = Some(observed.unwrap_or_else(|| {
+                tools
+                    .get(index % tools.len().max(1))
+                    .cloned()
+                    .unwrap_or_else(|| fallback.clone())
+            }));
+        }
+    }
+    let mut migrated = Vec::new();
+    let legacy = pool.iter().any(|profile| profile.agent_member_id.is_none());
+    for (index, profile) in pool.iter().enumerate() {
+        if profile.agent_member_id.is_some() {
+            migrated.push(profile.clone());
+            continue;
+        }
+        let tool = &tools[index];
+        let mut matching: Vec<_> = roster
+            .members
+            .iter()
+            .filter(|member| {
+                member.agent_id.as_ref() == Some(tool)
+                    && (member.enabled || member.assignment.is_some())
+            })
+            .map(|member| member.agent_member_id.clone())
+            .collect();
+        if matching.is_empty() {
+            if let Some(member) = roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_id.as_ref() == Some(tool))
+            {
+                matching.push(member.agent_member_id.clone());
+            } else {
+                roster.add(&history_for_prefs(path)?, Some(tool.clone()))?;
+                let member = roster.members.last_mut().expect("added member");
+                member.enabled = index == 0;
+                matching.push(member.agent_member_id.clone());
+            }
+        }
+        if index == 0
+            && !roster
+                .members
+                .iter()
+                .any(|member| matching.contains(&member.agent_member_id) && member.enabled)
+        {
+            roster
+                .members
+                .iter_mut()
+                .find(|member| member.agent_member_id == matching[0])
+                .expect("matching member")
+                .enabled = true;
+        }
+        for id in matching {
+            let mut bound = profile.clone();
+            bound.agent_member_id = Some(id);
+            bound.agent_id = tool.clone();
+            migrated.push(bound);
+        }
+    }
+    if legacy {
+        while roster.enabled_count() > prefs.max_active_agents {
+            let primary = migrated
+                .first()
+                .and_then(|profile| profile.agent_member_id.as_ref());
+            let member = roster
+                .members
+                .iter_mut()
+                .rev()
+                .find(|member| member.enabled && Some(&member.agent_member_id) != primary)
+                .ok_or("Cannot preserve Agent capacity during tool migration")?;
+            member.enabled = false;
+        }
+    }
+    if *roster != before {
+        roster.revision = roster
+            .revision
+            .checked_add(1)
+            .ok_or("Agent roster revision exhausted")?;
+    }
+    if legacy {
+        prefs.set_launch_profile_pool(migrated);
+    }
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
+}
+
+/// Provider is only a capability key; a bound candidate must name its owner.
+pub fn validate_registered_profiles(
+    prefs: &crate::IssueMonitorPrefs,
+    profiles: &[crate::IssueMonitorLaunchProfile],
+) -> Result<(), String> {
+    for profile in profiles {
+        let Some(id) = profile.agent_member_id.as_ref() else {
+            continue;
+        };
+        let member = prefs
+            .agent_roster
+            .as_ref()
+            .and_then(|roster| {
+                roster
+                    .members
+                    .iter()
+                    .find(|member| &member.agent_member_id == id)
+            })
+            .ok_or_else(|| format!("Registered Agent {id} is unavailable; reload Agents"))?;
+        if member.agent_id.as_deref() != Some(canonical_tool(&profile.agent_id)?.as_str()) {
+            return Err(format!(
+                "Agent {} has a fixed tool; choose its registered profile",
+                member.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Normalize numerical configuration writes under the existing prefs lock.
 pub(crate) fn synchronize_roster_capacity(
     prefs: &mut crate::IssueMonitorPrefs,
     prefs_path: &Path,
 ) -> Result<(), String> {
+    let default_tool = prefs
+        .launch_profile_pool()
+        .first()
+        .map(|profile| profile.agent_id.clone())
+        .unwrap_or_else(|| "codex".into());
     if let Some(roster) = prefs.agent_roster.as_mut() {
         roster.validate()?;
         if roster.enabled_count() != prefs.max_active_agents {
-            roster.resize(prefs.max_active_agents, &history_for_prefs(prefs_path)?)?;
+            roster.resize(
+                prefs.max_active_agents,
+                &history_for_prefs(prefs_path)?,
+                &default_tool,
+            )?;
             roster.revision = roster
                 .revision
                 .checked_add(1)
                 .ok_or("Agent roster revision exhausted")?;
         }
     }
-    Ok(())
+    validate_registered_profiles(prefs, &prefs.launch_profile_pool())
 }
 
 fn ensure_roster(
     prefs: &mut crate::IssueMonitorPrefs,
     prefs_path: &Path,
     seed: &[AgentMember],
+    sessions_dir: &Path,
+    requested_tool: Option<&str>,
 ) -> Result<(), String> {
     if prefs.agent_roster.is_none() {
         // Legacy name history is a uniqueness ledger, never a list of members.
@@ -174,9 +359,16 @@ fn ensure_roster(
                 })
                 .collect(),
         };
+        let default_tool = prefs
+            .launch_profile_pool()
+            .first()
+            .map(|profile| profile.agent_id.clone())
+            .or_else(|| requested_tool.map(str::to_string))
+            .unwrap_or_else(|| "codex".into());
         roster.resize(
             prefs.max_active_agents.max(1),
             &history_for_prefs(prefs_path)?,
+            &default_tool,
         )?;
         remember(
             &history_for_prefs(prefs_path)?,
@@ -189,6 +381,7 @@ fn ensure_roster(
         prefs.max_active_agents = roster.enabled_count();
         prefs.agent_roster = Some(roster);
     }
+    synchronize_roster_tools(prefs, prefs_path, sessions_dir, requested_tool)?;
     prefs
         .agent_roster
         .as_ref()
@@ -238,6 +431,7 @@ fn initial_project_members(
                 .agent_member_id
                 .clone()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            agent_id: Some(session.agent_id.command().to_string()),
             name: name.clone(),
             enabled: false,
             created_at: session.created_at.to_rfc3339(),
@@ -271,11 +465,24 @@ pub fn mutate_project_roster(
     action: AgentRosterAction,
     expected_revision: Option<u64>,
 ) -> Result<AgentRoster, String> {
+    if let AgentRosterAction::Add { agent_id: Some(id) } = &action {
+        if let Some(gwt_agent::AgentId::Custom(id)) = gwt_agent::resolve_agent_id(id) {
+            if crate::issue_monitor::custom_coding_agent_definition(&id).is_none() {
+                return Err("Choose a known coding tool when registering an Agent".into());
+            }
+        }
+        canonical_tool(id)?;
+    }
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let dead = dead_project_assignments(&path, sessions_dir)?;
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
+        let default_tool = prefs
+            .launch_profile_pool()
+            .first()
+            .map(|profile| profile.agent_id.clone())
+            .unwrap_or_else(|| "codex".into());
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
         if expected_revision.is_some_and(|expected| expected != roster.revision) {
             return Err(std::io::Error::other(
@@ -294,13 +501,20 @@ pub fn mutate_project_roster(
         }
         match action {
             AgentRosterAction::Read => {}
-            AgentRosterAction::Add => roster
-                .add(&history_for_prefs(&path).map_err(std::io::Error::other)?)
+            AgentRosterAction::Add { ref agent_id } => roster
+                .add(
+                    &history_for_prefs(&path).map_err(std::io::Error::other)?,
+                    Some(
+                        canonical_tool(agent_id.as_deref().unwrap_or(&default_tool))
+                            .map_err(std::io::Error::other)?,
+                    ),
+                )
                 .map_err(std::io::Error::other)?,
             AgentRosterAction::Resize { size } => roster
                 .resize(
                     size,
                     &history_for_prefs(&path).map_err(std::io::Error::other)?,
+                    &default_tool,
                 )
                 .map_err(std::io::Error::other)?,
             AgentRosterAction::Rest { ref member_id } => {
@@ -504,6 +718,64 @@ pub fn reserve_project_member(
     delivery_id: Option<&str>,
     inherited_member_id: Option<&str>,
 ) -> Result<AgentMember, String> {
+    reserve_project_member_inner(
+        root,
+        sessions_dir,
+        reservation_id,
+        issue_number,
+        spec_number,
+        delivery_id,
+        inherited_member_id,
+        None,
+        None,
+    )
+}
+
+/// The materialized tool and selected registered person must agree at reservation.
+#[allow(clippy::too_many_arguments)]
+pub fn reserve_project_member_for_agent(
+    root: &Path,
+    sessions_dir: &Path,
+    reservation_id: &str,
+    issue_number: Option<u64>,
+    spec_number: Option<u64>,
+    delivery_id: Option<&str>,
+    inherited_member_id: Option<&str>,
+    requested_tool: &str,
+    selected_member_id: Option<&str>,
+) -> Result<AgentMember, String> {
+    reserve_project_member_inner(
+        root,
+        sessions_dir,
+        reservation_id,
+        issue_number,
+        spec_number,
+        delivery_id,
+        inherited_member_id,
+        Some(requested_tool),
+        selected_member_id,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reserve_project_member_inner(
+    root: &Path,
+    sessions_dir: &Path,
+    reservation_id: &str,
+    issue_number: Option<u64>,
+    spec_number: Option<u64>,
+    delivery_id: Option<&str>,
+    inherited_member_id: Option<&str>,
+    requested_tool: Option<&str>,
+    selected_member_id: Option<&str>,
+) -> Result<AgentMember, String> {
+    let requested_tool = requested_tool.map(canonical_tool).transpose()?;
+    let matches_tool = |member: &AgentMember| {
+        requested_tool
+            .as_ref()
+            .is_none_or(|tool| member.agent_id.as_ref() == Some(tool))
+            && selected_member_id.is_none_or(|id| member.agent_member_id == id)
+    };
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let host = crate::process::current_hostname();
     let dead = dead_project_assignments(&path, sessions_dir)?;
@@ -514,7 +786,14 @@ pub fn reserve_project_member(
         None
     };
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        ensure_roster(prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
+        if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref() == Some(&profile.agent_id))) {
+            return Err(std::io::Error::other("Selected registered Agent profile changed; wait and reload before launching"));
+        }
+        let selected_member_id = selected_member_id.map(str::to_string).or_else(|| requested_tool.as_ref().and_then(|tool| prefs.launch_profile_pool().into_iter()
+            .find(|profile| &profile.agent_id == tool && profile.agent_member_id.as_ref().is_some_and(|id| prefs.agent_roster.as_ref().is_some_and(|roster| roster.members.iter().any(|member| &member.agent_member_id == id && member.enabled && member.assignment.is_none()))))
+            .or_else(|| prefs.launch_profile_pool().into_iter().find(|profile| &profile.agent_id == tool))
+            .and_then(|profile| profile.agent_member_id)));
         let switch_exclusions: std::collections::BTreeMap<_, _> = prefs.agent_roster.as_ref().expect("initialized roster").members.iter().filter_map(|member| {
             prefs.agent_switch_admission_exclusion(issue_number, &member.agent_member_id,
                 inherited_member_id == Some(member.agent_member_id.as_str()), &host).map(|reason| (member.agent_member_id.clone(), reason))
@@ -530,6 +809,9 @@ pub fn reserve_project_member(
             })
         });
         if let Some(index) = existing {
+            if !matches_tool(&roster.members[index]) {
+                return Err(std::io::Error::other("Exact Agent reservation has a different registered person or fixed tool; waiting instead of switching tools"));
+            }
             if let Some(reason) = switch_exclusions.get(&roster.members[index].agent_member_id) {
                 return Err(std::io::Error::other(reason.clone()));
             }
@@ -594,20 +876,21 @@ pub fn reserve_project_member(
             }
             delivery_id.and_then(|id| prefs.pending_launch_deliveries.iter().find(|entry| entry.delivery_id == id && Some(entry.issue_number) == issue_number).and_then(|entry| entry.agent_member_id.clone()))
                 .or_else(|| prefs.agent_issue_schedule.reservations.iter().find(|entry| Some(entry.issue_number) == issue_number && entry.host_id == host && prefs.terminal_queues.get(&host).is_some_and(|queue| queue.entries.iter().any(|queued| queued.number == entry.issue_number))).map(|entry| entry.agent_member_id.clone()))
-        } else { None };
+        } else { None }.or(selected_member_id);
         let pinned_elsewhere = |member_id: &str| switch_exclusions.contains_key(member_id) || prefs.pending_launch_deliveries.iter().any(|entry| entry.agent_member_id.as_deref() == Some(member_id) && Some(entry.issue_number) != issue_number);
         let index = if let Some(member_id) = inherited_member_id {
             roster.members.iter().position(|member| {
                 member.agent_member_id == member_id && member.assignment.is_none()
             })
         } else if let Some(member_id) = scheduled.as_deref() {
-            Some(roster.members.iter().position(|member| member.agent_member_id == member_id && member.enabled && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id)).ok_or_else(|| std::io::Error::other(format!("Scheduled Agent {member_id} is not enabled and idle on this host; read issue.monitor.schedule.read and wait or reassign")))?)
+            Some(roster.members.iter().position(|member| member.agent_member_id == member_id && member.enabled && matches_tool(member) && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id)).ok_or_else(|| std::io::Error::other(format!("Scheduled Agent {member_id} is not enabled and idle on this host; read issue.monitor.schedule.read and wait or reassign")))?)
         } else {
             roster
                 .members
                 .iter()
                 .position(|member| {
                     member.enabled
+                        && matches_tool(member)
                         && member.assignment.is_none()
                         && !pinned_elsewhere(&member.agent_member_id)
                         && historical_member.as_deref() == Some(member.agent_member_id.as_str())
@@ -615,6 +898,7 @@ pub fn reserve_project_member(
                 .or_else(|| {
                     roster.members.iter().position(|member| {
                         member.enabled
+                            && matches_tool(member)
                             && member.assignment.is_none()
                             && !pinned_elsewhere(&member.agent_member_id)
                             && spec_number.is_some()
@@ -625,10 +909,13 @@ pub fn reserve_project_member(
                     roster
                         .members
                         .iter()
-                        .position(|member| member.enabled && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id))
+                        .position(|member| member.enabled && matches_tool(member) && member.assignment.is_none() && !pinned_elsewhere(&member.agent_member_id))
                 })
         }
         .ok_or_else(|| std::io::Error::other("No idle Agent member is available"))?;
+        if !matches_tool(&roster.members[index]) {
+            return Err(std::io::Error::other("Selected Agent has a different registered person or fixed tool; waiting for its exact registered profile"));
+        }
         let member = &mut roster.members[index];
         member.assignment = Some(AgentMemberAssignment {
             reservation_id: reservation_id.to_string(),
@@ -673,6 +960,15 @@ pub fn adopt_project_member_session(
     session: &mut gwt_agent::Session,
 ) -> Result<Option<String>, String> {
     if let Some(member_id) = &session.agent_member_id {
+        let roster = read_project_roster(root, sessions_dir)?;
+        let member = roster
+            .members
+            .iter()
+            .find(|member| &member.agent_member_id == member_id)
+            .ok_or("Registered Agent is missing")?;
+        if member.agent_id.as_deref() != Some(session.agent_id.command()) {
+            return Err("Exact restored Agent has a different fixed tool".into());
+        }
         return Ok(Some(member_id.clone()));
     }
     let Some(name) = session
@@ -693,6 +989,7 @@ pub fn adopt_project_member_session(
     let path = crate::issue_monitor_prefs_path_for_repo_path(root);
     let candidate = AgentMember {
         agent_member_id: uuid::Uuid::new_v4().to_string(),
+        agent_id: Some(session.agent_id.command().to_string()),
         name: name.clone(),
         enabled: false,
         created_at: session.created_at.to_rfc3339(),
@@ -725,7 +1022,7 @@ pub fn adopt_project_member_session(
         seed.push(candidate.clone());
     }
     let (_, member_id) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed).map_err(std::io::Error::other)?;
+        ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
         if let Some(member) = roster.members.iter().find(|member| {
             member.origin_session_id.as_deref() == Some(session.id.as_str())
@@ -1153,6 +1450,49 @@ mod tests {
             Some(&member.agent_member_id)
         )
         .is_err());
+        let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        crate::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+            prefs.set_launch_profile_pool(vec![serde_json::from_value(
+                serde_json::json!({"agent_id":"claude","model":"sonnet"}),
+            )
+            .unwrap()]);
+            Ok(())
+        })
+        .unwrap();
+        let migrated = read_project_roster(&root, &sessions).unwrap();
+        let active = migrated
+            .members
+            .iter()
+            .find(|entry| entry.agent_member_id == member.agent_member_id)
+            .unwrap();
+        assert_eq!(active.agent_id.as_deref(), Some("codex"));
+        assert_eq!(
+            active.assignment.as_ref().unwrap().session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        assert!(
+            !active.enabled,
+            "future slot transfers without stopping the old assignment"
+        );
+        assert_eq!(migrated.enabled_count(), 1);
+        assert!(migrated
+            .members
+            .iter()
+            .any(|member| member.enabled && member.agent_id.as_deref() == Some("claude")));
+        assert!(reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "primary-while-live",
+            None,
+            None,
+            None,
+            None,
+            "claude",
+            None
+        )
+        .unwrap_err()
+        .contains("capacity is occupied"));
+        assert_eq!(read_project_roster(&root, &sessions).unwrap(), migrated);
         drop(child.0.stdin.take());
         assert!(child.0.wait().unwrap().success());
         let assignment =
@@ -1426,7 +1766,7 @@ mod tests {
         let two = mutate_project_roster(
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
-            AgentRosterAction::Add,
+            AgentRosterAction::Add { agent_id: None },
             Some(first.revision),
         )
         .unwrap();
@@ -1514,7 +1854,7 @@ mod tests {
         assert!(mutate_project_roster(
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
-            AgentRosterAction::Add,
+            AgentRosterAction::Add { agent_id: None },
             Some(first.revision)
         )
         .is_err());
@@ -1705,6 +2045,14 @@ mod tests {
             None,
         )
         .unwrap();
+        assert!(roster
+            .members
+            .iter()
+            .all(|member| member.agent_id.as_deref() == Some("codex")));
+        let saved =
+            crate::load_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(&root))
+                .unwrap();
+        assert_eq!(saved.agent_roster.as_ref(), Some(&roster));
         let retired = &roster.members[1].agent_member_id;
         mutate_project_roster(
             &root,
@@ -1718,7 +2066,7 @@ mod tests {
         let added = mutate_project_roster(
             &root,
             &gwt_core::paths::gwt_sessions_dir(),
-            AgentRosterAction::Add,
+            AgentRosterAction::Add { agent_id: None },
             None,
         )
         .unwrap();
@@ -1783,6 +2131,7 @@ mod tests {
         value["agent_roster"] = serde_json::json!({
             "schema_version": 1, "revision": 1,
             "members": [{"agent_member_id": "member-one", "name": "Ada", "enabled": true,
+                "agent_id": "codex",
                 "created_at": "2026-10-25T00:00:00Z"}]
         });
         let prefs: crate::IssueMonitorPrefs = serde_json::from_value(value).unwrap();
@@ -1790,6 +2139,116 @@ mod tests {
         assert_eq!(
             saved["agent_roster"]["members"][0]["agent_member_id"],
             "member-one"
+        );
+        assert_eq!(saved["agent_roster"]["members"][0]["agent_id"], "codex");
+    }
+
+    #[test]
+    fn legacy_roster_binds_the_saved_primary_tool_without_increasing_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let mut prefs = crate::IssueMonitorPrefs::default();
+        prefs.max_active_agents = 4;
+        prefs.launch_profile = Some(
+            serde_json::from_value(serde_json::json!({"agent_id":"claude", "model":"sonnet"}))
+                .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&path, &prefs).unwrap();
+        let roster = read_project_roster(&root, &gwt_core::paths::gwt_sessions_dir()).unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        let member = &serde_json::to_value(&roster).unwrap()["members"][0];
+        assert_eq!(member["agent_id"], "claude");
+        assert_eq!(saved.max_active_agents, 4);
+        let pool = saved.launch_profile_pool();
+        assert_eq!(
+            pool.len(),
+            4,
+            "a legacy provider retains all four named slots"
+        );
+        assert!(pool
+            .iter()
+            .all(|profile| profile.model.as_deref() == Some("sonnet")));
+        assert_eq!(
+            serde_json::to_value(&saved.launch_profile).unwrap()["agent_member_id"],
+            member["agent_member_id"]
+        );
+        assert_eq!(
+            read_project_roster(&root, &gwt_core::paths::gwt_sessions_dir()).unwrap(),
+            roster
+        );
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let first = reserve_project_member_for_agent(
+            &root, &sessions, "one", None, None, None, None, "claude", None,
+        )
+        .unwrap();
+        let second = reserve_project_member_for_agent(
+            &root, &sessions, "two", None, None, None, None, "claude", None,
+        )
+        .unwrap();
+        assert_ne!(first.agent_member_id, second.agent_member_id);
+        assert!(reserve_project_member_for_agent(
+            &root, &sessions, "one", None, None, None, None, "codex", None
+        )
+        .unwrap_err()
+        .contains("fixed tool"));
+        release_project_member(&root, &sessions, &first.agent_member_id, "one").unwrap();
+        mutate_project_roster(
+            &root,
+            &sessions,
+            AgentRosterAction::Rest {
+                member_id: first.agent_member_id.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "wrong",
+            None,
+            None,
+            None,
+            Some(&first.agent_member_id),
+            "codex",
+            None
+        )
+        .unwrap_err()
+        .contains("fixed tool"));
+        let restored = reserve_project_member_for_agent(
+            &root,
+            &sessions,
+            "restore",
+            None,
+            None,
+            None,
+            Some(&first.agent_member_id),
+            "claude",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.agent_member_id, first.agent_member_id,
+            "Rest preserves exact same-tool restoration"
+        );
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.max_active_agents = 5;
+            Ok(())
+        })
+        .unwrap();
+        let saved = crate::load_issue_monitor_prefs(&path).unwrap();
+        let roster = saved.agent_roster.as_ref().unwrap();
+        assert_eq!(roster.enabled_count(), 5);
+        assert!(roster
+            .members
+            .iter()
+            .all(|member| member.agent_id.as_deref() == Some("claude")));
+        assert_eq!(
+            saved.launch_profile_pool().len(),
+            4,
+            "bound selections never expand on resize"
         );
     }
 

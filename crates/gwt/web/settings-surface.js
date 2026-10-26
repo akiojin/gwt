@@ -431,7 +431,7 @@ function renderCandidateSaveError(panel, event) {
     feedback.textContent = event.message;
     feedback.dataset.kind = "error";
     feedback.setAttribute("role", "alert");
-    const field = event.message.match(/\b(prefer_for|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
+    const field = event.message.match(/\b(prefer_for|agent_member_id|agent_id|model|reasoning|session_mode|runtime_target|docker_service|windows_shell|skip_permissions|fast_mode)\b/)?.[1];
     const row = panel.candidateSaveTarget?.closest("fieldset") || panel;
     const rejectedTag = event.message.match(/prefer_for entry ("(?:\\.|[^"\\])*")/)?.[1];
     const rejectedInput = rejectedTag && [...panel.querySelectorAll('[data-profile-field="prefer_for"]')]
@@ -513,8 +513,7 @@ function positionIssuesLaunchControls(body) {
 }
 
 export function renderAgentsSettingsPanel(panel, options) {
-  const { project, profiles, send, availableAgents = null, choices = null } = options;
-  const agentCatalog = availableAgents ?? choices?.agents ?? null;
+  const { project, profiles, send, availableMembers = null, choices = null } = options;
   const document = panel.ownerDocument;
   panel.replaceChildren();
   panel.dataset.dirty = "false";
@@ -527,7 +526,7 @@ export function renderAgentsSettingsPanel(panel, options) {
   panel.appendChild(heading);
   const help = document.createElement("p");
   help.className = "settings-help";
-  help.textContent = `${project?.project_root || "Open a project"} · Candidates are tried in order. Switch to the next candidate when a provider rejects a launch due to a rate limit. Changes apply to future launches.`;
+  help.textContent = `${project?.project_root || "Open a project"} · Each candidate selects a registered member with a fixed tool. The first member in the list fixes the launch tool. Only selected members using that tool are tried in order. If none is available, new launches wait; tools never switch automatically. Changes apply to future launches.`;
   panel.appendChild(help);
   if (!profiles) {
     help.textContent += " Loading launch profiles…";
@@ -580,7 +579,7 @@ export function renderAgentsSettingsPanel(panel, options) {
     else input.type = type;
     input.className = choices ? "settings-select" : type === "checkbox" ? "settings-checkbox" : "settings-input";
     input.dataset.profileField = key;
-    input.setAttribute("aria-label", `${name} ${parent.dataset.agentId || "candidate"}`);
+    input.setAttribute("aria-label", `${name} ${parent.dataset.profileLabel || parent.dataset.agentId || "candidate"}`);
     if (type === "checkbox") input.checked = value === true;
     else if (!choices) input.value = String(value ?? "");
     label.appendChild(input);
@@ -603,6 +602,8 @@ export function renderAgentsSettingsPanel(panel, options) {
         : key === "prefer_for" ? input.value.split(",").map(v => v.trim()).filter(Boolean)
           : input.value.trim() || null;
     }
+    const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === next.agent_member_id);
+    if (member) next.agent_id = member.agent_id;
     return next;
   });
   const submit = (next, input = null) => {
@@ -641,14 +642,27 @@ export function renderAgentsSettingsPanel(panel, options) {
     const row = document.createElement("fieldset");
     row.className = "settings-section";
     row.dataset.agentId = profile.agent_id;
+    row.dataset.agentMemberId = profile.agent_member_id || "";
+    const savedMember = availableMembers?.find(member => (member.member_id || member.agent_member_id) === profile.agent_member_id);
+    row.dataset.profileLabel = savedMember?.name || profile.agent_id;
     const legend = document.createElement("legend");
-    legend.textContent = `${index + 1}. ${profile.agent_id}`;
+    legend.textContent = `${index + 1}. ${savedMember?.name || profile.agent_member_id || "Unavailable member"}`;
     row.appendChild(legend);
     panel.appendChild(row);
     rows.push({ row, profile });
-    const agent = field(row, "Agent", "agent_id", profile.agent_id, "text",
-      (agentCatalog || []).map(agent => ({ value: agent.id, label: agent.name || agent.id })));
-    const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(agent.value));
+    const memberChoices = (availableMembers || []).map(member => ({ value: member.member_id || member.agent_member_id,
+      label: `${member.name} (${choices?.agents.find(tool => provider(tool.id) === provider(member.agent_id))?.name || member.agent_id})${member.enabled ? "" : " · Resting"}` }));
+    if (!savedMember && profile.agent_member_id) memberChoices.push({ value: profile.agent_member_id, label: `${profile.agent_member_id} · Unavailable member` });
+    const agent = field(row, "Agent", "agent_member_id", profile.agent_member_id || "", "text", memberChoices);
+    agent.disabled = availableMembers === null;
+    const toolField = document.createElement("label"); toolField.className = "settings-field";
+    const toolCaption = document.createElement("span"), toolValue = document.createElement("output");
+    toolCaption.textContent = "Tool"; toolValue.dataset.profileTool = "";
+    toolField.append(toolCaption, toolValue); row.append(toolField);
+    const memberStatus = document.createElement("p"); memberStatus.className = "settings-help"; memberStatus.setAttribute("role", "status"); row.append(memberStatus);
+    const selectedMember = () => availableMembers?.find(member => (member.member_id || member.agent_member_id) === agent.value);
+    let previousTool = provider(profile.agent_id);
+    const capabilities = () => choices?.agents.find(entry => provider(entry.id) === provider(selectedMember()?.agent_id || profile.agent_id));
     const initial = capabilities();
     let model = field(row, "Model", "model", profile.model ?? initial?.default_model ?? "", "text", []);
     const initialModel = initial?.models.find(option => option.value === model.value);
@@ -669,7 +683,30 @@ export function renderAgentsSettingsPanel(panel, options) {
     row.appendChild(modelSuggestions);
     row.updateCandidateChoices = changed => {
       const entry = capabilities();
-      const agentChanged = changed === "agent_id";
+      const member = selectedMember();
+      const tool = member?.agent_id || profile.agent_id;
+      const agentChanged = changed === "agent_member_id" && previousTool !== provider(tool);
+      previousTool = provider(tool);
+      row.dataset.agentMemberId = agent.value;
+      row.dataset.agentId = tool;
+      const memberLabel = member?.name || agent.value || "Unavailable member";
+      row.dataset.profileLabel = memberLabel;
+      legend.textContent = `${index + 1}. ${memberLabel}`;
+      for (const input of row.querySelectorAll("[data-profile-field]")) {
+        const caption = input.closest("label")?.querySelector("span")?.textContent;
+        if (caption) input.setAttribute("aria-label", `${caption} ${memberLabel}`);
+      }
+      for (const button of row.querySelectorAll("button[data-action]")) {
+        const action = button.dataset.action;
+        button.setAttribute("aria-label", action === "remove" ? `Remove ${memberLabel}` : `Move ${action} ${memberLabel}`);
+        button.textContent = action === "remove" ? `Remove ${memberLabel}` : `Move ${action} ${memberLabel}`;
+      }
+      toolValue.setAttribute("aria-label", `Tool ${memberLabel}`);
+      toolValue.textContent = entry?.name || tool;
+      memberStatus.textContent = availableMembers === null ? "Loading registered members…" : !member
+        ? "Selected member is unavailable. Choose a registered member; no substitute will be launched."
+        : !member.enabled ? "Resting member. Future launches wait until this member is enabled." : "";
+      memberStatus.hidden = !memberStatus.textContent;
       if (!changed || agentChanged) {
         const value = agentChanged ? entry?.default_model ?? "" : model.value;
         const freeText = Boolean(entry?.supports_model_input && !entry.models.length);
@@ -712,37 +749,33 @@ export function renderAgentsSettingsPanel(panel, options) {
     if (profile.model == null) model.dataset.inheritedDefault = model.value;
     if (profile.reasoning == null) reasoning.dataset.inheritedDefault = reasoning.value;
     for (const [direction, offset] of [["up", -1], ["down", 1]]) {
-      const move = button(row, `Move ${direction} ${profile.agent_id}`, direction, () => {
+      const move = button(row, `Move ${direction} ${row.dataset.profileLabel}`, direction, () => {
         const next = draft();
         [next[index], next[index + offset]] = [next[index + offset], next[index]];
         submit(next);
       });
       move.disabled = index + offset < 0 || index + offset >= profiles.length;
     }
-    const remove = button(row, `Remove ${profile.agent_id}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
+    const remove = button(row, `Remove ${row.dataset.profileLabel}`, "remove", () => submit(draft().filter((_, i) => i !== index)));
     remove.disabled = profiles.length <= 1;
   }
   const add = document.createElement("section");
   add.className = "settings-section";
   panel.appendChild(add);
-  const remaining = (availableAgents || []).filter(agent => !profiles.some(profile => provider(profile.agent_id) === provider(agent.id)));
-  const candidate = field(add, "Add candidate", "new", "", "text", ["", ...remaining.map(agent => agent.id)]);
-  candidate.options[0].textContent = "Select an agent…";
-  for (const option of candidate.options) {
-    const agent = remaining.find(agent => agent.id === option.value);
-    if (agent) option.textContent = `${agent.name || agent.id} (${agent.id})`;
-  }
+  const remaining = (availableMembers || []).filter(member => !profiles.some(profile => profile.agent_member_id === (member.member_id || member.agent_member_id)));
+  const candidate = field(add, "Add candidate", "new", "", "text", [{ value: "", label: "Select a registered member…" },
+    ...remaining.map(member => ({ value: member.member_id || member.agent_member_id, label: `${member.name} (${member.agent_id})${member.enabled ? "" : " · Resting"}` }))]);
   const addButton = button(add, "Add candidate", "add-candidate", () => {
-    const agent = candidate.value.trim();
-    const next = draft();
-    if (!agent) showFeedback("Select an agent to add.", true);
-    else if (next.some(profile => provider(profile.agent_id) === provider(agent))) showFeedback(`Agent ${agent} is already in the candidate pool.`, true);
-    else if (!availableAgents?.some(known => known.id === agent)) showFeedback(`Unknown agent: ${agent}. Select a known agent.`, true);
-    else submit([...next, { agent_id: agent }]);
+    const memberId = candidate.value.trim(), next = draft();
+    const member = availableMembers?.find(member => (member.member_id || member.agent_member_id) === memberId);
+    if (!memberId) showFeedback("Select a registered member to add.", true);
+    else if (next.some(profile => profile.agent_member_id === memberId)) showFeedback(`Member ${memberId} is already in the candidate pool.`, true);
+    else if (!member) showFeedback(`Unknown member: ${memberId}. Select a registered member.`, true);
+    else submit([...next, { agent_member_id: memberId, agent_id: member.agent_id }]);
   });
-  candidate.disabled = addButton.disabled = availableAgents === null || remaining.length === 0;
-  showFeedback(availableAgents === null ? "Loading available agents…"
-    : remaining.length === 0 ? "All known agents are already in the candidate pool." : "Select an agent to add.");
+  candidate.disabled = addButton.disabled = availableMembers === null || remaining.length === 0;
+  showFeedback(availableMembers === null ? "Loading registered members…"
+    : remaining.length === 0 ? "All registered members are already in the candidate pool." : "Select a registered member to add.");
   add.appendChild(feedback);
 }
 
@@ -819,6 +852,7 @@ export function createSettingsSurface({
   getIndexStatus,
   pmSettingsPanel,
   mountIssues,
+  rosterModel,
   scheduleFrame,
 }) {
       // Issue #2698 PR 4 — same guard applied to the System Settings
@@ -1092,13 +1126,7 @@ export function createSettingsSurface({
           }
           send(message);
         };
-        const builtins = supportedAgentsModel.read().agents
-          ?? current.choices?.agents.filter(agent => !agent.is_custom) ?? null;
-        const customCatalog = customAgentsModel.read().catalog;
-        const availableAgents = builtins === null || !customCatalog.loaded || customCatalog.loading ? null : [
-          ...builtins,
-          ...customCatalog.agents.map(agent => ({ id: agent.id, name: agent.display_name || agent.id })),
-        ];
+        const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
           const editing = panel?.contains(document.activeElement)
@@ -1107,7 +1135,7 @@ export function createSettingsSurface({
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
-            availableAgents,
+            availableMembers,
           });
         }
         positionIssuesLaunchControls(body);
@@ -1122,9 +1150,32 @@ export function createSettingsSurface({
       function applyIssueMonitorProfiles(event) {
         const root = event.project_root;
         if (!root) return;
+        const bound = Array.isArray(event.profiles) && event.profiles.every(profile => profile.agent_member_id);
         issueSettingsModel.update(state => ({ ...state, [root]: {
           ...state[root], profiles: event.profiles, choices: event.choices, profilesRequestId: event.request_id,
+          rosterProfilesPending: bound ? false : state[root]?.rosterProfilesPending,
         } }));
+      }
+      function refreshProfilesAfterRoster(roster) {
+        issueSettingsModel.update(state => ({ ...state, completedRoster: roster }));
+      }
+      issueSettingsModel.subscribe(state => state.completedRoster, roster => {
+        purgeDetachedSettingsBodies();
+        const root = activeProjectTab()?.project_root;
+        if (!root || ![...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root)) return;
+        if (typeof roster?.project_key !== "string" || roster.project_key !== rosterModel?.read().project_key) return;
+        // This wire ACK follows the producer's committed migration, even
+        // when only profiles changed and the roster revision stayed equal.
+        issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], rosterProfilesReady: true, rosterProfilesPending: false } }));
+      });
+      function refreshUnboundProfiles() {
+        const root = activeProjectTab()?.project_root;
+        if (!root || ![...settingsWindowBodies].some(body => body.dataset.settingsProjectRoot === root)) return;
+        const current = issueSettingsModel.read()[root];
+        if (!current?.rosterProfilesReady || current.rosterProfilesPending
+          || Array.isArray(current.profiles) && current.profiles.every(profile => profile.agent_member_id)) return;
+        issueSettingsModel.update(state => ({ ...state, [root]: { ...state[root], rosterProfilesPending: true } }));
+        send({ kind: "get_issue_monitor_profiles" });
       }
       function applyIssueMonitorProfilesError(event) {
         if (!event.project_root) return;
@@ -1134,6 +1185,7 @@ export function createSettingsSurface({
       }
       issueSettingsModel.subscribe(state => state, () => {
         purgeDetachedSettingsBodies();
+        refreshUnboundProfiles();
         for (const body of settingsWindowBodies) {
           renderProjectSettings(body);
         }
@@ -1213,17 +1265,10 @@ export function createSettingsSurface({
       }
 
       supportedAgentsModel.subscribeFrame(state => state, () => renderSupportedAgentPanels());
-      supportedAgentsModel.subscribe(state => state.agents, () => {
-        purgeDetachedSettingsBodies();
-        for (const body of settingsWindowBodies) renderProjectSettings(body);
-      });
-
       customAgentsModel.subscribeFrame(state => state, state => {
         if (state !== renderedCustomAgentsState) renderSettingsAgentList(state);
       });
-      customAgentsModel.subscribe(state => state.catalog, catalog => {
-        // Read recovery must not replace candidate inputs while awaiting a reply.
-        if (catalog.loading) return;
+      rosterModel?.subscribeFrame(state => state, () => {
         purgeDetachedSettingsBodies();
         for (const body of settingsWindowBodies) renderProjectSettings(body);
       });
@@ -1237,6 +1282,7 @@ export function createSettingsSurface({
         if (activeProjectTab()?.project_root) {
           send({ kind: "list_issue_monitor" });
           send({ kind: "get_issue_monitor_profiles" });
+          send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
         }
         send({ kind: "list_supported_agents" });
         send({ kind: "get_system_settings" });
@@ -2632,8 +2678,10 @@ export function createSettingsSurface({
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
         customAgentsModel,
+        supportedAgentsModel,
         agentBackendsModel,
         applyAgentBackendsReceiveEvent,
         systemSettingsModel,
