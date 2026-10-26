@@ -617,6 +617,32 @@ impl WindowRuntime {
     }
 }
 
+impl Drop for WindowRuntime {
+    fn drop(&mut self) {
+        // Workers retain Pane/PTY Arcs while waiting for child exit or EOF;
+        // dropping the runtime alone cannot reach PtyHandle's cleanup.
+        // ConPTY close and physical writes can block, so keep them off the GUI.
+        self.pty.revoke_input_generation();
+        let pty = self.pty.clone();
+        let output_thread = self.output_thread.take();
+        let status_thread = self.status_thread.take();
+        if pty_io::enqueue_process_window_close_finalizer(Box::new(move || {
+            let _ = pty.kill();
+            pty.release_descriptors();
+            if let Some(handle) = output_thread {
+                let _ = handle.join();
+            }
+            if let Some(handle) = status_thread {
+                let _ = handle.join();
+            }
+        }))
+        .is_err()
+        {
+            tracing::error!(target: "gwt.pane.teardown", "runtime cleanup worker is unavailable");
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorktreeFormProjection {
     Resolve,
