@@ -6862,12 +6862,12 @@ fn drain_owner_launch_fixtures(
     events
 }
 
-fn spawn_owner_title_fixture(
+fn spawn_owner_codex_fixture(
     runtime: &mut AppRuntime,
     tab_id: &str,
     mut config: gwt_agent::LaunchConfig,
-    expected_title: &str,
-) {
+    expected_title: Option<&str>,
+) -> String {
     let root = runtime.tab(tab_id).unwrap().project_root.clone();
     pane_control_tests::control_init_repo(&root);
     config
@@ -6899,21 +6899,21 @@ fn spawn_owner_title_fixture(
     drain_queued_blocking_tasks(&tasks);
     let completion = take_remote_owner_launch_completion(match &runtime.proxy {
         AppEventProxy::Stub(events) => events,
-        _ => panic!("recording title fixture proxy"),
+        _ => panic!("recording Codex fixture proxy"),
     });
     let snapshot = match &completion.result {
         Ok(super::RemoteOwnerLaunchOutcome::Runtime(snapshot, _)) => snapshot,
         Ok(super::RemoteOwnerLaunchOutcome::Failed { failure, .. }) => {
-            panic!("actual owner title launch failed: {}", failure.detail)
+            panic!("actual owner Codex launch failed: {}", failure.detail)
         }
         Ok(super::RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => {
-            panic!("actual owner title launch compensated: {}", failure.error)
+            panic!("actual owner Codex launch compensated: {}", failure.error)
         }
         Ok(super::RemoteOwnerLaunchOutcome::DiagnosticClosed { detail, .. }) => {
-            panic!("actual owner title launch exited: {detail:?}")
+            panic!("actual owner Codex launch exited: {detail:?}")
         }
         other => panic!(
-            "actual owner title launch was not installed: {:?}",
+            "actual owner Codex launch was not installed: {:?}",
             other.as_ref().err()
         ),
     };
@@ -6924,9 +6924,17 @@ fn spawn_owner_title_fixture(
         },
     ))
     .unwrap();
-    assert_eq!(wire["purpose_title"].as_str(), Some(expected_title));
+    if let Some(expected_title) = expected_title {
+        assert_eq!(wire["purpose_title"].as_str(), Some(expected_title));
+    }
+    let context = runtime.project_context(tab_id).unwrap();
+    let client = owner.client();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = client.identity().cloned();
     runtime.handle_remote_owner_launch_complete(completion);
     assert!(runtime.active_agent_sessions.contains_key(&window_id));
+    window_id
 }
 
 fn owner_fixture_agent_command(
@@ -7869,28 +7877,98 @@ fn worktree_listings_on_this_thread() -> u64 {
     WORKTREE_LISTINGS.with(std::cell::Cell::get)
 }
 
-fn approval_settle_runtime() -> (tempfile::TempDir, AppRuntime, String, Vec<u8>) {
+fn approval_settle_runtime() -> (
+    tempfile::TempDir,
+    ScopedGwtHome,
+    AppRuntime,
+    String,
+    Vec<u8>,
+) {
     let temp = tempdir().expect("tempdir");
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
+    let home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("approval-project");
+    fs::create_dir_all(&root).unwrap();
+    init_repo_with_initial_commit(&root);
+    let tab = sample_project_tab("tab-1", "Repo", root, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime
-        .window_hook_states
-        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/approval")
+        .linked_issue_number(42)
+        .build();
+    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let pane = owner_runtime_probe(&runtime, &window_id);
+    let hook = owner_runtime_status_event(&owner, &pane, "running", "PreToolUse");
+    let context = runtime.project_context("tab-1").unwrap();
+    let identity = owner.client().identity().unwrap().clone();
+    runtime.handle_project_owner_event(&context, 1, &identity, hook);
     let prompt = b"Would you like to run the following command?\r\n command\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n"
         .to_vec();
-    process_test_owner_output(&mut runtime, &window_id, &prompt);
-    runtime.handle_runtime_output(window_id.clone(), prompt.clone());
-    runtime.terminal_input_events(&window_id, "1\r");
-    (temp, runtime, window_id, prompt)
+    approval_owner_screen(&mut runtime, &window_id, &prompt, Instant::now());
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Input {
+            id: pane.id,
+            incarnation: pane.incarnation,
+            data: b"1\r".to_vec(),
+        }),
+    )
+    .unwrap();
+    assert!(
+        owner_runtime_probe(&runtime, &window_id)
+            .policy
+            .approval
+            .unwrap()
+            .resolution_started
+    );
+    (temp, home, runtime, window_id, prompt)
+}
+
+fn relay_approval_owner_events(
+    runtime: &mut AppRuntime,
+    window_id: &str,
+    source: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+) -> Vec<OutboundEvent> {
+    let address = runtime.window_lookup[window_id].clone();
+    let context = runtime.project_context(&address.tab_id).unwrap();
+    let identity = runtime.runtimes[window_id].owner_identity.clone();
+    let mut events = Vec::new();
+    while let Ok(event) = source.try_recv() {
+        events.extend(runtime.handle_project_owner_event(&context, 1, &identity, event));
+    }
+    events
+}
+
+fn approval_owner_screen(
+    runtime: &mut AppRuntime,
+    window_id: &str,
+    bytes: &[u8],
+    now: Instant,
+) -> Vec<OutboundEvent> {
+    let owner = project_owner_fixture(runtime, window_id);
+    let pane = owner_runtime_probe(runtime, window_id);
+    let mut source = owner.subscribe();
+    pane.pane.lock().unwrap().process_bytes(bytes);
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &pane.id,
+        pane.incarnation,
+        Utc::now(),
+        now,
+    ))
+    .unwrap();
+    relay_approval_owner_events(runtime, window_id, &mut source)
+}
+
+fn approval_owner_tick(
+    runtime: &mut AppRuntime,
+    window_id: &str,
+    now: Instant,
+) -> Vec<OutboundEvent> {
+    let owner = project_owner_fixture(runtime, window_id);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(owner.tick_runtime_policy(now)).unwrap();
+    relay_approval_owner_events(runtime, window_id, &mut source)
 }
 
 /// Fake index python for the transient-semantic-failure runtime contract

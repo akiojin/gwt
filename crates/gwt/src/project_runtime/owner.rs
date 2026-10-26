@@ -7536,11 +7536,11 @@ impl OwnerState {
             .lock()
             .ok()
             .map(|pane| pane.screen().contents());
-        if runtime
+        let approval_settle_due = runtime
             .policy
             .approval_settle_at
-            .is_some_and(|due| monotonic_now >= due)
-        {
+            .is_some_and(|due| monotonic_now >= due);
+        if approval_settle_due {
             runtime.policy.approval_settle_at = None;
             let provider = super::runtime_events::approval_provider(agent_id.as_deref());
             if screen.as_deref().is_some_and(|screen| {
@@ -7562,6 +7562,11 @@ impl OwnerState {
                 monotonic_now,
             },
         );
+        if approval_settle_due {
+            // Partial prompt evidence keeps Waiting until new output or input.
+            // Consuming this deadline must not schedule another idle tick.
+            runtime.policy.approval_settle_at = None;
+        }
         if let Some(detail) = &outcome.detail {
             runtime.detail = Some(detail.clone());
         } else if outcome.clear_detail {

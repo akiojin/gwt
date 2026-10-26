@@ -2872,7 +2872,12 @@ fn app_runtime_agent_window_initial_title_uses_branch_issue_link_title() {
         .branch("work/20260506-1257")
         .build();
 
-    spawn_owner_title_fixture(&mut runtime, "tab-1", config, "SPEC: Branch linked purpose");
+    spawn_owner_codex_fixture(
+        &mut runtime,
+        "tab-1",
+        config,
+        Some("SPEC: Branch linked purpose"),
+    );
 
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab
@@ -2922,7 +2927,7 @@ fn app_runtime_agent_window_initial_title_falls_back_to_projection_owner() {
         .branch("work/20260506-1257")
         .build();
 
-    spawn_owner_title_fixture(&mut runtime, "tab-1", config, "SPEC-2008");
+    spawn_owner_codex_fixture(&mut runtime, "tab-1", config, Some("SPEC-2008"));
 
     let tab = runtime.tab("tab-1").expect("tab");
     let agent_window = tab

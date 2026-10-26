@@ -243,7 +243,6 @@ crates/gwt/src/app_runtime/tests/runtime_contract_tests.rs|blocking_task_spawner
 crates/gwt/src/app_runtime/tests/runtime_contract_tests.rs|blocking_task_spawner_returns_before_a_stalled_task_finishes|started_rx.recv_timeout(Duration::from_secs(2)).expect()|1
 crates/gwt/src/app_runtime/tests/startup_status_tests.rs|bootstrap_hands_its_worktree_inventory_to_the_startup_ingest|assert!(Instant::now()<deadline,)|1
 crates/gwt/src/app_runtime/tests/startup_status_tests.rs|bootstrap_hands_its_worktree_inventory_to_the_startup_ingest|letdeadline=Instant::now()+Duration::from_secs(30)|1
-crates/gwt/src/app_runtime/tests/terminal_approval_tests.rs|app_runtime_approval_settle_timer_routes_sanitized_token_event|wait_for_recorded_event_with_timeout(,&proxy_events,Duration::from_secs(2),|events||1
 crates/gwt/src/app_runtime/tests/terminal_approval_tests.rs|app_runtime_status_thread_reports_process_exit_without_reader_eof|letdeadline=Instant::now()+Duration::from_secs(5)|1
 crates/gwt/src/app_runtime/tests/terminal_approval_tests.rs|app_runtime_status_thread_reports_process_exit_without_reader_eof|whileInstant::now()<deadline|1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|planned_orphan_intake_path_is_not_queued_for_auto_resume_while_prune_is_blocked|started_rx.recv_timeout(Duration::from_secs(1)).expect()|1

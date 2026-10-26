@@ -1526,45 +1526,52 @@ fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it
     assert!(!runtime.window_approval_waiting.contains_key(&window_id));
 }
 
+fn approval_owner_future_anchor() -> Instant {
+    // test-hygiene: allow-wall-clock-deadline Inject a future monotonic anchor so the real actor cannot race the explicit deadline tick; no assertion waits for wall time.
+    Instant::now() + Duration::from_secs(3600)
+}
+
 #[test]
 fn app_runtime_approval_settle_same_prompt_cancels_resolution_without_frames() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    assert!(runtime
-        .observe_runtime_approval_prompt(&window_id, None)
-        .is_empty());
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-    let fingerprint = runtime.window_approval_waiting[&window_id]
-        .active_fingerprint
-        .expect("active fingerprint");
-
-    let redraw = runtime.observe_runtime_approval_prompt(&window_id, Some(fingerprint));
-    assert!(redraw.is_empty());
-
-    let events = runtime.handle_runtime_approval_settle(&window_id, token);
-
+    let (_temp, _home, mut runtime, window_id, prompt) = approval_settle_runtime();
+    let anchor = approval_owner_future_anchor();
+    assert!(approval_owner_screen(&mut runtime, &window_id, b"\x1b[2J\x1b[H", anchor).is_empty());
+    let due = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval_settle_at
+        .unwrap();
+    let mut redraw = b"\x1b[2J\x1b[H".to_vec();
+    redraw.extend(prompt);
+    assert!(approval_owner_screen(&mut runtime, &window_id, &redraw, anchor).is_empty());
+    let events = approval_owner_tick(&mut runtime, &window_id, due);
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
     assert!(events.is_empty());
-    let latch = &runtime.window_approval_waiting[&window_id];
-    assert!(!latch.resolution_started);
-    assert!(latch.pending_settle_token.is_none());
+    assert!(!actual.policy.approval.unwrap().resolution_started);
+    assert!(actual.policy.approval_settle_at.is_none());
+    assert_eq!(actual.status, WindowProcessStatus::Waiting);
 }
 
 #[test]
 fn app_runtime_approval_settle_stable_progress_clears_waiting() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    runtime.observe_runtime_approval_prompt(&window_id, None);
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(b"\x1b[2J\x1b[HWorking\r\n");
-
-    let events = runtime.handle_runtime_approval_settle(&window_id, token);
-
+    let (_temp, _home, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\x1b[2J\x1b[HWorking\r\n",
+        approval_owner_future_anchor(),
+    );
+    let due = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval_settle_at
+        .unwrap();
+    let events = approval_owner_tick(&mut runtime, &window_id, due);
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    assert_eq!(
+        runtime.runtimes[&window_id].status,
+        WindowProcessStatus::Running
+    );
+    close_test_owner_runtime(&mut runtime, &window_id);
     assert!(events.iter().any(|event| matches!(
         event.event,
         BackendEvent::WindowState {
@@ -1572,45 +1579,57 @@ fn app_runtime_approval_settle_stable_progress_clears_waiting() {
             ..
         }
     )));
-    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(actual.policy.approval.is_none());
+    assert!(actual.policy.approval_settle_at.is_none());
+    assert_eq!(actual.status, WindowProcessStatus::Running);
 }
 
 #[test]
 fn app_runtime_approval_settle_partial_provider_evidence_keeps_waiting() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    runtime.observe_runtime_approval_prompt(&window_id, None);
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(b"\x1b[2J\x1b[HWould you like to run the following command?\r\n");
-
-    let events = runtime.handle_runtime_approval_settle(&window_id, token);
-
+    let (_temp, _home, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\x1b[2J\x1b[HWould you like to run the following command?\r\n",
+        approval_owner_future_anchor(),
+    );
+    let due = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval_settle_at
+        .unwrap();
+    let events = approval_owner_tick(&mut runtime, &window_id, due);
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
     assert!(events.is_empty());
-    let latch = &runtime.window_approval_waiting[&window_id];
-    assert!(latch.resolution_started);
-    assert!(latch.pending_settle_token.is_none());
+    assert_eq!(actual.status, WindowProcessStatus::Waiting);
+    assert!(actual.policy.approval.unwrap().resolution_started);
+    assert!(
+        actual.policy.approval_settle_at.is_none(),
+        "partial evidence retains Waiting without continuously rearming an idle timer"
+    );
 }
 
 #[test]
 fn app_runtime_approval_settle_ignores_complete_prompt_in_scrollback_above_progress() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    runtime.observe_runtime_approval_prompt(&window_id, None);
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-    owner_runtime_probe(&runtime, &window_id)
+    let (_temp, _home, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\r\nRunning tests...\r\n",
+        approval_owner_future_anchor(),
+    );
+    let pane = owner_runtime_probe(&runtime, &window_id);
+    assert!(pane
         .pane
         .lock()
-        .expect("pane")
-        .process_bytes(b"\r\nRunning tests...\r\n");
-
-    let events = runtime.handle_runtime_approval_settle(&window_id, token);
-
+        .unwrap()
+        .screen()
+        .contents()
+        .contains("Would you like to run the following command?"));
+    let due = pane.policy.approval_settle_at.unwrap();
+    let events = approval_owner_tick(&mut runtime, &window_id, due);
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
     assert!(events.iter().any(|event| matches!(
         event.event,
         BackendEvent::WindowState {
@@ -1618,56 +1637,77 @@ fn app_runtime_approval_settle_ignores_complete_prompt_in_scrollback_above_progr
             ..
         }
     )));
-    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(actual.policy.approval.is_none());
+    assert!(actual.policy.approval_settle_at.is_none());
 }
 
 #[test]
 fn app_runtime_approval_settle_stale_token_is_noop() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    runtime.observe_runtime_approval_prompt(&window_id, None);
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-
-    let events = runtime.handle_runtime_approval_settle(&window_id, token.wrapping_add(1));
-
-    assert!(events.is_empty());
-    assert_eq!(
-        runtime.window_approval_waiting[&window_id].pending_settle_token,
-        Some(token)
+    let (_temp, _home, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    let anchor = approval_owner_future_anchor();
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\x1b[2J\x1b[HWorking\r\n",
+        anchor,
     );
+    let before = owner_runtime_probe(&runtime, &window_id);
+    assert!(runtime
+        .handle_runtime_approval_settle(&window_id, u64::MAX)
+        .is_empty());
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    assert!(owner_fixture_block_on(owner.observe_runtime_policy(
+        &before.id,
+        before.incarnation + 1,
+        Utc::now(),
+        anchor
+    ))
+    .is_err());
+    let after = owner_runtime_probe(&runtime, &window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
+    assert_eq!(
+        after.policy.approval_settle_at,
+        before.policy.approval_settle_at
+    );
+    assert_eq!(
+        after.policy.approval.unwrap().active_fingerprint,
+        before.policy.approval.unwrap().active_fingerprint
+    );
+    assert!(after.policy.approval.unwrap().resolution_started);
 }
 
 #[test]
-fn app_runtime_approval_settle_timer_routes_sanitized_token_event() {
-    let (_temp, mut runtime, window_id, _prompt) = approval_settle_runtime();
-    let proxy_events = match &runtime.proxy {
-        AppEventProxy::Stub(events) => events.clone(),
-        AppEventProxy::Real(_)
-        | AppEventProxy::Project { .. }
-        | AppEventProxy::Notifying { .. } => {
-            panic!("sample runtime must use stub proxy")
-        }
-    };
-    runtime.observe_runtime_approval_prompt(&window_id, None);
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-
-    wait_for_recorded_event_with_timeout(
-        "runtime approval settle timer event",
-        &proxy_events,
-        Duration::from_secs(2),
-        |events| {
-            events.iter().any(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::RuntimeApprovalSettle { id, token: queued }
-                        if id == &window_id && *queued == token
-                )
-            })
-        },
+fn app_runtime_approval_settle_uses_owner_deadline_without_gui_token_event() {
+    let (_temp, _home, mut runtime, window_id, _prompt) = approval_settle_runtime();
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\x1b[2J\x1b[HWorking\r\n",
+        approval_owner_future_anchor(),
     );
+    let due = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval_settle_at
+        .unwrap();
+    let events = approval_owner_tick(&mut runtime, &window_id, due);
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("recording owner projection fixture")
+    };
+    assert!(!recorded.lock().unwrap().iter().any(|event| matches!(
+        recorded_project_payload(event),
+        UserEvent::RuntimeApprovalSettle { .. }
+    )));
+    close_test_owner_runtime(&mut runtime, &window_id);
+    assert!(events.iter().any(|event| matches!(
+        event.event,
+        BackendEvent::WindowState {
+            state: WindowProcessStatus::Running,
+            ..
+        }
+    )));
+    assert_eq!(actual.status, WindowProcessStatus::Running);
+    assert!(actual.policy.approval.is_none());
 }
 
 #[test]

@@ -849,11 +849,11 @@ fn app_runtime_agent_window_initial_title_uses_linked_issue_title() {
         .linked_issue_number(2359)
         .build();
 
-    spawn_owner_title_fixture(
+    spawn_owner_codex_fixture(
         &mut runtime,
         "tab-1",
         config,
-        "SPEC: Workspace purpose titles",
+        Some("SPEC: Workspace purpose titles"),
     );
 
     let tab = runtime.tab("tab-1").expect("tab");
