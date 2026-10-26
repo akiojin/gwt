@@ -1,64 +1,192 @@
 use super::*;
 
+// Every resource below is captured from the canonical actor. This fixture
+// observes real writer entries and never installs a GUI writer or Session.
+pub(super) struct PmDeliveryFixture {
+    pub repo: PathBuf,
+    pub owner: Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    pub pm: gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    pub target: gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    clients: Mutex<Vec<gwt::project_runtime::test_support::OwnerAgentClient>>,
+}
+
+pub(super) fn pm_delivery_owner_fixture(temp: &Path) -> PmDeliveryFixture {
+    use super::pane_control_tests::{
+        control_launch_config, control_owner_agent, control_owner_launch, control_register_pm,
+    };
+    let repo = temp.join("project");
+    let (owner, pm) = control_owner_agent(&repo, "pm", 42);
+    control_register_pm(&repo, &pm);
+    let runner = temp.join(if cfg!(windows) {
+        "pm-codex.cmd"
+    } else {
+        "pm-codex"
+    });
+    #[cfg(not(windows))]
+    {
+        fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; exec cat >/dev/null\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\nif \"%~1\"==\"features\" exit /b 0\r\npowershell -NoProfile -Command \"while ($null -ne [Console]::ReadLine()) {}\"\r\n").unwrap();
+    let location = control_launch_config(&repo, 43);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(location.working_dir.unwrap())
+        .branch(location.branch.unwrap())
+        .base_branch(location.base_branch.unwrap())
+        .build();
+    config.command = runner.display().to_string();
+    config.linked_issue_number = Some(43);
+    config.explicit_follow_up = true;
+    let target = control_owner_launch(&owner, "target", config);
+    owner_runtime_status_event(&owner, &target, "Working", "SessionStart");
+    let target = owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).unwrap();
+    assert!(
+        matches!(
+            target.status,
+            WindowProcessStatus::Running | WindowProcessStatus::Idle | WindowProcessStatus::Waiting
+        ),
+        "positive PM delivery begins after the actual provider SessionStart: {:?}",
+        target.status
+    );
+    assert_eq!(
+        target.session.as_ref().unwrap().agent_id,
+        gwt_agent::AgentId::Codex
+    );
+    PmDeliveryFixture {
+        repo,
+        owner,
+        pm,
+        target,
+        clients: Mutex::new(Vec::new()),
+    }
+}
+
+impl PmDeliveryFixture {
+    pub fn send(
+        &self,
+        client: String,
+        operation_id: &str,
+        id: &str,
+        text: &str,
+        responder: Option<AgentPmSendResponder>,
+    ) -> Vec<serde_json::Value> {
+        self.send_as(&self.pm, client, operation_id, id, text, responder)
+    }
+    pub fn send_as(
+        &self,
+        caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+        client: String,
+        operation_id: &str,
+        id: &str,
+        text: &str,
+        responder: Option<AgentPmSendResponder>,
+    ) -> Vec<serde_json::Value> {
+        let client = owner_fixture_block_on(
+            self.owner
+                .agent_client(&format!("{client}-{}", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+        client.enqueue(
+            caller.grant.as_ref().unwrap().clone(),
+            AgentFrontendRequest::PmSendInput {
+                operation_id: operation_id.into(),
+                window_id: id.into(),
+                text: text.into(),
+                responder,
+            },
+        );
+        let immediate = client.drain().unwrap();
+        assert_eq!(immediate.close, None);
+        self.clients.lock().unwrap().push(client);
+        immediate.events
+    }
+    pub fn close_target(&self) {
+        super::pane_control_tests::control_close(&self.owner, &self.target);
+    }
+    pub fn close_pm(&self) {
+        super::pane_control_tests::control_close(&self.owner, &self.pm);
+    }
+}
+
+impl Drop for PmDeliveryFixture {
+    fn drop(&mut self) {
+        let barrier = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline direct PM replies and the real owner worker must settle before exact process cleanup
+            tokio::time::timeout(
+                gwt_core::deadline_budget::HANG_GUARD,
+                self.owner.agent_dispatch_barrier(),
+            )
+            .await
+        });
+        let mut clean = matches!(barrier, Ok(Ok(())));
+        for client in self.clients.lock().unwrap().drain(..) {
+            clean &= client
+                .drain()
+                .is_ok_and(|reply| reply.close.is_none() && reply.events.is_empty());
+        }
+        for pane in [&self.target, &self.pm] {
+            if pane.pty.try_wait().is_ok_and(|exit| exit.is_none()) {
+                clean &= owner_fixture_block_on(self.owner.command(
+                    gwt::project_runtime::events::OwnerCommand::Close {
+                        id: pane.id.clone(),
+                        incarnation: pane.incarnation,
+                    },
+                ))
+                .is_ok();
+            }
+        }
+        if !thread::panicking() {
+            assert!(clean, "PM direct responses must not duplicate on ClientHub and every exact fixture child must reap");
+        }
+    }
+}
+
 /// Issue #5839: ordinary notification delivery and the authenticated PM route
 /// must report failure instead of feeding Codex's current Find surface.
 #[test]
 fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
+    use gwt::project_runtime::events::OwnerCommand;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target = "tab-1::other-window";
-    insert_test_pane_runtime(&mut runtime, target);
-    runtime.register_pty_writer(target, None);
-    let pane = Arc::clone(&runtime.runtimes[target].pane);
-    pane.lock()
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let target = &fixture.target;
+    target
+        .pane
+        .lock()
         .unwrap()
         .process_bytes(b"\x1b[2J\x1b[H/ T R A N S C R I P T / / /\x1b[21;1HFind: ");
-    let events = runtime.pane_send_input_to_window_events(
-        "client".into(),
-        target,
-        "watchdog notification\r",
-    );
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::PaneSendResult { ok: false, error: Some(error), .. }
-                if error.contains("Transcript")
-        )),
-        "{events:?}"
-    );
-
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let ordinary = owner_fixture_block_on(fixture.owner.command(OwnerCommand::SendInput {
+        id: target.id.clone(),
+        incarnation: target.incarnation,
+        text: "watchdog notification\r".into(),
+    }));
+    assert!(ordinary.is_err_and(|error| error.contains("Transcript")));
+    let revision = target.pty.ordinary_input_revision();
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135765839";
-    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
-    runtime.authenticated_pm_pane_send_input_events(
-        &issuer,
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
         "client".into(),
-        grant,
         operation_id,
-        target,
+        &target.id,
         "PM notification\r",
         Some(responder),
     );
-    assert!(matches!(
-        result.blocking_recv().expect("terminal PM result"),
+    assert!(
+        matches!(result.blocking_recv().expect("terminal PM result"),
         BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
-            if status == "failed" && reason.contains("Transcript")
-    ));
-    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+            if status == "failed" && reason.contains("Transcript"))
+    );
+    assert!(
+        !cancellation.cancel(),
+        "overlay refusal must precede physical mutation"
+    );
+    assert_eq!(target.pty.ordinary_input_revision(), revision);
+    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo);
     let receipt = gwt::pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
         .expect("receipt read")
         .expect("durable refusal");
@@ -66,25 +194,23 @@ fn transcript_overlay_reports_failed_pane_and_pm_ack_without_staging_body() {
         receipt.status,
         gwt::pm_registry::PmDeliveryReceiptStatus::Refused
     );
-
-    assert!(
-        runtime.terminal_input_events(target, "\x1b").is_empty(),
-        "raw recovery keys remain available"
-    );
-    pane.lock()
+    owner_fixture_block_on(fixture.owner.command(OwnerCommand::Input {
+        id: target.id.clone(),
+        incarnation: target.incarnation,
+        data: b"\x1b".to_vec(),
+    }))
+    .expect("raw recovery keys remain available");
+    target
+        .pane
+        .lock()
         .unwrap()
         .process_bytes(b"\x1b[2J\x1b[Hcodex\r\n> ");
-    let events = runtime.pane_send_input_to_window_events(
-        "client".into(),
-        target,
-        "recovered notification\r",
-    );
-    assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })),
-        "{events:?}"
-    );
+    owner_fixture_block_on(fixture.owner.command(OwnerCommand::SendInput {
+        id: target.id.clone(),
+        incarnation: target.incarnation,
+        text: "recovered notification\r".into(),
+    }))
+    .expect("ordinary delivery recovers after the overlay closes");
 }
 
 /// SPEC-3431 FR-111 (T-206): the server-side PM principal gate for pane
@@ -100,22 +226,12 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target_window = "tab-1::other-window".to_string();
-    insert_test_pane_runtime(&mut runtime, &target_window);
-    runtime.register_pty_writer(&target_window, None);
+    let _owner_home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target_window = fixture.target.id.clone();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
 
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643ae";
     let body = "verify this exact body";
     let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
@@ -125,6 +241,7 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     let (prepared_tx, prepared_rx) = mpsc::sync_channel(1);
     let (release_ack_tx, release_ack_rx) = mpsc::sync_channel(1);
     let ack = thread::spawn(move || {
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual durable Prepared receipt; the receipt establishes ordering
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
@@ -138,6 +255,7 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
                 break;
             }
             assert!(
+                // test-hygiene: allow-wall-clock-deadline bound an actual owner-worker receipt hang, never assert a scheduling delay
                 Instant::now() < deadline,
                 "Prepared receipt was not committed"
             );
@@ -146,12 +264,12 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
         }
         prepared_tx.send(()).expect("announce Prepared receipt");
         release_ack_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(Duration::from_secs(3)) // test-hygiene: allow-wall-clock-deadline hang guard for an actual receipt or explicit ACK-release barrier
             .expect("release the exact hook acknowledgement");
         gwt::pm_registry::finish_pm_delivery_receipt(
             &ack_receipt_path,
             operation_id,
-            "other-session",
+            &target_session_id,
             &ack_body_sha256,
             gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
             None,
@@ -160,19 +278,17 @@ fn authenticated_pm_send_reports_delivered_only_after_exact_target_hook_ack() {
     });
     let (responder, mut result, _cancellation) = AgentPmSendResponder::channel();
 
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "origin-client".to_string(),
-            grant,
             operation_id,
             &target_window,
             &format!("{body}\r"),
-            Some(responder),
+            Some(responder)
         )
         .is_empty());
     prepared_rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv_timeout(Duration::from_secs(3)) // test-hygiene: allow-wall-clock-deadline hang guard for an actual receipt or explicit ACK-release barrier
         .expect("the delivery reached Prepared before its acknowledgement");
     assert!(
         matches!(
@@ -231,22 +347,12 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target_window = "tab-1::other-window".to_string();
-    insert_test_pane_runtime(&mut runtime, &target_window);
-    runtime.register_pty_writer(&target_window, None);
+    let _owner_home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target_window = fixture.target.id.clone();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
 
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b6";
     let body = "acknowledged after the submit retries";
     let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
@@ -254,6 +360,7 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
     let ack_receipt_path = receipt_path.clone();
     let ack_body_sha256 = body_sha256.clone();
     let ack = thread::spawn(move || {
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual durable Prepared receipt; the receipt establishes ordering
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let prepared = gwt::pm_registry::load_pm_delivery_receipts(&ack_receipt_path)
@@ -267,6 +374,7 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
                 break;
             }
             assert!(
+                // test-hygiene: allow-wall-clock-deadline bound an actual owner-worker receipt hang, never assert a scheduling delay
                 Instant::now() < deadline,
                 "Prepared receipt was not committed"
             );
@@ -279,7 +387,7 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
         gwt::pm_registry::finish_pm_delivery_receipt(
             &ack_receipt_path,
             operation_id,
-            "other-session",
+            &target_session_id,
             &ack_body_sha256,
             gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
             None,
@@ -291,15 +399,13 @@ fn authenticated_pm_send_reports_delivered_when_hook_ack_lands_after_submit_retr
     let (responder, result, _cancellation) =
         AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
 
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "origin-client".to_string(),
-            grant,
             operation_id,
             &target_window,
             &format!("{body}\r"),
-            Some(responder),
+            Some(responder)
         )
         .is_empty());
     let result = result.blocking_recv().expect("terminal delivery result");
@@ -341,21 +447,11 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target_window = "tab-1::other-window".to_string();
-    insert_test_pane_runtime(&mut runtime, &target_window);
-    runtime.register_pty_writer(&target_window, None);
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let _owner_home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target_window = fixture.target.id.clone();
+
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643af";
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
     // This delivery waits out its whole acceptance window; keep that window the
@@ -363,15 +459,13 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
     let (responder, result, _cancellation) =
         AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(3));
 
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "origin-client".to_string(),
-            grant,
             operation_id,
             &target_window,
             "unacknowledged body\r",
-            Some(responder),
+            Some(responder)
         )
         .is_empty());
     let result = result.blocking_recv().expect("terminal delivery result");
@@ -399,14 +493,7 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
 
     // An intervening human draft revokes submit recovery, even if the old
     // operation has a full-body guard. No new input transaction may start.
-    let entry = Arc::clone(
-        runtime
-            .pty_writers
-            .read()
-            .unwrap()
-            .get(&target_window)
-            .unwrap(),
-    );
+    let entry = fixture.target.writer.as_ref().unwrap().clone();
     let original_transaction = entry
         .pm_delivery_replay
         .lock()
@@ -414,12 +501,17 @@ fn authenticated_pm_send_reports_unconfirmed_without_target_hook_ack() {
         .as_ref()
         .expect("full body recovery guard")
         .transaction_revision;
-    entry.handle.write_input(b"human draft").unwrap();
+    owner_fixture_block_on(fixture.owner.command(
+        gwt::project_runtime::events::OwnerCommand::Input {
+            id: fixture.target.id.clone(),
+            incarnation: fixture.target.incarnation,
+            data: b"human draft".to_vec(),
+        },
+    ))
+    .unwrap();
     let (responder, result, _cancellation) = AgentPmSendResponder::channel();
-    runtime.authenticated_pm_pane_send_input_events(
-        &issuer,
+    fixture.send(
         "origin-client".into(),
-        issuer.grant_for_test(&capability.token).unwrap(),
         operation_id,
         &target_window,
         "unacknowledged body\r",
@@ -444,26 +536,17 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target = "tab-1::other-window";
-    insert_test_pane_runtime(&mut runtime, target);
-    runtime.register_pty_writer(target, None);
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer.issue(&repo, "pm-session-live").unwrap();
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target = fixture.target.id.as_str();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
+
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135763898";
     let body = "recover an idle composer";
     let (responder, result, _cancellation) =
         AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
-    runtime.authenticated_pm_pane_send_input_events(
-        &issuer,
+    fixture.send(
         "client".into(),
-        issuer.grant_for_test(&capability.token).unwrap(),
         operation_id,
         target,
         &format!("{body}\r"),
@@ -471,7 +554,7 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
     );
     assert!(matches!(result.blocking_recv().unwrap(),
         BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
-    let entry = Arc::clone(runtime.pty_writers.read().unwrap().get(target).unwrap());
+    let entry = fixture.target.writer.as_ref().unwrap().clone();
     let original_transaction = entry
         .pm_delivery_replay
         .lock()
@@ -481,10 +564,8 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
         .transaction_revision;
     let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
     let (responder, result, recovery_cancellation) = AgentPmSendResponder::channel();
-    runtime.authenticated_pm_pane_send_input_events(
-        &issuer,
+    fixture.send(
         "client".into(),
-        issuer.grant_for_test(&capability.token).unwrap(),
         operation_id,
         target,
         &format!("{body}\r"),
@@ -501,17 +582,15 @@ fn authenticated_pm_send_recovers_the_same_operation_after_dropped_submit() {
     gwt::pm_registry::finish_pm_delivery_receipt(
         &path,
         operation_id,
-        "other-session",
+        &target_session_id,
         &gwt::pm_registry::pm_delivery_prompt_sha256(body),
         gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
         None,
     )
     .unwrap();
     let (responder, result, _cancellation) = AgentPmSendResponder::channel();
-    runtime.authenticated_pm_pane_send_input_events(
-        &issuer,
+    fixture.send(
         "client".into(),
-        issuer.grant_for_test(&capability.token).unwrap(),
         operation_id,
         target,
         &format!("{body}\r"),
@@ -537,12 +616,11 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target = "tab-1::other-window";
-    insert_test_pane_runtime(&mut runtime, target);
-    runtime.register_pty_writer(target, None);
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target = fixture.target.id.as_str();
+    let pm_session_id = fixture.pm.session.as_ref().unwrap().id.clone();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d79135763897";
     let body = "recover the same operation";
     let path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
@@ -550,9 +628,9 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         operation_id: operation_id.into(),
         recorded_at: "2026-10-22T00:00:00Z".into(),
         status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
-        principal_session_id: "pm-session-live".into(),
+        principal_session_id: pm_session_id.clone(),
         target_window_id: target.into(),
-        target_session_id: "other-session".into(),
+        target_session_id: target_session_id.clone(),
         body_sha256: gwt::pm_registry::pm_delivery_prompt_sha256(body),
         reason: None,
     };
@@ -560,25 +638,18 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
     gwt::pm_registry::finish_pm_delivery_receipt(
         &path,
         operation_id,
-        "other-session",
+        &target_session_id,
         &prepared.body_sha256,
         gwt::pm_registry::PmDeliveryReceiptStatus::Ambiguous,
         Some("body_staged_or_unknown"),
     )
     .unwrap();
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer.issue(&repo, "pm-session-live").unwrap();
-    let send = |runtime: &mut AppRuntime| {
+
+    let send = || {
         let (responder, result, _cancellation) =
             AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(1));
-        runtime.authenticated_pm_pane_send_input_events(
-            &issuer,
+        fixture.send(
             "client".into(),
-            issuer.grant_for_test(&capability.token).unwrap(),
             operation_id,
             target,
             &format!("{body}\r"),
@@ -586,11 +657,9 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         );
         result.blocking_recv().unwrap()
     };
-    assert!(
-        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult {
-        status, reason: Some(reason), .. } if status == "unconfirmed" && reason.contains("readback-only"))
-    );
-    let entry = Arc::clone(runtime.pty_writers.read().unwrap().get(target).unwrap());
+    assert!(matches!(send(), BackendEvent::PmMessageSendResult {
+        status, reason: Some(reason), .. } if status == "unconfirmed" && reason.contains("readback-only")));
+    let entry = fixture.target.writer.as_ref().unwrap().clone();
     let reservation = entry.handle.reserve_input_transaction().unwrap();
     assert_eq!(
         reservation.previous_transaction_revision(),
@@ -598,15 +667,13 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         "a legacy/partial-write receipt alone must never authorize submit"
     );
     drop(reservation);
-    runtime.deregister_pty_writer(target);
-    assert!(
-        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult { status, .. } if status == "lost")
-    );
+    fixture.close_target();
+    assert!(matches!(send(), BackendEvent::PmMessageSendResult { status, .. } if status == "lost"));
     assert_eq!(
         gwt::pm_registry::finish_pm_delivery_receipt(
             &path,
             operation_id,
-            "other-session",
+            &target_session_id,
             &prepared.body_sha256,
             gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
             None,
@@ -615,7 +682,7 @@ fn authenticated_pm_send_rechecks_ambiguous_receipt_when_target_is_gone() {
         gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
     );
     assert!(
-        matches!(send(&mut runtime), BackendEvent::PmMessageSendResult { status, .. } if status == "delivered")
+        matches!(send(), BackendEvent::PmMessageSendResult { status, .. } if status == "delivered")
     );
 }
 
@@ -627,10 +694,12 @@ fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-    let target_window = "tab-1::other-window";
+    let _owner_home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target_window = fixture.target.id.clone();
+    let pm_session_id = fixture.pm.session.as_ref().unwrap().id.clone();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b2";
     let body = "already verified body";
     let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
@@ -639,9 +708,9 @@ fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
         operation_id: operation_id.to_string(),
         recorded_at: "2026-08-13T00:00:00Z".to_string(),
         status: gwt::pm_registry::PmDeliveryReceiptStatus::Prepared,
-        principal_session_id: "pm-session-live".to_string(),
+        principal_session_id: pm_session_id.clone(),
         target_window_id: target_window.to_string(),
-        target_session_id: "other-session".to_string(),
+        target_session_id: target_session_id.clone(),
         body_sha256: body_sha256.clone(),
         reason: None,
     };
@@ -650,36 +719,23 @@ fn authenticated_pm_send_replays_verified_receipt_without_a_live_target() {
     gwt::pm_registry::finish_pm_delivery_receipt(
         &receipt_path,
         operation_id,
-        "other-session",
+        &target_session_id,
         &body_sha256,
         gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
         None,
     )
     .expect("verify delivered operation");
-    runtime.active_agent_sessions.remove(target_window);
-    runtime.deregister_pty_writer(target_window);
-    runtime.runtimes.remove(target_window);
+    fixture.close_target();
 
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
     let (responder, result, _cancellation) = AgentPmSendResponder::channel();
 
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "reconnected-origin".to_string(),
-            grant,
             operation_id,
-            target_window,
+            &target_window,
             &format!("{body}\r"),
-            Some(responder),
+            Some(responder)
         )
         .is_empty());
     assert!(matches!(
@@ -709,36 +765,27 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    for window_id in [pm_window_id.as_str(), "tab-1::other-window"] {
-        insert_test_pane_runtime(&mut runtime, window_id);
-        runtime.register_pty_writer(window_id, None);
-    }
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let _owner_home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let repo = fixture.repo.clone();
+    let target = fixture.target.id.as_str();
+    let target_session_id = fixture.target.session.as_ref().unwrap().id.clone();
+
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b3";
     let body = "one prepared delivery";
     let body_sha256 = gwt::pm_registry::pm_delivery_prompt_sha256(body);
     let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
     let (first_responder, mut first_result, _first_cancellation) = AgentPmSendResponder::channel();
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "first-origin".to_string(),
-            grant.clone(),
             operation_id,
-            "tab-1::other-window",
+            target,
             &format!("{body}\r"),
-            Some(first_responder),
+            Some(first_responder)
         )
         .is_empty());
+    // test-hygiene: allow-wall-clock-deadline hang guard for the actual durable Prepared receipt; the receipt establishes ordering
     let deadline = Instant::now() + Duration::from_secs(2);
     while !gwt::pm_registry::load_pm_delivery_receipts(&receipt_path)
         .unwrap_or_default()
@@ -749,6 +796,7 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
         })
     {
         assert!(
+            // test-hygiene: allow-wall-clock-deadline bound an actual owner-worker receipt hang, never assert a scheduling delay
             Instant::now() < deadline,
             "Prepared receipt was not committed"
         );
@@ -757,15 +805,13 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
     }
     let (replay_responder, mut replay_result, _replay_cancellation) =
         AgentPmSendResponder::channel();
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
+    assert!(fixture
+        .send(
             "replay-origin".to_string(),
-            grant,
             operation_id,
-            "tab-1::other-window",
+            target,
             &format!("{body}\r"),
-            Some(replay_responder),
+            Some(replay_responder)
         )
         .is_empty());
     for result in [&mut first_result, &mut replay_result] {
@@ -787,7 +833,7 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
     gwt::pm_registry::finish_pm_delivery_receipt(
         &receipt_path,
         operation_id,
-        "other-session",
+        &target_session_id,
         &body_sha256,
         gwt::pm_registry::PmDeliveryReceiptStatus::Verified,
         None,
@@ -821,103 +867,59 @@ fn concurrent_same_operation_waiters_share_one_prepared_delivery() {
 
 #[test]
 fn authenticated_pm_send_refuses_foreign_project_without_a_durable_receipt() {
+    use super::pane_control_tests::{
+        control_close, control_owner_agent, control_seed_foreign_roster,
+    };
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    insert_test_pane_runtime(&mut runtime, &pm_window_id);
-    runtime.register_pty_writer(&pm_window_id, None);
-
-    let foreign = temp.path().join("foreign-repo");
-    fs::create_dir_all(&foreign).expect("create foreign repo");
-    init_repo(&foreign);
-    let mut foreign_tab = sample_project_tab_with_window_at(
-        "tab-foreign",
-        "agent-foreign",
-        foreign,
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    assert!(foreign_tab
-        .workspace
-        .set_session_id("agent-foreign", Some("foreign-session".to_string())));
-    runtime.tabs.push(foreign_tab);
-    let foreign_window_id = "tab-foreign::agent-foreign";
-    let mut foreign_session = sample_active_agent_session("tab-foreign", foreign_window_id);
-    foreign_session.session_id = "foreign-session".to_string();
-    runtime
-        .active_agent_sessions
-        .insert(foreign_window_id.to_string(), foreign_session);
-    insert_test_pane_runtime(&mut runtime, foreign_window_id);
-    runtime.register_pty_writer(foreign_window_id, None);
-
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue(&repo, "pm-session-live")
-        .expect("PM capability");
-    let grant = issuer.grant_for_test(&capability.token).expect("PM grant");
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let foreign_repo = temp.path().join("foreign");
+    control_seed_foreign_roster(&foreign_repo);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_repo, "foreign", 44);
     let oversized_operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b1";
-    let (oversized_responder, oversized_result, _oversized_cancellation) =
-        AgentPmSendResponder::channel();
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
-            "origin-client".to_string(),
-            grant.clone(),
-            oversized_operation_id,
-            "tab-1::other-window",
-            &format!("{}\r", "x".repeat(16 * 1024 + 1)),
-            Some(oversized_responder),
-        )
-        .is_empty());
-    assert!(matches!(
-        oversized_result
-            .blocking_recv()
-            .expect("oversized terminal refusal"),
-        BackendEvent::PmMessageSendResult {
-            status,
-            reason: Some(reason),
-            ..
-        } if status == "failed" && reason.contains("byte limit")
-    ));
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
+        "origin".into(),
+        oversized_operation_id,
+        &fixture.target.id,
+        &format!("{}\r", "x".repeat(16 * 1024 + 1)),
+        Some(responder),
+    );
+    assert!(
+        matches!(result.blocking_recv().expect("oversized terminal refusal"),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("byte limit"))
+    );
+    assert!(!cancellation.cancel());
     let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643b0";
-    let (responder, result, _cancellation) = AgentPmSendResponder::channel();
-
-    assert!(runtime
-        .authenticated_pm_pane_send_input_events(
-            &issuer,
-            "origin-client".to_string(),
-            grant,
-            operation_id,
-            foreign_window_id,
-            "must not cross projects\r",
-            Some(responder),
-        )
-        .is_empty());
-    assert!(matches!(
-        result.blocking_recv().expect("terminal refusal"),
-        BackendEvent::PmMessageSendResult {
-            status,
-            reason: Some(reason),
-            ..
-        } if status == "failed" && reason.contains("not an authorized live agent pane")
-    ));
+    let revision = foreign.pty.ordinary_input_revision();
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
+        "origin".into(),
+        operation_id,
+        &foreign.id,
+        "must not cross projects\r",
+        Some(responder),
+    );
+    assert!(matches!(result.blocking_recv().expect("terminal refusal"),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("not an authorized live agent pane")));
+    assert!(!cancellation.cancel());
+    assert_eq!(foreign.pty.ordinary_input_revision(), revision);
     assert!(
         gwt::pm_registry::load_pm_delivery_receipts(
-            &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&repo),
+            &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(&fixture.repo)
         )
         .expect("delivery receipts")
         .iter()
-        .all(|receipt| receipt.operation_id != operation_id),
-        "a cross-project refusal must not consume durable receipt storage"
+        .all(|receipt| receipt.operation_id != operation_id
+            && receipt.operation_id != oversized_operation_id),
+        "refusals before admission must not consume durable receipt storage"
     );
+    control_close(&foreign_owner, &foreign);
 }
 
 #[test]
@@ -926,72 +928,79 @@ fn pm_pane_send_gate_refuses_everyone_but_the_live_registered_pm() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (_repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
-    let target_window = "tab-1::other-window".to_string();
-
-    let refusal_of = |events: &[OutboundEvent]| -> String {
-        events
-            .iter()
-            .find_map(|event| match &event.event {
-                BackendEvent::PaneSendResult {
-                    ok: false,
-                    error: Some(error),
-                    ..
-                } => Some(error.clone()),
-                _ => None,
-            })
-            .expect("a refused send must reply with a typed error")
-    };
-
-    // A non-PM session is refused: the self-only world stays intact and the
-    // privileged path does not open for it.
-    let events = runtime.pm_pane_send_input_events(
-        "client-1".to_string(),
-        "other-session",
-        &target_window,
+    let _home = ScopedGwtHome::set(temp.path());
+    let fixture = pm_delivery_owner_fixture(temp.path());
+    let original_transaction = fixture
+        .target
+        .pty
+        .reserve_input_transaction()
+        .unwrap()
+        .previous_transaction_revision();
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send_as(
+        &fixture.target,
+        "ordinary".into(),
+        &uuid::Uuid::new_v4().to_string(),
+        &fixture.target.id,
         "hello\r",
+        Some(responder),
     );
-    assert!(
-        refusal_of(&events).contains("not the registered PM"),
-        "foreign principals must be refused"
-    );
-
-    // An unknown window is refused before any principal work.
-    let events = runtime.pm_pane_send_input_events(
-        "client-1".to_string(),
-        "pm-session-live",
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("not the live registered PM")));
+    assert!(!cancellation.cancel());
+    let (responder, result, cancellation) = AgentPmSendResponder::channel();
+    fixture.send(
+        "unknown".into(),
+        &uuid::Uuid::new_v4().to_string(),
         "tab-9::ghost",
         "hello\r",
+        Some(responder),
     );
-    assert!(refusal_of(&events).contains("unknown pane"));
-
-    // The live registered PM passes the gate; with no PTY runtime in the
-    // harness the write itself reports the missing runtime, which proves the
-    // authorized injection path was reached (not a principal refusal).
-    let events = runtime.pm_pane_send_input_events(
-        "client-1".to_string(),
-        "pm-session-live",
-        &target_window,
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, reason: Some(reason), .. }
+            if status == "failed" && reason.contains("not an authorized live agent pane")));
+    assert!(!cancellation.cancel());
+    assert_eq!(
+        fixture
+            .target
+            .pty
+            .reserve_input_transaction()
+            .unwrap()
+            .previous_transaction_revision(),
+        original_transaction + 1,
+        "refused callers and targets must not reserve a protected write"
+    );
+    let (responder, result, cancellation) =
+        AgentPmSendResponder::channel_with_acceptance_window(Duration::from_secs(2));
+    fixture.send(
+        "pm".into(),
+        &uuid::Uuid::new_v4().to_string(),
+        &fixture.target.id,
         "hello\r",
+        Some(responder),
     );
+    assert!(matches!(result.blocking_recv().unwrap(),
+        BackendEvent::PmMessageSendResult { status, .. } if status == "unconfirmed"));
     assert!(
-        refusal_of(&events).contains("no live runtime"),
-        "the live PM must reach the injection path"
+        cancellation.cancel(),
+        "the live registered PM reached the actual protected input commit"
     );
-
-    // A stale registration (PM pane gone) is refused at the liveness check.
-    runtime.active_agent_sessions.remove(&pm_window_id);
-    let events = runtime.pm_pane_send_input_events(
-        "client-1".to_string(),
-        "pm-session-live",
-        &target_window,
-        "hello\r",
-    );
+    fixture.close_pm();
+    let stale = owner_fixture_block_on(fixture.owner.agent_client("stale-pm")).unwrap();
+    let reply = owner_fixture_block_on(stale.request(
+        fixture.pm.grant.as_ref().unwrap().clone(),
+        AgentFrontendRequest::PmSendInput {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            window_id: fixture.target.id.clone(),
+            text: "must not write\r".into(),
+            responder: None,
+        },
+    ))
+    .unwrap();
     assert!(
-        refusal_of(&events).contains("no live pane"),
-        "a stale PM registration must not deliver"
+        reply.close.is_some(),
+        "a retired PM capability must fail closed at the authenticated owner"
     );
 }
 

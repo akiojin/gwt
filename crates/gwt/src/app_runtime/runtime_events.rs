@@ -6,17 +6,14 @@
 //! layer, and the local GUI state update path unchanged.
 
 use base64::Engine as _;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::{
-    close_window_from_workspace, should_auto_close_agent_window, AppRuntime, BackendEvent,
-    OutboundEvent, WindowPreset, WindowProcessStatus,
-};
+use super::{AppRuntime, BackendEvent, OutboundEvent, WindowPreset, WindowProcessStatus};
 
 /// Preserve indentation and interior blank rows; omit only unused screen rows.
 pub(super) fn terminal_preview_text(contents: &str) -> String {
@@ -30,16 +27,12 @@ pub(super) fn terminal_preview_text(contents: &str) -> String {
 pub(super) const RUNTIME_OUTPUT_BATCH_INTERVAL: Duration = Duration::from_millis(150);
 
 pub(crate) struct PendingRuntimeOutput {
+    authoritative_owner: bool,
     incarnation: Option<u64>,
     deadline: Instant,
     pub(super) data: Vec<u8>,
     screen: Option<String>,
 }
-
-/// Issue #3274: how many trailing non-empty screen lines survive into the
-/// persistent window detail when an agent process errors out.
-const AGENT_ERROR_TAIL_LINES: usize = 3;
-const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 
 /// Issue #3616: how long a quota notice must sit on a *live* pane's screen,
 /// with no agent activity at all, before it is treated as a block.
@@ -51,32 +44,10 @@ const AGENT_ERROR_TAIL_MAX_CHARS: usize = 240;
 /// provider's sentence.
 const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
 
-/// One attempt belongs to the Session, even when its live PTY is replaced.
-pub(crate) struct ProviderCapacityResume {
-    window_id: String,
-    incarnation: u64,
-    binding: gwt_agent::SessionExecutionBinding,
-    pub(super) due: Option<Instant>,
-    input_revision: Option<u64>,
-    attempted: bool,
-    permit: Arc<AtomicBool>,
-}
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
 /// This bounded settle window avoids a false Running frame between the clear
 /// and the redraw without ever blocking the tao event loop.
 const APPROVAL_SETTLE_DELAY: Duration = Duration::from_millis(100);
-/// Claude Code's exact-resume failure line. When a resumed conversation no
-/// longer exists in the agent's store, this is the only explanation the user
-/// ever gets — promote it to an explicit diagnostic (SPEC-1921 exact session
-/// restore amendment: stale provider ids keep a visible diagnostic).
-const EXACT_RESUME_FAILURE_SIGNATURE: &str = "No conversation found with session ID";
-const PROVIDER_ERROR_PREFIX: &str = "Error: ";
-const RESUME_WRITER_CONFLICT_OUTER_PREFIX: &str = "Failed to resume session from ";
-const RESUME_WRITER_CONFLICT_PREFIX: &str = "thread/resume failed during TUI bootstrap:";
-const RESUME_WRITER_CONFLICT_SUFFIX: &str = "already has an active writer";
-const RESUME_WRITER_CONFLICT_CODE: &str = "(code -32600)";
-use gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON;
-
 fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'static str {
     match source_event {
         Some("SessionStart") => "session_start",
@@ -90,16 +61,6 @@ fn runtime_hook_source_event_profile_label(source_event: Option<&str>) -> &'stat
         Some("PermissionRequest") => "permission_request",
         Some(_) => "other",
         None => "none",
-    }
-}
-
-fn runtime_hook_composed_state_profile_label(state: WindowProcessStatus) -> &'static str {
-    match state {
-        WindowProcessStatus::Running => "running",
-        WindowProcessStatus::Waiting => "waiting",
-        WindowProcessStatus::Stopped => "stopped",
-        WindowProcessStatus::Error => "error",
-        _ => "other",
     }
 }
 
@@ -280,430 +241,32 @@ mod runtime_hook_stage_timing_tests {
     }
 }
 
-fn marker_is_inside_double_quotes(line: &str, marker_offset: usize) -> bool {
-    let mut quoted = false;
-    let mut escaped = false;
-    for byte in line[..marker_offset].bytes() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match byte {
-            b'\\' => escaped = true,
-            b'"' => quoted = !quoted,
-            _ => {}
-        }
-    }
-    quoted
-}
-
-fn resume_writer_conflict_outer_offset(line: &str) -> Option<usize> {
-    let anchored_provider_output = |offset: usize| {
-        let output = &line[offset..];
-        if output.starts_with(RESUME_WRITER_CONFLICT_OUTER_PREFIX) {
-            Some(offset)
-        } else {
-            output
-                .strip_prefix(PROVIDER_ERROR_PREFIX)
-                .filter(|detail| detail.starts_with(RESUME_WRITER_CONFLICT_OUTER_PREFIX))
-                .map(|_| offset + PROVIDER_ERROR_PREFIX.len())
-        }
-    };
-
-    let trimmed = line.trim_start();
-    let leading_whitespace = line.len() - trimmed.len();
-    anchored_provider_output(leading_whitespace).or_else(|| {
-        let last_output = " — last output: ";
-        let output_offset = line.find(last_output)? + last_output.len();
-        anchored_provider_output(output_offset)
-    })
-}
-
-/// Classify a typed failure out of an agent's exit detail.
-///
-/// The two exit-detail causes are checked in this order because they answer
-/// different questions. A provider quota block is a property of the account
-/// and applies to any session mode, so it is tested first; the late-resume
-/// writer race can only happen while resuming. Screen-only onboarding prompts
-/// are classified separately from this exit-detail path.
-pub(super) fn classify_issue_monitor_failure(
-    detail: &str,
-    session_mode: gwt_agent::SessionMode,
-) -> Option<gwt::IssueMonitorFailure> {
-    if let Some(failure) = classify_provider_usage_limit(detail) {
-        return Some(failure);
-    }
-    classify_resume_writer_conflict(detail, session_mode)
-}
-
-/// Issue #3616: the provider stated it is out of quota.
-///
-/// Detection lives in `gwt_core::usage` because the message formats and their
-/// reset clauses are provider domain knowledge, not runtime-event knowledge.
-/// `Local::now()` is the reference zone on purpose: both providers print a
-/// local wall clock with no offset, so the machine running the agent is the
-/// only anchor available.
-pub(super) fn classify_provider_usage_limit(detail: &str) -> Option<gwt::IssueMonitorFailure> {
-    let notice = gwt_core::usage::detect_provider_limit_notice(detail, &chrono::Local::now())?;
-    Some(provider_usage_limit_failure(&notice, None, None))
-}
-
-/// `pane_agent_id` is the agent the pane is actually running, and it wins over
-/// the notice's own wording: Claude's weekly-limit text names no provider at
-/// all, and mis-attributing the block would tell the PM the wrong account is
-/// out.
-pub(super) fn provider_usage_limit_failure(
-    notice: &gwt_core::usage::ProviderLimitNotice,
-    pane_agent_id: Option<&str>,
-    evidence: Option<gwt::IssueMonitorProviderQuotaHoldEvidence>,
-) -> gwt::IssueMonitorFailure {
-    gwt::IssueMonitorFailure::ProviderUsageLimit {
-        provider: provider_label(notice, pane_agent_id),
-        resets_at: notice
-            .resets_at
-            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-        evidence: evidence.map(Box::new),
-    }
-}
-
-/// The agent id to report as the exhausted account, falling back to the
-/// notice's hint and finally to `unknown` — never to a guess.
-pub(super) fn provider_label(
-    notice: &gwt_core::usage::ProviderLimitNotice,
-    pane_agent_id: Option<&str>,
-) -> String {
-    if let Some(agent_id) = pane_agent_id
-        .map(str::trim)
-        .filter(|agent_id| !agent_id.is_empty())
-    {
-        return agent_id.to_string();
-    }
-    match notice.provider {
-        Some(gwt_core::usage::UsageProvider::Codex) => "codex".to_string(),
-        Some(gwt_core::usage::UsageProvider::ClaudeCode) => "claude".to_string(),
-        None => "unknown".to_string(),
-    }
-}
-
-/// Classify the provider's exact late-resume writer race without promoting
-/// unrelated launch failures that happen to mention a writer.
-fn classify_resume_writer_conflict(
-    detail: &str,
-    session_mode: gwt_agent::SessionMode,
-) -> Option<gwt::IssueMonitorFailure> {
-    if session_mode != gwt_agent::SessionMode::Resume {
-        return None;
-    }
-    detail.lines().find_map(|line| {
-        let outer_offset = resume_writer_conflict_outer_offset(line)?;
-        let prefix_offset =
-            outer_offset + line[outer_offset..].find(RESUME_WRITER_CONFLICT_PREFIX)?;
-        if marker_is_inside_double_quotes(line, prefix_offset) {
-            return None;
-        }
-        let after_prefix = prefix_offset + RESUME_WRITER_CONFLICT_PREFIX.len();
-        let writer_offset =
-            after_prefix + line[after_prefix..].find(RESUME_WRITER_CONFLICT_SUFFIX)?;
-        if marker_is_inside_double_quotes(line, writer_offset) {
-            return None;
-        }
-        let after_writer = writer_offset + RESUME_WRITER_CONFLICT_SUFFIX.len();
-        let code_offset = after_writer + line[after_writer..].find(RESUME_WRITER_CONFLICT_CODE)?;
-        if marker_is_inside_double_quotes(line, code_offset) {
-            return None;
-        }
-        Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
-            holder_window_id: None,
-        })
-    })
-}
-
-/// Compose the persistent window detail for an errored agent process from the
-/// plain exit detail and the final screen tail. Pure so the classification is
-/// unit-testable without a PTY.
-fn compose_agent_error_detail(base: Option<String>, tail: Option<&str>) -> Option<String> {
-    let tail = tail.map(str::trim).filter(|tail| !tail.is_empty());
-    let Some(tail) = tail else {
-        return base;
-    };
-    // Issue #3490: several Codex agents initializing the shared `~/.codex`
-    // state directory at once lose the SQLite race, and the provider's answer
-    // is a nested stack trace that tells the operator nothing actionable.
-    // Checked before truncation because the lock refusal is the tail of a long
-    // path-heavy message and would be cut off. The replacement carries the
-    // transient-retry hint, so the Issue Monitor requeues without spending an
-    // attempt on host contention.
-    if gwt_agent::is_codex_shared_state_lock_failure(tail) {
-        return Some(gwt_agent::codex_shared_state_lock_detail());
-    }
-    let sandbox_error =
-        "Could not read Windows sandbox configuration and requirements from the app server.";
-    if tail.contains(sandbox_error) {
-        return Some(format!(
-            "Agent startup failed: {sandbox_error}; {}",
-            gwt_agent::TRANSIENT_LAUNCH_RETRY_HINT
-        ));
-    }
-    // Issue #4445: an npm shim whose target executable was renamed away by the
-    // provider's auto-update reports a localized shell message and a bare exit
-    // status. The path it could not find is the whole diagnosis, and it is at
-    // the head of the tail, so it is named before truncation can drop it.
-    if let Some(named) = gwt_agent::missing_launcher_binary_detail(tail) {
-        return Some(named);
-    }
-    let tail: String = if tail.chars().count() > AGENT_ERROR_TAIL_MAX_CHARS {
-        let mut truncated: String = tail.chars().take(AGENT_ERROR_TAIL_MAX_CHARS).collect();
-        truncated.push('…');
-        truncated
-    } else {
-        tail.to_string()
-    };
-    if tail.contains(EXACT_RESUME_FAILURE_SIGNATURE) {
-        return Some(
-            "Exact session restore failed. The agent no longer has this conversation; \
-             use Continue work to start a new conversation with handoff context."
-                .to_string(),
-        );
-    }
-    match base {
-        Some(base) if !base.is_empty() => Some(format!("{base} — last output: {tail}")),
-        _ => Some(format!("Agent exited — last output: {tail}")),
-    }
-}
+pub(super) use gwt::project_runtime::runtime_events::{
+    classify_issue_monitor_failure, provider_label, provider_usage_limit_failure,
+};
 
 impl AppRuntime {
-    fn provider_capacity_target(
+    pub(super) fn relay_provider_usage_to_owners(
         &self,
-        window_id: &str,
-    ) -> Option<(
-        gwt::monitor_duplicate_runtime::RegisteredMonitorRuntime,
-        gwt_agent::SessionExecutionBinding,
-    )> {
-        if self.window_preset(window_id) != Some(WindowPreset::Agent) {
-            return None;
+        accounts: &[gwt_core::usage::ProviderUsage],
+    ) {
+        let mut owners = HashMap::new();
+        for runtime in self.runtimes.values() {
+            owners
+                .entry(runtime.owner_identity.host_instance_id.clone())
+                .or_insert_with(|| runtime.client.clone());
         }
-        let active = self.active_agent_sessions.get(window_id)?;
-        let runtime = self.runtimes.get(window_id)?;
-        let writers = self.pty_writers.read().ok()?;
-        let entry = writers.get(window_id)?;
-        let registration = entry.monitor_runtime.as_ref()?;
-        if active.agent_id != "codex"
-            || active.runtime_target != gwt_agent::LaunchRuntimeTarget::Host
-            || registration.review_dispatch
-            || registration.window_id != window_id
-            || registration.session_id != active.session_id
-            || registration.incarnation != runtime.incarnation
-            || registration.worktree_path != active.worktree_path
-            || !Arc::ptr_eq(&entry.handle, &runtime.pty)
-        {
-            return None;
-        }
-        let binding = self
-            .agent_capability_issuer
-            .as_ref()?
-            .active_execution_binding_for_token(self.agent_capability_tokens.get(window_id)?)?;
-        if binding.session_id != active.session_id
-            || binding.owner_number != registration.issue_number
-        {
-            return None;
-        }
-        Some((
-            gwt::monitor_duplicate_runtime::RegisteredMonitorRuntime {
-                registration: registration.clone(),
-                handle: Arc::clone(&entry.handle),
-            },
-            binding,
-        ))
-    }
-
-    pub(super) fn cancel_provider_capacity_resume(&mut self, window_id: &str) {
-        for resume in self
-            .provider_capacity_resumes
-            .values_mut()
-            .filter(|resume| resume.window_id == window_id)
-        {
-            resume.permit.store(false, Ordering::Release);
-            resume.due = None;
+        for client in owners.into_values() {
+            let accounts = accounts.to_vec();
+            if let Err(error) = self.blocking_tasks.try_spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                    .map_err(|error| error.to_string()).and_then(|runtime| runtime.block_on(client.command(
+                        gwt::project_runtime::events::OwnerCommand::ProviderUsageSnapshot { accounts })));
+                if let Err(error) = result { tracing::warn!(%error, "provider usage projection was not accepted by project owner"); }
+            }) { tracing::warn!(%error, "provider usage owner relay could not be scheduled"); }
         }
     }
 
-    fn observe_provider_capacity_hook(&mut self, window_id: &str, state: WindowProcessStatus) {
-        // A trailing Stop is Idle, not renewed activity. Keep its pending
-        // retry while Waiting and terminal hook states still revoke it.
-        if state == WindowProcessStatus::Idle {
-            return;
-        }
-        self.cancel_provider_capacity_resume(window_id);
-        if state != WindowProcessStatus::Running {
-            return;
-        }
-        let Some((target, binding)) = self.provider_capacity_target(window_id) else {
-            return;
-        };
-        let resume = self
-            .provider_capacity_resumes
-            .entry(binding.session_id.clone())
-            .or_insert_with(|| ProviderCapacityResume {
-                window_id: window_id.to_string(),
-                incarnation: target.registration.incarnation,
-                binding: binding.clone(),
-                due: None,
-                input_revision: None,
-                attempted: false,
-                permit: Arc::new(AtomicBool::new(false)),
-            });
-        resume.window_id = window_id.to_string();
-        resume.incarnation = target.registration.incarnation;
-        resume.binding = binding;
-    }
-
-    fn arm_provider_capacity_resume(&mut self, window_id: &str) {
-        if self.window_approval_waiting.contains_key(window_id)
-            || self.provider_quota_holds.contains_key(window_id)
-            || !self
-                .provider_api_error_holds
-                .get(window_id)
-                .is_some_and(|error| {
-                    error.transient && error.summary.starts_with("Selected model is at capacity")
-                })
-        {
-            return;
-        }
-        let Some((target, binding)) = self.provider_capacity_target(window_id) else {
-            return;
-        };
-        let Some(resume) = self.provider_capacity_resumes.get_mut(&binding.session_id) else {
-            return;
-        };
-        if resume.attempted
-            || resume.incarnation != target.registration.incarnation
-            || resume.binding != binding
-        {
-            return;
-        }
-        resume.due = Some(Instant::now() + Duration::from_secs(60));
-        resume.input_revision = target.handle.ordinary_input_revision();
-        resume.permit = Arc::new(AtomicBool::new(true));
-    }
-
-    /// The existing convergence clock schedules a single revocable worker;
-    /// no sleep, Session read or execution lease runs on the application loop.
-    pub(crate) fn sweep_provider_capacity_resumes(&mut self, now: Instant) {
-        let due: Vec<_> = self
-            .provider_capacity_resumes
-            .iter()
-            .filter(|(_, resume)| !resume.attempted && resume.due.is_some_and(|due| now >= due))
-            .map(|(session_id, resume)| (session_id.clone(), resume.window_id.clone()))
-            .collect();
-        for (session_id, window_id) in due {
-            let Some((target, binding)) = self.provider_capacity_target(&window_id) else {
-                self.cancel_provider_capacity_resume(&window_id);
-                continue;
-            };
-            if session_id != binding.session_id
-                || self.window_status(&window_id) != Some(WindowProcessStatus::Waiting)
-                || self.window_approval_waiting.contains_key(&window_id)
-                || self.provider_quota_holds.contains_key(&window_id)
-                || !self
-                    .provider_api_error_holds
-                    .get(&window_id)
-                    .is_some_and(|error| {
-                        error.transient
-                            && error.summary.starts_with("Selected model is at capacity")
-                    })
-            {
-                self.cancel_provider_capacity_resume(&window_id);
-                continue;
-            }
-            let Some(resume) = self.provider_capacity_resumes.get_mut(&session_id) else {
-                continue;
-            };
-            if resume.incarnation != target.registration.incarnation
-                || resume.binding != binding
-                || target.handle.has_unsent_user_input()
-                || resume.input_revision.is_none()
-                || target.handle.ordinary_input_revision() != resume.input_revision
-            {
-                resume.permit.store(false, Ordering::Release);
-                resume.due = None;
-                continue;
-            }
-            // An ambiguous outcome consumes the same budget as a success.
-            resume.attempted = true;
-            resume.due = None;
-            let permit = Arc::clone(&resume.permit);
-            let input_revision = resume.input_revision;
-            let writers = Arc::clone(&self.pty_writers);
-            let issuer = self
-                .agent_capability_issuer
-                .clone()
-                .expect("captured issuer");
-            let token = self.agent_capability_tokens[&window_id].clone();
-            let spawn = self.blocking_tasks.try_spawn(move || {
-                let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
-                    gwt_core::operation_deadline::now() + Duration::from_secs(5),
-                );
-                let result = (|| -> Result<(), String> {
-                    let registration = &target.registration;
-                    let session = gwt_agent::Session::load(&registration.sessions_dir.join(format!("{}.toml", registration.session_id))).map_err(|error| error.to_string())?;
-                    if session.launch_route != gwt_agent::LaunchRoute::Autonomous || session.agent_id != gwt_agent::AgentId::Codex || session.execution_binding.as_ref() != Some(&binding) || session.worktree_path != registration.worktree_path || session.linked_issue_number != Some(registration.issue_number) {
-                        return Err("the autonomous Monitor Session changed".into());
-                    }
-                    let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)?.ok_or("the producing Session is unbound")?;
-                    let reservation = Arc::clone(&target.handle).reserve_input_transaction().map_err(|error| error.to_string())?;
-                    let mut body_attempted = false;
-                    // Physical submission is the only evidence here. Provider
-                    // recovery and its prompt hook are observed independently.
-                    let _unverified = super::pty_io::drive_verified_pane_submit(
-                        "[gwt] Automated retry after model capacity. Continue the current task within its existing authorization; permission and verification gates still apply.\r",
-                        reservation.bracketed_paste_enabled(),
-                        1,
-                        |bytes| reservation.write_input_authorized(bytes, |commit| {
-                            let fail = |details: &str| gwt_terminal::TerminalError::PtyIoError { details: details.into() };
-                            gwt_core::operation_deadline::ensure_remaining("capacity retry input").map_err(|error| fail(&error.to_string()))?;
-                            if !body_attempted && (!permit.load(Ordering::Acquire) || target.handle.has_unsent_user_input() || target.handle.ordinary_input_revision() != input_revision) {
-                                return Err(fail("capacity retry cancelled by newer activity"));
-                            }
-                            let authorized = gwt::cli::execution_state::with_current_active_session_execution_identity_lease(&registration.sessions_dir, &identity, || {
-                                let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
-                                if !prefs.enabled || !prefs.autonomous_mode || !issuer.active_token_is_current(&token, &binding) {
-                                    return Err(fail("autonomous Monitor authority changed"));
-                                }
-                                let pm = gwt::pm_registry::load_pm_prefs(&gwt::pm_registry::pm_prefs_path_for_repo_path(&registration.project_root)).map_err(|error| fail(&error.to_string()))?;
-                                if pm.settings.paused || pm.registration.as_ref().is_some_and(|pm| pm.session_id == registration.session_id) {
-                                    return Err(fail("PM is paused or owns the target Session"));
-                                }
-                                let current = writers.read().map_err(|_| fail("PTY registry unavailable"))?;
-                                if !current.get(&registration.window_id).is_some_and(|entry| Arc::ptr_eq(&entry.handle, &target.handle) && entry.monitor_runtime.as_ref().is_some_and(|current| current.session_id == registration.session_id && current.incarnation == registration.incarnation && current.issue_number == registration.issue_number && current.worktree_path == registration.worktree_path && current.project_root == registration.project_root && !current.review_dispatch)) {
-                                    return Err(fail("the Monitor PTY was replaced"));
-                                }
-                                if body_attempted {
-                                    commit(&mut || {})
-                                } else {
-                                    reservation.with_unchanged_ordinary_input(input_revision.expect("captured ordinary input revision"), || {
-                                        if !permit.load(Ordering::Acquire) {
-                                            return Err(fail("capacity retry cancelled by newer activity"));
-                                        }
-                                        commit(&mut || body_attempted = true)
-                                    })
-                                }
-                            }).map_err(|error| fail(&error.to_string()))?;
-                            authorized.ok_or_else(|| fail("the producing execution is no longer Active"))?
-                        }).map_err(|error| error.to_string()),
-                        thread::sleep,
-                        || Ok(false),
-                    )?;
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    tracing::warn!(%error, session_id = %binding.session_id, "capacity retry refused; existing waiting state and PM notification retained");
-                }
-            });
-            if let Err(error) = spawn {
-                tracing::warn!(%error, "capacity retry worker unavailable; attempt remains consumed");
-            }
-        }
-    }
     /// Deliver the shared diagnostic stream only to projects with a consumer.
     /// Docked surfaces retain their subscriptions, independently of UI selection.
     fn project_events_for_open_surface(
@@ -755,14 +318,9 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
     ) -> Vec<OutboundEvent> {
-        let screen = self.runtimes.get(&id).and_then(|runtime| {
-            runtime
-                .pane
-                .lock()
-                .ok()
-                .map(|pane| pane.screen().contents())
-        });
-        let mut events = self.handle_runtime_output_inner(id.clone(), data, true, None, screen);
+        let screen = self.runtimes.get(&id).map(|runtime| runtime.screen.clone());
+        let mut events =
+            self.handle_runtime_output_inner(id.clone(), data, true, false, None, screen);
         events.extend(self.flush_runtime_output_batch(&id));
         events
     }
@@ -781,7 +339,7 @@ impl AppRuntime {
         if !self.runtime_incarnation_is_current(&id, incarnation) {
             return Vec::new();
         }
-        self.handle_runtime_output_inner(id, data, true, Some(seq), screen)
+        self.handle_runtime_output_inner(id, data, true, false, Some(seq), screen)
     }
 
     pub(crate) fn handle_daemon_runtime_output(
@@ -805,9 +363,20 @@ impl AppRuntime {
         // Daemon publications describe another process; a local PTY
         // incarnation is neither
         // available nor authoritative for this path.
-        let mut events = self.handle_runtime_output_inner(id, data, false, None, None);
+        let mut events = self.handle_runtime_output_inner(id, data, false, false, None, None);
         events.extend(preview);
         events
+    }
+
+    /// Authoritative bytes and screen supplied by the daemon, with the existing preview batching.
+    pub(crate) fn handle_owner_runtime_output(
+        &mut self,
+        id: String,
+        data: Vec<u8>,
+        seq: u64,
+        screen: String,
+    ) -> Vec<OutboundEvent> {
+        self.handle_runtime_output_inner(id, data, true, true, Some(seq), Some(screen))
     }
 
     fn handle_runtime_output_inner(
@@ -815,6 +384,7 @@ impl AppRuntime {
         id: String,
         data: Vec<u8>,
         publish_to_daemon: bool,
+        authoritative_owner: bool,
         stream_seq: Option<u64>,
         screen: Option<String>,
     ) -> Vec<OutboundEvent> {
@@ -842,13 +412,17 @@ impl AppRuntime {
                 .pending_runtime_outputs
                 .entry(id.clone())
                 .or_insert_with(|| PendingRuntimeOutput {
+                    authoritative_owner,
                     incarnation,
                     deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
                     data: Vec::new(),
                     screen: None,
                 });
-            if pending.incarnation != incarnation {
+            if pending.incarnation != incarnation
+                || pending.authoritative_owner != authoritative_owner
+            {
                 *pending = PendingRuntimeOutput {
+                    authoritative_owner,
                     incarnation,
                     deadline: Instant::now() + RUNTIME_OUTPUT_BATCH_INTERVAL,
                     data: Vec::new(),
@@ -897,7 +471,7 @@ impl AppRuntime {
         events
     }
 
-    fn flush_runtime_output_batch(&mut self, id: &str) -> Vec<OutboundEvent> {
+    pub(super) fn flush_runtime_output_batch(&mut self, id: &str) -> Vec<OutboundEvent> {
         let Some(pending) = self.pending_runtime_outputs.remove(id) else {
             return Vec::new();
         };
@@ -918,6 +492,20 @@ impl AppRuntime {
         let screen = pending.screen;
         let preview = screen.as_deref().map(terminal_preview_text);
         let preview_elapsed = batch_started.elapsed();
+        if pending.authoritative_owner {
+            return preview
+                .into_iter()
+                .map(|text| {
+                    OutboundEvent::project(
+                        project_key.clone(),
+                        BackendEvent::TerminalPreview {
+                            id: id.to_string(),
+                            text,
+                        },
+                    )
+                })
+                .collect();
+        }
         if let Some(tab) = self.tab(&address.tab_id) {
             publish_runtime_output_change(&tab.project_root, id, &pending.data, preview.clone());
         }
@@ -932,150 +520,13 @@ impl AppRuntime {
                 },
             ));
         }
-        let provider = self.approval_prompt_provider(id);
-        if let Some(screen) = screen.as_deref() {
-            events.extend(self.observe_codex_directory_trust_prompt(id, provider, screen));
-        }
-        let prompt = screen
-            .as_deref()
-            .and_then(|screen| gwt::window_state::approval_prompt_fingerprint(provider, screen));
-        self.observe_permission_prompt_regression(id, prompt);
-        events.extend(self.observe_runtime_approval_prompt(id, prompt));
-        let approval_elapsed = batch_started.elapsed();
-        events.extend(self.observe_provider_quota_notice(
-            id,
-            screen.as_deref(),
-            chrono::Utc::now(),
-        ));
-        let quota_elapsed = batch_started.elapsed();
-        // Preserve fences and indentation so native errors can be distinguished
-        // from tool/code quotations. The detector bounds its own tail.
-        events.extend(self.observe_provider_api_error(id, screen.as_deref()));
-        // Flushes run at the start of any native callback, so the outer
-        // callback's label alone cannot establish this work's latency budget.
-        tracing::debug!(
-            target: "gwt.frontend.timing",
-            marker = "issue_5379_runtime_output_batch",
+        tracing::debug!(target: "gwt.frontend.timing", marker = "issue_5379_runtime_output_batch",
             elapsed_ms = batch_started.elapsed().as_millis() as u64,
             scope_us = scope_elapsed.as_micros() as u64,
             preview_us = (preview_elapsed - scope_elapsed).as_micros() as u64,
             relay_us = (relay_elapsed - preview_elapsed).as_micros() as u64,
-            approval_us = (approval_elapsed - relay_elapsed).as_micros() as u64,
-            quota_us = (quota_elapsed - approval_elapsed).as_micros() as u64,
-            api_error_us = (batch_started.elapsed() - quota_elapsed).as_micros() as u64,
-            "GUI runtime output batch handled"
-        );
+            "GUI runtime output batch projected");
         events
-    }
-
-    fn observe_codex_directory_trust_prompt(
-        &mut self,
-        window_id: &str,
-        provider: gwt::window_state::ApprovalPromptProvider,
-        screen: &str,
-    ) -> Vec<OutboundEvent> {
-        if gwt::window_state::directory_trust_prompt_fingerprint(provider, screen).is_none() {
-            return Vec::new();
-        }
-        let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) else {
-            return Vec::new();
-        };
-        let Some(issue_number) =
-            self.issue_monitor_live_issue_number_for_window(&project_root, window_id)
-        else {
-            return Vec::new();
-        };
-        self.issue_monitor_agent_failed_events_with_failure(
-            &project_root,
-            window_id,
-            CODEX_DIRECTORY_TRUST_PROMPT_REASON,
-            Some(issue_number),
-            Some(gwt::IssueMonitorFailure::CodexDirectoryTrustPrompt),
-        )
-    }
-
-    /// Issue #4544 AC-3: record a provider permission prompt that the launch
-    /// contract said could not happen.
-    ///
-    /// The Codex directory-trust prompt one function up is already handled as
-    /// its own terminal handoff. This is the ordinary approval prompt, and the
-    /// distinction that matters is not the prompt — it is who could answer it.
-    /// An autonomous launch has nobody watching by construction, so a prompt
-    /// there is not a question, it is a stall that will read as a healthy
-    /// running pane until something times out.
-    ///
-    /// Deliberately silent (no events): the pane's own waiting overlay is
-    /// `observe_runtime_approval_prompt`'s job, and this must not change what
-    /// the window looks like. It records the fact where the settlement gates
-    /// read it, and nothing else.
-    fn observe_permission_prompt_regression(&mut self, window_id: &str, prompt: Option<u64>) {
-        let Some(fingerprint) = prompt else {
-            return;
-        };
-        let Some(session) = self.active_agent_sessions.get(window_id) else {
-            return;
-        };
-        let (worktree, session_id, agent_id) = (
-            session.worktree_path.clone(),
-            session.session_id.clone(),
-            session.agent_id.clone(),
-        );
-        // A producing-work launch is the only one that carries an Execution
-        // Control Record, and the record must be this session's — a pane
-        // sitting in a worktree whose execution belongs to someone else is
-        // not evidence about that execution.
-        let Ok(Some(record)) = gwt::cli::execution_state::load(&worktree) else {
-            return;
-        };
-        if record.primary_session_id != session_id {
-            return;
-        }
-        if !Self::launch_had_to_be_prompt_free(&session_id) {
-            return;
-        }
-        // The prompt stays on screen across many output chunks. Recording it
-        // once is the fact; recording it per chunk would take the trusted
-        // store write lease in a loop for no added truth.
-        if matches!(gwt::cli::permission_readiness::load(&worktree), Ok(Some(_))) {
-            return;
-        }
-        match gwt::cli::permission_readiness::record_prompt_regression(
-            &worktree,
-            record.owner_kind.as_str(),
-            record.owner_number,
-            &session_id,
-            &agent_id,
-            fingerprint,
-        ) {
-            Ok(recorded) => tracing::warn!(
-                gate_id = %recorded.gate_id,
-                owner = record.owner_number,
-                provider = %agent_id,
-                "permission prompt regression recorded on a launch that had to be prompt-free (Issue #4544)"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                owner = record.owner_number,
-                "could not record the permission prompt regression"
-            ),
-        }
-    }
-
-    /// Whether this session's launch was required to run without permission
-    /// prompts.
-    ///
-    /// Today that is exactly the unattended route: an autonomous launch has no
-    /// human who could answer. A manual Start Work launch may still legitimately
-    /// prompt, and treating it as a regression would block deliveries that were
-    /// never broken.
-    fn launch_had_to_be_prompt_free(session_id: &str) -> bool {
-        gwt::cli::execution_state::session_launch_route(Some(session_id))
-            .is_some_and(|route| !route.is_attended())
-    }
-
-    fn current_screen_approval_prompt(&self, id: &str) -> Option<u64> {
-        let (provider, screen) = self.current_approval_screen(id)?;
-        gwt::window_state::approval_prompt_fingerprint(provider, &screen)
     }
 
     fn current_approval_screen(
@@ -1087,8 +538,7 @@ impl AppRuntime {
             return None;
         }
         let runtime = self.runtimes.get(id)?;
-        let pane = runtime.pane.lock().ok()?;
-        Some((provider, pane.screen().contents()))
+        Some((provider, runtime.screen.clone()))
     }
 
     fn approval_prompt_provider(
@@ -1403,414 +853,23 @@ impl AppRuntime {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
-        publish_to_daemon: bool,
+        _publish_to_daemon: bool,
         exit_confirmed: bool,
-        exact_runtime_incarnation: bool,
+        _exact_runtime_incarnation: bool,
     ) -> Vec<OutboundEvent> {
-        let _project_scope = self.enter_window_log_scope(&id);
-        let Some(address) = self.window_lookup.get(&id).cloned() else {
-            if !exit_confirmed {
-                return Vec::new();
-            }
-            self.remove_window_state_tracking(&id);
-            self.mark_agent_session_stopped(&id);
-            self.deregister_pty_writer(&id);
-            self.runtimes.remove(&id);
-            self.window_details.remove(&id);
-            // SPEC-3214 FR-002: the status arrived after the window was torn
-            // down, so the PTY is gone — safe point to destroy any pending
-            // intake worktree.
-            return self.take_ephemeral_worktree_cleanup_events();
-        };
-        let issue_monitor_project_root = self
-            .tab(&address.tab_id)
-            .map(|tab| tab.project_root.clone());
-        let is_agent_window = self.window_preset(&id) == Some(WindowPreset::Agent);
-        // SPEC-3431 FR-003: capture the exiting window's session before the
-        // teardown below removes the active entry — the PM crash handler
-        // matches it against the durable registration.
-        let pm_crash_candidate = self
-            .active_agent_sessions
-            .get(&id)
-            .map(|session| session.session_id.clone());
-        // Issue #3341: the exit receipt lives only on the pane, and every
-        // terminal branch below drops the runtime (and the active session that
-        // names the durable Session). Persist it here, while both are still
-        // reachable, so an agent that vanished mid-turn leaves evidence that
-        // outlives the window. `exit_confirmed` gates it because a
-        // reader-thread read error reports Error without ever waiting on the
-        // child.
-        if exit_confirmed
-            && matches!(
-                status,
-                WindowProcessStatus::Stopped | WindowProcessStatus::Error
-            )
-        {
-            self.persist_agent_session_exit_receipt(&id);
-            // Error panes may retain their runtime for diagnostics after exit.
-            // The task file belongs to the process lifetime, not the screen.
-            if let Some(runtime) = self.runtimes.get_mut(&id) {
-                runtime._initial_prompt_file = None;
-            }
-        }
-        let approval_was_active = self.window_approval_waiting.contains_key(&id)
-            || (status == WindowProcessStatus::Error
-                && self.current_screen_approval_prompt(&id).is_some());
-        let detail = if approval_was_active && status == WindowProcessStatus::Error {
-            Some("Agent approval prompt ended unexpectedly".to_string())
-        } else {
-            detail
-        };
-        // A terminal PTY status ends the input generation even when the Pane
-        // stays on screen for recovery diagnostics. Removing the registry
-        // pointer before invalidation lets an in-flight authorized write
-        // finish, while every worker still waiting to commit observes the
-        // missing/stale generation and fails closed.
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
-            self.deregister_pty_writer(&id);
-        }
-        let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&id);
-        if publish_to_daemon {
-            if let Some(address) = self.window_lookup.get(&id) {
-                if let Some(tab) = self.tab(&address.tab_id) {
-                    publish_runtime_status_change(&tab.project_root, &id, status, detail.clone());
-                }
-            }
-        }
-
-        // SPEC #3200 T-045/FR-025: a running agent on a monitored autonomous
-        // issue is a liveness signal — refresh its stuck-detection window.
-        if is_agent_window && matches!(status, WindowProcessStatus::Running) {
-            if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                self.issue_monitor_heartbeat(project_root, &id);
-            }
-        }
-
-        // Issue #3616: read the provider's own explanation before anything is
-        // torn down. A clean exit discards the screen entirely (the branch
-        // below only composes a detail for `Error`), which is exactly why a
-        // quota-dead Codex pane looked like finished work.
-        let quota_agent_id = self.pane_agent_id(&id);
-        // Issue #3923 AC-3: a notice left on the final screen is not a block
-        // while the poller reads the account as usable — the pane exited for
-        // some other reason and the text is stale.
-        let quota_match = self
-            .provider_quota_notice_for_exit(&id, status, exit_confirmed, &detail)
-            .filter(|(notice, _)| self.released_provider_quota_notices.get(&id) != Some(notice));
-        let quota_notice = quota_match.as_ref().map(|(notice, _)| notice);
-        match quota_match.as_ref() {
-            Some((notice, screen_text)) => {
-                let recorded_at =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                let evidence = gwt::IssueMonitorProviderQuotaHoldEvidence::screen_notice(
-                    &recorded_at,
-                    &id,
-                    screen_text,
-                )
-                .with_poller(quota_agent_id.as_deref(), &self.provider_usage_accounts);
-                self.provider_quota_holds.insert(
-                    id.clone(),
-                    provider_usage_limit_failure(notice, quota_agent_id.as_deref(), Some(evidence)),
-                );
-            }
-            None => {
-                self.provider_quota_holds.remove(&id);
-            }
-        }
-        let keep_active_agent_session_for_recovery = !exit_confirmed
-            || quota_notice.is_some()
-            || self.should_keep_active_agent_session_for_recoverable_pty_error(&id, status);
-        // Issue #3274: an errored agent runtime is torn down below, dropping
-        // its vt100 state — a client that reconnects later replays nothing and
-        // an empty Error window gives no clue why. Capture the final screen
-        // tail into the persistent detail before the state is gone; the raw
-        // output stays available in logs.
-        let detail = if let Some(notice) = quota_notice {
-            Some(gwt_core::usage::describe_provider_limit_notice(
-                notice,
-                Some(provider_label(notice, quota_agent_id.as_deref()).as_str()),
-            ))
-        } else if matches!(status, WindowProcessStatus::Error)
-            && !approval_was_active
-            && matches!(
-                self.window_preset(&id),
-                Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
-            )
-        {
-            compose_agent_error_detail(detail, self.final_screen_tail(&id).as_deref())
-        } else {
-            detail
-        };
-        // The hook state must still be dropped for a quota block. Keeping a
-        // live `Idle` would make `compose_window_state_with_active_session`
-        // resurrect the pane as Idle — a healthy-looking agent — and the quota
-        // overlay below only rewrites the two terminal states.
-        if matches!(status, WindowProcessStatus::Error) {
-            self.window_hook_states.remove(&id);
+        if let Some(runtime) = self.runtimes.get_mut(&id) {
+            runtime.raw_status = status;
+            runtime.status = status;
+            runtime.detail = detail.clone();
+            runtime.exit_confirmed |= exit_confirmed;
         }
         self.window_pty_statuses.insert(id.clone(), status);
-        let composed_status = self.recompute_window_state(&id).unwrap_or(status);
-        if matches!(
-            status,
-            WindowProcessStatus::Stopped | WindowProcessStatus::Error
-        ) {
-            self.clear_runtime_approval_latch_without_status(&id, publish_to_daemon);
-        }
-        // Structural auto-close belongs to the exact local PTY receipt. Hook
-        // Stop and daemon status events have no process-local incarnation and
-        // can arrive after a same-address, same-Session successor exists.
-        // Reader/display errors also lack a confirmed child exit. Only
-        // `handle_runtime_status_event`, after its current-incarnation fence,
-        // sets both authority bits below.
-        let should_auto_close = exit_confirmed
-            && exact_runtime_incarnation
-            && should_auto_close_agent_window(&self.active_agent_sessions, &id, &composed_status);
-        match detail.as_ref() {
-            Some(detail) if !detail.is_empty() => {
-                self.window_details.insert(id.clone(), detail.clone());
-            }
-            _ => {
-                self.window_details.remove(&id);
-            }
-        }
-        let termination_failure = self
-            .issue_monitor_failure_for_window(
-                &id,
-                detail.as_deref().unwrap_or_default(),
-                issue_monitor_session_mode,
-            )
-            .or(Some(gwt::IssueMonitorFailure::Termination {
-                classification: if exit_confirmed && exact_runtime_incarnation {
-                    self.issue_monitor_termination_for_window(&id)
-                } else {
-                    gwt::IssueMonitorFailureClass::Unknown
-                },
-            }));
-        let termination_issue_hint = issue_monitor_project_root
-            .as_deref()
-            .and_then(|root| self.issue_monitor_pending_feedback_for_window(&id, root))
-            .and_then(|context| context.issue_monitor_issue_number);
-        if should_auto_close {
-            if !close_window_from_workspace(
-                &mut self.tabs,
-                &mut self.window_lookup,
-                &mut self.window_details,
-                &id,
-            ) {
-                return Vec::new();
-            }
-            self.queue_accepted_window_close_finalizer(
-                &id,
-                issue_monitor_project_root.clone(),
-                false,
-                None,
-                None,
-            );
-            let _ = self.persist();
-            let mut events = Vec::new();
-            // SPEC-3431 FR-067: auto-close reaps the window itself instead of
-            // going through `close_window_events`, so it also owes the Issue
-            // Monitor the notification that path would have sent. Without it
-            // the launch's slot stays held by a window that no longer exists.
-            if is_agent_window {
-                if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                    let message = detail
-                        .as_deref()
-                        .unwrap_or("Agent exited without completing the work")
-                        .to_string();
-                    events.extend(self.issue_monitor_agent_failed_events_with_failure(
-                        project_root,
-                        &id,
-                        &message,
-                        termination_issue_hint,
-                        termination_failure.clone(),
-                    ));
-                }
-            }
-            if let Some(context) = self.project_context(&address.tab_id) {
-                events.push(self.workspace_state_broadcast(&context));
-            }
-            if let Some(event) =
-                self.in_memory_active_work_projection_broadcast_for_tab(&address.tab_id)
-            {
-                events.push(event);
-            }
-            return events;
-        }
-        if keep_active_agent_session_for_recovery {
-            self.recoverable_agent_error_windows.insert(id.clone());
-        } else if status != WindowProcessStatus::Error {
-            self.recoverable_agent_error_windows.remove(&id);
-        }
-        if matches!(
-            status,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) && !keep_active_agent_session_for_recovery
-        {
-            self.runtimes.remove(&id);
-            self.remove_window_state_tracking(&id);
-            if !self.stop_pending_continue_work_session_without_projection(&id) {
-                self.mark_agent_session_stopped(&id);
-            }
-        }
-        let _ = self.persist();
-
-        // SPEC-3214 FR-002: a Stopped/Error status means the PTY process has
-        // exited — drain any intake worktree cleanup queued by the session
-        // stop above (or by an earlier explicit stop of this window).
-        let mut events = if exit_confirmed {
-            self.take_ephemeral_worktree_cleanup_events()
-        } else {
-            Vec::new()
-        };
-        // SPEC-3431 FR-065: notify the Issue Monitor whenever an agent window
-        // reaches Error, including when the pane is kept on screen.
-        //
-        // `keep_active_agent_session_for_recovery` used to gate this too, but
-        // the two concerns are different. That flag is about **display**
-        // (#3274: hold the pane so the user can read the final screen instead
-        // of an empty Error window); whether the slot is still occupied is
-        // about **accounting**. `WindowProcessStatus::Error` on an agent comes
-        // from `try_wait` (gwt-terminal `Pane::check_status`), so the process
-        // is gone either way and the slot is free either way.
-        //
-        // Conflating them leaked slots permanently: an agent whose last hook
-        // state was `Idle` — which is every agent that ran its Stop hook —
-        // satisfied the guard, so `agent_failed` was never published and the
-        // row stayed `launched` forever. `recoverable_agent_error_windows` is
-        // only cleared by a later hook event, and a dead process sends none.
-        // With the default `max_active = 1` that stops the whole queue.
-        //
-        // SPEC-3431 FR-067: `Stopped` (a clean `exit 0`) leaks the same way.
-        // It never reached `agent_failed`, and the auto-close gate below
-        // additionally required `window_hook_states == Some(Stopped)` — a
-        // value `window_state_for_hook_event` cannot produce — so the window
-        // was never closed either and no `WindowClosed` control was published.
-        // Nothing told the Monitor, so the row stayed `launched` holding the
-        // slot. The process is gone in both cases, so both release the slot.
-        //
-        // This reports a clean exit through the failure channel on purpose:
-        // the Monitor decides completion from the PR, not from an exit code,
-        // so the only claim being made here is "this launch is over". Naming
-        // it a success would be the lie, not naming it a failure.
-        //
-        // Issue #3616: a quota block composes to `Waiting` (the pane is not
-        // done), so it is named here explicitly. The slot still has to be
-        // released — the process is gone — but the Monitor receives it as a
-        // typed hold rather than an attempt-consuming failure.
-        if exit_confirmed
-            && is_agent_window
-            && (quota_notice.is_some()
-                || matches!(
-                    composed_status,
-                    WindowProcessStatus::Error | WindowProcessStatus::Stopped
-                ))
-        {
-            let default_message = if composed_status == WindowProcessStatus::Error {
-                "Agent entered error state"
-            } else {
-                "Agent exited without completing the work"
-            };
-            let message = detail.as_deref().unwrap_or(default_message).to_string();
-            if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                events.extend(self.issue_monitor_agent_failed_events_with_failure(
-                    project_root,
-                    &id,
-                    &message,
-                    termination_issue_hint,
-                    termination_failure.clone(),
-                ));
-            }
-        }
-        // SPEC-3431 FR-003: an unexpected exit of the registered PM records a
-        // crash and respawns when the backoff ladder allows. Clean self-exits
-        // take the auto-close branch above (resident turnover: the ensure
-        // gate revives the PM on the next project open); explicit closes run
-        // `close_window_events`, which deregisters instead.
-        if exit_confirmed
-            && matches!(
-                status,
-                WindowProcessStatus::Error | WindowProcessStatus::Stopped
-            )
-            && !keep_active_agent_session_for_recovery
-        {
-            if let (Some(session_id), Some(project_root)) = (
-                pm_crash_candidate.as_deref(),
-                issue_monitor_project_root.as_ref(),
-            ) {
-                let tab_id = address.tab_id.clone();
-                events.extend(self.handle_pm_crash(&tab_id, project_root, session_id));
-            }
-        }
-        if exit_confirmed
-            && matches!(
-                status,
-                WindowProcessStatus::Error | WindowProcessStatus::Stopped
-            )
-        {
-            if let Some(event) = self.active_work_projection_broadcast_for_tab(&address.tab_id) {
-                events.push(event);
-            }
-        }
-        events.extend(self.status_events(id, composed_status, detail));
-        events
+        self.apply_owner_status_projection(&id, status, detail)
     }
 
     /// The trailing non-empty lines of a window's live vt100 screen, joined
     /// into one detail-sized string. `None` when the window has no runtime
     /// (already torn down) or the screen is blank (Issue #3274).
-    fn final_screen_tail(&self, id: &str) -> Option<String> {
-        self.screen_tail(id, AGENT_ERROR_TAIL_LINES, " ")
-    }
-
-    fn screen_tail(&self, id: &str, lines: usize, separator: &str) -> Option<String> {
-        let runtime = self.runtimes.get(id)?;
-        let pane = runtime.pane.lock().ok()?;
-        screen_tail_text(&pane.screen().contents(), lines, separator)
-    }
-
-    /// Copy this window's PTY exit receipt onto its durable Session
-    /// (Issue #3341).
-    ///
-    /// Best effort by design: a window with no agent session, no installed
-    /// runtime, or no observed child exit simply has nothing to record, and a
-    /// failed write must never change how the exit itself is handled.
-    fn persist_agent_session_exit_receipt(&self, window_id: &str) {
-        let Some(session_id) = self
-            .active_agent_sessions
-            .get(window_id)
-            .map(|session| session.session_id.clone())
-        else {
-            return;
-        };
-        let Some(exit) = self
-            .runtimes
-            .get(window_id)
-            .and_then(|runtime| runtime.pane.lock().ok())
-            .and_then(|pane| pane.last_exit().cloned())
-        else {
-            return;
-        };
-        let receipt = gwt_agent::SessionExitReceipt {
-            exit_code: exit.exit_code,
-            signal: exit.signal,
-            exited_at: exit.observed_at.into(),
-        };
-        if let Err(error) =
-            gwt_agent::persist_session_exit(&self.sessions_dir, &session_id, &receipt)
-        {
-            tracing::warn!(
-                window_id = %window_id,
-                session_id = %session_id,
-                error = %error,
-                "failed to persist the agent PTY exit receipt"
-            );
-        }
-    }
-
     /// Issue #3616: fold one live-screen observation into the quota state for
     /// `window_id`, returning whatever the resulting state change must publish.
     ///
@@ -1919,18 +978,6 @@ impl AppRuntime {
         self.window_details
             .insert(window_id.to_string(), detail.clone());
         let mut events = Vec::new();
-        if self.window_preset(window_id) == Some(WindowPreset::Agent) {
-            let session_mode = self.issue_monitor_session_mode_for_window(window_id);
-            if let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) {
-                events.extend(self.issue_monitor_agent_failed_events_with_mode(
-                    &project_root,
-                    window_id,
-                    &detail,
-                    session_mode,
-                ));
-            }
-        }
-        let _ = self.persist();
         if let Some(composed) = self.recompute_window_state(window_id) {
             events.extend(self.status_events(window_id.to_string(), composed, Some(detail)));
         }
@@ -1967,41 +1014,7 @@ impl AppRuntime {
                 gwt_core::usage::UsageProvider::ClaudeCode => "claude",
             });
         let mut events = Vec::new();
-        if let Some(agent_id) = auth_agent {
-            let detail = gwt::issue_monitor::provider_reauthentication_required_message(agent_id);
-            if let Some(project_root) = self.issue_monitor_project_root_for_window(window_id) {
-                let issue_number = self
-                    .issue_monitor_issue_number_for_window(&project_root, window_id)
-                    .or_else(|| {
-                        let prefs = gwt::load_issue_monitor_prefs(
-                            &gwt::issue_monitor_prefs_path_for_repo_path(&project_root),
-                        )
-                        .ok()?;
-                        let evidence = prefs.provider_quota_hold_evidence.get(agent_id)?;
-                        evidence
-                            .attempts
-                            .iter()
-                            .rev()
-                            .find(|attempt| attempt.window_id.as_deref() == Some(window_id))
-                            .and_then(|attempt| attempt.issue_number)
-                            .or_else(|| {
-                                (evidence.window_id.as_deref() == Some(window_id))
-                                    .then_some(evidence.issue_number)
-                                    .flatten()
-                            })
-                    });
-                if let Some(issue_number) = issue_number {
-                    events.extend(self.issue_monitor_agent_failed_events_with_failure(
-                        &project_root,
-                        window_id,
-                        &detail,
-                        Some(issue_number),
-                        Some(gwt::IssueMonitorFailure::ProviderAuthenticationRequired {
-                            provider: agent_id.to_string(),
-                        }),
-                    ));
-                }
-            }
+        if auth_agent.is_some() {
             self.provider_quota_holds.remove(window_id);
             self.provider_quota_candidates.remove(window_id);
         }
@@ -2011,7 +1024,6 @@ impl AppRuntime {
         // dropped rather than left behind: the quota hold now explains the
         // pane, and a stale entry would outlive it at teardown.
         if auth_agent.is_none() && self.provider_quota_holds.contains_key(window_id) {
-            self.cancel_provider_capacity_resume(window_id);
             self.provider_api_error_holds.remove(window_id);
             return Vec::new();
         }
@@ -2027,7 +1039,7 @@ impl AppRuntime {
                 if self.provider_api_error_holds.get(window_id) == Some(&error) {
                     return events;
                 }
-                self.cancel_provider_capacity_resume(window_id);
+
                 let detail = if auth_agent.is_some() {
                     error.summary.clone()
                 } else {
@@ -2045,7 +1057,6 @@ impl AppRuntime {
                 );
                 self.provider_api_error_holds
                     .insert(window_id.to_string(), error);
-                self.arm_provider_capacity_resume(window_id);
                 self.window_details
                     .insert(window_id.to_string(), detail.clone());
                 if let Some(composed) = self.recompute_window_state(window_id) {
@@ -2058,7 +1069,6 @@ impl AppRuntime {
                 events
             }
             None => {
-                self.cancel_provider_capacity_resume(window_id);
                 if self.provider_api_error_holds.remove(window_id).is_none() {
                     return Vec::new();
                 }
@@ -2139,47 +1149,6 @@ impl AppRuntime {
             })
     }
 
-    /// Issue #3616: whether this exit is the provider saying it is out of
-    /// quota.
-    ///
-    /// Both the exit detail and the final screen are searched. The detail alone
-    /// is not enough (a clean exit carries only "Process exited"), and the
-    /// screen alone is not enough either (a launch-path failure reports through
-    /// the detail before a pane exists). Only a confirmed exit of an agent pane
-    /// qualifies — a live agent that merely *rendered* the sentence is still
-    /// working.
-    fn provider_quota_notice_for_exit(
-        &self,
-        id: &str,
-        status: WindowProcessStatus,
-        exit_confirmed: bool,
-        detail: &Option<String>,
-    ) -> Option<(gwt_core::usage::ProviderLimitNotice, String)> {
-        if !exit_confirmed
-            || !matches!(
-                status,
-                WindowProcessStatus::Error | WindowProcessStatus::Stopped
-            )
-            || !matches!(
-                self.window_preset(id),
-                Some(WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex)
-            )
-        {
-            return None;
-        }
-        let mut haystack = String::new();
-        if let Some(detail) = detail.as_deref() {
-            haystack.push_str(detail);
-            haystack.push('\n');
-        }
-        if let Some((_, screen)) = self.current_approval_screen(id) {
-            haystack.push_str(&screen);
-        }
-        gwt_core::usage::detect_provider_limit_notice(&haystack, &chrono::Local::now())
-            .filter(|notice| notice.provider == self.quota_provider_for_window(id))
-            .map(|notice| (notice, haystack))
-    }
-
     pub(crate) fn handle_runtime_hook_event(
         &mut self,
         event: gwt::RuntimeHookEvent,
@@ -2204,20 +1173,6 @@ impl AppRuntime {
         event: gwt::RuntimeHookEvent,
         publish_to_daemon: bool,
     ) -> Vec<OutboundEvent> {
-        if let Some(pending) = self
-            .pending_launch_completions
-            .values_mut()
-            .find(|pending| {
-                pending.session_id.as_deref().is_some_and(|session_id| {
-                    event.gwt_session_id.as_deref() == Some(session_id)
-                        || (event.source_event.as_deref() != Some("SessionStart")
-                            && event.agent_session_id.as_deref() == Some(session_id))
-                })
-            })
-        {
-            pending.early_hooks.push((event, publish_to_daemon));
-            return Vec::new();
-        }
         let project_scope = self
             .active_window_for_runtime_event(&event)
             .as_deref()
@@ -2249,23 +1204,16 @@ impl AppRuntime {
     fn handle_runtime_hook_event_stages(
         &mut self,
         event: gwt::RuntimeHookEvent,
-        publish_to_daemon: bool,
+        _publish_to_daemon: bool,
         stages: &mut RuntimeHookStageTimings,
     ) -> Vec<OutboundEvent> {
-        if publish_to_daemon {
-            if let Some(project_root) = event.project_root.as_deref().map(PathBuf::from) {
-                stages.measure("daemon_publish", || {
-                    publish_runtime_hook_change(&project_root, &event)
-                });
-            }
-        }
         let mut events = Vec::new();
+        let window_id = self.active_window_for_runtime_event(&event);
         if Self::should_broadcast_runtime_hook_event_to_frontend(&event) {
-            let mut public_event = event.clone();
-            public_event.continuation_readiness_nonce = None;
-            let project_key = self
-                .active_window_for_runtime_event(&event)
-                .and_then(|id| self.project_key_for_window(&id).cloned())
+            let key = window_id
+                .as_deref()
+                .and_then(|id| self.project_key_for_window(id))
+                .cloned()
                 .or_else(|| {
                     event.project_root.as_deref().and_then(|root| {
                         self.tabs
@@ -2276,251 +1224,41 @@ impl AppRuntime {
                             .and_then(|tab| self.project_key_for_tab(&tab.id).cloned())
                     })
                 });
-            if let Some(key) = project_key {
+            if let Some(key) = key {
+                let mut public = event.clone();
+                public.continuation_readiness_nonce = None;
                 events.push(OutboundEvent::project(
                     key,
-                    BackendEvent::RuntimeHookEvent {
-                        event: public_event,
-                    },
+                    BackendEvent::RuntimeHookEvent { event: public },
                 ));
             }
         }
-        let window_id = self.active_window_for_runtime_event(&event);
-        let source_event = match event.source_event.as_deref() {
-            Some(
-                source @ ("SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse"
-                | "Stop" | "SubagentStart" | "SubagentStop" | "Notification"
-                | "PermissionRequest"),
-            ) => source,
-            None => "none",
-            _ => "other",
-        };
-        let occurred_at = if chrono::DateTime::parse_from_rfc3339(&event.occurred_at).is_ok() {
-            event.occurred_at.as_str()
-        } else {
-            "invalid"
-        };
-        tracing::info!(
-            target: "gwt.hook.delivery",
-            stage = "window",
-            outcome = if window_id.is_some() { "matched" } else { "unmatched" },
-            route = if publish_to_daemon { "live" } else { "daemon" },
-            gwt_session_id = event.gwt_session_id.as_deref().unwrap_or_default(),
-            source_event,
-            occurred_at,
-            window_id = window_id.as_deref().unwrap_or_default(),
-            "runtime hook delivery"
-        );
         let Some(window_id) = window_id else {
             return events;
         };
-        if event.source_event.as_deref()
-            == Some(gwt::daemon_runtime::PM_STATUS_CHANGED_SOURCE_EVENT)
-        {
-            // This authored-status notification must preserve provider state and approval latches.
-            let Some(session) = self
-                .active_agent_sessions
-                .get(&window_id)
-                .filter(|session| {
-                    event.kind == gwt::RuntimeHookEventKind::CoordinationEvent
-                        && event.status.is_none()
-                        && event.gwt_session_id.as_deref() == Some(session.session_id.as_str())
-                })
-            else {
-                return events;
-            };
-            let Some(tab) = self.tab(&session.tab_id).filter(|tab| {
-                self.pm_session_for_root(&tab.project_root) == Some(&session.session_id)
-            }) else {
-                return events;
-            };
-            events.extend(self.refresh_active_work_projection_for_project_root(&tab.project_root));
-            return events;
-        }
-        self.observe_issue_monitor_startup_activity(&window_id, &event);
-        let issue_monitor_session_mode = self.issue_monitor_session_mode_for_window(&window_id);
-        let effective_before = self.window_status(&window_id);
-        let approval_wait_cleared = self.window_approval_waiting.contains_key(&window_id);
-        if approval_wait_cleared {
-            self.clear_runtime_approval_latch_without_status(&window_id, publish_to_daemon);
-        }
-        let issue_monitor_project_root = self.issue_monitor_project_root_for_window(&window_id);
-        // SPEC-3431 FR-068: a hook arrival is the one signal that an agent is
-        // actually making progress. The PTY-status heartbeat below never fires
-        // for a working agent (the watcher thread stays silent until the
-        // process exits), so without this the activity clock froze at launch
-        // and a rate-limited or hung agent was indistinguishable from a busy
-        // one. Throttled inside `schedule_runtime_hook_heartbeat`.
-        if let Some(project_root) = issue_monitor_project_root.clone() {
-            stages.measure("issue_monitor_heartbeat", || {
-                self.schedule_runtime_hook_heartbeat(
-                    &project_root,
-                    &window_id,
-                    event.gwt_session_id.as_deref(),
-                    source_event,
-                    occurred_at,
-                )
-            });
-        }
-        if event.source_event.as_deref() == Some("SessionStart") {
-            events.extend(stages.measure("fresh_execution_launch_finalization", || {
-                self.finalize_fresh_execution_launch_session_start(
-                    &window_id,
-                    event.continuation_readiness_nonce.as_deref(),
-                )
-            }));
-            events.extend(stages.measure("continue_work_finalization", || {
-                self.finalize_continue_work_session_start(
-                    &window_id,
-                    event.continuation_readiness_nonce.as_deref(),
-                )
-            }));
-        }
-        let is_agent_window = self.window_preset(&window_id) == Some(WindowPreset::Agent);
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
-            if approval_wait_cleared {
-                if let Some(composed) = stages.measure("window_state_recompute", || {
-                    self.recompute_window_state(&window_id)
-                }) {
-                    if effective_before != Some(composed) {
-                        events.extend(self.status_events(window_id, composed, None));
-                    }
-                }
-            }
             return events;
         };
-        self.recoverable_agent_error_windows.remove(&window_id);
-        // Issue #3616: a hook arrival is proof the agent is running, so any
-        // quota hold or pending candidate for this pane is stale. This is also
-        // what makes the live-screen classifier safe: an agent whose own output
-        // quotes the provider's sentence keeps running tools, and every tool
-        // fires a hook well inside the settle window.
-        self.provider_quota_holds.remove(&window_id);
-        self.provider_quota_candidates.remove(&window_id);
-        self.released_provider_quota_notices.remove(&window_id);
-        let hook_state_changed =
-            self.window_hook_states.get(&window_id).copied() != Some(hook_state);
-        self.observe_provider_capacity_hook(&window_id, hook_state);
-        if !hook_state_changed && !approval_wait_cleared {
-            return events;
-        }
+        // This is a display cache. Authenticated readiness, Session and Monitor
+        // writes have already been applied by the fixed project owner.
         self.window_hook_states
             .insert(window_id.clone(), hook_state);
-        let Some(composed_state) = stages.measure("window_state_recompute", || {
-            self.recompute_window_state(&window_id)
-        }) else {
-            return events;
-        };
-        let hook_detail = event
-            .message
-            .as_deref()
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-            .map(str::to_string);
-        // RuntimeHook events may carry a Host-issued Session id, but no exact
-        // process-local window lifecycle generation. A late predecessor Stop
-        // can therefore name a same-address, same-Session successor. Surface
-        // the terminal state, but leave destructive close to an
-        // incarnation-fenced PTY status or an explicit Host close.
-        if gwt::window_state::is_live_agent_hook_state(hook_state) {
-            self.window_details.remove(&window_id);
-        } else if let Some(detail) = hook_detail.as_ref() {
-            self.window_details
-                .insert(window_id.clone(), detail.clone());
-        }
-        let detail = hook_detail.or_else(|| self.window_details.get(&window_id).cloned());
-        stages.measure("persist", || {
-            let _ = self.persist();
+        let status = self
+            .runtimes
+            .get(&window_id)
+            .map(|runtime| runtime.status)
+            .unwrap_or(hook_state);
+        stages.measure("window_state_projection", || {
+            events.extend(self.apply_owner_status_projection(&window_id, status, event.message));
         });
-        if is_agent_window && composed_state == WindowProcessStatus::Error {
-            let message = detail
-                .as_deref()
-                .unwrap_or("Agent entered error state")
-                .to_string();
-            if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                events.extend(stages.measure("issue_monitor_agent_failed", || {
-                    self.schedule_runtime_hook_agent_failure(
-                        project_root,
-                        &window_id,
-                        &message,
-                        issue_monitor_session_mode,
-                    )
-                }));
-            }
-        }
-        if matches!(
-            composed_state,
-            WindowProcessStatus::Error | WindowProcessStatus::Stopped
-        ) {
-            // Issue #4406 AC-4: acknowledge the ended pane from the cached
-            // projection and rebuild off the event loop. Rebuilding here read
-            // the home works.json, every session ledger TOML and one execution
-            // diagnosis per Work row, holding the GUI thread for up to 35,982ms.
-            // Issue #4406 AC-4: measured so a regression back onto the loop
-            // here is reported by name rather than as an unexplained
-            // `RuntimeHook` stall.
-            stages.measure("active_work_projection_dispatch", || {
-                if let Some(tab_id) = self
-                    .window_lookup
-                    .get(&window_id)
-                    .map(|address| address.tab_id.as_str())
-                {
-                    if let Some(event) =
-                        self.cached_active_work_projection_broadcast_for_tab(tab_id)
-                    {
-                        events.push(event);
-                    }
-                }
-                // Issue #3777 AC-2: the rebuild itself is scheduled off the event
-                // loop, carrying the content-free RuntimeHook profile labels.
-                if let Some(project_root) = issue_monitor_project_root.as_ref() {
-                    self.schedule_runtime_hook_active_work_projection_refresh(
-                        project_root,
-                        runtime_hook_source_event_profile_label(event.source_event.as_deref()),
-                        runtime_hook_composed_state_profile_label(composed_state),
-                    );
-                }
-                if let Some(project_root) = issue_monitor_project_root.as_deref() {
-                    self.request_active_work_projection_refresh(project_root);
-                }
-            });
-        }
-        if hook_state_changed || effective_before != Some(composed_state) {
-            events.extend(self.status_events(window_id, composed_state, detail));
-        }
         events
-    }
-
-    fn should_keep_active_agent_session_for_recoverable_pty_error(
-        &self,
-        window_id: &str,
-        status: WindowProcessStatus,
-    ) -> bool {
-        status == WindowProcessStatus::Error
-            && self.active_agent_sessions.contains_key(window_id)
-            && self
-                .window_preset(window_id)
-                .is_some_and(gwt::window_state::uses_agent_hook_state)
-            && (self
-                .window_hook_states
-                .get(window_id)
-                .is_some_and(|state| gwt::window_state::is_live_agent_hook_state(*state))
-                || self.recoverable_agent_error_windows.contains(window_id))
     }
 
     fn should_broadcast_runtime_hook_event_to_frontend(event: &gwt::RuntimeHookEvent) -> bool {
         event.kind != gwt::RuntimeHookEventKind::RuntimeState
     }
 }
-fn screen_tail_text(contents: &str, lines: usize, separator: &str) -> Option<String> {
-    let screen_lines: Vec<&str> = contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = screen_lines[screen_lines.len().saturating_sub(lines)..].join(separator);
-    (!tail.is_empty()).then_some(tail)
-}
+
 const RUNTIME_DAEMON_PUBLISH_QUEUE_CAPACITY: usize = 4096;
 enum RuntimeDaemonPublish {
     Output {
@@ -2534,10 +1272,6 @@ enum RuntimeDaemonPublish {
         id: String,
         status: WindowProcessStatus,
         detail: Option<String>,
-    },
-    Hook {
-        project_root: PathBuf,
-        event: gwt::RuntimeHookEvent,
     },
 }
 #[derive(Debug)]
@@ -2720,25 +1454,6 @@ fn publish_runtime_daemon_event(
                 );
             }
         }
-        RuntimeDaemonPublish::Hook {
-            project_root,
-            event,
-        } => {
-            let payload =
-                gwt::runtime_daemon_events::runtime_hook_payload(&event, std::process::id());
-            let result = publisher.publish(
-                &project_root,
-                gwt::runtime_daemon_events::RUNTIME_HOOK_CHANNEL,
-                payload,
-            );
-            if let Err(err) = result {
-                tracing::debug!(
-                    error = %err,
-                    project_root = %project_root.display(),
-                    "runtime hook daemon publish failed (non-fatal)"
-                );
-            }
-        }
     }
 }
 fn publish_runtime_daemon_approval_event(
@@ -2788,25 +1503,7 @@ fn publish_runtime_output_change(
         });
     }
 }
-pub(super) fn publish_runtime_status_change(
-    project_root: &Path,
-    id: &str,
-    status: WindowProcessStatus,
-    detail: Option<String>,
-) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Status {
-        project_root: project_root.to_path_buf(),
-        id: id.to_string(),
-        status,
-        detail,
-    });
-}
-fn publish_runtime_hook_change(project_root: &Path, event: &gwt::RuntimeHookEvent) {
-    enqueue_runtime_daemon_publish(RuntimeDaemonPublish::Hook {
-        project_root: project_root.to_path_buf(),
-        event: event.clone(),
-    });
-}
+
 fn publish_runtime_approval_overlay_change(project_root: &Path, id: &str, waiting: bool) {
     let Some(sender) = runtime_daemon_approval_publish_sender() else {
         return;
@@ -2834,224 +1531,6 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{mpsc, Mutex};
 
-    /// Issue #3490 AC-2/AC-3: a Codex pane that died on the shared `~/.codex`
-    /// Issue #4445 AC-2: when the npm shim's target executable is gone the
-    /// operator gets `Process exited with status 1` plus a localized shell
-    /// message, and the path that was missing is only readable by inspecting
-    /// the cache directory. Name it in the detail instead.
-    #[test]
-    fn a_missing_launcher_binary_is_named_in_the_pane_detail() {
-        let missing = r"C:\Users\dev\AppData\Local\npm-cache\_npx\2842f47953679de1\node_modules\.bin\..\@anthropic-ai\claude-code\bin\claude.exe";
-
-        // The shim prints the path first, so a raw tail loses it to truncation
-        // exactly when the screen carries anything else.
-        let scrollback = "x".repeat(super::AGENT_ERROR_TAIL_MAX_CHARS);
-        let detail = super::compose_agent_error_detail(
-            Some("Process exited with status 1".to_string()),
-            Some(&format!(
-                "'\"{missing}\"' \u{306f}\u{3001}\u{5185}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{307e}\u{305f}\u{306f}\u{5916}\u{90e8}\u{30b3}\u{30de}\u{30f3}\u{30c9}\u{3068}\u{3057}\u{3066}\u{8a8d}\u{8b58}\u{3055}\u{308c}\u{3066}\u{3044}\u{307e}\u{305b}\u{3093}\u{3002}\n{scrollback}"
-            )),
-        )
-        .expect("an errored agent pane always carries a detail");
-
-        assert!(
-            detail.contains(missing),
-            "the pane must name the executable that was not found: {detail}"
-        );
-        assert!(
-            !detail.starts_with("Process exited with status 1"),
-            "a bare exit status is what the operator could not diagnose: {detail}"
-        );
-    }
-
-    /// SQLite race must not show the raw provider stack. The same string is the
-    /// message the Issue Monitor receives, so it also has to classify as a
-    /// transient launch failure — the contention is about the host, not the
-    /// work.
-    #[test]
-    fn codex_shared_state_lock_replaces_the_raw_stack_in_the_pane_detail() {
-        let observed_stack = "/Users/akiojin/.codex/state_5.sqlite: failed to initialize state \
-             runtime at /Users/akiojin/.codex: failed to open log DB at \
-             /Users/akiojin/.codex/logs_2.sqlite: error returned from database: (code: 5) \
-             database is locked";
-
-        let detail = super::compose_agent_error_detail(
-            Some("Agent exited with status 1".to_string()),
-            Some(observed_stack),
-        )
-        .expect("an errored agent pane always carries a detail");
-
-        assert!(
-            !detail.contains("state_5.sqlite"),
-            "the raw Codex stack must not reach the pane: {detail}"
-        );
-        assert!(
-            detail.contains("~/.codex"),
-            "the pane must name the shared state directory as the cause: {detail}"
-        );
-        assert!(
-            detail.contains("max_active"),
-            "the pane must name what the operator can do about it: {detail}"
-        );
-        assert!(
-            gwt_agent::is_transient_launch_failure(&detail),
-            "the Issue Monitor must requeue this without spending an attempt: {detail}"
-        );
-    }
-
-    #[test]
-    fn issue_5415_codex_sandbox_startup_error_retries_without_spending_an_attempt() {
-        let error =
-            "Could not read Windows sandbox configuration and requirements from the app server.";
-        let detail = super::compose_agent_error_detail(None, Some(error)).unwrap();
-        assert!(detail.contains(error), "keep the provider's diagnostic");
-        assert!(gwt_agent::is_transient_launch_failure(&detail));
-    }
-
-    #[test]
-    fn late_provider_active_writer_error_is_classified_as_resume_writer_conflict() {
-        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
-            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
-            (code -32600)";
-
-        assert_eq!(
-            super::classify_issue_monitor_failure(detail, gwt_agent::SessionMode::Resume),
-            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
-                holder_window_id: None,
-            }),
-            "a late provider race is typed immediately even when the external holder is unknown"
-        );
-        for prefixed_detail in [
-            "Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
-            "Agent exited — last output: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
-        ] {
-            assert_eq!(
-                super::classify_issue_monitor_failure(
-                    prefixed_detail,
-                    gwt_agent::SessionMode::Resume,
-                ),
-                Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
-                    holder_window_id: None,
-                }),
-                "the provider's observed Error: prefix must preserve typed recovery"
-            );
-        }
-        assert_eq!(
-            super::classify_issue_monitor_failure(
-                "thread/resume failed during TUI bootstrap: provider temporarily unavailable",
-                gwt_agent::SessionMode::Resume,
-            ),
-            None,
-            "generic provider failures must stay on the existing failure path"
-        );
-
-        for (case, unrelated_detail) in [
-            (
-                "reversed markers",
-                "thread/resume failed during TUI bootstrap: (code -32600) thread 019 already has an active writer",
-            ),
-            (
-                "markers split across lines",
-                "thread/resume failed during TUI bootstrap:\nthread 019 already has an active writer (code -32600)",
-            ),
-            (
-                "different provider code",
-                "thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32601)",
-            ),
-            (
-                "quoted compound diagnostic",
-                "provider wrapper repeated \"thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)\"",
-            ),
-            (
-                "unanchored Error prefix",
-                "provider wrapper: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
-            ),
-            (
-                "nested last-output prefix",
-                "Agent exited — last output: Warning: Error: Failed to resume session from ~/.codex/sessions/rollout.jsonl: thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)",
-            ),
-        ] {
-            assert_eq!(
-                super::classify_issue_monitor_failure(
-                    unrelated_detail,
-                    gwt_agent::SessionMode::Resume,
-                ),
-                None,
-                "{case} must not be promoted to a typed writer conflict"
-            );
-        }
-    }
-
-    #[test]
-    fn agent_failed_payload_carries_classified_resume_writer_conflict_to_daemon() {
-        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
-            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
-            (code -32600)";
-
-        assert_eq!(
-            super::super::AppRuntime::issue_monitor_agent_failed_payload(
-                "tab-1::agent-42",
-                detail,
-                Some(42),
-                gwt_agent::SessionMode::Resume,
-            ),
-            serde_json::json!({
-                "agent_failed": {
-                    "issue_number": 42,
-                    "window_id": "tab-1::agent-42",
-                    "message": detail,
-                    "failure": {
-                        "kind": "resume_writer_conflict",
-                    },
-                }
-            }),
-            "the payload helper used by issue_monitor_agent_failed_events must bridge the classifier into the daemon envelope"
-        );
-        assert_eq!(
-            super::super::AppRuntime::issue_monitor_agent_failed_payload(
-                "tab-1::agent-42",
-                "provider temporarily unavailable",
-                Some(42),
-                gwt_agent::SessionMode::Resume,
-            ),
-            serde_json::json!({
-                "agent_failed": {
-                    "issue_number": 42,
-                    "window_id": "tab-1::agent-42",
-                    "message": "provider temporarily unavailable",
-                }
-            }),
-            "generic failures must keep the legacy message-only envelope"
-        );
-    }
-
-    #[test]
-    fn launch_failed_payload_carries_classified_resume_writer_conflict_and_source_identity() {
-        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
-            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
-            (code -32600)";
-
-        assert_eq!(
-            super::super::AppRuntime::issue_monitor_launch_failed_payload(
-                42,
-                detail,
-                Some("launch:effect-42"),
-                Some("gui-42"),
-                gwt_agent::SessionMode::Resume,
-            ),
-            serde_json::json!({
-                "launch_failed": {
-                    "issue_number": 42,
-                    "message": detail,
-                    "delivery_id": "launch:effect-42",
-                    "materializer_id": "gui-42",
-                    "failure": {
-                        "kind": "resume_writer_conflict",
-                    },
-                }
-            })
-        );
-    }
     #[test]
     fn runtime_daemon_publish_enqueue_is_bounded_and_nonblocking() {
         let (sender, _receiver) = mpsc::sync_channel(1);
@@ -3142,104 +1621,5 @@ mod tests {
             panic!("sender should be reused without spawning a second worker")
         })
         .is_some());
-    }
-
-    #[test]
-    fn resume_writer_conflict_classification_and_payload_require_resume_session_origin() {
-        let detail = "Failed to resume session from ~/.codex/sessions/rollout.jsonl: \
-            thread/resume failed during TUI bootstrap: thread 019 already has an active writer \
-            (code -32600)";
-        let classify: fn(&str, gwt_agent::SessionMode) -> Option<gwt::IssueMonitorFailure> =
-            super::classify_issue_monitor_failure;
-        let agent_payload: fn(
-            &str,
-            &str,
-            Option<u64>,
-            gwt_agent::SessionMode,
-        ) -> serde_json::Value = super::super::AppRuntime::issue_monitor_agent_failed_payload;
-        let launch_payload: fn(
-            u64,
-            &str,
-            Option<&str>,
-            Option<&str>,
-            gwt_agent::SessionMode,
-        ) -> serde_json::Value = super::super::AppRuntime::issue_monitor_launch_failed_payload;
-
-        assert_eq!(
-            classify(detail, gwt_agent::SessionMode::Resume),
-            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
-                holder_window_id: None,
-            }),
-            "the exact provider diagnostic is typed only for an actual Resume launch"
-        );
-        let composed = format!("Process exited with status 1 — last output: {detail}");
-        assert_eq!(
-            classify(&composed, gwt_agent::SessionMode::Resume),
-            Some(gwt::IssueMonitorFailure::ResumeWriterConflict {
-                holder_window_id: None,
-            }),
-            "the runtime-composed error detail retains the anchored provider diagnostic",
-        );
-        for (case, echoed_detail) in [
-            ("raw normal output", detail),
-            (
-                "single-quoted fresh output echo",
-                "launcher echoed 'thread/resume failed during TUI bootstrap: thread 019 already has an active writer (code -32600)'",
-            ),
-        ] {
-            assert_eq!(
-                classify(echoed_detail, gwt_agent::SessionMode::Normal),
-                None,
-                "{case} is generic because a Normal/fresh launch cannot encounter a real Resume writer race"
-            );
-        }
-
-        let resume_agent = agent_payload(
-            "tab-1::agent-42",
-            detail,
-            Some(42),
-            gwt_agent::SessionMode::Resume,
-        );
-        assert_eq!(
-            resume_agent
-                .pointer("/agent_failed/failure/kind")
-                .and_then(serde_json::Value::as_str),
-            Some("resume_writer_conflict")
-        );
-        let fresh_agent = agent_payload(
-            "tab-1::agent-42",
-            detail,
-            Some(42),
-            gwt_agent::SessionMode::Normal,
-        );
-        assert!(
-            fresh_agent.pointer("/agent_failed/failure").is_none(),
-            "a fresh AgentFailed payload keeps the marker as a generic message"
-        );
-
-        let resume_launch = launch_payload(
-            42,
-            detail,
-            Some("launch:effect-42"),
-            Some("gui-42"),
-            gwt_agent::SessionMode::Resume,
-        );
-        assert_eq!(
-            resume_launch
-                .pointer("/launch_failed/failure/kind")
-                .and_then(serde_json::Value::as_str),
-            Some("resume_writer_conflict")
-        );
-        let fresh_launch = launch_payload(
-            42,
-            detail,
-            Some("launch:effect-42"),
-            Some("gui-42"),
-            gwt_agent::SessionMode::Normal,
-        );
-        assert!(
-            fresh_launch.pointer("/launch_failed/failure").is_none(),
-            "a FreshRequired/Normal LaunchFailed payload cannot synthesize a Resume conflict"
-        );
     }
 }

@@ -5,7 +5,6 @@
 //! only source of live PTY dimensions.
 
 use gwt::{AgentKanbanLane, FocusCycleDirection, WindowSurfaceOwner};
-use std::time::Instant;
 
 use super::{
     close_window_from_workspace, AppRuntime, BackendEvent, OutboundEvent, WindowPreset,
@@ -64,14 +63,11 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
 /// instead of treating an empty event list as success.
 pub(crate) struct CloseWindowOutcome {
     pub(crate) closed: bool,
-    pub(crate) reply_deferred: bool,
     pub(crate) events: Vec<OutboundEvent>,
 }
 
 pub(crate) struct PeerPaneCloseReply {
     pub(super) client_id: String,
-    pub(super) session_id: Option<String>,
-    pub(super) stopped_husk: bool,
 }
 
 /// Issue #4234 AC-3: every `AppRuntime` map that is keyed by a combined window
@@ -105,10 +101,8 @@ macro_rules! window_scoped_state {
         $visit!($runtime, $id, initial_launch_workers);
         $visit!($runtime, $id, pending_launch_completions);
         $visit!($runtime, $id, pending_launch_delivery_acks);
-        $visit!($runtime, $id, pending_monitor_startups);
         $visit!($runtime, $id, pending_continue_work);
         $visit!($runtime, $id, pending_fresh_execution_launches);
-        $visit!($runtime, $id, pending_fresh_execution_finalizations);
         $visit!($runtime, $id, pending_auto_resume_sources);
         $visit!($runtime, $id, terminal_close_candidates);
         $visit!($runtime, $id, window_pty_statuses);
@@ -128,58 +122,6 @@ macro_rules! window_scoped_state {
 }
 
 impl AppRuntime {
-    /// Agent lifecycle requests must preserve recent evidence from their actual target.
-    /// Explicit window close and runtime terminal cleanup do not call this guard.
-    pub(super) fn agent_close_board_check(
-        &self,
-        principal: &gwt::agent_capability::AgentSessionPrincipal,
-        id: &str,
-    ) -> Option<String> {
-        let (tab, window) = self.tabs.iter().find_map(|tab| {
-            tab.workspace
-                .persisted()
-                .windows
-                .iter()
-                .find(|window| super::combined_window_id(&tab.id, &window.id) == id)
-                .map(|window| (tab, window))
-        })?;
-        let target_session = window.session_id.as_deref();
-        let target_owner = window
-            .linked_issue_number
-            .or_else(|| {
-                target_session.and_then(|session_id| {
-                    self.launch_wizard_cache
-                        .session_by_id(session_id)
-                        .and_then(|session| session.linked_issue_number)
-                })
-            })
-            .or_else(|| self.issue_monitor_issue_number_for_window(&tab.project_root, id))
-            .or_else(|| {
-                target_session.and_then(|session_id| {
-                    gwt_agent::Session::load(&self.sessions_dir.join(format!("{session_id}.toml")))
-                        .ok()
-                        .and_then(|session| session.linked_issue_number)
-                })
-            });
-        match gwt::board_read_receipts::recent_owner_unread(
-            &tab.project_root,
-            principal.session_id(),
-            target_session,
-            target_owner,
-            chrono::Utc::now(),
-        ) {
-            Ok(entries) if !entries.is_empty() => Some(
-                gwt::board_read_receipts::read_required_message("pane.close", &entries),
-            ),
-            Ok(_) => None,
-            Err(error) => {
-                let warning = gwt::board_read_receipts::warning(error);
-                tracing::warn!(%warning, window_id = id, "agent pane close Board observation failed open");
-                None
-            }
-        }
-    }
-
     pub(crate) fn create_window_events(
         &mut self,
         context: &super::ProjectContext,
@@ -452,10 +394,16 @@ impl AppRuntime {
         let Some(runtime) = self.runtimes.get(id) else {
             return Vec::new();
         };
-        if let Ok(mut pane) = runtime.pane.lock() {
-            let _ = pane.resize(cols.max(20), rows.max(6));
-        }
-        Vec::new()
+        self.queue_remote_runtime_command(
+            id,
+            gwt::project_runtime::events::OwnerCommand::Resize {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+                cols: cols.max(20),
+                rows: rows.max(6),
+            },
+            super::RemoteRuntimeCommandKind::Resize,
+        )
     }
 
     pub(crate) fn close_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
@@ -470,20 +418,12 @@ impl AppRuntime {
         self.close_window_outcome_with_monitor_notification(id, true, None, None)
     }
 
-    pub(super) fn close_peer_window_outcome(
-        &mut self,
-        id: &str,
-        client_id: String,
-    ) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, None, Some(client_id))
-    }
-
     /// Issue #4234 AC-3: drop every window-keyed entry the closing window owns.
     ///
     /// Window ids are reassigned lowest-free, so a surviving entry is not only
     /// retained memory — it is state a future window with the same id would
     /// read as its own.
-    fn forget_window_scoped_state(&mut self, id: &str) {
+    pub(super) fn forget_window_scoped_state(&mut self, id: &str) {
         macro_rules! forget {
             ($runtime:ident, $id:ident, $field:ident) => {
                 WindowScopedEntries::forget(&mut $runtime.$field, $id);
@@ -555,14 +495,6 @@ impl AppRuntime {
             .events
     }
 
-    pub(super) fn close_window_outcome_with_self_close_ticket(
-        &mut self,
-        id: &str,
-        ticket: crate::AgentSelfCloseCapabilityTicket,
-    ) -> CloseWindowOutcome {
-        self.close_window_outcome_with_monitor_notification(id, true, Some(ticket), None)
-    }
-
     fn close_window_outcome_with_monitor_notification(
         &mut self,
         id: &str,
@@ -591,20 +523,10 @@ impl AppRuntime {
         else {
             return CloseWindowOutcome {
                 closed: false,
-                reply_deferred: false,
                 events: Vec::new(),
             };
         };
         let issue_monitor_project_root = self.issue_monitor_project_root_for_window(id);
-        let stopped_husk = !self.runtimes.contains_key(id)
-            && !self.has_pending_agent_launch_worker(id)
-            && id
-                .strip_prefix(&format!("{}::", context.tab_id))
-                .and_then(|raw_id| self.tab(&context.tab_id)?.workspace.window(raw_id))
-                .is_some_and(|window| {
-                    crate::runtime_support::window_is_agent_pane(window)
-                        && window.status == WindowProcessStatus::Stopped
-                });
         let peer_reply = peer_client_id.and_then(|client_id| {
             let session_id = self
                 .active_agent_sessions
@@ -618,13 +540,9 @@ impl AppRuntime {
                         .session_id
                         .clone()
                 });
-            (self.runtimes.contains_key(id) || session_id.is_some()).then_some(PeerPaneCloseReply {
-                client_id,
-                session_id,
-                stopped_husk,
-            })
+            (self.runtimes.contains_key(id) || session_id.is_some())
+                .then_some(PeerPaneCloseReply { client_id })
         });
-        let reply_deferred = peer_reply.is_some();
         if !close_window_from_workspace(
             &mut self.tabs,
             &mut self.window_lookup,
@@ -633,7 +551,6 @@ impl AppRuntime {
         ) {
             return CloseWindowOutcome {
                 closed: false,
-                reply_deferred: false,
                 events: Vec::new(),
             };
         }
@@ -667,7 +584,6 @@ impl AppRuntime {
         }
         CloseWindowOutcome {
             closed: true,
-            reply_deferred,
             events,
         }
     }
@@ -729,7 +645,6 @@ impl AppRuntime {
             closing_window_generation,
             peer_reply,
         );
-        self.pending_fresh_execution_finalizations.remove(id);
         self.profile_selections.remove(id);
     }
 
@@ -741,35 +656,17 @@ impl AppRuntime {
     /// [`Self::restart_window_events`]. Idempotent: stopping an already-stopped
     /// window simply re-broadcasts the authoritative `Stopped` status.
     pub(crate) fn stop_window_events(&mut self, id: &str) -> Vec<OutboundEvent> {
-        let Some(address) = self.window_lookup.get(id).cloned() else {
+        let Some(runtime) = self.runtimes.get(id) else {
             return Vec::new();
         };
-        let Some(context) = self.project_context(&address.tab_id) else {
-            return Vec::new();
-        };
-        // Tear down the live runtime (kills the PTY + joins reader/status
-        // threads + deregisters the writer). This reuses the exact same stop
-        // primitive that `close_window_events` uses, so no PTY management is
-        // reimplemented. `stop_window_runtime` also persists the Paused Work
-        // marker for an agent session via `mark_agent_session_stopped`.
-        // Qualify the transition while its exact runtime incarnation still exists.
-        self.observe_notification_transition_at(id, WindowProcessStatus::Stopped, Instant::now());
-        self.stop_window_runtime(id);
-        // Render the surviving window as Stopped. `stop_window_runtime` already
-        // removed the pty/hook tracking, so the workspace record is the source
-        // of truth for the post-stop status.
-        self.set_window_status(
-            &address.tab_id,
-            &address.raw_id,
-            WindowProcessStatus::Stopped,
-        );
-        let _ = self.persist();
-        let mut events = vec![self.workspace_state_broadcast(&context)];
-        events.extend(self.status_events(id.to_string(), WindowProcessStatus::Stopped, None));
-        if let Some(event) = self.active_work_projection_broadcast_for_tab(&context.tab_id) {
-            events.push(event);
-        }
-        events
+        self.queue_remote_runtime_command(
+            id,
+            gwt::project_runtime::events::OwnerCommand::Close {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+            },
+            super::RemoteRuntimeCommandKind::Stop,
+        )
     }
 
     /// SPEC-2356 安心 Addendum (FR-042): stop every running agent window's

@@ -1,99 +1,174 @@
 use super::*;
+use chrono::Datelike;
 
 #[test]
-fn codex_capacity_resume_uses_the_existing_convergence_tick() {
-    let main = include_str!("../../main.rs");
-    let tick = main
-        .split("Event::UserEvent(UserEvent::TerminalConvergenceTick) =>")
+fn codex_capacity_resume_uses_the_existing_owner_deadline_loop() {
+    let owner = include_str!("../../project_runtime/owner.rs");
+    let owner_loop = owner
+        .split("fn run(mut self, receiver: mpsc::Receiver<OwnerMessage>)")
         .nth(1)
         .unwrap()
-        .split("Event::UserEvent(")
+        .split("match message {")
         .next()
         .unwrap();
-    assert!(tick.contains("app.sweep_provider_capacity_resumes"));
+    assert!(owner_loop.contains("self.tick_runtime_policies(std::time::Instant::now())"));
+    assert!(owner_loop.contains(".chain(self.next_policy_deadline())"));
+    assert!(owner_loop.contains(".recv_timeout(deadline.saturating_duration_since"));
+}
+
+#[cfg(unix)]
+fn policy_owner_config(
+    temp: &Path,
+    project: &Path,
+    provider: gwt_agent::AgentId,
+    issue: u64,
+) -> gwt_agent::LaunchConfig {
+    let selected = super::pane_control_tests::control_launch_config(project, issue);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(provider)
+        .working_dir(selected.working_dir.unwrap())
+        .branch(selected.branch.unwrap())
+        .base_branch(selected.base_branch.unwrap())
+        .build();
+    config.command = temp.join("policy-provider").display().to_string();
+    config.linked_issue_number = Some(issue);
+    config.explicit_follow_up = true;
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    config
+}
+
+#[cfg(unix)]
+fn policy_owner_fixture(
+    temp: &Path,
+    provider: gwt_agent::AgentId,
+    script: &str,
+) -> (
+    gwt::project_runtime::test_support::ProjectOwnerHarness,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    use std::os::unix::fs::PermissionsExt;
+    let project = temp.join("project");
+    fs::create_dir_all(&project).unwrap();
+    init_repo_with_initial_commit(&project);
+    seed_owner_fixture_roster(&project, 8);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        |prefs| {
+            prefs.enabled = true;
+            prefs.autonomous_mode = true;
+        },
+    )
+    .unwrap();
+    let runner = temp.join("policy-provider");
+    fs::write(&runner, format!("#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\n{script}\n")).unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = policy_owner_config(temp, &project, provider, 42);
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    let pane = super::pane_control_tests::control_owner_launch(&owner, "policy", config);
+    (owner, pane)
+}
+
+#[cfg(unix)]
+fn policy_owner_hook(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    source: &str,
+    status: &str,
+) {
+    let session = pane.session.as_ref().unwrap();
+    let mut event = runtime_hook_state_for_event(status, source, &session.id);
+    event.project_root = session
+        .project_state_root
+        .as_ref()
+        .map(|root| root.display().to_string());
+    event.branch = Some(session.branch.clone());
+    event.agent_session_id = None;
+    event.occurred_at = Utc::now().to_rfc3339();
+    owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(event));
+    owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+        .unwrap();
+}
+
+#[cfg(unix)]
+fn policy_owner_screen(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    screen: &str,
+) -> gwt::project_runtime::test_support::OwnerRuntimeProbe {
+    pane.pane
+        .lock()
+        .unwrap()
+        .process_bytes(format!("\x1b[2J\x1b[H{screen}").as_bytes());
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &pane.id,
+        pane.incarnation,
+        Utc::now(),
+        Instant::now(),
+    ))
+    .unwrap();
+    owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap()
 }
 
 #[cfg(unix)]
 fn capacity_resume_fixture(
     temp: &Path,
 ) -> (
-    AppRuntime,
-    String,
-    super::super::BlockingTestTaskQueue,
-    std::sync::mpsc::Receiver<String>,
+    gwt::project_runtime::test_support::ProjectOwnerHarness,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
 ) {
-    use std::io::Read;
-    let project = temp.join("project");
-    let session_id = "capacity-session";
-    let binding = materialize_active_agent_pane_binding(&project, session_id);
-    let (mut runtime, issuer, _) =
-        active_bound_agent_pane_runtime(temp, &project, session_id, &binding);
-    let id = "tab-project::agent-project".to_string();
-    let mut session = gwt_agent::Session::load(
-        &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
-    )
-    .unwrap();
-    session.launch_route = gwt_agent::LaunchRoute::Autonomous;
-    session.save(&runtime.sessions_dir).unwrap();
-    let token = issuer
-        .issue_bound(&project, session_id, binding)
-        .unwrap()
-        .token;
-    runtime.agent_capability_tokens.insert(id.clone(), token);
-    let mut active = sample_active_agent_session("tab-project", &id);
-    active.session_id = session_id.into();
-    active.worktree_path = project.clone();
-    active.agent_project_root = project.display().to_string();
-    active.branch_name = session.branch.clone();
-    runtime.active_agent_sessions.insert(id.clone(), active);
-    runtime.register_pty_writer(&id, Some(&session));
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
-        &gwt::IssueMonitorPrefs {
-            enabled: true,
-            autonomous_mode: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let mut reader = runtime.runtimes[&id].pane.lock().unwrap().reader().unwrap();
-    let (sender, output) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        while let Ok(read) = reader.read(&mut buffer) {
-            if read == 0
-                || sender
-                    .send(String::from_utf8_lossy(&buffer[..read]).into_owned())
-                    .is_err()
-            {
-                break;
-            }
-        }
-    });
-    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "running",
-        "PreToolUse",
-        session_id,
-    ));
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    (runtime, id, tasks, output)
+    let (owner, pane) = policy_owner_fixture(
+        temp,
+        gwt_agent::AgentId::Codex,
+        "stty -echo; while IFS= read -r line; do printf 'GWT_INPUT:%s\\n' \"$line\"; done",
+    );
+    policy_owner_hook(&owner, &pane, "PreToolUse", "running");
+    let output = owner.subscribe();
+    (owner, pane, output)
 }
 
 #[cfg(unix)]
-fn capacity_output_through(output: &std::sync::mpsc::Receiver<String>, marker: &str) -> String {
-    // test-hygiene: allow-wall-clock-deadline Bound the real child PTY reader; its kernel output cannot advance through the injected retry clock.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut observed = String::new();
-    while !observed.contains(marker) {
-        observed.push_str(
-            &output
-                // test-hygiene: allow-wall-clock-deadline Wait for the real PTY submit or input barrier within the same bounded process IO contract.
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("PTY output must reach the marker"),
-        );
-    }
-    observed
+fn capacity_worker_observed(
+    worker: &gwt::project_runtime::test_support::OwnerPolicyRetryPauseGuard,
+    finished: bool,
+) {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound arrival/completion of the real queued owner worker; its checkpoint establishes order, not elapsed time.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            if finished {
+                worker.finished().await;
+            } else {
+                worker.wait().await;
+            }
+        })
+        .await
+        .expect("actual capacity worker reaches its captured checkpoint");
+    });
+}
+
+#[cfg(unix)]
+fn capacity_output_through(
+    output: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+    marker: &str,
+) -> String {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound actual owner output IPC from the physical provider child; policy timing uses the existing injected clock.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            let mut observed = String::new();
+            while !observed.contains(marker) {
+                if let gwt::project_runtime::events::OwnerEvent::Output { data, .. } =
+                    output.recv().await.unwrap()
+                {
+                    observed.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            observed
+        })
+        .await
+        .expect("actual provider output must reach the marker")
+    })
 }
 
 #[cfg(unix)]
@@ -101,47 +176,57 @@ fn capacity_output_through(output: &std::sync::mpsc::Receiver<String>, marker: &
 fn codex_capacity_resume_submits_once_after_a_quiet_minute() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, id, tasks, output) = capacity_resume_fixture(temp.path());
+    let (owner, pane, mut output) = capacity_resume_fixture(temp.path());
     let screen = "■ Selected model is at capacity. Please try again later.\n› ";
-    runtime.observe_provider_api_error(&id, Some(screen));
-    let due = runtime.provider_capacity_resumes["capacity-session"]
-        .due
-        .unwrap();
-    // A turn-ending Stop may arrive after the capacity output; it is not
-    // renewed activity and must preserve the pending retry.
-    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "waiting",
-        "Stop",
-        "capacity-session",
-    ));
+    let current = policy_owner_screen(&owner, &pane, screen);
+    let due = current.capacity_resume.unwrap().due.unwrap();
+    policy_owner_hook(&owner, &pane, "Stop", "waiting");
     assert_eq!(
-        runtime.window_status(&id),
-        Some(WindowProcessStatus::Waiting)
+        owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation))
+            .unwrap()
+            .status,
+        WindowProcessStatus::Waiting
     );
-    runtime.sweep_provider_capacity_resumes(due - Duration::from_secs(1));
-    assert!(tasks.lock().unwrap().is_empty());
-    runtime.sweep_provider_capacity_resumes(due);
-    assert_eq!(
-        tasks.lock().unwrap().len(),
-        1,
-        "one bounded retry must be queued"
-    );
-    let task = tasks.lock().unwrap().remove(0);
-    task();
-    let observed = capacity_output_through(&output, "verification gates still apply.\r\n");
-    assert!(observed.contains("[gwt]"), "{observed}");
-    runtime.observe_provider_api_error(&id, Some("Working again\n› "));
-    runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "running",
-        "PreToolUse",
-        "capacity-session",
-    ));
-    runtime.observe_provider_api_error(&id, Some(screen));
-    runtime.sweep_provider_capacity_resumes(due + Duration::from_secs(120));
+    owner_fixture_block_on(owner.tick_runtime_policy(due - Duration::from_secs(1))).unwrap();
     assert!(
-        tasks.lock().unwrap().is_empty(),
-        "the same Session must not retry twice"
+        !owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation))
+            .unwrap()
+            .capacity_resume
+            .unwrap()
+            .attempted
     );
+    let worker =
+        owner_fixture_block_on(owner.pause_next_capacity_retry(&pane.id, pane.incarnation))
+            .unwrap();
+    owner_fixture_block_on(owner.tick_runtime_policy(due)).unwrap();
+    capacity_worker_observed(&worker, false);
+    assert!(
+        owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation))
+            .unwrap()
+            .capacity_resume
+            .unwrap()
+            .attempted,
+        "one actual bounded retry worker was queued"
+    );
+    worker.release();
+    capacity_worker_observed(&worker, true);
+    let observed = capacity_output_through(&mut output, "verification gates still apply.\r\n");
+    assert!(observed.contains("[gwt]"), "{observed}");
+    policy_owner_screen(&owner, &pane, "Working again\n› ");
+    policy_owner_hook(&owner, &pane, "PreToolUse", "running");
+    policy_owner_screen(&owner, &pane, screen);
+    owner_fixture_block_on(owner.tick_runtime_policy(due + Duration::from_secs(120))).unwrap();
+    let retried = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation))
+        .unwrap()
+        .capacity_resume
+        .unwrap();
+    assert!(
+        retried.attempted && retried.due.is_none(),
+        "the same actual Session must not retry twice"
+    );
+    pane.pty.write_input(b"GWT_INPUT_BARRIER\r").unwrap();
+    assert!(!capacity_output_through(&mut output, "GWT_INPUT_BARRIER").contains("[gwt]"));
+    super::pane_control_tests::control_close(&owner, &pane);
 }
 
 #[cfg(unix)]
@@ -157,65 +242,67 @@ fn codex_capacity_resume_rechecks_activity_and_session_authority_after_worker_qu
     ] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (mut runtime, id, tasks, output) = capacity_resume_fixture(temp.path());
-        let pty = Arc::clone(&runtime.runtimes[&id].pty);
-        runtime.observe_provider_api_error(&id, Some("■ Selected model is at capacity"));
-        let due = runtime.provider_capacity_resumes["capacity-session"]
+        let (owner, pane, mut output) = capacity_resume_fixture(temp.path());
+        let due = policy_owner_screen(&owner, &pane, "■ Selected model is at capacity")
+            .capacity_resume
+            .unwrap()
             .due
             .unwrap();
-        runtime.sweep_provider_capacity_resumes(due);
-        assert_eq!(tasks.lock().unwrap().len(), 1, "{changed}");
+        let worker =
+            owner_fixture_block_on(owner.pause_next_capacity_retry(&pane.id, pane.incarnation))
+                .unwrap();
+        owner_fixture_block_on(owner.tick_runtime_policy(due)).unwrap();
+        capacity_worker_observed(&worker, false);
+        let mut successor = None;
         match changed {
             "submitted input" => {
-                // The browser's fast input path bypasses AppRuntime entirely.
-                pty.write_input(b"human turn\r").unwrap();
-                assert!(!pty.has_unsent_user_input());
+                pane.pty.write_input(b"human turn\r").unwrap();
+                assert!(!pane.pty.has_unsent_user_input());
             }
-            "recovery hook" => {
-                runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-                    "running",
-                    "PreToolUse",
-                    "capacity-session",
-                ));
-            }
-            "approval hook" => {
-                runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-                    "waiting",
-                    "PermissionRequest",
-                    "capacity-session",
-                ));
-            }
+            "recovery hook" => policy_owner_hook(&owner, &pane, "PreToolUse", "running"),
+            "approval hook" => policy_owner_hook(&owner, &pane, "PermissionRequest", "waiting"),
             "different API error" => {
-                runtime.observe_provider_api_error(&id, Some("API Error: 401 Unauthorized"));
-                assert_eq!(runtime.provider_api_error_holds[&id].http_status, Some(401));
+                let current = policy_owner_screen(&owner, &pane, "API Error: 401 Unauthorized");
+                assert_eq!(current.policy.api_error.unwrap().http_status, Some(401));
             }
             "settled execution" => {
                 gwt::cli::execution_state::settle(
-                    &runtime.active_agent_sessions[&id].worktree_path,
-                    "capacity-session",
+                    &pane.session.as_ref().unwrap().worktree_path,
+                    &pane.session.as_ref().unwrap().id,
                     gwt::cli::execution_state::ExecutionSettlement::Completed,
                 )
                 .unwrap();
             }
             "replaced Session" => {
-                let mut replacement =
-                    gwt_agent::Session::load(&runtime.sessions_dir.join("capacity-session.toml"))
-                        .unwrap();
-                replacement.id = "replacement-session".into();
-                runtime
-                    .active_agent_sessions
-                    .get_mut(&id)
-                    .unwrap()
-                    .session_id = replacement.id.clone();
-                runtime.register_pty_writer(&id, Some(&replacement));
+                super::pane_control_tests::control_close(&owner, &pane);
+                successor = Some(super::pane_control_tests::control_owner_launch(
+                    &owner,
+                    "policy",
+                    policy_owner_config(
+                        temp.path(),
+                        &temp.path().join("project"),
+                        gwt_agent::AgentId::Codex,
+                        43,
+                    ),
+                ));
             }
             _ => unreachable!(),
         }
-        let task = tasks.lock().unwrap().remove(0);
-        task();
-        pty.write_input(b"GWT_INPUT_BARRIER\r").unwrap();
-        let observed = capacity_output_through(&output, "GWT_INPUT_BARRIER");
+        worker.release();
+        capacity_worker_observed(&worker, true);
+        let current = successor.as_ref().unwrap_or(&pane);
+        current.pty.write_input(b"GWT_INPUT_BARRIER\r").unwrap();
+        if successor.is_some() {
+            assert!(
+                owner_fixture_block_on(owner.probe(&current.id, current.incarnation))
+                    .unwrap()
+                    .capacity_resume
+                    .is_none()
+            );
+        }
+        let observed = capacity_output_through(&mut output, "GWT_INPUT_BARRIER");
         assert!(!observed.contains("[gwt]"), "{changed}: {observed}");
+        super::pane_control_tests::control_close(&owner, current);
     }
 }
 
@@ -224,35 +311,38 @@ fn codex_capacity_resume_rechecks_activity_and_session_authority_after_worker_qu
 fn codex_capacity_resume_rejects_a_replaced_session_before_its_due_tick() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, id, tasks, _) = capacity_resume_fixture(temp.path());
-    runtime.observe_provider_api_error(&id, Some("■ Selected model is at capacity"));
-    let due = runtime.provider_capacity_resumes["capacity-session"]
+    let (owner, pane, mut output) = capacity_resume_fixture(temp.path());
+    let due = policy_owner_screen(&owner, &pane, "■ Selected model is at capacity")
+        .capacity_resume
+        .unwrap()
         .due
         .unwrap();
-    let mut replacement =
-        gwt_agent::Session::load(&runtime.sessions_dir.join("capacity-session.toml")).unwrap();
-    replacement.id = "replacement-session".into();
-    let mut binding = replacement.execution_binding.clone().unwrap();
-    binding.session_id = replacement.id.clone();
-    let token = runtime
-        .agent_capability_issuer
-        .as_ref()
-        .unwrap()
-        .issue_bound(&replacement.worktree_path, &replacement.id, binding)
-        .unwrap()
-        .token;
-    runtime.agent_capability_tokens.insert(id.clone(), token);
-    runtime
-        .active_agent_sessions
-        .get_mut(&id)
-        .unwrap()
-        .session_id = replacement.id.clone();
-    runtime.register_pty_writer(&id, Some(&replacement));
-    runtime.sweep_provider_capacity_resumes(due);
-    assert!(
-        tasks.lock().unwrap().is_empty(),
-        "a replacement Session must not inherit the old retry"
+    super::pane_control_tests::control_close(&owner, &pane);
+    let successor = super::pane_control_tests::control_owner_launch(
+        &owner,
+        "policy",
+        policy_owner_config(
+            temp.path(),
+            &temp.path().join("project"),
+            gwt_agent::AgentId::Codex,
+            43,
+        ),
     );
+    owner_fixture_block_on(owner.tick_runtime_policy(due)).unwrap();
+    assert!(
+        owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation))
+            .unwrap()
+            .capacity_resume
+            .is_none(),
+        "a replacement actual Session must not inherit the old retry"
+    );
+    assert_ne!(
+        successor.session.as_ref().unwrap().id,
+        pane.session.as_ref().unwrap().id
+    );
+    successor.pty.write_input(b"GWT_INPUT_BARRIER\r").unwrap();
+    assert!(!capacity_output_through(&mut output, "GWT_INPUT_BARRIER").contains("[gwt]"));
+    super::pane_control_tests::control_close(&owner, &successor);
 }
 
 /// Issue #4584 AC-1/AC-4: the regression this Issue exists for. A turn ended
@@ -720,133 +810,122 @@ fn a_real_pty_rendering_the_notice_puts_its_pane_into_waiting() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "claude");
-
-    // The exact Claude wording observed on 2026-08-17, printed by a child that
-    // then stays alive and unresponsive — the shape the exit path cannot see.
-    // Issue #5178: require acknowledgement between writes to force a partial
-    // PTY read without relying on the child or parent being scheduled first.
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let script = "printf '\\n> read the file\\n\\n'; \
          printf \"You've hit your weekly limit \\302\\267 resets Aug 20 at 6am (Asia/Tokyo)\\n\"; \
          read -r release; \
          printf '/usage-credits to finish what you are working on.\\n'; \
          sleep 30";
-    let pane = Pane::new(
-        window_id.clone(),
-        "/bin/sh".to_string(),
-        vec!["-c".to_string(), script.to_string()],
-        80,
-        24,
-        HashMap::new(),
-        test_pane_cwd(),
-    )
-    .expect("quota notice pane");
-    let pane = Arc::new(Mutex::new(pane));
-    runtime.runtimes.insert(
-        window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            pane.clone(),
-        ),
-    );
-
-    // Pump the pty into the vt100 parser the way the production output thread
-    // does, until the child's notice is on screen.
-    let mut reader = pane
-        .lock()
-        .expect("pane lock")
-        .reader()
-        .expect("pty reader");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let first = instant("2026-08-17T09:20:00Z");
-    let mut released = false;
-    let mut rendered = false;
-    let mut buffer = [0_u8; 4096];
-    while std::time::Instant::now() < deadline {
-        let read = std::io::Read::read(&mut reader, &mut buffer).expect("pty read");
-        if read == 0 {
-            break;
-        }
-        let screen = {
-            let mut locked = pane.lock().expect("pane lock");
-            locked.process_bytes(&buffer[..read]);
-            locked.screen().contents()
-        };
-        if !released && screen.contains("weekly limit") {
-            let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
-            assert!(
-                !runtime.provider_quota_candidates.contains_key(&window_id)
-                    && !runtime.provider_quota_holds.contains_key(&window_id),
-                "a heading without its native refusal footer must not form a quota candidate or hold"
-            );
-            pane.lock()
-                .expect("pane lock")
-                .write_input(b"\n")
-                .expect("release quota notice footer");
-            released = true;
-        }
-        if screen.contains("/usage-credits to finish what you are working on.") {
-            rendered = true;
-            break;
-        }
-    }
+    let (owner, pane) = policy_owner_fixture(temp.path(), gwt_agent::AgentId::ClaudeCode, script);
+    policy_owner_hook(&owner, &pane, "PreToolUse", "running");
+    let mut output = owner.subscribe();
+    let wait_screen = |output: &mut tokio::sync::broadcast::Receiver<
+        gwt::project_runtime::events::OwnerEvent,
+    >,
+                       marker: &str| {
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bound real child-to-owner output delivery; the notice/release handshake establishes ordering.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    let screen = pane.pane.lock().unwrap().screen().contents();
+                    if screen.contains(marker) {
+                        break screen;
+                    }
+                    output.recv().await.unwrap();
+                }
+            })
+            .await
+            .expect("actual provider notice reaches its owner parser")
+        })
+    };
+    wait_screen(&mut output, "weekly limit");
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &pane.id,
+        pane.incarnation,
+        Utc::now(),
+        Instant::now(),
+    ))
+    .unwrap();
+    let heading = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
     assert!(
-        rendered,
-        "precondition: the child's complete notice must reach the vt100 screen"
+        heading.policy.quota_candidate_since.is_none() && heading.policy.quota_hold.is_none(),
+        "a heading without its native refusal footer must not form a quota candidate or hold"
     );
-
-    let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, first);
+    pane.pty.write_input(b"\n").unwrap();
+    wait_screen(
+        &mut output,
+        "/usage-credits to finish what you are working on.",
+    );
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &pane.id,
+        pane.incarnation,
+        Utc::now(),
+        Instant::now(),
+    ))
+    .unwrap();
+    let candidate = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
     assert!(
-        !runtime.provider_quota_holds.contains_key(&window_id),
+        candidate.policy.quota_hold.is_none(),
         "the settle window still applies to a real pane"
     );
-
-    let settled = first + chrono::Duration::seconds(300);
-    let _ = runtime.observe_provider_quota_notice_from_screen(&window_id, settled);
-
+    let settled = candidate
+        .policy
+        .quota_candidate_since
+        .expect("actual owner observed the complete notice")
+        + chrono::Duration::seconds(300);
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &pane.id,
+        pane.incarnation,
+        settled,
+        Instant::now(),
+    ))
+    .unwrap();
+    let current = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
     assert_eq!(
-        runtime.window_status(&window_id),
-        Some(WindowProcessStatus::Waiting),
+        current.status,
+        WindowProcessStatus::Waiting,
         "a real pane showing a real notice must render as waiting, not idle; screen: {:?}",
-        pane.lock().expect("pane lock").screen().contents()
+        pane.pane.lock().unwrap().screen().contents()
     );
-    let hold = runtime
-        .provider_quota_holds
-        .get(&window_id)
-        .expect("the hold was recorded");
+    let hold = current
+        .policy
+        .quota_hold
+        .expect("the owner recorded its hold");
     let gwt::IssueMonitorFailure::ProviderUsageLimit {
         provider,
         resets_at,
         ..
     } = hold
     else {
-        panic!("expected a provider usage limit hold, got {hold:?}");
+        panic!("expected provider usage limit hold, got {hold:?}");
     };
     assert_eq!(provider, "claude");
-    // The provider prints a bare local wall clock, so production resolves it in
-    // the machine's zone. Deriving the expectation the same way keeps this exact
-    // without asserting the machine is in any particular zone — the first
-    // version hard-coded the author's +09:00 and failed on a UTC CI runner.
-    let expected_reset = chrono::Local
-        .with_ymd_and_hms(2026, 8, 20, 6, 0, 0)
-        .earliest()
-        .expect("6am on Aug 20 exists in the local zone")
+    let local = settled.with_timezone(&chrono::Local);
+    let expected_reset = [local.year(), local.year() + 1]
+        .into_iter()
+        .map(|year| {
+            chrono::Local
+                .with_ymd_and_hms(year, 8, 20, 6, 0, 0)
+                .earliest()
+                .unwrap()
+        })
+        .find(|reset| reset > &local)
+        .unwrap()
         .with_timezone(&chrono::Utc)
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     assert_eq!(
         resets_at.as_deref(),
         Some(expected_reset.as_str()),
-        "the reset instant survives the pty round trip"
+        "the reset instant survives the actual PTY round trip in the machine's local zone"
     );
     assert!(
-        runtime
-            .window_details
-            .get(&window_id)
+        current
+            .detail
+            .as_ref()
             .is_some_and(|detail| detail.contains("usage limit")),
-        "the pane must say why it is waiting"
+        "the actual owner must say why its pane is waiting"
     );
-
-    runtime.stop_window_runtime(&window_id);
+    super::pane_control_tests::control_close(&owner, &pane);
 }
 
 /// Issue #3616: an ordinary clean exit is untouched by the quota path.

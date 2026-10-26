@@ -1,5 +1,58 @@
 use super::*;
 
+fn pm_restore_owner_fixture(
+    runtime: &mut AppRuntime,
+) -> (
+    tokio::runtime::Runtime,
+    gwt::project_runtime::test_support::ProjectOwnerHarness,
+) {
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let tab = runtime.tab(&runtime.test_context().tab_id).unwrap();
+    save_workspace_state(
+        &workspace_state_path(&tab.project_root),
+        &tab.workspace.persisted(),
+    )
+    .expect("persist the original restore canvas for the physical owner");
+    let (command, args) = if cfg!(windows) {
+        long_running_test_command()
+    } else {
+        // Restoring the PM appends its bootstrap prompt. A provider accepts
+        // that argument; direct cat would treat it as a missing input file.
+        (
+            "/bin/sh".into(),
+            vec!["-c".into(), "exec /bin/cat".into(), "fixture".into()],
+        )
+    };
+    persist_owner_fixture_agent(command, args);
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let owner = executor.block_on(production_owner_fixture(
+        &runtime.test_context().project_root,
+    ));
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    (executor, owner)
+}
+
+fn drain_pm_owner_restore(
+    runtime: &mut AppRuntime,
+    recorded: &Arc<Mutex<Vec<UserEvent>>>,
+) -> Vec<OutboundEvent> {
+    let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
+        panic!("queued restore fixture");
+    };
+    drain_queued_blocking_tasks(tasks);
+    let mut events = Vec::new();
+    while recorded.lock().unwrap().iter().any(|event| {
+        matches!(
+            recorded_project_payload(event),
+            UserEvent::RemoteOwnerLaunchComplete(_)
+        )
+    }) {
+        let completion = take_remote_owner_launch_completion(recorded);
+        events.extend(runtime.handle_remote_owner_launch_complete(completion));
+    }
+    events
+}
+
 /// Issue #3607 AC-1 / AC-2 / AC-4: the second store of a split repository must
 /// not start its own PM. Store-scoped uniqueness cannot see the first one, so
 /// before this gate both stores auto-started and two PMs supervised one
@@ -211,7 +264,7 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
     let mut persisted = empty_workspace_state();
     let mut agent_window =
         sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
-    agent_window.agent_id = Some("claude".to_string());
+    agent_window.agent_id = Some("fixture".to_string());
     agent_window.session_id = Some("session-foreign-pm".to_string());
     persisted.windows.push(agent_window);
     persisted.next_z_index = 2;
@@ -224,10 +277,15 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-current"));
+    let (mut runtime, recorded_events) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
+    let (executor, owner) = pm_restore_owner_fixture(&mut runtime);
 
-    let mut session =
-        gwt_agent::Session::new(&orphan_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    let mut session = gwt_agent::Session::new(
+        &orphan_pm_worktree,
+        "work",
+        gwt_agent::AgentId::Custom("fixture".into()),
+    );
     session.id = "session-foreign-pm".to_string();
     session.agent_session_id = Some("native-foreign-pm".to_string());
     session.restore_window_on_startup = true;
@@ -240,10 +298,18 @@ fn restore_refuses_a_window_bound_to_another_stores_pm_worktree() {
         events.is_empty(),
         "restoring another store's PM worktree must not spawn anything"
     );
+    drain_pm_owner_restore(&mut runtime, &recorded_events);
     assert!(
         runtime.pending_auto_resume_sources.is_empty(),
         "no resume may be tracked for a foreign PM session"
     );
+    assert!(executor
+        .block_on(owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes))
+        .unwrap()["panes"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    executor.block_on(owner.shutdown());
 }
 
 /// The same gate must leave the store's *own* PM restorable — the stale-PM
@@ -263,7 +329,7 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     let mut persisted = empty_workspace_state();
     let mut agent_window =
         sample_window("agent-1", WindowPreset::Agent, WindowProcessStatus::Stopped);
-    agent_window.agent_id = Some("claude".to_string());
+    agent_window.agent_id = Some("fixture".to_string());
     agent_window.session_id = Some("session-own-pm".to_string());
     persisted.windows.push(agent_window);
     persisted.next_z_index = 2;
@@ -278,9 +344,13 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
     };
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
+    let (executor, owner) = pm_restore_owner_fixture(&mut runtime);
 
-    let mut session =
-        gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+    let mut session = gwt_agent::Session::new(
+        &own_pm_worktree,
+        "work",
+        gwt_agent::AgentId::Custom("fixture".into()),
+    );
     session.id = "session-own-pm".to_string();
     session.agent_session_id = Some("native-own-pm".to_string());
     session.restore_window_on_startup = true;
@@ -304,16 +374,38 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
 
     runtime.restore_open_project_windows("tab-current");
 
-    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+    let events = drain_pm_owner_restore(&mut runtime, &recorded_events);
 
     assert!(
         !events.is_empty(),
         "the store's own PM must still restore through the shared primitive"
     );
-    assert!(runtime
-        .pending_auto_resume_sources
-        .values()
-        .any(|source| source == "session-own-pm"));
+    assert_eq!(runtime.runtimes.len(), 1, "exactly one real PM runtime");
+    let id = runtime.runtimes.keys().next().unwrap().clone();
+    let projection = &runtime.runtimes[&id];
+    let probe = executor
+        .block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+        .unwrap();
+    assert_eq!(
+        probe
+            .session
+            .as_ref()
+            .unwrap()
+            .restore_source_session_id
+            .as_deref(),
+        Some("session-own-pm"),
+        "the actual successor must restore the registered source"
+    );
+    assert_eq!(
+        probe.session.as_ref().unwrap().agent_session_id.as_deref(),
+        Some("native-own-pm")
+    );
+    assert!(
+        probe.pty.try_wait().unwrap().is_none(),
+        "the admitted PM must be physically live"
+    );
+    close_test_owner_runtime(&mut runtime, &id);
+    executor.block_on(owner.shutdown());
 }
 
 /// Issue #4394 AC-1 / AC-5: a GUI restart brings back exactly one PM window.
@@ -342,7 +434,7 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
             WindowPreset::Agent,
             WindowProcessStatus::Stopped,
         );
-        window.agent_id = Some("claude".to_string());
+        window.agent_id = Some("fixture".to_string());
         window.session_id = Some(session_id.to_string());
         persisted.windows.push(window);
     }
@@ -358,10 +450,14 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
     };
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-current"));
+    let (executor, owner) = pm_restore_owner_fixture(&mut runtime);
 
     for session_id in std::iter::once(registered).chain(orphans) {
-        let mut session =
-            gwt_agent::Session::new(&own_pm_worktree, "work", gwt_agent::AgentId::ClaudeCode);
+        let mut session = gwt_agent::Session::new(
+            &own_pm_worktree,
+            "work",
+            gwt_agent::AgentId::Custom("fixture".into()),
+        );
         session.id = session_id.to_string();
         session.agent_session_id = Some(format!("native-{session_id}"));
         session.restore_window_on_startup = true;
@@ -377,16 +473,27 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
 
     runtime.restore_open_project_windows("tab-current");
 
-    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+    let events = drain_pm_owner_restore(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "the registered PM must still restore");
     assert_eq!(
         runtime
-            .pending_auto_resume_sources
+            .active_agent_sessions
             .values()
+            .map(|active| {
+                gwt_agent::Session::load(
+                    &runtime
+                        .sessions_dir
+                        .join(format!("{}.toml", active.session_id)),
+                )
+                .expect("actual resumed Session")
+                .restore_source_session_id
+                .expect("exact restored source")
+            })
             .collect::<Vec<_>>(),
-        vec![registered],
-        "only the registered PM may be resumed"
+        vec![registered.to_string()],
+        "only the registered PM may be resumed; events={events:?}; details={:?}",
+        runtime.window_details
     );
     for orphan in orphans {
         let session = gwt_agent::Session::load_and_migrate(
@@ -409,6 +516,23 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
             "{orphan} must not keep a PM placeholder on the canvas"
         );
     }
+    assert_eq!(
+        runtime.runtimes.len(),
+        1,
+        "exactly one real PM runtime; events={events:?}; details={:?}",
+        runtime.window_details
+    );
+    let id = runtime.runtimes.keys().next().unwrap().clone();
+    let projection = &runtime.runtimes[&id];
+    let probe = executor
+        .block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+        .unwrap();
+    assert!(
+        probe.pty.try_wait().unwrap().is_none(),
+        "the admitted PM must be physically live"
+    );
+    close_test_owner_runtime(&mut runtime, &id);
+    executor.block_on(owner.shutdown());
 }
 
 /// Issue #4394 AC-2: succession retires the replaced PM Session for restore,
@@ -2735,8 +2859,11 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let _gwt_home = ScopedGwtHome::set(temp.path().join(".gwt"));
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let runner_bin = write_fixture_runners(temp.path(), &["codex", "npx", "bunx"]);
+
+    #[cfg(not(windows))]
+    fs::write(runner_bin.join("codex"), "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nexec /bin/cat\n").expect("keep the actual restored provider alive through projection");
 
     for (origin, expected_route) in [
         (
@@ -2751,9 +2878,10 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         let case_root = temp.path().join(format!("{origin:?}"));
         let repo = case_root.join("repo");
         fs::create_dir_all(&repo).expect("create repo");
-        init_repo(&repo);
+        init_repo_with_initial_commit(&repo);
+        run_git(&repo, &["branch", "-M", "main"]);
         let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
-        let (mut runtime, recorded_events) =
+        let (mut runtime, _recorded_events) =
             sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
         let mut settings = Settings::default();
         pin_launch_agents(&mut settings, &runner_bin);
@@ -2766,17 +2894,15 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             )
             .expect("isolate Codex state and shared spawn pacing");
         write_profile_config(runtime.profile_config_path.as_deref().unwrap(), &settings);
-        runtime.agent_capability_issuer =
-            Some(crate::embedded_server::AgentCapabilityIssuer::for_test(
-                "http://127.0.0.1:43123/internal/hook-live",
-                "ws://127.0.0.1:43124/ws",
-                "ws://127.0.0.1:43123/internal/pane-ws",
-            ));
+        write_profile_config(&gwt_core::paths::gwt_config_path(), &settings);
+        runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
         let mut source = gwt_agent::Session::new(&repo, "main", gwt_agent::AgentId::Codex);
         source.agent_session_id = Some("conversation-4217-restart".to_string());
         source.linked_issue_number = Some(3824);
         source.agent_name = Some("Flora".into());
         source.launch_route = gwt_agent::LaunchRoute::Autonomous;
+        source.status = gwt_agent::AgentStatus::Stopped;
+        source.restore_window_on_startup = true;
         source.save(&runtime.sessions_dir).expect("save source");
         let source_session_id = source.id.clone();
         let placeholder = runtime
@@ -2804,7 +2930,18 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         );
         runtime.register_window("tab-1", &placeholder.id);
 
-        runtime.spawn_restored_agent_session("tab-1", source, None, origin);
+        let window_id = combined_window_id("tab-1", &placeholder.id);
+        let (executor, owner, _events, error, pane_id) = drive_owner_restore_fixture(
+            &mut runtime,
+            &window_id,
+            source,
+            if origin == super::super::startup::RestoreOrigin::Automatic {
+                gwt_agent::SessionLaunchOrigin::AutomaticRestore
+            } else {
+                gwt_agent::SessionLaunchOrigin::UserRestart
+            },
+        );
+        assert!(error.is_none(), "actual restore ACK: {error:?}");
         let source_member_id = gwt_agent::Session::load(
             &runtime
                 .sessions_dir
@@ -2840,29 +2977,9 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             1,
             "restart replaces its old pane"
         );
-        wait_for_recorded_event("restore launch preparation", &recorded_events, |events| {
-            events.iter().any(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchComplete { .. }
-                )
-            })
-        });
-        let recorded = recorded_events.lock().expect("event log");
-        let (window_id, result) = recorded
-            .iter()
-            .find_map(|event| match recorded_project_payload(event) {
-                UserEvent::LaunchComplete {
-                    window_id, result, ..
-                } => Some((window_id.clone(), result.as_ref().clone())),
-                _ => None,
-            })
-            .expect("launch completion");
-        let completion = result.as_ref().expect("successful restore preparation");
-        // Preparation preserves launch authority; completion records the
-        // distinct window origin before publishing the running Session.
+        let successor_id = runtime.active_agent_sessions[&window_id].session_id.clone();
         let successor =
-            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", completion.1)))
+            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{successor_id}.toml")))
                 .expect("load restored Session");
         assert_eq!(successor.launch_route, expected_route, "{origin:?}");
         assert_eq!(
@@ -2874,8 +2991,6 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
             successor.agent_name.as_deref(),
             Some(assigned_name.as_str())
         );
-        drop(recorded);
-        runtime.handle_launch_complete_and_drain(window_id, result);
         let successor =
             gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", successor.id)))
                 .expect("load completed restore provenance");
@@ -2889,6 +3004,16 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
                 super::super::startup::RestoreOrigin::UserRequested => "user_restart",
             }
         );
+        let incarnation = runtime.runtimes[&window_id].incarnation;
+        executor
+            .block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+                    id: pane_id,
+                    incarnation,
+                }),
+            )
+            .expect("exact restored physical cleanup");
+        executor.block_on(owner.shutdown());
     }
 }
 
@@ -2910,8 +3035,18 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let mut session = gwt_agent::Session::new(&pm_worktree, "", gwt_agent::AgentId::Codex);
+    let (executor, owner) = pm_restore_owner_fixture(&mut runtime);
+    let mut session = gwt_agent::Session::new(
+        &pm_worktree,
+        "",
+        gwt_agent::AgentId::Custom("fixture".into()),
+    );
     session.agent_session_id = Some("pm-conversation-resume".to_string());
+    session.project_state_root = Some(repo.clone());
+    session.restore_window_on_startup = true;
+    session.record_hook_event("Stop");
+    session.record_completed_stop();
+    session.save(&runtime.sessions_dir).unwrap();
     // Issue #4394 AC-1: only the registered PM's Session may resume from the
     // PM worktree.
     gwt::pm_registry::try_register_pm(
@@ -2928,7 +3063,7 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         super::super::startup::RestoreOrigin::Automatic,
     );
 
-    let events = drain_pm_worktree_preparation(&mut runtime, &recorded_events);
+    let events = drain_pm_owner_restore(&mut runtime, &recorded_events);
 
     assert!(!events.is_empty(), "PM resume must still spawn its pane");
     assert_eq!(
@@ -2936,4 +3071,16 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         commit_b,
         "generic startup/restart resume must refresh before process spawn"
     );
+    assert_eq!(runtime.runtimes.len(), 1, "exactly one real PM runtime");
+    let id = runtime.runtimes.keys().next().unwrap().clone();
+    let projection = &runtime.runtimes[&id];
+    let probe = executor
+        .block_on(owner.probe(&projection.owner_pane_id, projection.incarnation))
+        .unwrap();
+    assert!(
+        probe.pty.try_wait().unwrap().is_none(),
+        "the admitted PM must be physically live"
+    );
+    close_test_owner_runtime(&mut runtime, &id);
+    executor.block_on(owner.shutdown());
 }

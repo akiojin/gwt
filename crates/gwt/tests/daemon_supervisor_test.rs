@@ -64,7 +64,7 @@ fn always_alive(_pid: u32) -> bool {
 
 fn seed_live_endpoint(gwt_home: &Path, project_root: &Path, pid: u32) -> RuntimeScope {
     let scope = RuntimeScope::from_project_root(project_root, RuntimeTarget::Host).expect("scope");
-    let endpoint = DaemonEndpoint::new(
+    let mut endpoint = DaemonEndpoint::new(
         scope.clone(),
         pid,
         gwt_home.join("daemon.sock").display().to_string(),
@@ -73,6 +73,7 @@ fn seed_live_endpoint(gwt_home: &Path, project_root: &Path, pid: u32) -> Runtime
         // reusable fixture endpoint must report this build's version.
         env!("CARGO_PKG_VERSION").to_string(),
     );
+    endpoint.project_transport_url = Some("http://127.0.0.1:1".into());
     persist_endpoint(&scope.endpoint_path(gwt_home), &endpoint).expect("persist endpoint");
     scope
 }
@@ -133,6 +134,7 @@ fn ensure_running_starts_a_daemon_when_no_endpoint_is_published() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// A daemon that already owns the endpoint must never be duplicated: two
@@ -168,6 +170,7 @@ fn ensure_running_reuses_a_live_daemon_endpoint_instead_of_spawning() {
         "no second daemon may start"
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// The project authority may live in another worktree's endpoint slot.
@@ -183,13 +186,14 @@ fn ensure_running_reuses_the_project_authority_before_its_local_endpoint() {
         RuntimeTarget::Host,
     )
     .expect("owner scope");
-    let owner = DaemonEndpoint::new(
+    let mut owner = DaemonEndpoint::new(
         owner_scope.clone(),
         std::process::id(),
         fixture.gwt_home.join("owner.sock").display().to_string(),
         "owner-token".into(),
         env!("CARGO_PKG_VERSION").into(),
     );
+    owner.project_transport_url = Some("http://127.0.0.1:1".into());
     persist_endpoint(&owner_scope.endpoint_path(&fixture.gwt_home), &owner).unwrap();
     let prefs_path = fixture
         .gwt_home
@@ -215,6 +219,7 @@ fn ensure_running_reuses_the_project_authority_before_its_local_endpoint() {
         },
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     assert_eq!(
         result.unwrap(),
         DaemonEnsureOutcome::AlreadyRunning { pid: owner.pid }
@@ -261,6 +266,7 @@ fn free_v2_authority_lease_recovers_without_retiring_a_reused_pid() {
             },
         );
         supervisor.shutdown();
+        supervisor.cleanup_test_children();
         assert_eq!(
             retire_calls.load(Ordering::SeqCst),
             0,
@@ -314,6 +320,7 @@ fn held_lease_with_stale_descriptor_cannot_retire_an_unverified_pid() {
         },
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     assert_eq!(
         retired.load(Ordering::SeqCst),
         0,
@@ -356,8 +363,10 @@ fn a_queued_ensure_cannot_spawn_after_shutdown() {
         )
     };
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     let result = queued();
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     assert!(
         result.is_err(),
         "shutdown must reject queued ensure: {result:?}"
@@ -474,6 +483,7 @@ fn a_contended_prefs_lock_bounds_the_supervisor_authority_probe() {
     fs2::FileExt::unlock(&lock).unwrap();
     thread.join().unwrap();
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     assert!(
         matches!(result, Ok(Err(ref error)) if error.contains("deadline expired")),
         "probe must fail before the unrelated holder releases prefs.lock: {result:?}"
@@ -508,6 +518,7 @@ fn ensure_running_does_not_start_a_second_daemon_while_the_first_is_still_starti
     assert_eq!(second, DaemonEnsureOutcome::Starting { pid });
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 #[test]
@@ -551,6 +562,7 @@ fn same_project_clones_share_one_starting_child() {
     let first = supervisor.ensure_running_with(&fixture.project_root, inputs());
     let second = supervisor.ensure_running_with(&sibling, inputs());
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
     let DaemonEnsureOutcome::Spawned { pid } = first.unwrap() else {
         panic!("first clone must start the owner")
     };
@@ -593,6 +605,7 @@ fn ensure_running_replaces_a_daemon_that_exited() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// A stale endpoint left by a dead daemon must not be mistaken for a live one.
@@ -619,6 +632,7 @@ fn ensure_running_starts_a_daemon_when_the_published_endpoint_owner_is_dead() {
     assert!(matches!(outcome, DaemonEnsureOutcome::Spawned { .. }));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// A spawn failure must surface the reason instead of being swallowed: a
@@ -647,6 +661,7 @@ fn ensure_running_reports_the_reason_when_the_daemon_cannot_be_started() {
         "the failure reason must reach the caller: {error}"
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 #[test]
@@ -674,6 +689,7 @@ fn ensure_running_records_a_daemon_fault_in_the_error_ledger() {
         "daemon fault must land in the error ledger: {listed:?}"
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// The child must ask for the daemon through gwtd's only sanctioned transport
@@ -685,7 +701,11 @@ fn daemon_spawn_request_asks_gwtd_for_daemon_start_inside_the_project() {
     let gwtd = PathBuf::from("/Applications/GWT.app/Contents/MacOS/gwtd");
     let project_root = PathBuf::from("/Users/example/Workbench/project");
 
-    let request = daemon_spawn_request(&gwtd, &project_root);
+    let request = daemon_spawn_request(
+        &gwtd,
+        &project_root,
+        gwt_core::daemon::DaemonStartIntent::GuiManaged,
+    );
 
     assert_eq!(request.program, gwtd);
     assert_eq!(request.current_dir, project_root);
@@ -738,6 +758,7 @@ fn supervisor_resolves_against_the_current_daemon_protocol_version() {
         "an endpoint from another protocol version cannot be reused: {outcome:?}"
     );
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }
 
 /// The child's diagnostics have to land somewhere. The first isolated
@@ -788,4 +809,5 @@ fn the_spawn_context_anchors_the_daemon_diagnostic_log_next_to_its_endpoint() {
     assert_ne!(stderr_log, endpoint_path, "it must not shadow the endpoint");
     assert!(stderr_log.to_string_lossy().ends_with(".daemon-stderr.log"));
     supervisor.shutdown();
+    supervisor.cleanup_test_children();
 }

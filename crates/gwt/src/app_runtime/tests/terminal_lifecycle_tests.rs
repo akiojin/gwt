@@ -2882,10 +2882,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
-    runtime
-        .runtimes
-        .get(&shell_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &shell_id)
         .pane
         .lock()
         .expect("pane lock")
@@ -2948,7 +2945,10 @@ fn pane_snapshot_never_replays_spinner_redraw_chunks_it_already_contains() {
     insert_test_pane_runtime(&mut runtime, &window_id);
     let (incarnation, pane) = {
         let window_runtime = runtime.runtimes.get(&window_id).expect("runtime");
-        (window_runtime.incarnation, Arc::clone(&window_runtime.pane))
+        (
+            window_runtime.incarnation,
+            owner_runtime_probe(&runtime, &window_id).pane,
+        )
     };
 
     let repair_queue = ClientQueue::default();
@@ -3515,7 +3515,8 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
     let incarnation = runtime.runtimes[&id].incarnation;
     let data = b"worker captured output";
     let seq = {
-        let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+        let owner_probe = owner_runtime_probe(&runtime, &id);
+        let mut pane = owner_probe.pane.lock().unwrap();
         pane.process_bytes(data);
         pane.output_seq()
     };
@@ -3526,7 +3527,7 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
         seq,
         Some("worker captured output".into()),
     );
-    let pane = runtime.runtimes[&id].pane.clone();
+    let pane = owner_runtime_probe(&runtime, &id).pane.clone();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
@@ -3571,7 +3572,8 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let mut deadline = None;
     for chunk in chunks {
         let (seq, screen) = {
-            let mut pane = runtime.runtimes[&id].pane.lock().unwrap();
+            let owner_probe = owner_runtime_probe(&runtime, &id);
+            let mut pane = owner_probe.pane.lock().unwrap();
             pane.process_bytes(chunk);
             (pane.output_seq(), pane.screen().contents())
         };
@@ -3657,7 +3659,7 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
     let current = runtime.runtimes[&id].incarnation;
-    runtime.runtimes[&id]
+    owner_runtime_probe(&runtime, &id)
         .pane
         .lock()
         .unwrap()
@@ -3695,7 +3697,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
-    runtime.runtimes[&id]
+    owner_runtime_probe(&runtime, &id)
         .pane
         .lock()
         .unwrap()
@@ -3809,22 +3811,33 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
     assert!(!monitor.has_capacity_for_monitor_spawn(42, false));
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("seed unassigned delivery");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Starting,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let mut feedback = issue_monitor_feedback(42);
-    feedback.issue_monitor_project_root = Some(repo.clone());
-    runtime
-        .pending_launch_feedback_contexts
-        .insert(window_id.to_string(), feedback);
+    let input = gwt::project_runtime::installation::IssueMonitorLaunchClaimInput {
+        project_root: repo.clone(),
+        issue_number: 42,
+        delivery_id: "launch:effect-42".into(),
+        materializer_window_id: window_id.into(),
+        materializer_id: "transport-model-materializer".into(),
+        materializer_pid: host_pid,
+        fallback_timeout: gwt_core::deadline_budget::HANG_GUARD,
+        snapshot: Some(gwt::IssueMonitorWindowSnapshot {
+            project_tab_id: "tab-1".into(),
+            observed_at: now.clone(),
+            windows: vec![gwt::IssueMonitorWindowObservation {
+                window_id: window_id.into(),
+                monitor_owned: true,
+                issue_number: Some(42),
+                status: WindowProcessStatus::Starting,
+                review_dispatch: false,
+                hold_reason: None,
+                last_output_at: None,
+                session_id: None,
+            }],
+        }),
+        snapshot_tabs: BTreeSet::from(["tab-1".into()]),
+    };
     assert_eq!(
-        runtime.window_status(window_id),
-        Some(WindowProcessStatus::Starting)
+        input.snapshot.as_ref().unwrap().windows[0].status,
+        WindowProcessStatus::Starting
     );
 
     // This tests canvas/claim ordering and durable readback, not the IPC budget.
@@ -3839,24 +3852,13 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
         )
     };
     assert!(
-        runtime
-            .claim_issue_monitor_launch_delivery_with_publishers(
-                &repo,
-                42,
-                "launch:effect-42",
-                window_id,
-                |_, _| Ok(()),
-                |_| Err(lost_ack()),
-            )
+        input
+            .claim_with_publishers(|_, _| Ok(()), |_| Err(lost_ack()),)
             .is_err(),
         "an uncommitted claim must remain uncertain"
     );
-    let accepted = runtime
-        .claim_issue_monitor_launch_delivery_with_publishers(
-            &repo,
-            42,
-            "launch:effect-42",
-            window_id,
+    let accepted = input
+        .claim_with_publishers(
             |snapshot, tabs| {
                 received.borrow_mut().push("snapshot");
                 assert_eq!(snapshot.windows[0].window_id, window_id);
@@ -3909,19 +3911,18 @@ fn issue_monitor_delivery_claim_reads_back_committed_claim_after_lost_ack() {
         accepted,
         "readback must confirm the exact materializer tuple"
     );
-    assert_eq!(runtime.tabs[0].workspace.persisted().windows.len(), 1);
+    assert_eq!(input.snapshot.as_ref().unwrap().windows.len(), 1);
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("reload daemon claim");
     let delivery = &prefs.pending_launch_deliveries[0];
     assert_eq!(
         delivery.materializer_id.as_deref(),
-        Some(runtime.issue_monitor_materializer_id.as_str())
+        Some(input.materializer_id.as_str())
     );
     assert_eq!(delivery.materializer_pid, Some(host_pid));
     assert_eq!(delivery.materializer_window_id.as_deref(), Some(window_id));
 
-    let retry =
-        runtime.capture_issue_monitor_launch_claim(&repo, 42, "launch:effect-42", window_id);
+    let retry = input.clone();
     let stamp = super::super::issue_monitor_prefs_stamp(&prefs_path);
     assert!(retry
         .claim_or_reuse()
@@ -4003,7 +4004,7 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
         source.author_login = author.map(str::to_string);
         cache.write_snapshot(&source).unwrap();
         assert_eq!(
-            input.preflight_claim(monitor.prefs(), None),
+            input.test_preflight_claim(monitor.prefs(), None),
             expected,
             "{author:?}: {body}"
         );
@@ -4023,7 +4024,7 @@ fn issue4810_delivery_claim_restores_only_the_target_cached_source() {
     }
     fs::remove_dir_all(cache_root.join("42")).unwrap();
     assert!(
-        !input.preflight_claim(monitor.prefs(), None),
+        !input.test_preflight_claim(monitor.prefs(), None),
         "missing target cache must remain held"
     );
 }

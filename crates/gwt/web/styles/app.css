@@ -6846,3 +6846,23 @@ body.route-body {
 /* /Issue #5321 */
 .issue-detail-tabs { flex-shrink: 0; padding: var(--space-2); }
 .issue-detail-provenance { color: var(--color-text-muted); font-size: var(--type-xs); }
+
+/* Project execution health never replaces the browser connection indicator. */
+.project-owner-health {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--type-xs);
+}
+.project-owner-health[data-state="healthy"] { color: var(--color-state-active); }
+.project-owner-health[data-state="degraded"] { color: var(--color-state-blocked); }
+
+.gwt-hub__orphan {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.gwt-hub__orphan-detail {
+  color: var(--color-text-muted);
+  font-size: var(--type-sm);
+}

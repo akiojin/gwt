@@ -562,3 +562,91 @@ fn launch_priority_queue_close_rejects_and_moves_payloads_outside_lock() {
         "pending payload is released outside the lock"
     );
 }
+
+#[test]
+fn owner_output_backpressure_bounds_a_stream_and_preserves_other_project_and_status_fifo() {
+    use gwt::project_runtime::events::OwnerEvent;
+    let context = ProjectContext {
+        tab_id: "a".into(),
+        project_key: gwt_core::repo_hash::ProjectKey::parse("0123456789abcdef").unwrap(),
+        generation: 1,
+        project_root: "/project-a".into(),
+    };
+    let mut other = context.clone();
+    other.tab_id = "b".into();
+    other.project_key = gwt_core::repo_hash::ProjectKey::parse("fedcba9876543210").unwrap();
+    other.project_root = "/project-b".into();
+    let identity = gwt::daemon_subscriber::ProjectOwnerIdentity {
+        pid: 42,
+        host_started_at: 100,
+        host_instance_id: "owner".into(),
+    };
+    let output = |context: &ProjectContext, id: &str, seq| UserEvent::ProjectOwnerEvent {
+        context: context.clone(),
+        connection_id: 1,
+        identity: identity.clone(),
+        event: OwnerEvent::Output {
+            id: id.into(),
+            incarnation: 7,
+            data: vec![b'x'; 1024],
+            seq,
+            screen: "latest screen".into(),
+            screen_ansi: b"latest ANSI".to_vec(),
+            screen_seq: seq,
+        },
+    };
+    let mut queue = AppEventQueue::default();
+    queue.push_back(output(&context, "pane-a", 1)).unwrap();
+    queue.push_back(output(&other, "pane-b", 1)).unwrap();
+    for seq in 2..=100 {
+        queue.push_back(output(&context, "pane-a", seq)).unwrap();
+    }
+    assert_eq!(
+        queue.len(),
+        2,
+        "one pending owner stream slot per pane; A cannot retain a byte backlog ahead of B"
+    );
+    queue
+        .push_back(UserEvent::ProjectOwnerEvent {
+            context: context.clone(),
+            connection_id: 1,
+            identity: identity.clone(),
+            event: OwnerEvent::Status {
+                id: "pane-a".into(),
+                incarnation: 7,
+                status: gwt::WindowProcessStatus::Stopped,
+                raw_status: gwt::WindowProcessStatus::Stopped,
+                detail: None,
+                exit_confirmed: true,
+                exit_code: Some(0),
+            },
+        })
+        .unwrap();
+    queue.push_back(output(&context, "pane-a", 101)).unwrap();
+    queue
+        .push_back(frontend(FrontendEvent::FrontendReady))
+        .unwrap();
+    assert!(
+        matches!(queue.pop_front(), Some(UserEvent::Frontend { .. })),
+        "control remains responsive"
+    );
+    assert!(
+        matches!(queue.pop_front(), Some(UserEvent::ProjectOwnerEvent { context: b, event: OwnerEvent::Output { id, .. }, .. }) if b == other && id == "pane-b"),
+        "B progresses before the latest A repair"
+    );
+    assert!(
+        matches!(
+            queue.pop_front(),
+            Some(UserEvent::ProjectOwnerEvent {
+                event: OwnerEvent::Status { .. },
+                ..
+            })
+        ),
+        "status/control events are never conflated"
+    );
+    assert!(
+        queue.pop_front().is_some(),
+        "latest A display repair remains queued"
+    );
+    assert!(queue.pop_front().is_none());
+}

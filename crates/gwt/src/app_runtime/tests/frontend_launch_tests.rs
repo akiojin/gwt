@@ -591,10 +591,7 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
 
     assert!(runtime.runtimes.contains_key(&window_id));
     assert!(matches!(
-        runtime
-            .runtimes
-            .get(&window_id)
-            .expect("preserved pane")
+        owner_runtime_probe(&runtime, &window_id)
             .pane
             .lock()
             .expect("pane")
@@ -636,7 +633,7 @@ fn manual_launch_stop_rejects_replaced_durable_session_before_killing_pane() {
     assert_eq!(digest.len(), 16);
     assert_ne!(digest, &decision.fingerprint);
     runtime.active_agent_sessions.remove(&window_id);
-    runtime.stop_window_runtime_without_session_projection(&window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -723,7 +720,7 @@ fn manual_launch_stop_loses_to_an_existing_cross_process_active_launch_fence() {
         .expect("clear Active relaunch fence")
     );
     runtime.active_agent_sessions.remove(&window_id);
-    runtime.stop_window_runtime_without_session_projection(&window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -828,218 +825,129 @@ fn manual_successor_preflight_failure_after_stop_allows_normal_retry() {
 
 #[test]
 fn manual_successor_async_failure_after_prepare_replays_the_exact_operation() {
-    let temp = tempdir().expect("tempdir");
+    use gwt::project_runtime::{
+        events::OwnerCommand,
+        launch_payload::{ManualSuccessorChoice, OwnerLaunchMetadata},
+        test_support::OwnerLaunchStage,
+    };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-holder",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab.workspace.set_session_id(
-        "agent-holder",
-        Some("manual-async-failure-holder".to_string())
-    ));
-    let (mut runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let notifications = notify_on_test_events(&mut runtime);
-    let window_id = combined_window_id("tab-1", "agent-holder");
-    let holder = install_manual_launch_holder(
-        &mut runtime,
-        &repo,
-        "manual-async-failure-holder",
-        gwt_agent::AgentStatus::Running,
-        Some(&window_id),
-    );
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    install_manual_holder_capability(&mut runtime, &repo, &window_id, &holder);
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
-    let decision = runtime
-        .project_state(&runtime.test_context())
-        .expect("test project state")
-        .launch_wizard
-        .as_ref()
-        .and_then(|session| session.wizard.view().holder_decision)
-        .expect("holder decision");
-    settle_test_pane_child(&runtime, &window_id);
-    runtime.handle_launch_wizard_action(
-        &runtime.test_context(),
-        LaunchWizardAction::StopAndStartSuccessor {
-            fingerprint: decision.fingerprint,
-            window_id,
-        },
-    );
-    wait_for_notified_event(
-        "initial manual successor request",
-        &recorded_events,
-        &notifications,
-        |events| {
-            events.iter().any(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
-                )
-            })
-        },
-    );
-    let initial_request = {
-        let mut events = recorded_events.lock().expect("events");
-        let index = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchWizardLaunchMaterializationRequested { .. }
-                )
-            })
-            .expect("initial materialization request");
-        events.remove(index)
+    let project = temp.path().join("actual-manual-async-replay");
+    let (owner, predecessor) = pane_control_tests::control_owner_agent(&project, "holder", 42);
+    let source = predecessor.session.as_ref().unwrap();
+    let identity = gwt_agent::SessionExecutionIdentity::from_session(source)
+        .unwrap()
+        .unwrap();
+    let binding = identity.execution_binding.identity.clone();
+    assert!(predecessor.pty.try_wait().unwrap().is_none());
+    let operation_id = "manual-async-replay-operation";
+    let mut config = pane_control_tests::control_launch_config(&project, 42);
+    config.pending_initial_prompt = Some("Exercise exact retained manual preparation retry".into());
+    let metadata = OwnerLaunchMetadata {
+        manual_successor: Some(ManualSuccessorChoice {
+            operation_id: operation_id.into(),
+            expected_binding: binding.clone(),
+            expected_predecessor: Some(Box::new(identity)),
+            expected_runtime: Some(owner_fixture_live_runtime_evidence(&predecessor)),
+            predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor::ExactTerminalActive,
+        }),
+        ..Default::default()
     };
-    let UserEvent::LaunchWizardLaunchMaterializationRequested {
-        wizard_id,
-        client_id,
-        config,
-    } = initial_request
-    else {
-        unreachable!("matched above")
-    };
-    let operation_id = match config.as_ref() {
-        gwt::LaunchWizardLaunchRequest::Agent(config) => match &config.execution_intent {
-            gwt_agent::ExecutionLaunchIntent::ManualSuccessor { operation_id, .. } => {
-                operation_id.clone()
-            }
-            intent => panic!("expected manual successor intent, got {intent:?}"),
-        },
-        gwt::LaunchWizardLaunchRequest::Shell(_) => panic!("expected Agent request"),
-    };
-    let invalid_profile = temp.path().join("invalid-profile.toml");
-    fs::write(&invalid_profile, "this is not valid TOML = [").expect("write invalid profile");
-    runtime.profile_config_path = Some(invalid_profile);
-    let materialization = runtime.handle_launch_wizard_launch_materialization_requested(
-        wizard_id,
-        client_id,
-        config.as_ref().clone(),
+    let id = owner.pane_id("manual-successor");
+    let immutable = serde_json::to_value(OwnerCommand::LaunchAgent {
+        id: id.clone(),
+        operation_id: operation_id.into(),
+        tab_id: "fixture".into(),
+        config: Box::new(config),
+        metadata: Box::new(metadata),
+        cols: 80,
+        rows: 24,
+    })
+    .unwrap();
+    let prompt_directory = source.worktree_path.join(".gwt/tmp");
+    assert!(
+        !prompt_directory.exists(),
+        "the isolated fixture owns the absent prompt directory"
+    );
+    fs::create_dir_all(prompt_directory.parent().unwrap()).unwrap();
+    fs::write(&prompt_directory, b"owned late preparation fault").unwrap();
+    let failed =
+        owner_fixture_block_on(owner.command(serde_json::from_value(immutable.clone()).unwrap()));
+    fs::remove_file(&prompt_directory).unwrap();
+    assert!(
+        predecessor.pty.tree_exit_confirmed(),
+        "the owner must reap the exact holder before preparation can fail"
     );
     assert!(
-        !materialization.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::LaunchWizardState { wizard: Some(view) } if view.error.is_some()
-        )),
-        "preflight must succeed before the asynchronous failure: {materialization:#?}"
+        failed.as_ref().is_err_and(|error| error.contains("create initial prompt directory")),
+        "the actual worker must reach the owned prompt path fault after canonical preparation: {failed:?}"
     );
-    wait_for_notified_event(
-        "manual successor async failure",
-        &recorded_events,
-        &notifications,
-        |events| {
-            events
-                .iter()
-                .any(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err()))
-        },
-    );
-    let (failed_window_id, failed_result) = {
-        let mut events = recorded_events.lock().expect("events");
-        let index = events
-            .iter()
-            .position(|event| matches!(recorded_project_payload(event), UserEvent::LaunchComplete { result, .. } if result.is_err()))
-            .expect("failed completion");
-        match into_recorded_project_payload(events.remove(index)) {
-            UserEvent::LaunchComplete {
-                window_id, result, ..
-            } => (window_id, result),
-            _ => unreachable!("matched above"),
-        }
+    let authority = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
     };
-    runtime.handle_launch_complete_and_drain(failed_window_id, *failed_result);
+    let prepared = gwt::cli::execution_state::continuation_attempt_for_operation(&source.worktree_path, authority, operation_id).unwrap()
+        .unwrap_or_else(|| panic!("actual preparation must preserve its operation before asynchronous failure: {failed:?}"));
+    assert_eq!(
+        prepared.status,
+        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        "asynchronous preparation failure must preserve the exact operation for retry"
+    );
+    let terminal_binding =
+        gwt::cli::execution_state::current_execution_binding(&source.worktree_path, authority)
+            .unwrap()
+            .unwrap();
+    assert_eq!(terminal_binding.generation_id, binding.generation_id);
+    assert_eq!(terminal_binding.binding_id, binding.binding_id,
+        "preparation retains the predecessor while its actual terminalization may advance the ledger head");
+    let mut changed = immutable.clone();
+    changed["cols"] = serde_json::json!(81);
+    let refused = owner_fixture_block_on(owner.command(serde_json::from_value(changed).unwrap()))
+        .unwrap_err();
+    assert!(refused.contains("different launch"), "{refused}");
     assert_eq!(
         gwt::cli::execution_state::continuation_attempt_for_operation(
-            &repo,
-            gwt::cli::execution_state::ExecutionOwnerKey {
-                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-                number: 42,
-            },
-            &operation_id,
+            &source.worktree_path,
+            authority,
+            operation_id
         )
-        .expect("read prepared attempt")
-        .expect("prepared attempt")
-        .status,
-        gwt::cli::execution_state::ContinuationAttemptStatus::Prepared,
+        .unwrap()
+        .unwrap()
+        .request,
+        prepared.request,
+        "changed immutable requests cannot reuse the retained attempt"
     );
-
-    runtime.profile_config_path = Some(temp.path().join("missing-default-profile.toml"));
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .launch_wizard = Some(sample_ready_agent_launch_wizard_session("tab-1", &repo));
-    runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
-
-    wait_for_notified_event(
-        "manual successor exact retry",
-        &recorded_events,
-        &notifications,
-        |events| {
-            events.iter().any(|event| {
-                matches!(
-                    recorded_project_payload(event),
-                    UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. }
-                        if matches!(
-                            config.as_ref(),
-                            gwt::LaunchWizardLaunchRequest::Agent(config)
-                                if matches!(
-                                    &config.execution_intent,
-                                    gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
-                                        operation_id: replayed,
-                                        ..
-                                    } if replayed == &operation_id
-                                )
-                        )
-                )
-            })
-        },
-    );
-    let mut replay = recorded_events
-        .lock()
-        .expect("events")
-        .iter()
-        .find_map(|event| match event {
-            UserEvent::LaunchWizardLaunchMaterializationRequested { config, .. } => {
-                match config.as_ref().clone() {
-                    gwt::LaunchWizardLaunchRequest::Agent(config) => Some(config),
-                    gwt::LaunchWizardLaunchRequest::Shell(_) => None,
-                }
-            }
-            _ => None,
-        })
-        .expect("replayed Agent request");
-    runtime
-        .prepare_manual_successor_before_pane(&repo, &mut replay)
-        .expect("same operation must remain exactly replayable");
-    assert!(matches!(
-        replay.execution_intent,
-        gwt_agent::ExecutionLaunchIntent::PreparedManualSuccessor(_)
-    ));
-    assert_eq!(
-        gwt::cli::execution_state::load_generation_ledger(
-            &repo,
-            gwt::cli::execution_state::ExecutionOwnerKey {
-                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-                number: 42,
-            },
-        )
-        .expect("read ledger")
-        .expect("ledger")
-        .continuation_attempts
-        .len(),
-        1,
-    );
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    executor.block_on(async {
+        let checkpoint = owner.pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall).await.unwrap();
+        let retry_request = immutable.clone();
+        let client = owner.client(); let mut retry = tokio::spawn(async move { client.command(serde_json::from_value(retry_request).unwrap()).await });
+        let captured = tokio::select! {
+            result = &mut retry => panic!("the same immutable operation must retry the actual worker after its prompt path is repaired: {result:?}"),
+            // test-hygiene: allow-wall-clock-deadline hang guard for the exact real worker retry materialization
+            captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait()) => captured.unwrap(),
+        };
+        if captured.session.is_none() {
+            checkpoint.release();
+            panic!("actual exact-operation retry failed before materialization: {:?}", retry.await.unwrap());
+        }
+        assert_eq!(captured.session.as_ref().unwrap().id, prepared.request.initial_session_id);
+        assert_eq!(captured.pending_fresh_execution.as_ref().unwrap().operation_id, operation_id);
+        assert_eq!(captured.session.as_ref().unwrap().execution_binding.as_ref().unwrap().identity,
+            gwt::cli::execution_state::prepared_successor_execution_binding(&source.worktree_path, authority, &prepared.request).unwrap());
+        checkpoint.release(); let receipt = retry.await.unwrap().unwrap();
+        let live = owner.probe(&id, receipt["incarnation"].as_u64().unwrap()).await.unwrap();
+        assert!(live.pty.try_wait().unwrap().is_none());
+        let replay = owner.command(serde_json::from_value(immutable).unwrap()).await.unwrap();
+        assert_eq!(replay["incarnation"], receipt["incarnation"], "successful replay keeps the same actual child");
+        assert_eq!(replay["session_id"], receipt["session_id"]);
+        let ledger = gwt::cli::execution_state::load_generation_ledger(&source.worktree_path, authority).unwrap().unwrap();
+        assert_eq!(ledger.generations.len(), 1); assert_eq!(ledger.continuation_attempts.len(), 1);
+        owner.command(OwnerCommand::Close { id, incarnation: live.incarnation }).await.unwrap();
+    });
 }
 
 #[test]
@@ -1297,7 +1205,7 @@ fn manual_holder_decision_rejects_draft_mutation_before_stop_consent() {
     assert!(recorded_events.lock().expect("events").is_empty());
     settle_test_pane_child(&runtime, &window_id);
     runtime.active_agent_sessions.remove(&window_id);
-    runtime.stop_window_runtime_without_session_projection(&window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -2114,24 +2022,8 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_only_to_requesting_clien
             vec!["-lc".to_string(), "sleep 0.2; exit 0".to_string()],
         )
     };
-    let mut pane = Pane::new(
-        window_id.clone(),
-        command,
-        args,
-        80,
-        24,
-        HashMap::new(),
-        test_pane_cwd(),
-    )
-    .expect("pane");
-    pane.process_bytes(b"hello from frontend ready\n");
-    runtime.runtimes.insert(
-        window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::new(Mutex::new(pane)),
-        ),
-    );
+    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
+    process_test_owner_output(&mut runtime, &window_id, b"hello from frontend ready\n");
 
     let events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
@@ -2178,26 +2070,9 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_sgr_attributes() {
             vec!["-lc".to_string(), "exit 0".to_string()],
         )
     };
-    let mut pane = Pane::new(
-        window_id.clone(),
-        command,
-        args,
-        80,
-        24,
-        HashMap::new(),
-        test_pane_cwd(),
-    )
-    .expect("pane");
+    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
     // Write red foreground + bold "ALERT" then reset, then default-color text.
-    pane.process_bytes(b"\x1b[31;1mALERT\x1b[0m normal\n");
-
-    runtime.runtimes.insert(
-        window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::new(Mutex::new(pane)),
-        ),
-    );
+    process_test_owner_output(&mut runtime, &window_id, b"\x1b[31;1mALERT\x1b[0m normal\n");
 
     let events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);
@@ -2258,27 +2133,14 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
             vec!["-lc".to_string(), "exit 0".to_string()],
         )
     };
-    let mut pane = Pane::new(
-        window_id.clone(),
-        command,
-        args,
-        80,
-        6,
-        HashMap::new(),
-        test_pane_cwd(),
-    )
-    .expect("pane");
+    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 6);
     for line in 1..=18 {
-        pane.process_bytes(format!("SCROLLBACK-LINE-{line:03}\r\n").as_bytes());
+        process_test_owner_output(
+            &mut runtime,
+            &window_id,
+            format!("SCROLLBACK-LINE-{line:03}\r\n").as_bytes(),
+        );
     }
-
-    runtime.runtimes.insert(
-        window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::new(Mutex::new(pane)),
-        ),
-    );
 
     let events =
         runtime.handle_frontend_event("client-1".to_string(), FrontendEvent::FrontendReady);

@@ -386,6 +386,10 @@ impl AgentResourceSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FrontendEvent {
+    RefreshOrphanDaemons,
+    ReapOrphanDaemon {
+        observation_token: String,
+    },
     FrontendReady,
     ProjectClientAttention {
         visible: bool,
@@ -1439,17 +1443,44 @@ pub struct ProfileSnapshotView {
     pub merged_preview: Vec<ProfileEnvEntryView>,
 }
 
+/// Health of one authenticated project execution owner, separate from browser connectivity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOwnerHealthState {
+    Connecting,
+    Healthy,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectOwnerHealthView {
+    pub project_key: String,
+    pub state: ProjectOwnerHealthState,
+    pub detail: Option<String>,
+}
+
 /// Lightweight project catalog. No workspace, terminal, or agent payloads.
 #[derive(Debug, Clone, Serialize)]
 pub struct HubProjectView {
+    pub owner_health: Option<ProjectOwnerHealthView>,
     pub id: String,
     pub project_key: String,
     pub title: String,
     pub kind: ProjectKind,
 }
 
+/// Public projection contains no daemon credentials or process identity.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanDaemonView {
+    pub project_key: String,
+    pub title: String,
+    pub detail: String,
+    pub observation_token: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HubStateView {
+    pub orphan_daemons: Vec<OrphanDaemonView>,
     pub app_version: String,
     pub projects: Vec<HubProjectView>,
     pub recent_projects: Vec<RecentProjectView>,
@@ -2091,11 +2122,17 @@ pub enum BackendEvent {
     ProjectClosed {
         project_key: String,
     },
+    ProjectOwnerHealth {
+        health: ProjectOwnerHealthView,
+    },
     ProjectAgentAggregate {
         aggregate: ProjectAgentAggregate,
     },
     ProjectNotification {
         notification: crate::project_notifications::NotificationIntent,
+    },
+    OrphanDaemonResult {
+        message: String,
     },
     HubState {
         hub: HubStateView,
@@ -3052,12 +3089,22 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
+        "project_owner_health",
+        BackendEventDeliveryClass::IdempotentLatest,
+        BackendEventBackpressurePolicy::LatestWins,
+    ),
+    BackendEventPolicy::new(
         "project_agent_aggregate",
         BackendEventDeliveryClass::Snapshot,
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
         "project_notification",
+        BackendEventDeliveryClass::EphemeralStatus,
+        BackendEventBackpressurePolicy::PreserveOrder,
+    ),
+    BackendEventPolicy::new(
+        "orphan_daemon_result",
         BackendEventDeliveryClass::EphemeralStatus,
         BackendEventBackpressurePolicy::PreserveOrder,
     ),
@@ -3631,8 +3678,10 @@ impl BackendEvent {
             BackendEvent::CloseProjectPreview { .. } => "close_project_preview",
             BackendEvent::CloseProjectError { .. } => "close_project_error",
             BackendEvent::ProjectClosed { .. } => "project_closed",
+            BackendEvent::ProjectOwnerHealth { .. } => "project_owner_health",
             BackendEvent::ProjectAgentAggregate { .. } => "project_agent_aggregate",
             BackendEvent::ProjectNotification { .. } => "project_notification",
+            BackendEvent::OrphanDaemonResult { .. } => "orphan_daemon_result",
             BackendEvent::HubState { .. } => "hub_state",
             BackendEvent::ProjectNotFound { .. } => "project_not_found",
             BackendEvent::WorkspaceState { .. } => "workspace_state",

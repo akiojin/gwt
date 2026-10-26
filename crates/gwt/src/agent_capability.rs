@@ -1808,6 +1808,20 @@ impl AgentCapabilityIssuer {
         self.registry.active_execution_binding_for_token(token)
     }
 
+    pub(crate) fn with_current_active_token<T>(
+        &self,
+        token: &str,
+        expected: &gwt_agent::SessionExecutionBinding,
+        dispatch: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let principal = self.registry.authenticate(token)?;
+        if principal.active_execution_binding() != Some(expected) {
+            return None;
+        }
+        let grant = AgentCapabilityGrant::new(token.to_owned(), principal);
+        self.registry.with_current_grant(&grant, dispatch)
+    }
+
     pub fn self_close_active_execution_binding(
         &self,
         ticket: &AgentSelfCloseCapabilityTicket,

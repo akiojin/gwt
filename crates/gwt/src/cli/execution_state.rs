@@ -5796,6 +5796,42 @@ pub fn with_exact_active_manual_runtime_lease<T>(
     retain_handoff_after_success: bool,
     operation: impl FnOnce() -> io::Result<T>,
 ) -> io::Result<Option<T>> {
+    with_exact_manual_runtime_lease(
+        sessions_dir,
+        expected,
+        runtime,
+        CurrentExecutionBindingAuthority::ActiveMutation,
+        retain_handoff_after_success,
+        operation,
+    )
+}
+
+/// Retire one captured runtime without granting mutation of a settled execution.
+/// The callback must validate the captured physical child under the same lease.
+pub(crate) fn with_exact_owned_runtime_cleanup_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    runtime: gwt_agent::ManualLaunchRuntimeProof,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<Option<T>> {
+    with_exact_manual_runtime_lease(
+        sessions_dir,
+        expected,
+        runtime,
+        CurrentExecutionBindingAuthority::RuntimeCleanup,
+        false,
+        operation,
+    )
+}
+
+fn with_exact_manual_runtime_lease<T>(
+    sessions_dir: &Path,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    runtime: gwt_agent::ManualLaunchRuntimeProof,
+    authority: CurrentExecutionBindingAuthority,
+    retain_handoff_after_success: bool,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<Option<T>> {
     if runtime.host_pid != std::process::id() || runtime.runtime_incarnation == 0 {
         return Ok(None);
     }
@@ -5803,7 +5839,7 @@ pub fn with_exact_active_manual_runtime_lease<T>(
         return Ok(None);
     };
     let handoff_nonce = uuid::Uuid::new_v4().to_string();
-    with_current_active_session_execution_identity_lease(sessions_dir, expected, || {
+    with_current_session_execution_identity_lease(sessions_dir, expected, authority, || {
         let sidecar = gwt_agent::runtime_state_path_for_pid(
             sessions_dir,
             runtime.host_pid,
@@ -5815,10 +5851,11 @@ pub fn with_exact_active_manual_runtime_lease<T>(
         };
         if current.execution_identity.as_ref() != Some(expected)
             || current.runtime_incarnation != Some(runtime.runtime_incarnation)
-            || matches!(
-                current.status,
-                gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
-            )
+            || (authority == CurrentExecutionBindingAuthority::ActiveMutation
+                && matches!(
+                    current.status,
+                    gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
+                ))
         {
             return Err(generation_conflict(
                 "manual holder runtime proof changed before stop",
@@ -18317,7 +18354,7 @@ mod tests {
 
     #[test]
     fn app_runtime_missing_session_cleanup_uses_owner_first_composites() {
-        let source = include_str!("../app_runtime/continuation.rs");
+        let source = include_str!("../project_runtime/startup.rs");
         let fresh = source
             .split_once("fn reconcile_fresh_launch_without_session")
             .unwrap()
@@ -18341,7 +18378,8 @@ mod tests {
         assert!(genesis.contains("block_genesis_if_session_missing_with"));
         assert!(!genesis.contains("block_uncommitted_genesis_launch("));
 
-        let aborted = source
+        let continuation = include_str!("../project_runtime/continuation.rs");
+        let aborted = continuation
             .split_once("fn reconcile_aborted_continue_work_attempt")
             .unwrap()
             .1

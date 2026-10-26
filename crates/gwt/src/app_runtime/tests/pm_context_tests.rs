@@ -950,39 +950,51 @@ fn pm_close_window_deregisters_pm() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+    let _pane = attach_live_pm_pane(&mut runtime, &window_id);
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    let window_id = "tab-1::agent-1".to_string();
-    let mut session = sample_active_agent_session("tab-1", &window_id);
-    session.session_id = "pm-session-live".to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), session);
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let pty = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("PM runtime")
-        .pty
-        .clone();
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::try_register_pm(
-        &prefs_path,
-        pm_registration_fixture("pm-session-live", &repo),
-        |_| false,
-    )
-    .expect("seed registration");
+
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    let mut candidate = AppRuntime::pm_launch_config(
+        &probe.session.as_ref().unwrap().worktree_path,
+        &gwt::pm_registry::PmLaunchProfile::default_profile(),
+    );
+    candidate.command = "must-not-spawn-during-pm-close".into();
+    let captured_owner = owner.clone();
+    let captured_pty = pty.clone();
+    let captured_prefs = prefs_path.clone();
+    let candidate_id = owner.pane_id("overlapping-pm");
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let _hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        probe.grant.as_ref().expect("actual PM grant"),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeRegistryCleanup,
+        move || {
+            let child_reaped = captured_pty.try_wait().unwrap().is_some();
+            let registration_retained = gwt::pm_registry::load_pm_prefs(&captured_prefs)
+                .unwrap()
+                .registration
+                .is_some();
+            let admission = owner_fixture_block_on(captured_owner.command(
+                gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+                    id: candidate_id.clone(),
+                    operation_id: "pm-close-overlap".into(),
+                    tab_id: candidate_id.split_once("::").unwrap().0.into(),
+                    config: Box::new(candidate),
+                    metadata: Box::default(),
+                    cols: 80,
+                    rows: 24,
+                },
+            ));
+            observed_tx
+                .send((child_reaped, registration_retained, admission))
+                .unwrap();
+        },
+    );
 
     runtime.close_window_events(&window_id);
 
@@ -1001,6 +1013,21 @@ fn pm_close_window_deregisters_pm() {
         .pop()
         .expect("queued PM close finalizer");
     finalizer();
+
+    let (child_reaped, registration_retained, admission) = gwt_core::test_support::recv_event(
+        &observed_rx,
+        "actual owner PM cleanup reached the registry boundary",
+    );
+    assert!(
+        child_reaped && registration_retained,
+        "physical exit precedes registration and worktree mutation"
+    );
+    assert!(
+        admission
+            .unwrap_err()
+            .contains("canonical PM worktree is still closing"),
+        "the same owner protects the PM worktree from an overlapping new child"
+    );
 
     let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load finalized prefs");
     assert_eq!(
@@ -1313,8 +1340,10 @@ fn pm_crash_records_backoff_and_respawns() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     init_git_clone_with_origin(&repo);
+    let repo = repo.canonicalize().unwrap();
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "agent-1",
@@ -1322,31 +1351,80 @@ fn pm_crash_records_backoff_and_respawns() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
     let window_id = "tab-1::agent-1".to_string();
-
-    let mut session = gwt_agent::Session::new(repo.clone(), "work", gwt_agent::AgentId::ClaudeCode);
-    session.restore_window_on_startup = true;
-    session.save(&runtime.sessions_dir).expect("save session");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = session.id.clone();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
+    let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    let session_id = probe.session.as_ref().unwrap().id.clone();
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let mut source = owner.subscribe();
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::try_register_pm(
-        &prefs_path,
-        pm_registration_fixture(&session.id, &repo),
-        |_| false,
-    )
-    .expect("seed registration");
-
-    runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("agent crashed".to_string()),
-        true,
+    let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).unwrap();
+    runtime.sync_pm_session_cache(&repo, prefs.registration.as_ref());
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    probe
+        .pty
+        .kill()
+        .expect("terminate the actual PM child unexpectedly");
+    let lifecycle_events = owner_fixture_block_on(async {
+        let mut events = Vec::new();
+        // test-hygiene: allow-wall-clock-deadline actual child exit and owner lifecycle response hang guard
+        let completed = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let event = source.recv().await.expect("actual owner lifecycle");
+                let done = matches!(&event, gwt::project_runtime::events::OwnerEvent::PmLifecycle { outcome, .. } if outcome.session_id == session_id);
+                events.push(event);
+                if done { break; }
+            }
+        }).await;
+        if completed.is_err() {
+            let statuses: Vec<_> = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        gwt::project_runtime::events::OwnerEvent::Status { .. }
+                            | gwt::project_runtime::events::OwnerEvent::Closed { .. }
+                            | gwt::project_runtime::events::OwnerEvent::PmLifecycle { .. }
+                    )
+                })
+                .collect();
+            let current = owner.probe(&probe.id, probe.incarnation).await;
+            let current = current.as_ref().map(|probe| {
+                (
+                    probe.status,
+                    &probe.detail,
+                    probe.policy.recoverable_error,
+                    probe.policy.quota_hold.is_some(),
+                    probe.pty.try_wait(),
+                )
+            });
+            panic!("owner PM crash did not settle: events={statuses:?}; current={current:?}; prefs={:?}",
+                gwt::pm_registry::load_pm_prefs(&prefs_path));
+        }
+        events
+    });
+    assert!(
+        probe.pty.try_wait().unwrap().is_some(),
+        "crash mutation follows actual reap"
     );
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    for event in lifecycle_events {
+        runtime.handle_project_owner_event(&context, 1, &identity, event);
+    }
+    assert!(
+        runtime
+            .project_state(&context)
+            .unwrap()
+            .pending_pm_worktree_preparations
+            .contains(&repo),
+        "the canonical crash result requests the existing resume preparation"
+    );
+    assert_eq!(tasks.lock().unwrap().len(), 1);
+    tasks.lock().unwrap().remove(0)();
+    drain_pm_worktree_preparation(&mut runtime, &recorded);
 
     let prefs = gwt::pm_registry::load_pm_prefs(&prefs_path).expect("load prefs");
     let registration = prefs

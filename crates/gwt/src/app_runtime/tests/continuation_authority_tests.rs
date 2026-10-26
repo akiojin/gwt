@@ -30,37 +30,21 @@ fn continue_work_operation_binding_cannot_be_poisoned_by_another_work() {
             },
         );
 
-    let conflict = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-b",
-        "immutable-operation".to_string(),
-        "work-b".to_string(),
+    use gwt::project_runtime::continuation::ContinueWorkAction;
+    let conflict =
+        continue_work_domain_action(&runtime, "client-b", "immutable-operation", "work-b");
+    assert!(
+        matches!(conflict, ContinueWorkAction::Failure { ref failure, .. }
+        if failure.outcome == gwt::ContinueWorkOutcomeKind::Failed && failure.code == "operation_conflict"),
+        "a conflicting Work cannot replace the cached operation: {conflict:?}"
     );
-    assert!(conflict.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            work_id,
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            ..
-        } if work_id == "work-b" && code == "operation_conflict"
-    )));
-
-    let replay = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-a",
-        "immutable-operation".to_string(),
-        "work-a".to_string(),
+    let replay = continue_work_domain_action(&runtime, "client-a", "immutable-operation", "work-a");
+    assert!(
+        matches!(replay, ContinueWorkAction::Replay { ref outcome, .. }
+        if outcome.work_id == "work-a" && outcome.outcome == gwt::ContinueWorkOutcomeKind::ContinuedConversation
+            && outcome.error_code.is_none()),
+        "the original Work must retain its replay: {replay:?}"
     );
-    assert!(replay.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            work_id,
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            error_code: None,
-            ..
-        } if work_id == "work-a"
-    )));
     assert_eq!(
         runtime
             .project_state(&runtime.test_context())
@@ -480,25 +464,8 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
         "fixture must not provide durable Session metadata"
     );
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-only",
-        "projection-only-operation".to_string(),
-        work_id.clone(),
-    );
-
-    assert!(events.iter().all(|event| !matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            error_code: Some(code),
-            ..
-        } if code == "session_metadata_missing"
-    )));
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "projection-only-operation")
-        .expect("projection-only fallback must prepare one pending continuation");
+    let actual = owner_continue_launch_fixture(&runtime, "projection-only-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(pending.work_id, work_id);
     assert_eq!(
         pending.project_root, canonical_project_root,
@@ -514,18 +481,32 @@ fn continue_work_without_durable_session_starts_projection_only_handoff() {
             if request.source == "continue-work:handoff"
                 && request.initial_session_id == pending.binding.session_id
     ));
-    let persisted = runtime.tab("tab-1").expect("tab").workspace.persisted();
-    let windows = &persisted.windows;
+    let inventory = actual
+        .executor
+        .as_ref()
+        .unwrap()
+        .block_on(
+            actual
+                .owner
+                .as_ref()
+                .unwrap()
+                .command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+        )
+        .unwrap();
     assert_eq!(
-        windows.len(),
+        inventory["pending"].as_array().unwrap().len(),
         1,
-        "fallback must materialize one candidate pane"
+        "the actual owner must materialize one candidate"
     );
-    assert_eq!(windows[0].agent_id.as_deref(), Some("codex"));
+    assert_eq!(
+        actual.captured.session.as_ref().unwrap().agent_id.command(),
+        "codex"
+    );
     let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
         .expect("read projection-only ledger")
         .expect("projection-only ledger");
     assert_eq!(ledger.continuation_attempts.len(), 1);
+    actual.shutdown();
 }
 
 #[test]
@@ -537,7 +518,7 @@ fn projection_only_continue_uses_spec_generation_authority_without_issue_cache()
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, _repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, _repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-spec-authority",
         ProjectionOnlyContinueFixture {
@@ -555,23 +536,14 @@ fn projection_only_continue_uses_spec_generation_authority_without_issue_cache()
         },
     );
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-spec",
-        "projection-spec-operation".to_string(),
-        work_id,
-    );
-
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "projection-spec-operation")
-        .expect("SPEC authority must prepare projection-only continuation");
+    let actual = owner_continue_launch_fixture(&runtime, "projection-spec-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(pending.owner, owner);
     assert_eq!(
         pending.outcome,
         gwt::ContinueWorkOutcomeKind::StartedWithHandoff
     );
+    actual.shutdown();
 }
 
 #[test]
@@ -583,7 +555,7 @@ fn projection_only_continue_uses_spec_legacy_flat_authority_without_issue_cache(
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, _repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, _repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-spec-legacy-flat-authority",
         ProjectionOnlyContinueFixture {
@@ -601,23 +573,15 @@ fn projection_only_continue_uses_spec_legacy_flat_authority_without_issue_cache(
         },
     );
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-spec-legacy-flat",
-        "projection-spec-legacy-flat-operation".to_string(),
-        work_id,
-    );
-
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "projection-spec-legacy-flat-operation")
-        .expect("legacy flat SPEC authority must prepare continuation");
+    let actual =
+        owner_continue_launch_fixture(&runtime, "projection-spec-legacy-flat-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(pending.owner, owner);
     assert_eq!(
         pending.outcome,
         gwt::ContinueWorkOutcomeKind::StartedWithHandoff
     );
+    actual.shutdown();
 }
 
 #[test]
@@ -629,7 +593,7 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-canonical-branch",
         ProjectionOnlyContinueFixture {
@@ -672,28 +636,17 @@ fn projection_only_continue_matches_canonical_branch_for_durable_session() {
         .save(&runtime.sessions_dir)
         .expect("save canonical-branch durable Session");
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-canonical-branch",
-        "projection-canonical-branch-operation".to_string(),
-        work_id,
-    );
-
-    let _pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "projection-canonical-branch-operation")
-        .expect("canonical branch alias must use the durable Session");
-    let window = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .persisted()
-        .windows
-        .first()
-        .expect("candidate window");
-    assert_eq!(window.agent_id.as_deref(), Some("codex"));
-    assert_eq!(window.title, "Durable branch alias settings");
+    let actual =
+        owner_continue_launch_fixture(&runtime, "projection-canonical-branch-operation", &work_id);
+    assert_eq!(actual.pending.work_branch, "work/issue-2359");
+    let materialized = actual
+        .captured
+        .session
+        .as_ref()
+        .expect("actual chosen provider metadata");
+    assert_eq!(materialized.agent_id.command(), "codex");
+    assert_eq!(materialized.display_name, "Durable branch alias settings");
+    actual.shutdown();
 }
 
 #[test]
@@ -732,33 +685,87 @@ fn linked_workspace_resume_routes_through_authority_producing_continuation() {
         .save(&runtime.sessions_dir)
         .expect("save linked durable Session");
 
+    let canonical_profile = gwt_core::paths::gwt_config_path();
+    fs::create_dir_all(canonical_profile.parent().unwrap()).unwrap();
+    fs::copy(
+        runtime.profile_config_path.as_ref().unwrap(),
+        canonical_profile,
+    )
+    .unwrap();
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let physical_owner = executor.block_on(production_owner_fixture(&repo));
+    let checkpoint = executor
+        .block_on(physical_owner.pause_next_agent_launch_at(
+            gwt::project_runtime::test_support::OwnerLaunchStage::MaterializedBeforeInstall,
+        ))
+        .unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let events = runtime.resume_workspace_agent_events(
         &runtime.test_context(),
         "resume-client",
-        "linked-resume-operation".to_string(),
+        "linked-resume-operation".into(),
         durable.id.clone(),
         None,
     );
-
     assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::WorkspaceResumeAgentStarted {
-            operation_id,
-            session_id,
-            ..
-        } if operation_id == "linked-resume-operation" && session_id == "historical-session"
+        &event.event, BackendEvent::WorkspaceResumeAgentStarted { operation_id, session_id, .. }
+            if operation_id == "linked-resume-operation" && session_id == "historical-session"
     )));
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "linked-resume-operation")
-        .expect("linked Resume must prepare continuation authority");
+    let task = tasks
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("the GUI must enqueue its immutable owner request");
+    let worker_home = temp.path().to_path_buf();
+    let worker = thread::spawn(move || {
+        let _home = ScopedGwtHome::set(worker_home);
+        task();
+    });
+    let captured = executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual GUI-to-owner Resume materialization checkpoint
+        tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+            .await
+            .unwrap()
+    });
+    let pending = captured.pending_continue_work.clone();
+    executor.block_on(async {
+        let client = physical_owner.client();
+        let id = captured.id.clone();
+        let operation_id = captured.operation_id.clone();
+        let cancelled = tokio::spawn(async move {
+            client
+                .command(gwt::project_runtime::events::OwnerCommand::PendingCancel {
+                    id,
+                    operation_id,
+                })
+                .await
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard for exact cancellation admission before releasing the real Resume worker
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while captured.current.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        checkpoint.release();
+        cancelled
+            .await
+            .unwrap()
+            .expect("actual Resume cancellation cleanup ACK");
+    });
+    worker
+        .join()
+        .expect("the actual GUI owner request worker must finish");
+    executor.block_on(physical_owner.shutdown());
+    let pending =
+        pending.expect("linked Resume must prepare continuation authority at the actual owner");
     assert_eq!(pending.work_id, work_id);
-    assert!(matches!(
-        &pending.execution,
-        PendingContinueWorkExecution::Successor(request)
-            if request.initial_session_id == pending.binding.session_id
-    ));
+    assert!(
+        matches!(&pending.execution, PendingContinueWorkExecution::Successor(request)
+        if request.initial_session_id == pending.binding.session_id)
+    );
     assert_eq!(pending.binding.owner_number, owner.number);
 }
 
@@ -802,25 +809,8 @@ fn continue_work_prefers_exact_custom_durable_session() {
         .save(&runtime.sessions_dir)
         .expect("save exact custom durable Session");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-custom-durable",
-        "custom-durable-operation".to_string(),
-        work_id,
-    );
-
-    assert!(events.iter().all(|event| !matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            error_code: Some(code),
-            ..
-        } if code == "agent_identity_unsupported"
-    )));
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "custom-durable-operation")
-        .expect("exact custom durable Session must be preferred");
+    let actual = owner_continue_launch_fixture(&runtime, "custom-durable-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(
         pending.work_agent_session_id.as_deref(),
         Some("historical-session")
@@ -829,6 +819,11 @@ fn continue_work_prefers_exact_custom_durable_session() {
         pending.work_agent_id,
         gwt_agent::AgentId::Custom("review-bot".to_string())
     );
+    assert_eq!(
+        actual.captured.session.as_ref().unwrap().display_name,
+        "Exact custom durable settings"
+    );
+    actual.shutdown();
 }
 
 #[test]
@@ -878,23 +873,14 @@ fn continue_work_durable_session_requires_same_work_ref_agent() {
         .save(&runtime.sessions_dir)
         .expect("save ref-mismatched durable Session");
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-ref-agent-mismatch",
-        "ref-agent-mismatch-operation".to_string(),
-        work_id,
-    );
-
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "ref-agent-mismatch-operation")
-        .expect("latest projection agent must still provide handoff fallback");
+    let actual = owner_continue_launch_fixture(&runtime, "ref-agent-mismatch-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(pending.work_agent_session_id, None);
     assert_eq!(
         pending.outcome,
         gwt::ContinueWorkOutcomeKind::StartedWithHandoff
     );
+    actual.shutdown();
 }
 
 #[test]
@@ -954,25 +940,16 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
         let authority_before =
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
-        let events = runtime.continue_work_events(
-            &runtime.test_context(),
+        let failure = continue_work_domain_failure(
+            &runtime,
             "client-missing-work-agent",
-            format!("operation-{case_name}"),
-            work_id,
+            &(format!("operation-{case_name}")),
+            &(work_id),
         );
 
-        assert!(
-            events.iter().any(|event| matches!(
-                &event.event,
-                BackendEvent::ContinueWorkOutcome {
-                    outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                    error_code: Some(code),
-                    retryable: false,
-                    ..
-                } if code == "agent_identity_missing"
-            )),
-            "{case_name}: {events:#?}"
-        );
+        assert_eq!(failure.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+        assert!(!failure.retryable);
+        assert_eq!(failure.code, "agent_identity_missing");
         assert!(runtime.pending_continue_work.is_empty(), "{case_name}");
         assert_eq!(
             runtime
@@ -1043,24 +1020,18 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
         serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
             .expect("serialize Workspace before");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let failure = continue_work_domain_failure(
+        &runtime,
         "client-branch-divergence",
-        "operation-branch-divergence".to_string(),
-        work_id,
+        &("operation-branch-divergence".to_string()),
+        &(work_id),
     );
 
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
-                retryable: true,
-                ..
-            }
-        )),
-        "actual branch divergence must conflict: {events:#?}"
+    assert_eq!(
+        failure.outcome,
+        gwt::ContinueWorkOutcomeKind::ConflictUnknown
     );
+    assert!(failure.retryable);
     assert!(runtime.pending_continue_work.is_empty());
     assert_eq!(
         serde_json::to_vec(runtime.tab("tab-1").expect("tab").workspace.persisted())
@@ -1111,22 +1082,17 @@ fn continue_work_shell_ref_cannot_authenticate_agent_session() {
         .save(&runtime.sessions_dir)
         .expect("save Session behind Shell ref");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let failure = continue_work_domain_failure(
+        &runtime,
         "client-shell-ref",
-        "shell-ref-operation".to_string(),
-        work_id,
+        &("shell-ref-operation".to_string()),
+        &(work_id),
     );
 
     assert!(runtime.pending_continue_work.is_empty());
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            error_code: Some(code),
-            retryable: false,
-            ..
-        } if code == "agent_identity_missing"
-    )));
+    assert_eq!(failure.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+    assert!(!failure.retryable);
+    assert_eq!(failure.code, "agent_identity_missing");
 }
 
 #[test]
@@ -1176,23 +1142,22 @@ fn projection_only_continue_ignores_noncanonical_projected_session_path() {
         .save(sessions_parent)
         .expect("save outside Session-shaped file");
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-noncanonical-session",
-        "projection-noncanonical-session-operation".to_string(),
-        work_id,
+    let actual = owner_continue_launch_fixture(
+        &runtime,
+        "projection-noncanonical-session-operation",
+        &work_id,
     );
-
-    let window = runtime
-        .tab("tab-1")
-        .expect("tab")
-        .workspace
-        .persisted()
-        .windows
-        .first()
+    let materialized = actual
+        .captured
+        .session
+        .as_ref()
         .expect("projection fallback candidate");
-    assert_ne!(window.title, "Injected outside Session settings");
-    assert_eq!(window.agent_id.as_deref(), Some("codex"));
+    assert_ne!(
+        materialized.display_name,
+        "Injected outside Session settings"
+    );
+    assert_eq!(materialized.agent_id.command(), "codex");
+    actual.shutdown();
 }
 
 #[test]
@@ -1319,24 +1284,16 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         .save(&runtime.sessions_dir)
         .expect("save foreign Session with matching project root");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let failure = continue_work_domain_failure(
+        &runtime,
         "client-foreign-recovery",
-        operation_id.to_string(),
-        work_id.to_string(),
+        &(operation_id.to_string()),
+        &(work_id.to_string()),
     );
 
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                error_code: Some(code),
-                retryable: false,
-                ..
-            } if code == "agent_identity_missing"
-        )),
-        "foreign durable authority must not replace the active Work failure: {events:?}"
-    );
+    assert_eq!(failure.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+    assert!(!failure.retryable);
+    assert_eq!(failure.code, "agent_identity_missing");
     let attempt = gwt::cli::execution_state::continuation_attempt_for_operation(
         &foreign,
         owner,
@@ -1393,18 +1350,12 @@ fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
         .save(&runtime.sessions_dir)
         .expect("save conflicting durable Session");
 
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-conflicting-session",
-        "projection-conflicting-session-operation".to_string(),
-        work_id,
+    let actual = owner_continue_launch_fixture(
+        &runtime,
+        "projection-conflicting-session-operation",
+        &work_id,
     );
-
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "projection-conflicting-session-operation")
-        .expect("conflicting Session must not block authenticated projection fallback");
+    let pending = &actual.pending;
     assert_eq!(pending.owner, owner);
     assert_eq!(
         pending.outcome,
@@ -1415,6 +1366,7 @@ fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
         PendingContinueWorkExecution::Successor(request)
             if request.source == "continue-work:handoff"
     ));
+    actual.shutdown();
 }
 
 #[test]
@@ -1452,21 +1404,16 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
         .expect("read ledger before")
         .expect("ledger before");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let failure = continue_work_domain_failure(
+        &runtime,
         "client-projection-container-first",
-        "projection-container-first-operation".to_string(),
-        work_id,
+        &("projection-container-first-operation".to_string()),
+        &(work_id),
     );
 
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            ..
-        } if code == "execution_container_ambiguous"
-    )));
+    assert_eq!(failure.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+    assert!(!failure.retryable);
+    assert_eq!(failure.code, "execution_container_ambiguous");
     assert!(runtime.pending_continue_work.is_empty());
     assert_eq!(
         gwt::cli::execution_state::load_generation_ledger(&repo, owner)
@@ -1485,236 +1432,237 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
 
 #[test]
 fn projection_only_continue_spawn_failure_aborts_without_committing_candidate_state() {
-    let _env_guard = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let fake_codex = write_fake_codex(temp.path());
-    let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
-        temp.path(),
-        "projection-only-spawn-failure",
-        ProjectionOnlyContinueFixture {
-            work_owner: Some("Issue #2359"),
-            owner_number: 2359,
-            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-            agent_id: Some("Codex"),
-            cross_worktree: false,
-            missing_container: false,
-            conflicting_owner: false,
-            conflicting_container: false,
-            conflicting_branch_only: false,
-            conflicting_agent: false,
-            legacy_flat_only: false,
-        },
-    );
-    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
-    let work_items_path =
-        gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&project_root);
-    let before_work_items = fs::read(&work_items_path).expect("read Work projection before");
-    let before_work_events = tracked_work_event_store_snapshot(&project_root);
-    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read ledger before")
-        .expect("ledger before");
-
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-spawn-failure",
-        "projection-spawn-failure-operation".to_string(),
-        work_id,
-    );
-    let window_id = runtime
-        .pending_continue_work
-        .iter()
-        .find(|(_, pending)| pending.operation_id == "projection-spawn-failure-operation")
-        .map(|(window_id, _)| window_id.clone())
-        .expect("projection fallback must prepare candidate");
-
-    let events = runtime.handle_launch_complete_and_drain(
-        window_id,
-        Err("simulated projection-only spawn failure".into()),
-    );
-
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                error_code: Some(code),
-                ..
-            } if code == "launch_failed"
-        )),
-        "unexpected spawn failure events: {events:#?}"
-    );
-    assert!(runtime.pending_continue_work.is_empty());
-    assert!(
-        runtime
-            .tab("tab-1")
-            .expect("tab")
-            .workspace
-            .persisted()
-            .windows
-            .is_empty(),
-        "aborted candidate pane must be removed"
-    );
-    assert_eq!(
-        fs::read(&work_items_path).expect("read Work projection after"),
-        before_work_items
-    );
-    assert_eq!(
-        tracked_work_event_store_snapshot(&project_root),
-        before_work_events
-    );
-    assert!(
-        fs::read_dir(&runtime.sessions_dir)
-            .expect("read Sessions after")
-            .filter_map(Result::ok)
-            .all(|entry| entry.path().extension().and_then(|value| value.to_str()) != Some("toml")),
-        "aborted candidate must leave no Session TOML"
-    );
-    let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read ledger after")
-        .expect("ledger after");
-    assert_eq!(after_ledger.generations, before_ledger.generations);
-    assert_eq!(
-        after_ledger.current_generation_id,
-        before_ledger.current_generation_id
-    );
-    assert!(after_ledger.continuation_attempts.iter().any(|attempt| {
-        attempt.request.operation_id == "projection-spawn-failure-operation"
-            && attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
-    }));
+    let (_runtime, repo, authority, work_id) =
+        owner_continuation_seed(temp.path(), "projection-only-spawn-failure");
+    let work_path = gwt_core::paths::gwt_workspace_work_items_path_for_repo_path(&repo);
+    let before_work = fs::read(&work_path).unwrap();
+    let before_events = tracked_work_event_store_snapshot(&repo);
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, authority)
+        .unwrap()
+        .unwrap();
+    let executor = TokioRuntime::new().unwrap();
+    executor.block_on(async {
+        use gwt::project_runtime::{
+            events::{OwnerCommand, OwnerEvent},
+            test_support::OwnerLaunchStage,
+        };
+        let owner = production_owner_fixture(&repo).await;
+        let checkpoint = owner
+            .pause_next_agent_launch_at(OwnerLaunchStage::MaterializedBeforeInstall)
+            .await
+            .unwrap();
+        let mut outcomes = owner.subscribe();
+        let client = owner.client();
+        let launch = tokio::spawn(async move {
+            client
+                .command(OwnerCommand::ContinueWork {
+                    client_id: "client-projection-spawn-failure".into(),
+                    operation_id: "projection-spawn-failure-operation".into(),
+                    work_id,
+                })
+                .await
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual reconstructed candidate before PTY installation
+        let captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+            .await
+            .unwrap();
+        let candidate = captured
+            .session
+            .as_ref()
+            .expect("actual materialized candidate");
+        let runner = temp
+            .path()
+            .join("fixture-runner-bin")
+            .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        fs::remove_file(runner)
+            .expect("remove the already-probed real fixture provider before physical spawn");
+        checkpoint.release();
+        assert!(launch.await.unwrap().is_err());
+        // test-hygiene: allow-wall-clock-deadline hang guard for correlated actual ContinueWork physical launch failure
+        let failure = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let event = outcomes.recv().await.unwrap();
+                if matches!(&event, OwnerEvent::ContinueWorkOutcome { operation_id, .. }
+                    if operation_id == "projection-spawn-failure-operation")
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(failure, OwnerEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed, error_code: Some(ref code), ..
+        } if code == "launch_failed"),
+            "{failure:?}"
+        );
+        let inventory = owner.command(OwnerCommand::ListPanes).await.unwrap();
+        assert!(inventory["panes"].as_array().unwrap().is_empty());
+        assert!(inventory["pending"].as_array().unwrap().is_empty());
+        assert!(!gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", candidate.id))
+            .exists());
+        assert_eq!(fs::read(&work_path).unwrap(), before_work);
+        assert_eq!(tracked_work_event_store_snapshot(&repo), before_events);
+        let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, authority)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ledger.generations, before_ledger.generations);
+        assert_eq!(
+            ledger.current_generation_id,
+            before_ledger.current_generation_id
+        );
+        assert!(ledger
+            .continuation_attempts
+            .iter()
+            .any(
+                |attempt| attempt.request.operation_id == "projection-spawn-failure-operation"
+                    && attempt.status
+                        == gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+            ));
+        owner.shutdown().await;
+    });
 }
 
 #[test]
 fn projection_only_continue_owner_change_before_activation_aborts_without_committing() {
-    let _env_guard = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let fake_codex = write_fake_codex(temp.path());
-    let _path = prepend_tool_parent_to_path(&fake_codex);
-    let operation_id = "projection-owner-toctou-operation";
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (_runtime, repo, owner_key, work_id) = owner_continuation_seed(
         temp.path(),
-        "projection-owner-toctou",
-        ProjectionOnlyContinueFixture {
-            work_owner: Some("Issue #2359"),
-            owner_number: 2359,
-            owner_kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-            agent_id: Some("Codex"),
-            cross_worktree: false,
-            missing_container: false,
-            conflicting_owner: false,
-            conflicting_container: false,
-            conflicting_branch_only: false,
-            conflicting_agent: false,
-            legacy_flat_only: false,
-        },
+        "projection_only_continue_owner_change_before_activation_aborts_without_committing",
     );
-    let project_root = runtime.tab("tab-1").expect("tab").project_root.clone();
-    runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-projection-owner-toctou",
-        operation_id.to_string(),
-        work_id.clone(),
-    );
-    let (window_id, pending) = runtime
-        .pending_continue_work
-        .iter()
-        .find(|(_, pending)| pending.operation_id == operation_id)
-        .map(|(window_id, pending)| (window_id.clone(), pending.clone()))
-        .expect("prepare projection continuation");
-    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read predecessor ledger")
-        .expect("predecessor ledger");
-    let mut candidate = gwt_agent::Session::new(
-        &pending.worktree_path,
-        pending.work_branch.clone(),
-        pending.work_agent_id.clone(),
-    );
-    candidate.id = pending.binding.session_id.clone();
-    candidate.project_state_root = Some(pending.project_root.clone());
-    candidate.repo_hash = Some(pending.binding.repo_hash.clone());
-    candidate.linked_issue_number = Some(owner.number);
-    candidate
-        .set_execution_binding(Some(pending.binding.clone()))
-        .expect("bind candidate Session");
-    candidate
-        .save(&runtime.sessions_dir)
-        .expect("save candidate Session");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = pending.binding.session_id.clone();
-    active.branch_name = "work/issue-2359".to_string();
-    active.worktree_path = repo.clone();
-    active.agent_project_root = project_root.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue_prepared(&repo, &pending.binding.session_id, pending.binding.clone())
-        .expect("issue Prepared capability");
-    runtime.agent_capability_issuer = Some(issuer);
-    runtime
-        .agent_capability_tokens
-        .insert(window_id.clone(), capability.token);
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+        .expect("predecessor ledger")
+        .expect("ledger");
+    let executor = tokio::runtime::Runtime::new().expect("fixture executor");
+    executor.block_on(async {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        let owner = production_owner_fixture(&repo).await;
+        let checkpoint = owner
+            .pause_next_agent_launch()
+            .await
+            .expect("actual prepared candidate");
+        let transport = owner.client();
+        let selected = work_id.clone();
+        let launch = tokio::spawn(async move {
+            transport
+                .command(OwnerCommand::ContinueWork {
+                    client_id: "client-1".into(),
+                    operation_id: "readiness-rejection".into(),
+                    work_id: selected,
+                })
+                .await
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual owner preparation checkpoint; the checkpoint establishes ordering
+        let captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+            .await
+            .expect("actual preparation reaches the checkpoint");
+        let pending = captured
+            .pending_continue_work
+            .as_ref()
+            .expect("actual owner Prepared receipt");
+        let candidate = captured.session.as_ref().expect("actual candidate Session");
+        assert_eq!(pending.binding.session_id, candidate.id);
+        assert!(captured
+            .issuer
+            .grant_is_current(captured.grant.as_ref().expect("actual Prepared Host grant")));
+        let mut owner_change = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Update,
+            &work_id,
+            chrono::Utc::now() + chrono::Duration::seconds(1),
+        );
+        owner_change.owner = Some("SPEC #3248".into());
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, owner_change)
+            .expect("change selected Work after actual preparation");
 
-    let mut owner_change = gwt_core::workspace_projection::WorkEvent::new(
-        gwt_core::workspace_projection::WorkEventKind::Update,
-        &work_id,
-        chrono::Utc::now() + chrono::Duration::seconds(1),
-    );
-    owner_change.owner = Some("SPEC #3248".to_string());
-    gwt_core::workspace_projection::record_workspace_work_event(&project_root, owner_change)
-        .expect("change Work owner before activation");
-    let work_before_finalize = tracked_work_event_store_snapshot(&project_root);
-
-    let events = runtime
-        .finalize_continue_work_session_start(&window_id, Some(pending.readiness_nonce.as_str()));
-
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                error_code: Some(code),
-                ..
-            } if code == "launch_failed"
-        )),
-        "changed owner must reject activation: {events:?}"
-    );
-    assert!(!runtime.pending_continue_work.contains_key(&window_id));
-    assert!(!runtime
-        .sessions_dir
-        .join(format!("{}.toml", pending.binding.session_id))
-        .exists());
-    assert_eq!(
-        tracked_work_event_store_snapshot(&project_root),
-        work_before_finalize,
-        "rejected activation must not overwrite the changed Work authority",
-    );
-    let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read rejected ledger")
-        .expect("rejected ledger");
-    assert_eq!(after_ledger.generations, before_ledger.generations);
-    assert_eq!(
-        after_ledger.current_generation_id,
-        before_ledger.current_generation_id
-    );
-    assert_eq!(
-        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id,)
-            .expect("read rejected attempt")
+        let work_before_finalize = tracked_work_event_store_snapshot(&repo);
+        checkpoint.release();
+        launch
+            .await
+            .expect("launch worker")
+            .expect("physical launch ACK");
+        let mut projected = owner.subscribe();
+        let mut readiness = runtime_hook_state_for_event("Waiting", "SessionStart", &candidate.id);
+        readiness.project_root = Some(repo.display().to_string());
+        readiness.branch = Some(candidate.branch.clone());
+        readiness.continuation_readiness_nonce = Some(pending.readiness_nonce.clone());
+        owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(
+            readiness,
+        ));
+        // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
+        let failure = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let event @ OwnerEvent::ContinueWorkOutcome { .. } =
+                    projected.recv().await.expect("owner outcome")
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("readiness rejection outcome");
+        assert!(
+            matches!(failure, OwnerEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed, error_code: Some(ref code), ..
+        } if code == "launch_failed"),
+            "exact owner must reject invalid readiness: {failure:?}"
+        );
+        assert!(
+            !gwt_core::paths::gwt_sessions_dir()
+                .join(format!("{}.toml", candidate.id))
+                .exists(),
+            "rejection must discard only the actual exact candidate Session"
+        );
+        assert_eq!(
+            tracked_work_event_store_snapshot(&repo),
+            work_before_finalize,
+            "rejected readiness must not rewrite selected Work"
+        );
+        let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+            .expect("rejected ledger")
+            .expect("ledger");
+        assert_eq!(after_ledger.generations, before_ledger.generations);
+        assert_eq!(
+            after_ledger.current_generation_id,
+            before_ledger.current_generation_id
+        );
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &repo,
+                owner_key,
+                &captured.operation_id
+            )
             .expect("rejected attempt")
+            .expect("actual attempt")
             .status,
-        gwt::cli::execution_state::ContinuationAttemptStatus::Aborted,
-    );
+            gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+        );
+        owner
+            .command(OwnerCommand::Close {
+                id: captured.id,
+                incarnation: captured.incarnation,
+            })
+            .await
+            .expect("physical cleanup ACK");
+        assert!(captured
+            .pty
+            .as_ref()
+            .expect("actual child")
+            .try_wait()
+            .expect("child wait")
+            .is_some());
+        owner.shutdown().await;
+    });
 }
 
 #[test]
@@ -1895,28 +1843,8 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
         },
     );
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-owner-kind-heal",
-        "owner-kind-heal-operation".to_string(),
-        work_id.clone(),
-    );
-
-    assert!(
-        events.iter().all(|event| !matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                error_code: Some(code),
-                ..
-            } if code == "execution_owner_ambiguous"
-        )),
-        "a kind-only mismatch against an unambiguous trusted authority must self-heal: {events:?}"
-    );
-    let pending = runtime
-        .pending_continue_work
-        .values()
-        .find(|pending| pending.operation_id == "owner-kind-heal-operation")
-        .expect("healed continuation must prepare one pending attempt");
+    let actual = owner_continue_launch_fixture(&runtime, "owner-kind-heal-operation", &work_id);
+    let pending = &actual.pending;
     assert_eq!(pending.work_id, work_id);
     assert_eq!(
         pending.owner, owner,
@@ -1926,6 +1854,7 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
         .expect("read healed ledger")
         .expect("healed ledger");
     assert_eq!(ledger.continuation_attempts.len(), 1);
+    actual.shutdown();
 }
 
 // #3426: with no trusted generation authority and no cache evidence, a
@@ -2086,270 +2015,397 @@ fn startup_nonlocal_liveness_indexes_runtime_namespaces_once_for_128_sessions() 
 
 #[test]
 fn continue_work_rebinds_live_local_legacy_session_without_new_generation() {
+    assert_actual_legacy_inspection_repair(false);
+    assert_actual_legacy_inspection_repair(true);
+}
+
+fn assert_actual_legacy_inspection_repair(close_during_publication: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    run_git(
-        &repo,
-        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
-    );
-    let session_id = "legacy-live-session";
-    let work_id = "work-legacy-live";
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-2359"]);
+    let runner_dir = write_fixture_runners(temp.path(), &["codex"]);
+    let runner = runner_dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+    #[cfg(unix)]
+    fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nexec /bin/cat\n").unwrap();
+    #[cfg(windows)]
+    fs::write(&runner, "@echo off\r\nif \"%~1\"==\"--version\" (echo 1.2.3 & exit /b 0)\r\nping -n 31 127.0.0.1 >NUL\r\n").unwrap();
+    let owner_key = gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number: 2359,
     };
-    gwt::cli::execution_state::materialize_at_launch(
-        &repo,
-        owner.kind,
-        owner.number,
-        session_id,
-        "gwt-execute",
-        false,
-    )
-    .expect("materialize legacy Active projection");
-
-    let now = chrono::Utc::now();
-    let mut start = gwt_core::workspace_projection::WorkEvent::new(
-        gwt_core::workspace_projection::WorkEventKind::Start,
-        work_id,
-        now,
-    );
-    start.title = Some("Legacy live Work".to_string());
-    start.owner = Some("Issue #2359".to_string());
-    start.agent_session_id = Some(session_id.to_string());
-    start.agent_id = Some("Codex".to_string());
-    start.display_name = Some("Codex".to_string());
-    start.execution_container = Some(
-        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-            branch: Some("work/issue-2359".to_string()),
-            worktree_path: Some(repo.clone()),
-            pr_number: None,
-            pr_url: None,
-            pr_state: None,
-        },
-    );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
-        .expect("record legacy live Work");
-
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let runtime_root = temp.path().join(".gwt");
-    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    let mut durable = gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
-    durable.id = session_id.to_string();
-    durable.project_state_root = None;
-    durable.repo_hash = detect_repo_hash(&repo).map(|value| value.to_string());
-    durable.linked_issue_number = Some(owner.number);
-    durable.execution_binding = None;
-    durable
-        .save(&runtime.sessions_dir)
-        .expect("save legacy durable Session");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = session_id.to_string();
-    active.branch_name = "work/issue-2359".to_string();
-    active.worktree_path = repo.clone();
-    active.agent_project_root = repo.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let inspection = issuer
-        .issue(&repo, session_id)
-        .expect("issue legacy inspection capability");
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    runtime
-        .agent_capability_tokens
-        .insert(window_id.clone(), inspection.token.clone());
-
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-1",
-        "legacy-focus-operation".to_string(),
-        work_id.to_string(),
-    );
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            outcome: gwt::ContinueWorkOutcomeKind::FocusedExisting,
-            retryable: false,
-            ..
+    owner_fixture_block_on(async {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        let owner = production_owner_fixture(&repo).await;
+        let mut command =
+            owner_fixture_agent_command(&owner, &repo, "legacy-live", "legacy-inspection-launch");
+        let OwnerCommand::LaunchAgent {
+            config, metadata, ..
+        } = &mut command
+        else {
+            unreachable!()
+        };
+        **config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&repo)
+            .build();
+        config.command = runner.display().to_string();
+        config.args.clear();
+        config.suppress_execution_control = true;
+        config.linked_issue_number = Some(owner_key.number);
+        metadata.workspace_resume_context = None;
+        let receipt = owner
+            .command(command)
+            .await
+            .expect("actual observation-only physical launch");
+        let id = receipt["id"].as_str().unwrap().to_string();
+        let incarnation = receipt["incarnation"].as_u64().unwrap();
+        let physical = owner.probe(&id, incarnation).await.unwrap();
+        assert!(physical.pty.try_wait().unwrap().is_none());
+        let inspection = physical
+            .current_capability_grant()
+            .expect("actual inspection bearer");
+        assert!(inspection.principal().active_execution_binding().is_none());
+        let mut durable = physical.session.clone().expect("actual unbound Session");
+        let session_id = durable.id.clone();
+        assert!(durable.execution_binding.is_none());
+        durable.project_state_root = None;
+        durable.linked_issue_number = Some(owner_key.number);
+        durable
+            .save(&gwt_core::paths::gwt_sessions_dir())
+            .expect("legacy metadata on the exact owned source");
+        gwt::cli::execution_state::materialize_at_launch(
+            &repo,
+            owner_key.kind,
+            owner_key.number,
+            &session_id,
+            "gwt-execute",
+            false,
+        )
+        .expect("legacy flat Active projection");
+        let work_id = "work-legacy-live";
+        let mut start = gwt_core::workspace_projection::WorkEvent::new(
+            gwt_core::workspace_projection::WorkEventKind::Start,
+            work_id,
+            chrono::Utc::now(),
+        );
+        start.title = Some("Legacy live Work".into());
+        start.owner = Some("Issue #2359".into());
+        start.agent_session_id = Some(session_id.clone());
+        start.agent_id = Some("Codex".into());
+        start.display_name = Some("Codex".into());
+        start.execution_container = Some(
+            gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+                branch: Some("work/issue-2359".into()),
+                worktree_path: Some(repo.clone()),
+                pr_number: None,
+                pr_url: None,
+                pr_state: None,
+            },
+        );
+        gwt_core::workspace_projection::record_workspace_work_event(&repo, start).unwrap();
+        let mut events = owner.subscribe();
+        let writer = close_during_publication.then(|| {
+            gwt_agent::session::runtime_writer_lease(&gwt_agent::runtime_state_path(
+                &gwt_core::paths::gwt_sessions_dir(),
+                &session_id,
+            ))
+            .expect("hold only the actual runtime proof publication lease")
+        });
+        let client = owner.client();
+        let continuation = tokio::spawn(async move {
+            client
+                .command(OwnerCommand::ContinueWork {
+                    client_id: "legacy-client".into(),
+                    operation_id: "legacy-focus-operation".into(),
+                    work_id: work_id.into(),
+                })
+                .await
+        });
+        let mut close = None;
+        if close_during_publication {
+            // test-hygiene: allow-wall-clock-deadline hang guard for real authenticated inspection promotion before releasing its publication lease
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    if physical
+                        .current_capability_grant()
+                        .is_some_and(|grant| grant.principal().active_execution_binding().is_some())
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            owner.command(OwnerCommand::Health).await.unwrap();
+            let client = owner.client();
+            let target = id.clone();
+            close = Some(tokio::spawn(async move {
+                client
+                    .command(OwnerCommand::Close {
+                        id: target,
+                        incarnation,
+                    })
+                    .await
+            }));
+            // test-hygiene: allow-wall-clock-deadline hang guard for the exact actor close fence while binding proof publication is leased
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let inventory = owner.command(OwnerCommand::ListPanes).await.unwrap();
+                    if inventory["closing"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|row| row["id"] == id && row["incarnation"] == incarnation)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                physical.current.load(Ordering::Acquire),
+                "deferred close must retain only the exact publication permit until its ACK"
+            );
+            assert!(owner
+                .command(OwnerCommand::SendInput {
+                    id: id.clone(),
+                    incarnation,
+                    text: "must not reach the closing child".into()
+                })
+                .await
+                .is_err());
         }
-    )));
-    let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("load imported generation")
-        .expect("imported generation");
-    assert_eq!(ledger.generations.len(), 1);
-    assert!(ledger.continuation_attempts.is_empty());
-    assert!(ledger.takeover_attempts.is_empty());
-    let current = gwt::cli::execution_state::current_execution_binding(&repo, owner)
-        .expect("read current binding")
-        .expect("current binding");
-    let rebound = gwt_agent::Session::load_and_migrate(
-        &runtime.sessions_dir.join(format!("{session_id}.toml")),
-    )
-    .expect("read rebound Session")
-    .execution_binding
-    .expect("legacy Session must be rebound");
-    assert_eq!(rebound.identity, current);
-    assert!(issuer.active_token_is_current(&inspection.token, &rebound));
+        let promoted = physical.current_capability_grant();
+        drop(writer);
+        let result = continuation.await.unwrap();
+        if let Some(close) = close {
+            assert!(
+                result.is_err(),
+                "closing cannot publish a successful focus receipt: {result:?}"
+            );
+            close
+                .await
+                .unwrap()
+                .expect("publication ACK must precede exact physical Close ACK");
+        } else {
+            result.expect("actual legacy focus ACK");
+        }
+        // test-hygiene: allow-wall-clock-deadline hang guard for the correlated actual legacy binding-repair outcome
+        let (outcome, observed) = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut observed = Vec::new();
+            loop {
+                let event = events.recv().await.unwrap();
+                observed.push(event.clone());
+                if matches!(&event, OwnerEvent::ContinueWorkOutcome { operation_id, .. } if operation_id == "legacy-focus-operation") {
+                    break (event, observed);
+                }
+            }
+        }).await.unwrap();
+        let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+            .unwrap()
+            .unwrap();
+        let current = gwt::cli::execution_state::current_execution_binding(&repo, owner_key)
+            .unwrap()
+            .unwrap();
+        let rebound = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{session_id}.toml")),
+        )
+        .unwrap()
+        .execution_binding
+        .expect("actual legacy Session must be rebound");
+        let grant = if close_during_publication {
+            promoted.expect("captured real promoted capability")
+        } else {
+            let after = owner.probe(&id, incarnation).await.unwrap();
+            assert!(Arc::ptr_eq(&after.pty, &physical.pty));
+            let grant = after
+                .current_capability_grant()
+                .expect("same actual bearer promoted to Active");
+            owner
+                .command(OwnerCommand::Close { id, incarnation })
+                .await
+                .expect("actual exact legacy child cleanup");
+            grant
+        };
+        owner.shutdown().await;
+        if close_during_publication {
+            assert!(
+                matches!(
+                    outcome,
+                    OwnerEvent::ContinueWorkOutcome {
+                        outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
+                        ..
+                    }
+                ),
+                "closed repair outcome: {outcome:?}"
+            );
+            assert!(
+                observed
+                    .iter()
+                    .all(|event| !matches!(event, OwnerEvent::FocusExisting { .. })),
+                "a closing pane must not gain a successful focus event"
+            );
+            assert_eq!(rebound.identity.generation_id, current.generation_id);
+            assert_eq!(rebound.identity.binding_id, current.binding_id);
+        } else {
+            assert!(
+                matches!(
+                    outcome,
+                    OwnerEvent::ContinueWorkOutcome {
+                        outcome: gwt::ContinueWorkOutcomeKind::FocusedExisting,
+                        retryable: false,
+                        ..
+                    }
+                ),
+                "actual legacy continuation: {outcome:?}"
+            );
+            assert_eq!(rebound.identity, current);
+        }
+        assert_eq!(ledger.generations.len(), 1);
+        assert!(ledger.continuation_attempts.is_empty());
+        assert!(ledger.takeover_attempts.is_empty());
+        assert_eq!(grant.principal().active_execution_binding(), Some(&rebound));
+        assert!(
+            !physical.issuer.grant_is_current(&grant),
+            "exact Close must revoke the promoted bearer"
+        );
+        assert!(physical.pty.tree_exit_confirmed());
+    });
 }
 
 #[test]
 fn continue_work_readiness_nonce_mismatch_aborts_candidate_before_commit() {
-    let _env_guard = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (_runtime, repo, owner_key, work_id) = owner_continuation_seed(
+        temp.path(),
+        "continue_work_readiness_nonce_mismatch_aborts_candidate_before_commit",
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    let session_id = "nonce-candidate";
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 2359,
-    };
-    gwt::cli::execution_state::materialize_at_launch(
-        &repo,
-        owner.kind,
-        owner.number,
-        "predecessor-session",
-        "gwt-execute",
-        false,
-    )
-    .expect("materialize predecessor");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            "predecessor-session",
-            gwt::cli::execution_state::ExecutionSettlement::Completed,
-        )
-        .expect("settle predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
-    gwt::cli::execution_state::ensure_generation_ledger(
-        &repo,
-        owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
-    )
-    .expect("import predecessor");
-    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
-        .expect("read predecessor binding")
-        .expect("predecessor binding");
-    let request = gwt::cli::execution_state::SuccessorRequest {
-        operation_id: "nonce-operation".to_string(),
-        principal_id: "gwt-host-continuation".to_string(),
-        work_id: Some("nonce-work".to_string()),
-        source: "continue-work:resume".to_string(),
-        session_binding_id: "binding-candidate".to_string(),
-        initial_session_id: session_id.to_string(),
-        entrypoint: "gwt-execute".to_string(),
-        requested_at: chrono::Utc::now(),
-    };
-    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
-        .expect("prepare successor");
-    let identity =
-        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
-            .expect("derive successor binding");
-    let binding = gwt_agent::SessionExecutionBinding {
-        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-        session_id: session_id.to_string(),
-        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
-        owner_kind: owner.kind.as_str().to_string(),
-        owner_number: owner.number,
-        identity,
-        capability_generation: 1,
-    };
-    let mut candidate =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
-    candidate.id = session_id.to_string();
-    candidate.project_state_root = Some(repo.clone());
-    candidate.linked_issue_number = Some(owner.number);
-    candidate
-        .set_execution_binding(Some(binding.clone()))
-        .expect("bind candidate");
-    candidate
-        .save(&runtime.sessions_dir)
-        .expect("save candidate");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = session_id.to_string();
-    active.worktree_path = repo.clone();
-    active.agent_project_root = repo.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-    runtime.pending_continue_work.insert(
-        window_id.clone(),
-        PendingContinueWork {
-            client_id: "client-1".to_string(),
-            operation_id: "nonce-operation".to_string(),
-            work_id: "nonce-work".to_string(),
-            project_root: repo.clone(),
-            worktree_path: repo.clone(),
-            owner,
-            work_branch: "work/issue-2359".to_string(),
-            work_agent_id: gwt_agent::AgentId::Codex,
-            work_agent_session_id: None,
-            execution: PendingContinueWorkExecution::Successor(request),
-            binding,
-            readiness_nonce: "expected-readiness".to_string(),
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            resume_context: WorkspaceResumeContext {
-                title: None,
-                owner: Some("Issue #2359".to_string()),
-                summary: None,
-                next_action: None,
-            },
-            predecessor_session_id: "predecessor-session".to_string(),
-            predecessor_binding,
-        },
-    );
+    let before_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+        .expect("predecessor ledger")
+        .expect("ledger");
+    let executor = tokio::runtime::Runtime::new().expect("fixture executor");
+    executor.block_on(async {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        let owner = production_owner_fixture(&repo).await;
+        let checkpoint = owner
+            .pause_next_agent_launch()
+            .await
+            .expect("actual prepared candidate");
+        let transport = owner.client();
+        let selected = work_id.clone();
+        let launch = tokio::spawn(async move {
+            transport
+                .command(OwnerCommand::ContinueWork {
+                    client_id: "client-1".into(),
+                    operation_id: "readiness-rejection".into(),
+                    work_id: selected,
+                })
+                .await
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual owner preparation checkpoint; the checkpoint establishes ordering
+        let captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait())
+            .await
+            .expect("actual preparation reaches the checkpoint");
+        let pending = captured
+            .pending_continue_work
+            .as_ref()
+            .expect("actual owner Prepared receipt");
+        let candidate = captured.session.as_ref().expect("actual candidate Session");
+        assert_eq!(pending.binding.session_id, candidate.id);
+        assert!(captured
+            .issuer
+            .grant_is_current(captured.grant.as_ref().expect("actual Prepared Host grant")));
 
-    let events = runtime.finalize_continue_work_session_start(&window_id, Some("wrong-readiness"));
-
-    assert!(events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            ..
-        } if code == "launch_failed"
-    )));
-    assert!(!runtime.pending_continue_work.contains_key(&window_id));
-    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
-    assert!(
-        !runtime
-            .sessions_dir
-            .join(format!("{session_id}.toml"))
-            .exists(),
-        "nonce mismatch must discard only the exact candidate Session"
-    );
+        let work_before_finalize = tracked_work_event_store_snapshot(&repo);
+        checkpoint.release();
+        launch
+            .await
+            .expect("launch worker")
+            .expect("physical launch ACK");
+        let mut projected = owner.subscribe();
+        let mut readiness = runtime_hook_state_for_event("Waiting", "SessionStart", &candidate.id);
+        readiness.project_root = Some(repo.display().to_string());
+        readiness.branch = Some(candidate.branch.clone());
+        readiness.continuation_readiness_nonce = Some("wrong-readiness".into());
+        owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(
+            readiness,
+        ));
+        // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
+        let failure = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let event @ OwnerEvent::ContinueWorkOutcome { .. } =
+                    projected.recv().await.expect("owner outcome")
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("readiness rejection outcome");
+        assert!(
+            matches!(failure, OwnerEvent::ContinueWorkOutcome {
+            outcome: gwt::ContinueWorkOutcomeKind::Failed, error_code: Some(ref code), ..
+        } if code == "launch_failed"),
+            "exact owner must reject invalid readiness: {failure:?}"
+        );
+        assert!(
+            !gwt_core::paths::gwt_sessions_dir()
+                .join(format!("{}.toml", candidate.id))
+                .exists(),
+            "rejection must discard only the actual exact candidate Session"
+        );
+        assert_eq!(
+            tracked_work_event_store_snapshot(&repo),
+            work_before_finalize,
+            "rejected readiness must not rewrite selected Work"
+        );
+        let after_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+            .expect("rejected ledger")
+            .expect("ledger");
+        assert_eq!(after_ledger.generations, before_ledger.generations);
+        assert_eq!(
+            after_ledger.current_generation_id,
+            before_ledger.current_generation_id
+        );
+        assert_eq!(
+            gwt::cli::execution_state::continuation_attempt_for_operation(
+                &repo,
+                owner_key,
+                &captured.operation_id
+            )
+            .expect("rejected attempt")
+            .expect("actual attempt")
+            .status,
+            gwt::cli::execution_state::ContinuationAttemptStatus::Aborted
+        );
+        owner
+            .command(OwnerCommand::Close {
+                id: captured.id,
+                incarnation: captured.incarnation,
+            })
+            .await
+            .expect("physical cleanup ACK");
+        assert!(captured
+            .pty
+            .as_ref()
+            .expect("actual child")
+            .try_wait()
+            .expect("child wait")
+            .is_some());
+        owner.shutdown().await;
+    });
 }
 
 #[test]
@@ -2500,24 +2556,18 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let events = continue_work_domain_failure(
+        &runtime,
         "client-retry",
-        operation_id.to_string(),
-        work_id.to_string(),
+        &(operation_id.to_string()),
+        &(work_id.to_string()),
     );
 
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
-                retryable: true,
-                ..
-            }
-        )),
-        "replacement binding must be retained for explicit reconciliation: {events:?}"
+    assert_eq!(
+        events.outcome,
+        gwt::ContinueWorkOutcomeKind::ConflictUnknown
     );
+    assert!(events.retryable);
     assert!(candidate_path.exists());
     assert_optional_files_unchanged(&authority_before);
     let attempt =
@@ -2541,24 +2591,15 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         .save(&runtime.sessions_dir)
         .expect("restore exact candidate fixture");
 
-    let reconciled = runtime.continue_work_events(
-        &runtime.test_context(),
+    let reconciled = continue_work_domain_failure(
+        &runtime,
         "client-retry-exact",
-        operation_id.to_string(),
-        work_id.to_string(),
+        &(operation_id.to_string()),
+        &(work_id.to_string()),
     );
-    assert!(
-        reconciled.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                error_code: Some(code),
-                retryable: false,
-                ..
-            } if code == "continuation_aborted"
-        )),
-        "exact candidate must finish aborted cleanup: {reconciled:?}"
-    );
+    assert_eq!(reconciled.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+    assert!(!reconciled.retryable);
+    assert_eq!(reconciled.code, "continuation_aborted");
     assert!(!candidate_path.exists());
     let work = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .expect("load Work")
@@ -2743,24 +2784,18 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
         let work_before = tracked_workspace_work_store_snapshot(&repo);
 
-        let retained = runtime.continue_work_events(
-            &runtime.test_context(),
+        let retained = continue_work_domain_failure(
+            &runtime,
             "client-retry-dangling",
-            operation_id.to_string(),
-            work_id.to_string(),
+            &(operation_id.to_string()),
+            &(work_id.to_string()),
         );
 
-        assert!(
-            retained.iter().any(|event| matches!(
-                &event.event,
-                BackendEvent::ContinueWorkOutcome {
-                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
-                    retryable: true,
-                    ..
-                }
-            )),
-            "dangling Aborted candidate must remain an ambiguous present Session: {retained:?}",
+        assert_eq!(
+            retained.outcome,
+            gwt::ContinueWorkOutcomeKind::ConflictUnknown
         );
+        assert!(retained.retryable);
         assert!(fs::symlink_metadata(&candidate_path)
             .expect("dangling candidate entry must remain")
             .file_type()
@@ -2792,47 +2827,29 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             .expect("materialize same-id Aborted candidate after Missing observation");
     }));
 
-    let raced = runtime.continue_work_events(
-        &runtime.test_context(),
+    let raced = continue_work_domain_failure(
+        &runtime,
         "client-retry-materialized",
-        operation_id.to_string(),
-        work_id.to_string(),
+        &(operation_id.to_string()),
+        &(work_id.to_string()),
     );
 
-    assert!(
-        raced.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
-                retryable: true,
-                ..
-            }
-        )),
-        "same-id materialization must retain reconciliation evidence: {raced:?}",
-    );
+    assert_eq!(raced.outcome, gwt::ContinueWorkOutcomeKind::ConflictUnknown);
+    assert!(raced.retryable);
     assert!(candidate_path.exists(), "replacement candidate must remain");
     assert_optional_files_unchanged(&authority_before);
     assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     fs::remove_file(&candidate_path).expect("restore true Missing state for successful cleanup");
 
-    let events = runtime.continue_work_events(
-        &runtime.test_context(),
+    let events = continue_work_domain_failure(
+        &runtime,
         "client-retry",
-        operation_id.to_string(),
-        work_id.to_string(),
+        &(operation_id.to_string()),
+        &(work_id.to_string()),
     );
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                outcome: gwt::ContinueWorkOutcomeKind::Failed,
-                error_code: Some(code),
-                retryable: false,
-                ..
-            } if code == "continuation_aborted"
-        )),
-        "aborted retry outcome: {events:?}"
-    );
+    assert_eq!(events.outcome, gwt::ContinueWorkOutcomeKind::Failed);
+    assert!(!events.retryable);
+    assert_eq!(events.code, "continuation_aborted");
 
     let follow_up = gwt_core::workspace_projection::record_workspace_work_event(
         &repo,
@@ -3102,24 +3119,14 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
         )
         .expect("serialize cleanup Workspace before");
 
-        let events = runtime.continue_work_events(
-            &runtime.test_context(),
-            "client-cleanup",
-            operation_id,
-            work_id,
-        );
+        let events =
+            continue_work_domain_failure(&runtime, "client-cleanup", &(operation_id), &(work_id));
 
-        assert!(
-            events.iter().any(|event| matches!(
-                &event.event,
-                BackendEvent::ContinueWorkOutcome {
-                    outcome: gwt::ContinueWorkOutcomeKind::ConflictUnknown,
-                    retryable: true,
-                    ..
-                }
-            )),
-            "{case_name} replacement must conflict: {events:#?}"
+        assert_eq!(
+            events.outcome,
+            gwt::ContinueWorkOutcomeKind::ConflictUnknown
         );
+        assert!(events.retryable);
         assert_eq!(
             fs::read(&candidate_path).expect("read retained cleanup replacement"),
             candidate_before,
@@ -3159,481 +3166,250 @@ fn continue_work_activated_candidate_only_fallback_rejects_agent_substitution_wi
 
 #[test]
 fn continue_work_authenticated_session_start_commits_successor_and_work_exactly_once() {
-    let _env_guard = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    run_git(
-        &repo,
-        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
-    );
-
-    let predecessor_session_id = "predecessor-session";
-    let candidate_session_id = "candidate-session";
-    let selected_work_id = "work-selected";
-    let operation_id = "continue-op-commit";
-    let readiness_nonce = "continue-ready-commit";
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 2359,
-    };
-    gwt::cli::execution_state::materialize_at_launch(
-        &repo,
-        owner.kind,
-        owner.number,
-        predecessor_session_id,
-        "gwt-execute",
-        false,
-    )
-    .expect("materialize predecessor execution");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Completed,
-        )
-        .expect("settle predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
-    let ledger = gwt::cli::execution_state::ensure_generation_ledger(
-        &repo,
-        owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
-    )
-    .expect("import completed predecessor");
-    assert_eq!(
-        ledger.current_effective_status(),
-        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed)
-    );
-    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
-        .expect("read predecessor binding")
-        .expect("predecessor binding");
-
-    let now = chrono::Utc::now();
-    let request = gwt::cli::execution_state::SuccessorRequest {
-        operation_id: operation_id.to_string(),
-        principal_id: "gwt-host-continuation".to_string(),
-        work_id: Some(selected_work_id.to_string()),
-        source: "continue-work:resume".to_string(),
-        session_binding_id: "binding-candidate".to_string(),
-        initial_session_id: candidate_session_id.to_string(),
-        entrypoint: "gwt-execute".to_string(),
-        requested_at: now,
-    };
-    gwt::cli::execution_state::prepare_successor(&repo, owner, &request)
-        .expect("prepare successor");
-    let planned_identity =
-        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
-            .expect("derive Prepared binding");
-    let binding = gwt_agent::SessionExecutionBinding {
-        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-        session_id: candidate_session_id.to_string(),
-        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
-        owner_kind: owner.kind.as_str().to_string(),
-        owner_number: owner.number,
-        identity: planned_identity.clone(),
-        capability_generation: 1,
-    };
-
-    let mut start = gwt_core::workspace_projection::WorkEvent::new(
-        gwt_core::workspace_projection::WorkEventKind::Start,
-        selected_work_id,
-        now,
-    );
-    start.title = Some("Continue selected Work".to_string());
-    start.owner = Some("Issue #2359".to_string());
-    start.agent_session_id = Some(predecessor_session_id.to_string());
-    start.agent_id = Some("Codex".to_string());
-    start.display_name = Some("Codex".to_string());
-    start.execution_container = Some(
-        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
-            branch: Some("work/issue-2359".to_string()),
-            worktree_path: Some(repo.clone()),
-            pr_number: None,
-            pr_url: None,
-            pr_state: None,
-        },
-    );
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, start)
-        .expect("record selected Work");
-    gwt_core::workspace_projection::record_workspace_work_event(
-        &repo,
-        gwt_core::workspace_projection::WorkEvent::new(
-            gwt_core::workspace_projection::WorkEventKind::Done,
-            selected_work_id,
-            now + chrono::Duration::seconds(1),
-        ),
-    )
-    .expect("complete selected Work");
-
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let runtime_root = temp.path().join(".gwt");
-    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = candidate_session_id.to_string();
-    active.branch_name = "work/issue-2359".to_string();
-    active.worktree_path = repo.clone();
-    active.agent_project_root = repo.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-
-    let mut candidate_session =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
-    candidate_session.id = candidate_session_id.to_string();
-    candidate_session.project_state_root = Some(repo.clone());
-    candidate_session.linked_issue_number = Some(owner.number);
-    candidate_session
-        .set_execution_binding(Some(binding.clone()))
-        .expect("bind candidate Session");
-    candidate_session
-        .save(&runtime.sessions_dir)
-        .expect("save candidate Session");
-
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue_prepared(&repo, candidate_session_id, binding.clone())
-        .expect("issue Prepared capability");
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    runtime
-        .agent_capability_tokens
-        .insert(window_id.clone(), capability.token.clone());
-    runtime.pending_continue_work.insert(
-        window_id.clone(),
-        PendingContinueWork {
-            client_id: "client-1".to_string(),
-            operation_id: operation_id.to_string(),
-            work_id: selected_work_id.to_string(),
-            project_root: repo.clone(),
-            worktree_path: repo.clone(),
-            owner,
-            work_branch: "work/issue-2359".to_string(),
-            work_agent_id: gwt_agent::AgentId::Codex,
-            work_agent_session_id: Some(predecessor_session_id.to_string()),
-            execution: PendingContinueWorkExecution::Successor(request),
-            binding: binding.clone(),
-            readiness_nonce: readiness_nonce.to_string(),
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            resume_context: WorkspaceResumeContext {
-                title: Some("Continue selected Work".to_string()),
-                owner: Some("Issue #2359".to_string()),
-                summary: None,
-                next_action: None,
-            },
-            predecessor_session_id: predecessor_session_id.to_string(),
-            predecessor_binding: predecessor_binding.clone(),
-        },
-    );
-    let committed_pending = runtime
-        .pending_continue_work
-        .get(&window_id)
-        .expect("pending continuation")
-        .clone();
-    let _retry_focus = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-reconnected",
-        operation_id.to_string(),
-        selected_work_id.to_string(),
-    );
-    assert!(
-        runtime
-            .project_state(&runtime.test_context())
-            .expect("test project state")
-            .continue_work_waiters
-            .get(operation_id)
-            .is_some_and(|waiters| waiters.contains("client-reconnected")),
-        "a reconnect retry must subscribe to the exact pending operation"
-    );
-    assert!(
-        gwt::cli::execution_state::prepared_execution_binding_matches(
-            &repo,
-            owner,
-            candidate_session_id,
-            &binding.identity,
-        )
-        .expect("read Prepared authority"),
-        "the candidate binding must match the durable Prepared attempt"
-    );
-    let prepared_probe = gwt::probe_authenticated_prepared_execution_binding(
-        &repo,
-        candidate_session_id,
-        &binding,
-        "continue-work-test-host",
-        gwt::AgentExecutionBindingProbeRequest {
-            schema_version: gwt::AGENT_EXECUTION_BINDING_PROBE_SCHEMA_VERSION,
-            operation_id: operation_id.to_string(),
-            nonce: "prepared-probe-nonce".to_string(),
-        },
-    );
-    assert!(
-        prepared_probe.is_ok(),
-        "the Prepared Host probe must succeed before activation: {prepared_probe:?}"
-    );
-
-    assert!(
-        runtime
-            .project_state(&runtime.test_context())
-            .expect("test project state")
-            .continue_work_outcomes
-            .is_empty(),
-        "PTY spawn alone must not produce success"
-    );
-    assert_eq!(
-        gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-            .expect("read Prepared ledger")
-            .expect("Prepared ledger")
-            .current_effective_status(),
-        Some(gwt::cli::execution_state::ExecutionControlStatus::Completed),
-        "Prepared launch must leave the predecessor current"
-    );
-
-    let events = runtime.finalize_continue_work_session_start(&window_id, Some(readiness_nonce));
-
-    assert!(
-        events.iter().any(|event| matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
-                operation_id: emitted_operation_id,
-                work_id,
-                outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-                ..
-            } if emitted_operation_id == operation_id && work_id == selected_work_id
-        )),
-        "authenticated readiness must emit one correlated success; events={events:?}, attempt={:?}",
-        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id)
-            .expect("read continuation attempt")
-    );
-    assert!(events.iter().any(|event| {
-        matches!(
-            (&event.target, &event.event),
-            (
-                DispatchTarget::Client(client_id),
-                BackendEvent::ContinueWorkOutcome {
-                    operation_id: emitted_operation_id,
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
+    let (_runtime, repo, owner_key, work_id) =
+        owner_continuation_seed(temp.path(), "continue-owner-exactly-once");
+    persist_owner_continue_conversation(&repo, &codex_home, "historical-session", &repo);
+    let predecessor = gwt::cli::execution_state::current_execution_binding(&repo, owner_key)
+        .expect("predecessor")
+        .expect("binding");
+    let executor = tokio::runtime::Runtime::new().expect("fixture executor");
+    executor.block_on(async {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        let owner = production_owner_fixture(&repo).await;
+        let mut projected = owner.subscribe();
+        let checkpoint = owner
+            .pause_next_agent_launch()
+            .await
+            .expect("actual prepared successor");
+        let transport = owner.client();
+        let selected = work_id.clone();
+        let launch = tokio::spawn(async move {
+            transport
+                .command(OwnerCommand::ContinueWork {
+                    client_id: "client-1".into(),
+                    operation_id: "continue-op-commit".into(),
+                    work_id: selected,
+                })
+                .await
+        });
+        // test-hygiene: allow-wall-clock-deadline hang guard for the actual owner preparation checkpoint; the checkpoint establishes ordering
+        let captured = tokio::time::timeout(Duration::from_secs(30), checkpoint.wait()).await.expect("actual preparation reaches the checkpoint");
+        let pending = captured
+            .pending_continue_work
+            .as_ref()
+            .expect("actual continuation receipt");
+        let candidate = captured.session.as_ref().expect("actual candidate Session");
+        let grant = captured.grant.as_ref().expect("actual Prepared capability");
+        assert!(captured.issuer.grant_is_current(grant));
+        assert_eq!(pending.binding.session_id, candidate.id);
+        assert_eq!(
+            pending.outcome,
+            gwt::ContinueWorkOutcomeKind::ContinuedConversation
+        );
+        assert!(
+            gwt::cli::execution_state::prepared_execution_binding_matches(
+                &repo,
+                owner_key,
+                &candidate.id,
+                &pending.binding.identity
+            )
+            .expect("exact Prepared authority")
+        );
+        assert_eq!(
+            gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+                .expect("Prepared ledger")
+                .expect("ledger")
+                .current_effective_status(),
+            Some(gwt::cli::execution_state::ExecutionControlStatus::Completed),
+            "PTY preparation must leave the predecessor current"
+        );
+        checkpoint.release();
+        launch
+            .await
+            .expect("actual launch")
+            .expect("physical launch ACK");
+        assert!(
+            !std::iter::from_fn(|| projected.try_recv().ok()).any(|event| matches!(
+                event,
+                OwnerEvent::ContinueWorkOutcome {
                     outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
                     ..
                 }
-            ) if client_id == "client-reconnected" && emitted_operation_id == operation_id
-        )
-    }));
-    assert!(!runtime.pending_continue_work.contains_key(&window_id));
-    assert!(issuer.active_token_is_current(&capability.token, &binding));
-    assert_eq!(
-        gwt::cli::execution_state::current_execution_binding(&repo, owner)
-            .expect("read committed binding"),
-        Some(planned_identity)
-    );
-    assert!(
-        !gwt::cli::execution_state::current_active_execution_binding_matches(
-            &repo,
-            owner,
-            predecessor_session_id,
-            &predecessor_binding,
-        )
-        .expect("verify predecessor fence"),
-        "the predecessor binding must be rejected after activation"
-    );
-    let projection = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("load Work projection")
-        .expect("Work projection");
-    let selected = projection
-        .work_items
-        .iter()
-        .find(|item| item.id == selected_work_id)
-        .expect("selected Work");
-    assert_eq!(
-        selected.status_category,
-        gwt_core::workspace_projection::WorkspaceStatusCategory::Active
-    );
-    assert!(selected
-        .agents
-        .iter()
-        .any(|agent| agent.session_id == candidate_session_id));
-    assert!(
-        runtime
-            .finalize_continue_work_session_start(&window_id, Some(readiness_nonce))
-            .is_empty(),
-        "the consumed readiness receipt must not emit a second success"
-    );
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_outcomes
-        .remove(operation_id);
-    runtime
-        .pending_continue_work
-        .insert(window_id.clone(), committed_pending.clone());
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_waiters
-        .insert(
-            operation_id.to_string(),
-            HashSet::from(["client-after-response-loss".to_string()]),
+            )),
+            "PTY spawn alone must not produce success"
         );
-    let late_error_events = runtime.launch_error_events_with_continue_work(
-        window_id.clone(),
-        "late PTY error after committed response loss".to_string(),
-        None,
-    );
-    assert!(
-        late_error_events.iter().any(|event| matches!(
-            (&event.target, &event.event),
-            (
-                DispatchTarget::Client(client_id),
-                BackendEvent::ContinueWorkOutcome {
-                    operation_id: emitted_operation_id,
-                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-                    retryable: false,
+        owner
+            .command(OwnerCommand::ContinueWork {
+                client_id: "client-reconnected".into(),
+                operation_id: pending.operation_id.clone(),
+                work_id: work_id.clone(),
+            })
+            .await
+            .expect("exact pending retry joins readiness");
+        let mut readiness = runtime_hook_state_for_event("Waiting", "SessionStart", &candidate.id);
+        readiness.project_root = Some(repo.display().to_string());
+        readiness.branch = Some(candidate.branch.clone());
+        readiness.continuation_readiness_nonce = Some(pending.readiness_nonce.clone());
+        owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(
+            readiness.clone(),
+        ));
+        let mut recipients = HashSet::new();
+        // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while recipients.len() < 2 {
+                if let OwnerEvent::ContinueWorkOutcome {
+                    client_id,
+                    operation_id,
+                    work_id: selected,
+                    outcome,
                     ..
+                } = projected.recv().await.expect("correlated outcome")
+                {
+                    assert_eq!(operation_id, pending.operation_id);
+                    assert_eq!(selected, work_id);
+                    assert_eq!(outcome, gwt::ContinueWorkOutcomeKind::ContinuedConversation);
+                    recipients.insert(client_id);
                 }
-            ) if client_id == "client-after-response-loss" && emitted_operation_id == operation_id
-        )),
-        "an Activated late error must reconcile and fan out durable success: {late_error_events:?}"
-    );
-    assert!(
-        !runtime.pending_continue_work.contains_key(&window_id),
-        "post-commit launch errors must discard only the stale process-local receipt",
-    );
-    assert!(
-        !runtime
-            .project_state(&runtime.test_context())
-            .expect("test project state")
-            .continue_work_waiters
-            .contains_key(operation_id),
-        "the reconciled outcome must consume reconnect waiters exactly once",
-    );
-    assert!(runtime.active_agent_sessions.contains_key(&window_id));
-    assert!(
-        !matches!(
-            runtime.window_status(&window_id),
-            Some(WindowProcessStatus::Error | WindowProcessStatus::Stopped)
-        ),
-        "durably committed response-loss recovery must not tear down the exact live pane"
-    );
-    let same_host_retry = runtime.continue_work_events(
-        &runtime.test_context(),
-        "client-response-loss",
-        operation_id.to_string(),
-        selected_work_id.to_string(),
-    );
-    assert!(same_host_retry.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
-            retryable: false,
-            ..
-        }
-    )));
-    assert!(!runtime
-        .project_state(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_waiters
-        .contains_key(operation_id));
-    assert!(
-        !runtime.pending_continue_work.contains_key(&window_id),
-        "durable response-loss reconciliation must consume the stale pending receipt"
-    );
-
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_outcomes
-        .remove(operation_id);
-    runtime
-        .pending_continue_work
-        .insert(window_id.clone(), committed_pending);
-    runtime
-        .project_state_mut(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_waiters
-        .insert(
-            operation_id.to_string(),
-            HashSet::from(["client-error-pane".to_string()]),
+            }
+        })
+        .await
+        .expect("authenticated readiness fanout");
+        assert_eq!(
+            recipients,
+            HashSet::from(["client-1".to_string(), "client-reconnected".to_string()])
         );
-    runtime
-        .window_pty_statuses
-        .insert(window_id.clone(), WindowProcessStatus::Error);
-    assert!(
-        runtime
-            .continue_work_launch_failed_events(&window_id, "already-dead pane")
-            .is_empty(),
-        "a non-live pane must never be reconstructed as strong continuation success"
-    );
-    assert!(runtime.pending_continue_work.contains_key(&window_id));
-    assert!(runtime
-        .project_state(&runtime.test_context())
-        .expect("test project state")
-        .continue_work_waiters
-        .contains_key(operation_id));
-
-    let retry_tab = sample_project_tab_with_window_at(
-        "tab-retry",
-        "shell-retry",
-        repo.clone(),
-        WindowPreset::Shell,
-        WindowProcessStatus::Ready,
-    );
-    let mut restarted_runtime = sample_runtime(&runtime_root, vec![retry_tab], Some("tab-retry"));
-    let retry_events = restarted_runtime.continue_work_events(
-        &restarted_runtime.test_context(),
-        "client-retry",
-        operation_id.to_string(),
-        selected_work_id.to_string(),
-    );
-    assert!(
-        retry_events.iter().all(|event| !matches!(
-            &event.event,
-            BackendEvent::ContinueWorkOutcome {
+        let promoted = owner.probe(&captured.id, captured.incarnation).await.expect("actual promoted runtime");
+        assert!(promoted.has_capability_bearer(grant), "promotion retains the same actual bearer");
+        let active_grant = promoted.grant.as_ref().expect("current promoted grant");
+        assert!(captured.issuer.grant_is_current(active_grant));
+        assert_eq!(active_grant.principal().active_execution_binding(), Some(&pending.binding));
+        assert!(!captured.issuer.grant_is_current(grant), "the frozen Prepared principal cannot remain current after promotion");
+        assert_eq!(
+            gwt::cli::execution_state::current_execution_binding(&repo, owner_key)
+                .expect("committed binding"),
+            Some(pending.binding.identity.clone())
+        );
+        assert!(
+            !gwt::cli::execution_state::current_active_execution_binding_matches(
+                &repo,
+                owner_key,
+                "historical-session",
+                &predecessor
+            )
+            .expect("predecessor fence")
+        );
+        let projection = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+            .expect("Work")
+            .expect("projection");
+        let selected = projection
+            .work_items
+            .iter()
+            .find(|item| item.id == work_id)
+            .expect("selected Work");
+        assert_eq!(
+            selected.status_category,
+            gwt_core::workspace_projection::WorkspaceStatusCategory::Active
+        );
+        assert!(selected
+            .agents
+            .iter()
+            .any(|agent| agent.session_id == candidate.id));
+        owner.transport_event(gwt::project_transport::TransportEvent::RuntimeHook(
+            readiness,
+        ));
+        owner
+            .command(OwnerCommand::Health)
+            .await
+            .expect("duplicate readiness barrier");
+        assert!(
+            !std::iter::from_fn(|| projected.try_recv().ok())
+                .any(|event| matches!(event, OwnerEvent::ContinueWorkOutcome { .. })),
+            "consumed readiness must not emit a second success"
+        );
+        owner
+            .command(OwnerCommand::ContinueWork {
+                client_id: "client-after-response-loss".into(),
+                operation_id: pending.operation_id.clone(),
+                work_id: work_id.clone(),
+            })
+            .await
+            .expect("same exact operation replay");
+        // test-hygiene: allow-wall-clock-deadline hang guard for the exact owner outcome; accepted messages establish ordering
+        let replay = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let event = projected.recv().await.expect("replay");
+                if matches!(&event, OwnerEvent::ContinueWorkOutcome { client_id, .. } if client_id == "client-after-response-loss") { break event; }
+            }
+        })
+        .await
+        .expect("durable live response-loss replay");
+        assert!(matches!(
+            replay,
+            OwnerEvent::ContinueWorkOutcome {
                 outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                retryable: false,
                 ..
             }
-        )),
-        "ledger + Work state without a live exact pane must not replay strong success: {retry_events:?}"
-    );
-    assert!(retry_events.iter().any(|event| matches!(
-        &event.event,
-        BackendEvent::ContinueWorkOutcome {
-            operation_id: emitted_operation_id,
-            work_id,
-            outcome: gwt::ContinueWorkOutcomeKind::Failed,
-            error_code: Some(code),
-            retryable: true,
-            ..
-        } if emitted_operation_id == operation_id
-            && work_id == selected_work_id
-            && code == "continuation_reconciliation_required"
-    )));
-    let readback = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("load response-loss retry ledger")
-        .expect("response-loss retry ledger");
-    assert_eq!(readback.generations.len(), 2);
-    assert_eq!(
-        readback
-            .continuation_attempts
-            .iter()
-            .filter(|attempt| {
-                attempt.status == gwt::cli::execution_state::ContinuationAttemptStatus::Activated
+        ));
+        let live = owner
+            .probe(&captured.id, captured.incarnation)
+            .await
+            .expect("same live exact pane remains installed");
+        assert!(Arc::ptr_eq(
+            &live.pty,
+            captured.pty.as_ref().expect("actual child")
+        ));
+        owner
+            .command(OwnerCommand::Close {
+                id: captured.id,
+                incarnation: captured.incarnation,
             })
-            .count(),
-        1,
-        "response-loss retry must not append another generation or activation"
-    );
+            .await
+            .expect("exact close ACK");
+        owner.shutdown().await;
+        let restarted = production_owner_fixture(&repo).await;
+        let mut retry_events = restarted.subscribe();
+        restarted
+            .command(OwnerCommand::ContinueWork {
+                client_id: "client-retry".into(),
+                operation_id: pending.operation_id.clone(),
+                work_id: work_id.clone(),
+            })
+            .await
+            .expect("terminal exact operation retry");
+        assert!(
+            !std::iter::from_fn(|| retry_events.try_recv().ok()).any(|event| matches!(
+                event,
+                OwnerEvent::ContinueWorkOutcome {
+                    outcome: gwt::ContinueWorkOutcomeKind::ContinuedConversation,
+                    ..
+                }
+            )),
+            "a non-live pane cannot be reconstructed as strong continuation success"
+        );
+        let readback = gwt::cli::execution_state::load_generation_ledger(&repo, owner_key)
+            .expect("retry ledger")
+            .expect("ledger");
+        assert_eq!(readback.generations.len(), 2);
+        assert_eq!(
+            readback
+                .continuation_attempts
+                .iter()
+                .filter(|attempt| attempt.status
+                    == gwt::cli::execution_state::ContinuationAttemptStatus::Activated)
+                .count(),
+            1,
+            "response-loss retry must not append a second activation"
+        );
+        restarted.shutdown().await;
+    });
 }
 
 // #3426 (A): the Work projection says `Issue #2359` while the trusted ledger
@@ -3741,124 +3517,42 @@ fn fresh_execution_authenticated_session_start_creates_successor_after_done_work
 fn assert_fresh_execution_preserves_terminal_work(
     terminal_kind: gwt_core::workspace_projection::WorkEventKind,
 ) {
-    let _env_guard = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
+    let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    run_git(
-        &repo,
-        &["symbolic-ref", "HEAD", "refs/heads/work/issue-2359"],
-    );
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 2359,
-    };
-    let predecessor_session_id = "legacy-blocked-session";
-    let candidate_session_id = "fresh-candidate-session";
-    let operation_id = "fresh-launch-ready-operation";
-    let readiness_nonce = "fresh-launch-private-readiness";
-    gwt::cli::execution_state::materialize_at_launch(
-        &repo,
-        owner.kind,
-        owner.number,
-        predecessor_session_id,
-        "$gwt-execute #2359",
+    let fixture = owner_fresh_launch_fixture(
+        temp.path(),
+        "fresh-terminal-history",
+        gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         false,
-    )
-    .expect("materialize legacy execution");
-    assert!(matches!(
-        gwt::cli::execution_state::settle(
-            &repo,
-            predecessor_session_id,
-            gwt::cli::execution_state::ExecutionSettlement::Blocked {
-                reason: "legacy terminal blocker".to_string(),
-                missing_verification: Some("legacy evidence gap".to_string()),
-            },
-        )
-        .expect("settle Blocked predecessor"),
-        gwt::cli::execution_state::SettleResult::Settled(_)
-    ));
-    gwt::cli::execution_state::ensure_generation_ledger(
-        &repo,
-        owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
-    )
-    .expect("import Blocked predecessor");
-    let predecessor_ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("load predecessor ledger")
-        .expect("predecessor ledger");
-    let predecessor_generation = predecessor_ledger.generations[0].clone();
-    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(&repo, owner)
-        .expect("read predecessor binding")
-        .expect("predecessor binding");
-
-    let request = gwt::cli::execution_state::SuccessorRequest {
-        operation_id: operation_id.to_string(),
-        principal_id: "gwt-host-launch".to_string(),
-        work_id: None,
-        source: gwt::cli::execution_state::FRESH_LINKED_OWNER_LAUNCH_SOURCE.to_string(),
-        session_binding_id: "fresh-candidate-binding".to_string(),
-        initial_session_id: candidate_session_id.to_string(),
-        entrypoint: "$gwt-execute #2359".to_string(),
-        requested_at: Utc::now(),
-    };
-    gwt::cli::execution_state::prepare_fresh_linked_owner_launch_successor(&repo, owner, &request)
-        .expect("prepare fresh successor");
-    let planned =
-        gwt::cli::execution_state::prepared_successor_execution_binding(&repo, owner, &request)
-            .expect("derive fresh binding");
-    let binding = gwt_agent::SessionExecutionBinding {
-        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-        session_id: candidate_session_id.to_string(),
-        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
-        owner_kind: owner.kind.as_str().to_string(),
-        owner_number: owner.number,
-        identity: planned.clone(),
-        capability_generation: 1,
-    };
-
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        Some(WorkspaceResumeContext {
+            title: Some("Fresh legacy recovery".into()),
+            owner: Some("Issue #2359".into()),
+            summary: None,
+            next_action: None,
+        }),
     );
-    let runtime_root = temp.path().join(".gwt");
-    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    let mut predecessor_session =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
-    predecessor_session.id = predecessor_session_id.to_string();
-    predecessor_session.project_state_root = Some(repo.clone());
-    predecessor_session.linked_issue_number = Some(owner.number);
-    predecessor_session
-        .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
-            schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-            session_id: predecessor_session_id.to_string(),
-            repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
-            owner_kind: owner.kind.as_str().to_string(),
-            owner_number: owner.number,
-            identity: predecessor_binding.clone(),
-            capability_generation: 1,
-        }))
-        .expect("bind predecessor Session");
-    predecessor_session
-        .save(&runtime.sessions_dir)
-        .expect("save predecessor Session");
-    let predecessor_session_path = runtime
-        .sessions_dir
-        .join(format!("{predecessor_session_id}.toml"));
-    let predecessor_session_bytes = fs::read(&predecessor_session_path).expect("old Session bytes");
-
-    let mut predecessor_active = sample_active_agent_session("tab-1", &window_id);
-    predecessor_active.session_id = predecessor_session_id.to_string();
-    predecessor_active.branch_name = "work/issue-2359".to_string();
+    let repo = fixture.repo.clone();
+    let owner = fixture.authority;
+    let predecessor_session_id = "predecessor-fresh-terminal-history";
+    let candidate_session_id = fixture.pending.binding.session_id.as_str();
+    let predecessor_session_path =
+        gwt_core::paths::gwt_sessions_dir().join(format!("{predecessor_session_id}.toml"));
+    let predecessor_session = gwt_agent::Session::load(&predecessor_session_path).unwrap();
+    let predecessor_session_bytes = fs::read(&predecessor_session_path).unwrap();
+    let predecessor_generation = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
+        .unwrap()
+        .unwrap()
+        .generations[0]
+        .clone();
+    let predecessor_binding = fixture.predecessor_binding.clone();
+    let mut predecessor_active = sample_active_agent_session("tab-1", "tab-1::historical");
+    predecessor_active.session_id = predecessor_session_id.into();
+    predecessor_active.branch_name = predecessor_session.branch.clone();
     predecessor_active.worktree_path = repo.clone();
+    predecessor_active.agent_id = predecessor_session.agent_id.to_string();
     save_workspace_launch_projection(
         &repo,
         &predecessor_active,
@@ -3917,123 +3611,39 @@ fn assert_fresh_execution_preserves_terminal_work(
     assert!(predecessor_work_snapshot.is_terminal());
     assert_eq!(predecessor_work_snapshot.execution_containers.len(), 2);
 
-    let mut candidate =
-        gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
-    candidate.id = candidate_session_id.to_string();
-    candidate.project_state_root = Some(repo.clone());
-    candidate.linked_issue_number = Some(owner.number);
-    candidate
-        .set_execution_binding(Some(binding.clone()))
-        .expect("bind fresh Session");
-    candidate
-        .save(&runtime.sessions_dir)
-        .expect("save fresh Session");
-    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&candidate)
-        .unwrap()
+    let receipt = commit_owner_fresh_readiness(&fixture);
+    assert!(receipt.validated);
+    let probe = fixture
+        .executor
+        .block_on(
+            fixture
+                .owner
+                .probe(&fixture.captured.id, fixture.captured.incarnation),
+        )
         .unwrap();
-    persist_durable_launch_recovery(
-        &runtime.sessions_dir,
-        DurableLaunchRecoveryKind::FreshSuccessor {
-            operation_id: operation_id.to_string(),
-        },
-        candidate_session_id,
-        &repo,
-        &repo,
-        owner,
-        Some(&binding),
-        Some(&gwt_agent::AgentId::Codex),
-    )
-    .expect("persist fresh launch receipt");
-    let mut active = sample_active_agent_session("tab-1", &window_id);
-    active.session_id = candidate_session_id.to_string();
-    active.branch_name = "work/issue-2359".to_string();
-    active.worktree_path = repo.clone();
-    active.agent_project_root = repo.display().to_string();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:45131/internal/hook-live",
-        "ws://127.0.0.1:46241/ws",
-        "ws://127.0.0.1:45131/internal/pane-ws",
-    );
-    let capability = issuer
-        .issue_prepared(&repo, candidate_session_id, binding.clone())
-        .expect("issue Prepared capability");
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    runtime
-        .agent_capability_tokens
-        .insert(window_id.clone(), capability.token.clone());
-    runtime.pending_fresh_execution_launches.insert(
-        window_id.clone(),
-        PendingFreshExecutionLaunch {
-            operation_id: operation_id.to_string(),
-            project_root: repo.clone(),
-            worktree_path: repo.clone(),
-            owner,
-            request,
-            binding: binding.clone(),
-            session_identity,
-            readiness_nonce: readiness_nonce.to_string(),
-            predecessor_binding: predecessor_binding.clone(),
-            base_branch: Some("origin/develop".to_string()),
-            linked_issue_number: Some(owner.number),
-            resume_context: Some(WorkspaceResumeContext {
-                title: Some("Fresh legacy recovery".to_string()),
-                owner: Some("Issue #2359".to_string()),
-                summary: None,
-                next_action: None,
-            }),
-            launch_feedback_context: None,
-        },
-    );
-
-    let mut session_start =
-        runtime_hook_state_for_event("Working", "SessionStart", candidate_session_id);
-    session_start.continuation_readiness_nonce = Some(readiness_nonce.to_string());
-    session_start.project_root = Some(repo.display().to_string());
-    session_start.branch = Some("work/issue-2359".to_string());
-    let (spawner, _) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let mut events = runtime.handle_runtime_hook_event(session_start);
-    events.extend(commit_pending_fresh_execution(&mut runtime));
-
-    assert!(
-        !events.is_empty(),
-        "activation must publish the committed state"
-    );
-    assert!(!runtime
-        .pending_fresh_execution_launches
-        .contains_key(&window_id));
+    assert!(probe.readiness_watch.is_none());
     assert!(!durable_launch_recovery_exists(
-        &runtime.sessions_dir,
-        candidate_session_id,
+        &gwt_core::paths::gwt_sessions_dir(),
+        candidate_session_id
     ));
-    assert!(
-        issuer.active_token_is_current(&capability.token, &binding),
-        "fresh capability was not promoted; events={events:?}; attempt={:?}; current={:?}",
-        gwt::cli::execution_state::continuation_attempt_for_operation(&repo, owner, operation_id,),
-        gwt::cli::execution_state::current_execution_binding(&repo, owner),
-    );
+    assert!(probe.has_capability_bearer(fixture.captured.grant.as_ref().unwrap()));
+    assert!(probe.issuer.grant_is_current(probe.grant.as_ref().unwrap()));
     assert_eq!(
-        gwt::cli::execution_state::current_execution_binding(&repo, owner)
-            .expect("read fresh current binding"),
-        Some(planned),
+        gwt::cli::execution_state::current_execution_binding(&repo, owner).unwrap(),
+        Some(fixture.pending.binding.identity.clone())
     );
     let ledger = gwt::cli::execution_state::load_generation_ledger(&repo, owner)
-        .expect("read activated ledger")
-        .expect("activated ledger");
+        .unwrap()
+        .unwrap();
     assert_eq!(ledger.generations.len(), 2);
     assert_eq!(ledger.generations[0], predecessor_generation);
     assert_ne!(
         gwt::cli::execution_state::current_execution_binding(&repo, owner).unwrap(),
-        Some(predecessor_binding),
-        "old binding must be stale after fresh activation",
+        Some(predecessor_binding)
     );
     assert_eq!(
-        fs::read(&predecessor_session_path).expect("old Session readback"),
-        predecessor_session_bytes,
-        "fresh activation must not rewrite the predecessor Session",
+        fs::read(&predecessor_session_path).unwrap(),
+        predecessor_session_bytes
     );
     let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .unwrap()
@@ -4044,7 +3654,7 @@ fn assert_fresh_execution_preserves_terminal_work(
             .iter()
             .find(|work| work.id == predecessor_work),
         Some(&predecessor_work_snapshot),
-        "fresh activation must preserve the terminal Work and its Session membership",
+        "fresh activation preserves terminal Work and exact historical membership"
     );
     let successor = works
         .work_items
@@ -4054,13 +3664,13 @@ fn assert_fresh_execution_preserves_terminal_work(
                 .iter()
                 .any(|agent| agent.session_id == candidate_session_id)
         })
-        .expect("fresh Session belongs to a successor Work");
+        .unwrap();
     assert_ne!(successor.id, predecessor_work);
     assert!(!successor.is_terminal());
     assert!(successor.related_work_item_ids.contains(&predecessor_work));
     save_workspace_launch_projection(
         &repo,
-        runtime.active_agent_sessions.get(&window_id).unwrap(),
+        probe.active_session.as_ref().unwrap(),
         None,
         Some(owner.number),
         Some(owner),
@@ -4070,7 +3680,7 @@ fn assert_fresh_execution_preserves_terminal_work(
         },
         Some(&HashSet::from([candidate_session_id.to_string()])),
     )
-    .expect("retry must reuse the same successor Work");
+    .expect("retry reuses successor Work");
     assert!(
         save_workspace_launch_projection(
             &repo,
@@ -4082,32 +3692,31 @@ fn assert_fresh_execution_preserves_terminal_work(
             WorkspaceLaunchProjectionKind::Resume {
                 created_by_start_work: true
             },
-            Some(&HashSet::from([predecessor_session_id.to_string()])),
+            Some(&HashSet::from([predecessor_session_id.to_string()]))
         )
         .is_err(),
-        "a terminal predecessor Session cannot be moved to its successor"
+        "a terminal predecessor Session cannot move to its successor"
     );
-
-    let update = gwt::apply_bound_authenticated_workspace_update(
-        &repo,
-        candidate_session_id,
-        &binding,
-        gwt::AgentWorkspaceUpdateRequest {
+    let (status, update) = fixture
+        .executor
+        .block_on(probe.workspace_update(&gwt::AgentWorkspaceUpdateRequest {
             schema_version: gwt::AGENT_WORKSPACE_UPDATE_SCHEMA_VERSION,
             claimed_session_id: candidate_session_id.to_string(),
-            observation: gwt::observe_agent_runtime(&repo).expect("observe successor worktree"),
+            observation: gwt::observe_agent_runtime(&repo).unwrap(),
             intent: gwt::AgentWorkspaceUpdateIntent {
-                current_focus: Some("Continue the next owner slice".to_string()),
+                current_focus: Some("Continue the next owner slice".into()),
                 ..Default::default()
             },
-        },
-    )
-    .expect("the fresh binding must authorize workspace.update on its successor Work");
-    assert_eq!(update.work_id, successor.id);
+        }))
+        .unwrap();
+    assert!(
+        status.is_success(),
+        "actual bound workspace.update: {status}: {update}"
+    );
+    assert_eq!(update["work_id"], successor.id);
     assert_eq!(
-        fs::read(&predecessor_session_path).expect("old Session readback after update"),
-        predecessor_session_bytes,
-        "successor workspace.update must preserve the predecessor Session",
+        fs::read(&predecessor_session_path).unwrap(),
+        predecessor_session_bytes
     );
     let retry_works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
         .unwrap()
@@ -4120,4 +3729,5 @@ fn assert_fresh_execution_preserves_terminal_work(
             .find(|work| work.id == predecessor_work),
         Some(&predecessor_work_snapshot)
     );
+    fixture.shutdown();
 }

@@ -155,7 +155,7 @@ gtk = "0.18"
 # dev-dependency below so integration-test binaries are covered too; the
 # arming ctor additionally requires debug_assertions, so a release build can
 # never ship armed even under --all-features.
-test-gh-guard = ["dep:ctor"]
+test-gh-guard = ["dep:ctor", "gwt-core/test-support"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

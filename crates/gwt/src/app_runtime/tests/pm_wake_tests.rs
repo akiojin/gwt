@@ -199,7 +199,10 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
     let context = runtime.project_context_for_root(&repo).unwrap();
     runtime.pm_agent_idle_wake_events(&context);
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         gwt::pm_registry::load_pm_loop_state(&gwt::pm_registry::pm_loop_state_path_for_repo_path(
@@ -210,7 +213,7 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
         .is_none(),
         "a new PM turn must retain the queued edge instead of submitting it"
     );
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(
         runtime
             .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
@@ -355,8 +358,11 @@ fn agent_idle_wake_is_immediate_and_rearms_only_after_running() {
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
         .is_some());
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T03:00:00Z")
         .is_none());
@@ -430,12 +436,15 @@ fn codex_capacity_wake_waits_for_pm_but_drops_a_recovered_pane() {
     let id = "tab-1::other-window";
     let screen = "■ Selected model is at capacity";
     runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     runtime.observe_provider_api_error(id, Some(screen));
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .is_none());
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     write_pm_pause_fixture(&repo, true);
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
@@ -543,7 +552,10 @@ fn agent_idle_wake_survives_busy_pm_and_recent_loop_clock() {
         },
     )
     .unwrap();
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
     assert!(
@@ -556,7 +568,7 @@ fn agent_idle_wake_survives_busy_pm_and_recent_loop_clock() {
         .unwrap()
         .last_wake_at
         .is_none());
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(
         runtime
             .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:30Z")
@@ -990,7 +1002,8 @@ fn pm_wake_never_fires_without_a_live_registered_pm_or_with_monitor_off() {
 
     // No registration at all: nothing to wake.
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister");
+    gwt::pm_registry::deregister_pm(&prefs_path, &registered_pm_session_id(&repo))
+        .expect("deregister");
     let escalated_again = [
         pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
         pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
@@ -1151,7 +1164,6 @@ fn malformed_or_old_quiet_timestamps_can_select_a_prompt_but_never_refresh_head(
     )
     .expect("monitor prefs for stable remote identity");
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister old PM");
     gwt::pm_registry::try_register_pm(
         &prefs_path,
         pm_registration_fixture("pm-session-live", &pm_worktree),
@@ -1743,7 +1755,7 @@ fn live_pm_pane_fixture_drains_input_and_reaps_its_child_at_scope_exit() {
     let (_repo, mut runtime, window_id) = pm_wake_fixture(&temp);
     let pty = {
         let _fixture = attach_live_pm_pane(&mut runtime, &window_id);
-        let pty = runtime.runtimes[&window_id].pty.clone();
+        let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
         // Cross the macOS canonical queue limit without submitting a line.
         pty.write_input(&[b'x'; 4096]).expect("drain unsent input");
         pty
@@ -1773,11 +1785,9 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
 
     let compose = runtime.terminal_input_events(&pm_window_id, "ちゃんとbunx/npxで実行されてい");
     assert!(compose.is_empty());
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
-        runtime
-            .runtimes
-            .get(&pm_window_id)
-            .expect("live PM pane")
+        owner_runtime_probe(&runtime, &pm_window_id)
             .pane
             .lock()
             .expect("pane lock")
@@ -1788,10 +1798,7 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
     assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
     assert!(
-        runtime
-            .runtimes
-            .get(&pm_window_id)
-            .expect("live PM pane")
+        owner_runtime_probe(&runtime, &pm_window_id)
             .pane
             .lock()
             .expect("pane lock")
@@ -1841,10 +1848,7 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
 
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
     drain_pm_wake_delivery_tasks(&mut runtime);
-    let pty = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("live PM pane")
+    let pty = owner_runtime_probe(&runtime, &pm_window_id)
         .pane
         .lock()
         .expect("pane lock")
@@ -1918,10 +1922,7 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
             .is_empty(),
         "submit must deliver and clear the held tick"
     );
-    let pty = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("live PM pane")
+    let pty = owner_runtime_probe(&runtime, &pm_window_id)
         .pane
         .lock()
         .expect("pane lock")

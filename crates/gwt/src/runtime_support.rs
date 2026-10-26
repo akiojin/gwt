@@ -54,11 +54,7 @@ pub fn should_auto_start_restored_window(window: &gwt::PersistedWindowState) -> 
 // もしくは preset が Agent / Claude / Codex のいずれか) を runtime_support
 // 側でも露出し、`ProjectTabView` 生成箇所から重複定義なく参照できるようにする。
 pub fn window_is_agent_pane(window: &gwt::PersistedWindowState) -> bool {
-    window.agent_id.is_some()
-        || matches!(
-            window.preset,
-            WindowPreset::Agent | WindowPreset::Claude | WindowPreset::Codex
-        )
+    gwt::project_runtime::agent_dispatch::window_is_agent_pane(window)
 }
 
 // SPEC-2013 FR-011: agent preset の Running 窓だけを `RunningAgentSummary` に
@@ -69,20 +65,7 @@ pub fn window_is_agent_pane(window: &gwt::PersistedWindowState) -> bool {
 pub fn collect_running_agents(
     windows: &[gwt::PersistedWindowState],
 ) -> Vec<gwt::RunningAgentSummary> {
-    windows
-        .iter()
-        .filter(|window| {
-            window_is_agent_pane(window) && window.status == WindowProcessStatus::Running
-        })
-        .map(|window| gwt::RunningAgentSummary {
-            display_name: window
-                .dynamic_title
-                .clone()
-                .or_else(|| window.purpose_title.clone())
-                .unwrap_or_else(|| window.title.clone()),
-            branch: window.dynamic_title_detail.clone(),
-        })
-        .collect()
+    gwt::project_runtime::agent_dispatch::collect_running_agents(windows)
 }
 
 pub fn current_app_version() -> &'static str {
@@ -186,23 +169,7 @@ pub fn dedupe_recent_projects(
 /// 返す。タブ open 時の direct-pick semantics (worktree path で開く) には
 /// 影響しない。Recent Projects 登録経路と persisted state load 経路の双方で
 /// 使う。
-pub fn normalize_recent_project_path(path: &Path) -> PathBuf {
-    let Ok(layout_root) = gwt_git::worktree::main_worktree_root(path) else {
-        return path.to_path_buf();
-    };
-    if is_bare_repo_dir(&layout_root) {
-        layout_root
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.to_path_buf())
-    } else {
-        layout_root
-    }
-}
-
-fn is_bare_repo_dir(path: &Path) -> bool {
-    path.join("HEAD").exists() && path.join("objects").exists() && path.join("refs").exists()
-}
+pub use gwt::launch_runtime::normalize_recent_project_path;
 
 /// Normalize every Recent Projects entry via [`normalize_recent_project_path`]
 /// and re-derive its title when the path changes. Combine with
@@ -294,15 +261,7 @@ pub fn resolve_project_target(path: &Path) -> Result<ProjectOpenTarget, String> 
     })
 }
 
-pub fn normalize_branch_name(branch_name: &str) -> String {
-    if let Some(name) = branch_name.strip_prefix("refs/remotes/") {
-        return name.strip_prefix("origin/").unwrap_or(name).to_string();
-    }
-    if let Some(name) = branch_name.strip_prefix("origin/") {
-        return name.to_string();
-    }
-    branch_name.to_string()
-}
+pub use gwt::launch_runtime::normalize_branch_name;
 
 pub fn synthetic_branch_entry(branch_name: &str) -> BranchListEntry {
     BranchListEntry {
@@ -366,146 +325,17 @@ pub fn branch_worktree_path_for(main_repo_path: &Path, branch_name: &str) -> Opt
     None
 }
 
-pub fn usable_worktree_path_for_branch(
-    worktrees: &[gwt_git::WorktreeInfo],
-    branch_name: &str,
-) -> Option<PathBuf> {
-    worktrees
-        .iter()
-        .find(|worktree| {
-            worktree.branch.as_deref() == Some(branch_name) && usable_worktree_entry(worktree)
-        })
-        .map(|worktree| worktree.path.clone())
-}
+#[cfg(test)]
+pub use gwt::launch_runtime::{
+    first_available_worktree_path, suffixed_worktree_path, worktree_path_is_occupied,
+    worktrees_have_stale_branch_entry,
+};
+pub use gwt::launch_runtime::{
+    intake_hook_config_is_disposable, local_branch_exists, origin_remote_ref, same_worktree_path,
+    usable_worktree_path_for_branch,
+};
 
-pub fn worktrees_have_stale_branch_entry(
-    worktrees: &[gwt_git::WorktreeInfo],
-    branch_name: &str,
-) -> bool {
-    worktrees.iter().any(|worktree| {
-        worktree.branch.as_deref() == Some(branch_name) && !usable_worktree_entry(worktree)
-    })
-}
-
-pub fn usable_worktree_entry(worktree: &gwt_git::WorktreeInfo) -> bool {
-    !worktree.prunable && worktree.path.exists()
-}
-
-pub use gwt::worktree_form::{is_ephemeral_worktree_path, EPHEMERAL_WORKTREE_PREFIX};
-
-/// SPEC-3214 (codex #3237): whether a worktree-relative status `entry` is a
-/// gwt MERGED hook config (`.claude/settings.local.json` / `.codex/hooks.json`)
-/// that currently holds ONLY gwt-generated content, and so is safe to reap
-/// along with an ephemeral intake worktree. A user edit (an extra key or a
-/// non-managed hook) makes it non-disposable. Bridges `gwt-git`'s teardown
-/// probe (which cannot depend on `gwt-skills`) to the managed-hook semantics.
-pub fn intake_hook_config_is_disposable(worktree: &Path, entry: &str) -> bool {
-    gwt::managed_assets::managed_hook_config_is_disposable(worktree, entry)
-}
-
-pub fn first_available_worktree_path(
-    preferred_path: &Path,
-    worktrees: &[gwt_git::WorktreeInfo],
-) -> Option<PathBuf> {
-    if !worktree_path_is_occupied(preferred_path, worktrees) && !preferred_path.exists() {
-        return Some(preferred_path.to_path_buf());
-    }
-
-    for suffix in 2usize.. {
-        let candidate = suffixed_worktree_path(preferred_path, suffix)?;
-        if !worktree_path_is_occupied(&candidate, worktrees) && !candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
-}
-
-pub fn suffixed_worktree_path(path: &Path, suffix: usize) -> Option<PathBuf> {
-    let file_name = path.file_name()?.to_str()?;
-    let mut candidate = path.to_path_buf();
-    candidate.set_file_name(format!("{file_name}-{suffix}"));
-    Some(candidate)
-}
-
-pub fn worktree_path_is_occupied(path: &Path, worktrees: &[gwt_git::WorktreeInfo]) -> bool {
-    worktrees
-        .iter()
-        .any(|worktree| same_worktree_path(&worktree.path, path))
-}
-
-pub fn same_worktree_path(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-pub fn origin_remote_ref(branch_name: &str) -> String {
-    if let Some(ref_name) = branch_name.strip_prefix("refs/remotes/") {
-        ref_name.to_string()
-    } else if branch_name.starts_with("origin/") {
-        branch_name.to_string()
-    } else {
-        format!("origin/{branch_name}")
-    }
-}
-
-pub fn current_git_branch(repo_path: &Path) -> Result<String, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args(["branch", "--show-current"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|err| format!("git branch --show-current: {err}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git branch --show-current: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if branch.is_empty() {
-        Err("git branch --show-current returned an empty branch name".to_string())
-    } else {
-        Ok(branch)
-    }
-}
-
-pub fn local_branch_exists(repo_path: &Path, branch_name: &str) -> Result<bool, String> {
-    let output = gwt_core::process::hidden_command("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch_name}"),
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|err| format!("git show-ref --verify refs/heads/{branch_name}: {err}"))?;
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(format!(
-            "git show-ref --verify refs/heads/{branch_name} in {} failed with status {}: {}",
-            repo_path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-    }
-}
-
-pub fn resolve_launch_spec_with_fallback(
-    preset: WindowPreset,
-    shell: &gwt::ShellProgram,
-) -> Result<gwt::LaunchSpec, gwt::PresetResolveError> {
-    let _ = shell;
-    resolve_launch_spec(preset)
-}
+pub use gwt::launch_runtime::current_git_branch;
 
 #[cfg(test)]
 pub fn spawn_env() -> HashMap<String, String> {

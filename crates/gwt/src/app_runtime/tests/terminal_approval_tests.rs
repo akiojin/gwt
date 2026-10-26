@@ -322,7 +322,30 @@ fn app_runtime_status_thread_reports_process_exit_without_reader_eof() {
         }
     }
     let incarnation = super::super::next_window_runtime_incarnation();
-    let status_thread = runtime.spawn_status_thread(window_id.clone(), incarnation, pane.clone());
+    let proxy = runtime.proxy.clone();
+    let status_thread = gwt::pane_runtime::spawn_status_thread(
+        window_id.clone(),
+        incarnation,
+        pane.clone(),
+        move |event| {
+            if let gwt::pane_runtime::PaneRuntimeEvent::Status {
+                id,
+                incarnation,
+                status,
+                detail,
+                exit_confirmed,
+            } = event
+            {
+                proxy.send(UserEvent::RuntimeStatus {
+                    id,
+                    incarnation,
+                    status,
+                    detail,
+                    exit_confirmed,
+                });
+            }
+        },
+    );
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut observed_status = None;
@@ -474,9 +497,9 @@ fn app_runtime_native_conpty_pushes_running_waiting_idle_and_process_exit() {
     )
     .expect("native ConPTY pane");
     insert_test_pane_runtime_with_pane(&mut runtime, &window_id, pane);
-    let pane = runtime.runtimes[&window_id].pane.clone();
+    let pane = owner_runtime_probe(&runtime, &window_id).pane.clone();
     let incarnation = runtime.runtimes[&window_id].incarnation;
-    let pty = runtime.runtimes[&window_id].pty.clone();
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
     struct ConptyCleanup(Arc<gwt_terminal::PtyHandle>);
     impl Drop for ConptyCleanup {
         fn drop(&mut self) {
@@ -628,12 +651,7 @@ fn late_runtime_hook_stop_preserves_same_session_successor_generation() {
     let window_id = combined_window_id("tab-1", "codex-1");
     runtime.register_window("tab-1", "codex-1");
     insert_test_pane_runtime(&mut runtime, &window_id);
-    let pty = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("live runtime")
-        .pty
-        .clone();
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
     runtime.active_agent_sessions.insert(
         window_id.clone(),
         sample_active_agent_session("tab-1", &window_id),
@@ -1215,10 +1233,7 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
         > 1. Yes, proceed\r\n\
           2. No, and tell Codex what to do differently\r\n\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1268,7 +1283,7 @@ fn app_runtime_provider_auth_notice_parks_the_live_owner_from_pty_output() {
     )
     .unwrap();
     let output = b"\x1b[2J\x1b[H\xe2\x96\xa0 Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\r\n";
-    runtime.runtimes[&window_id]
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .unwrap()
@@ -1332,10 +1347,7 @@ fn app_runtime_codex_directory_trust_prompt_escalates_only_monitor_owned_live_wi
         risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\r\n\
         policies to load.\r\n\r\n\
         > 1. Yes, continue\r\n  2. No, quit\r\n\r\n  Press enter to continue\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1381,10 +1393,7 @@ fn app_runtime_directory_trust_prompt_is_inert_for_unowned_codex_window() {
         Do you trust the contents of this directory? Working with untrusted contents comes with higher\r\n\
         risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load.\r\n\r\n\
         > 1. Yes, continue\r\n  2. No, quit\r\n\r\n  Press enter to continue\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1431,10 +1440,7 @@ fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt(
         > 1. Yes\r\n\
           2. No, and tell Claude what to do differently\r\n\r\n\
         Enter to confirm \xc2\xb7 Esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1473,10 +1479,7 @@ fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it
         > 1. Yes, proceed\r\n\
           2. No, and tell Codex what to do differently\r\n\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1505,10 +1508,7 @@ fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it
     let token = runtime.window_approval_waiting[&window_id]
         .pending_settle_token
         .expect("settle token");
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1555,10 +1555,7 @@ fn app_runtime_approval_settle_stable_progress_clears_waiting() {
     let token = runtime.window_approval_waiting[&window_id]
         .pending_settle_token
         .expect("settle token");
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1583,10 +1580,7 @@ fn app_runtime_approval_settle_partial_provider_evidence_keeps_waiting() {
     let token = runtime.window_approval_waiting[&window_id]
         .pending_settle_token
         .expect("settle token");
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1607,10 +1601,7 @@ fn app_runtime_approval_settle_ignores_complete_prompt_in_scrollback_above_progr
     let token = runtime.window_approval_waiting[&window_id]
         .pending_settle_token
         .expect("settle token");
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1696,10 +1687,7 @@ fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() 
     let first = b"Would you like to run the following command?\r\n first-command\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1711,10 +1699,7 @@ fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() 
         b"\x1b[2J\x1b[HWould you like to run the following command?\r\n second-command\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1829,10 +1814,7 @@ fn app_runtime_custom_agent_name_containing_codex_is_not_classified_as_codex() {
     let prompt = b"Would you like to run the following command?\r\n secret\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1871,10 +1853,7 @@ fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere
         .window_hook_states
         .insert(window_id.clone(), WindowProcessStatus::Running);
     runtime.handle_runtime_approval_wait_state(&window_id, true);
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -1925,10 +1904,7 @@ fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
         SECRET_TOKEN=/private/path command --token sentinel\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    runtime
-        .runtimes
-        .get(&window_id)
-        .expect("runtime")
+    owner_runtime_probe(&runtime, &window_id)
         .pane
         .lock()
         .expect("pane")
@@ -2131,11 +2107,10 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
         Some(WindowProcessStatus::Running)
     );
     assert!(runtime.runtimes.contains_key(&window_id));
-    assert!(runtime
-        .pty_writers
-        .read()
-        .expect("pty writer registry")
-        .contains_key(&window_id));
+    assert!(
+        owner_runtime_probe(&runtime, &window_id).writer.is_some(),
+        "only the physical owner retains the current PTY writer"
+    );
 
     runtime.stop_window_runtime(&window_id);
 }
@@ -2503,19 +2478,13 @@ fn restart_window_events_is_noop_when_window_already_running() {
     runtime
         .window_pty_statuses
         .insert(window_id.clone(), WindowProcessStatus::Running);
-    let original_pane = runtime
-        .runtimes
-        .get(&window_id)
-        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+    let original_pane = Some(Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize)
         .expect("runtime present");
 
     let events = runtime.restart_window_events(&window_id);
 
     assert!(events.is_empty(), "restarting a running window is a no-op");
-    let after_pane = runtime
-        .runtimes
-        .get(&window_id)
-        .map(|runtime| Arc::as_ptr(&runtime.pane) as usize)
+    let after_pane = Some(Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize)
         .expect("runtime still present");
     assert_eq!(
         original_pane, after_pane,

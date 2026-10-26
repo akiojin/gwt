@@ -2,11 +2,29 @@
 //!
 //! These functions return the owned pane. Callers install it and retain the
 //! handshake guard through publication or uncertain-launch reconciliation.
+pub mod agent_dispatch;
+pub mod agent_frontend;
+pub mod client;
+pub mod continuation;
+pub mod events;
+pub mod installation;
+pub mod launch;
 pub mod launch_authority;
 pub mod launch_finalization;
 pub mod launch_output_mirror;
 pub mod launch_payload;
 pub mod launch_readiness;
+pub mod monitor;
+pub(crate) mod owner;
+pub mod pm_delivery;
+pub(crate) mod presence;
+pub mod runtime_events;
+pub mod startup;
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[doc(hidden)]
+pub mod test_support;
+pub(crate) mod transport;
+pub mod workspace;
 
 use gwt_terminal::{
     pty::{ProcessPolicy, SpawnConfig},

@@ -122,19 +122,19 @@ pub fn spawn_output_thread(
             .lock()
             .map_err(|error| error.to_string())
             .and_then(|mut pane| {
-                pane.check_status()
+                let status = pane
+                    .check_status()
                     .cloned()
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                // Exit confirmation belongs to this status observation. A
+                // second process probe could observe an exit after a Running
+                // status was copied and publish contradictory evidence.
+                Ok((status, pane.last_exit().is_some()))
             });
 
         match status {
-            Ok(status) => {
+            Ok((status, exit_confirmed)) => {
                 let (status, detail) = runtime_status_from_pane_status(&status);
-                let exit_confirmed = pane
-                    .lock()
-                    .ok()
-                    .and_then(|pane| pane.process_has_exited().ok())
-                    .unwrap_or(false);
                 sink(PaneRuntimeEvent::Status {
                     id,
                     incarnation,

@@ -20,36 +20,68 @@ use std::time::{Duration, Instant};
 
 use gwt_core::index_coordinator::{HeavyHolderKind, HeavyLeaseStatus, IndexCoordinator};
 
-use crate::PtyWriterRegistry;
+use crate::project_runtime::agent_dispatch::PtyWriterRegistry;
 
 const TICK: Duration = Duration::from_secs(5);
 /// A tick slower than this is logged, so its cost is never unmeasured.
 const SLOW_TICK: Duration = Duration::from_millis(50);
 
-/// Spawn the relief loop on a dedicated thread.
-pub fn spawn(pty_writers: PtyWriterRegistry) {
+pub(crate) struct VerificationCapRelief {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for VerificationCapRelief {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::warn!("verification cap relief worker panicked during owner shutdown");
+            }
+        }
+    }
+}
+
+/// The fixed owner retains the existing relief loop until its physical drain.
+pub(crate) fn spawn(pty_writers: PtyWriterRegistry) -> Option<VerificationCapRelief> {
+    let (stop, stopped) = std::sync::mpsc::channel();
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    let home = gwt_core::test_support::gwt_home_override();
     let spawned = std::thread::Builder::new()
         .name("gwt-verification-cap-relief".to_string())
-        .spawn(move || loop {
-            std::thread::sleep(TICK);
-            let started = Instant::now();
-            let holders = verification_holder_pids(verification_statuses());
-            relieve(&pty_writers, &holders);
-            let elapsed = started.elapsed();
-            if elapsed > SLOW_TICK {
-                tracing::warn!(
-                    target: "gwt_verification",
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    "verification cap relief tick was slow"
-                );
+        .spawn(move || {
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            let _home = home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
+            loop {
+                match stopped.recv_timeout(TICK) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => break,
+                }
+                let started = Instant::now();
+                let holders = verification_holder_pids(verification_statuses());
+                relieve(&pty_writers, &holders);
+                let elapsed = started.elapsed();
+                if elapsed > SLOW_TICK {
+                    tracing::warn!(
+                        target: "gwt_verification",
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        "verification cap relief tick was slow"
+                    );
+                }
             }
         });
-    if let Err(error) = spawned {
-        tracing::warn!(
-            target: "gwt_verification",
-            %error,
-            "verification cap relief thread failed to start"
-        );
+    match spawned {
+        Ok(worker) => Some(VerificationCapRelief {
+            stop,
+            worker: Some(worker),
+        }),
+        Err(error) => {
+            tracing::warn!(target: "gwt_verification", %error,
+                "verification cap relief thread failed to start");
+            None
+        }
     }
 }
 

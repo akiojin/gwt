@@ -259,6 +259,8 @@ fn close_project_reopen_registers_restored_windows_without_changing_other_projec
     let root_b = temp.path().join("b");
     fs::create_dir_all(&root_a).unwrap();
     fs::create_dir_all(&root_b).unwrap();
+    let _owner_a = owner_fixture_block_on(production_owner_fixture(&root_a));
+    let _owner_b = owner_fixture_block_on(production_owner_fixture(&root_b));
     let tabs = vec![
         sample_project_tab_with_window_at(
             "a",

@@ -193,8 +193,10 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(&repo)));
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -203,6 +205,7 @@ fn app_runtime_work_singleton_preserves_historical_duplicates() {
         &[WindowPreset::Work, WindowPreset::Branches],
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.test_project_owners.insert(repo.clone(), owner);
 
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Work, None);
     let windows = &runtime
@@ -242,11 +245,16 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
     let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab("tab-1", "Repo", repo, ProjectKind::Git, &[]);
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(&repo)));
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.test_project_owners.insert(repo, owner);
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Shell, None);
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Shell, None);
+    drain_owner_launch_fixtures(&mut runtime, &tasks);
     let shell_ids = runtime
         .tab("tab-1")
         .expect("tab")
@@ -260,9 +268,22 @@ fn app_runtime_work_singleton_preserves_shell_multi_instance_runtime() {
 
     assert_eq!(shell_ids.len(), 2);
     assert_eq!(runtime.runtimes.len(), 2);
+    let physical = shell_ids
+        .iter()
+        .map(|id| owner_runtime_probe(&runtime, id).pty)
+        .collect::<Vec<_>>();
+    assert!(
+        !Arc::ptr_eq(&physical[0], &physical[1]),
+        "each Shell has its own physical owner runtime"
+    );
     for shell_id in shell_ids {
         runtime.close_window_events(&shell_id);
     }
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        physical.iter().all(|pty| pty.try_wait().unwrap().is_some()),
+        "both actual Shell children are reaped"
+    );
 }
 
 // SPEC-2359 Workspace → Work → Session: a Work row (keyed by the gwt session
@@ -432,7 +453,19 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     );
     assert_eq!(live_rows[0].lifecycle_state, "active");
     assert_eq!(live_rows[0].active_agents, 1);
-    runtime.mark_agent_session_stopped(&session.window_id);
+    gwt::project_runtime::workspace::paused_work_record_task(
+        &project_root,
+        &session,
+        chrono::Utc::now(),
+    )
+    .expect("canonical stopped Work task")();
+    gwt_core::workspace_projection::mark_workspace_agent_stopped(
+        &project_root,
+        &session.session_id,
+        Some(&session.window_id),
+    )
+    .expect("canonical stopped Work projection");
+    runtime.active_agent_sessions.remove(&session.window_id);
     let stopped_items = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
         .expect("load stopped repo-global WorkItems")
         .expect("stopped repo-global WorkItems");
@@ -474,71 +507,6 @@ fn start_work_launch_uses_repo_global_work_items_and_worktree_local_event() {
     );
     assert_eq!(paused_rows[0].lifecycle_state, "paused");
     assert_eq!(paused_rows[0].active_agents, 0);
-}
-
-// #3426: the genesis Start Work projection must let the canonical execution
-// owner override a presentation-derived Issue-kind resume context, mirroring
-// the Blocked-successor path.
-#[test]
-fn start_work_projection_prefers_canonical_execution_owner_over_resume_context() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let project_root = temp.path().join("repo");
-    fs::create_dir_all(&project_root).expect("create repo");
-    init_repo(&project_root);
-    let mut session = sample_active_agent_session("tab-1", "window-1921");
-    session.session_id = "session-launch-1921".to_string();
-    session.branch_name = "work/issue-1921".to_string();
-    session.worktree_path = project_root.clone();
-    session.agent_project_root = project_root.display().to_string();
-    let context = WorkspaceResumeContext {
-        title: Some("SPEC-1921: agent management".to_string()),
-        owner: Some("Issue #1921".to_string()),
-        summary: None,
-        next_action: None,
-    };
-
-    save_start_work_workspace_projection(
-        &project_root,
-        &session,
-        "develop",
-        Some(1921),
-        Some(gwt::cli::execution_state::ExecutionOwnerKey {
-            kind: gwt::cli::execution_state::ExecutionOwnerKind::Spec,
-            number: 1921,
-        }),
-        Some(&context),
-        Some(&std::collections::HashSet::from([session
-            .session_id
-            .clone()])),
-    )
-    .expect("Start Work launch publication");
-
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&project_root)
-        .expect("load WorkItems")
-        .expect("WorkItems");
-    let work = work_items
-        .work_items
-        .iter()
-        .find(|item| {
-            item.agents
-                .iter()
-                .any(|agent| agent.session_id == session.session_id)
-        })
-        .expect("materialized Work");
-    assert_eq!(
-        work.owner.as_deref(),
-        Some("SPEC-1921"),
-        "trusted execution owner must override the mis-kinded resume context"
-    );
-    assert_eq!(
-        work.title, "SPEC-1921: agent management",
-        "non-owner resume context fields stay presentation-owned"
-    );
 }
 
 // #3065: the Workspace Resume context must come from the resumed branch's
@@ -700,7 +668,7 @@ fn save_shell_work_projection_registers_shell_and_survives_agent_launch() {
 
     // シナリオ1: registering a Start-Work Shell makes it a Work in the projection.
     let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
-    super::super::save_shell_work_projection(
+    gwt::project_runtime::workspace::save_shell_work_projection(
         &repo,
         "tab-1:shell-3",
         Some(repo.join("wt-shell")),
@@ -927,33 +895,9 @@ fn image_paste_prepare_rejects_unsupported_mime_and_empty_payload() {
 fn image_paste_event_saves_file_under_worktree() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/image-paste".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
+
     let payload = base64::engine::general_purpose::STANDARD.encode(b"webp-bytes");
     let event: FrontendEvent = serde_json::from_value(serde_json::json!({
         "kind": "paste_image",
@@ -964,9 +908,15 @@ fn image_paste_event_saves_file_under_worktree() {
     }))
     .expect("deserialize paste image event");
 
+    let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
     assert!(events.is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        "the actual owner committed the attachment prompt"
+    );
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")
@@ -992,21 +942,10 @@ fn image_paste_event_saves_file_under_worktree() {
 fn uploaded_image_paste_event_saves_file_under_drop_files() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
     let uploaded_path = temp.path().join("image-upload.tmp");
     fs::write(&uploaded_path, b"png-upload").expect("write uploaded image");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
     runtime
         .attachment_uploads
         .insert(
@@ -1019,20 +958,7 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
             },
         )
         .expect("register image upload");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/image-paste".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+
     let event: FrontendEvent = serde_json::from_value(serde_json::json!({
         "kind": "paste_image_uploaded",
         "id": window_id,
@@ -1043,9 +969,15 @@ fn uploaded_image_paste_event_saves_file_under_drop_files() {
     }))
     .expect("deserialize uploaded paste image event");
 
+    let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
     assert!(events.is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        "the actual owner committed the attachment prompt"
+    );
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")
@@ -1411,33 +1343,9 @@ fn file_attachment_prompt_formats_single_and_multiple_paths_without_newlines() {
 fn file_attachment_event_saves_inline_file_under_worktree() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/file-drop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
+
     let payload = base64::engine::general_purpose::STANDARD.encode(b"text-bytes");
     let event: FrontendEvent = serde_json::from_value(serde_json::json!({
         "kind": "attach_files",
@@ -1454,9 +1362,15 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
     }))
     .expect("deserialize attach files event");
 
+    let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
     assert!(events.is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        "the actual owner committed the attachment prompt"
+    );
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")
@@ -1473,35 +1387,11 @@ fn file_attachment_event_saves_inline_file_under_worktree() {
 fn file_attachment_event_saves_native_path_under_drop_files() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
     let source = temp.path().join("large-host-file.bin");
     fs::write(&source, b"native-bytes").expect("write native source");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/file-drop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+
     let event: FrontendEvent = serde_json::from_value(serde_json::json!({
         "kind": "attach_files",
         "id": window_id,
@@ -1514,9 +1404,15 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
     }))
     .expect("deserialize attach files event");
 
+    let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
     assert!(events.is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        "the actual owner committed the attachment prompt"
+    );
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")
@@ -1540,21 +1436,10 @@ fn file_attachment_event_saves_native_path_under_drop_files() {
 fn file_attachment_event_saves_uploaded_file_under_drop_files() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let worktree = temp.path().join("repo");
-    fs::create_dir_all(&worktree).expect("create worktree");
+    let (mut runtime, probe, window_id) = owner_browser_input_fixture(temp.path());
+    let worktree = probe.session.as_ref().unwrap().worktree_path.clone();
     let uploaded_path = temp.path().join("upload.tmp");
     fs::write(&uploaded_path, b"uploaded-bytes").expect("write uploaded temp");
-    let tab_id = "tab-1";
-    let raw_window_id = "agent-1";
-    let window_id = combined_window_id(tab_id, raw_window_id);
-    let tab = sample_project_tab_with_window_at(
-        tab_id,
-        raw_window_id,
-        worktree.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _events) = sample_runtime_with_events(temp.path(), vec![tab], Some(tab_id));
     runtime
         .attachment_uploads
         .insert(
@@ -1567,20 +1452,7 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
             },
         )
         .expect("register upload");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-1".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "feature/file-drop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: worktree.clone(),
-            agent_project_root: worktree.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: tab_id.to_string(),
-        },
-    );
+
     let event: FrontendEvent = serde_json::from_value(serde_json::json!({
         "kind": "attach_files",
         "id": window_id,
@@ -1596,9 +1468,15 @@ fn file_attachment_event_saves_uploaded_file_under_drop_files() {
     }))
     .expect("deserialize attach files event");
 
+    let input_before = probe.pty.ordinary_input_revision().unwrap();
     let events = runtime.handle_frontend_event("client-1".to_string(), event);
 
     assert!(events.is_empty());
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(
+        probe.pty.ordinary_input_revision().unwrap() > input_before,
+        "the actual owner committed the attachment prompt"
+    );
     let drop_dir = worktree.join(".gwt").join("drop-files");
     let files = fs::read_dir(&drop_dir)
         .expect("read drop dir")

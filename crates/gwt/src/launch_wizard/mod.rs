@@ -632,7 +632,7 @@ struct AgentLaunchDraft {
     codex_fast_mode: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShellLaunchConfig {
     pub working_dir: Option<PathBuf>,
     pub branch: Option<String>,

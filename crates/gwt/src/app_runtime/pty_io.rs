@@ -1,49 +1,15 @@
-//! Terminal/pane IO bridging + PTY runtime thread lifecycle split out of
-//! `app_runtime/mod.rs` for SPEC-3064 Phase 1 (Pass 2).
-//!
-//! Owns:
-//! - Client-facing pane input bridging
-//!   ([`AppRuntime::pane_send_input_events`],
-//!   [`AppRuntime::terminal_input_events`],
-//!   [`AppRuntime::client_pane_snapshot_repair_events`])
-//! - The PTY writer registry ([`AppRuntime::register_pty_writer`] /
-//!   [`AppRuntime::deregister_pty_writer`])
-//! - Runtime stop orchestration ([`AppRuntime::stop_window_runtime`],
-//!   [`AppRuntime::stop_all_runtimes`], the `RuntimeStopThreads` join
-//!   helpers) and GUI adapters for the PTY output / status workers
-//!   ([`AppRuntime::spawn_output_thread`],
-//!   [`AppRuntime::spawn_status_thread`])
-//!
-//! Behavior-preserving move: `WindowRuntime` / `RuntimeStopThreads` stay in
-//! `mod.rs` and are reached via `super`. Worker loops live in `gwt::pane_runtime`.
-
+//! Rust GUI adapters for the authenticated project owner. Terminal state is a read-only cache.
 use std::sync::{mpsc as std_mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::window::PeerPaneCloseReply;
 use base64::Engine as _;
-use gwt::session_finalizer::CloseHandoffReservation;
 
 use super::{
-    combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, Pane,
-    RuntimeStopThreads, UserEvent, WindowCloseMonitorResult, WindowProcessStatus,
+    combined_window_id, AppRuntime, BackendEvent, ClientId, OutboundEvent, UserEvent,
+    WindowCloseMonitorResult, WindowProcessStatus,
 };
-
-fn window_lifecycle_generation_is_current(
-    generations: &Arc<Mutex<std::collections::HashMap<String, u64>>>,
-    window_id: &str,
-    expected: Option<u64>,
-) -> bool {
-    let Some(expected) = expected else {
-        return false;
-    };
-    generations
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(window_id)
-        .is_some_and(|current| *current == expected)
-}
 
 fn settle_window_lifecycle_generation(
     generations: &Arc<Mutex<std::collections::HashMap<String, u64>>>,
@@ -137,10 +103,6 @@ thread_local! {
     static FORCE_CLOSE_FINALIZER_THREAD_SPAWN_FAILURE: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
-    static CLOSE_FINALIZER_BEFORE_DURABLE_CLEANUP_TEST_HOOK:
-        std::cell::RefCell<Option<WindowCloseFinalizerTask>> = const {
-            std::cell::RefCell::new(None)
-        };
 }
 
 #[cfg(test)]
@@ -178,24 +140,6 @@ pub(super) fn hold_process_close_finalizer_worker_for_test() -> std_mpsc::Sender
     release_sender
 }
 
-#[cfg(test)]
-pub(super) fn set_close_finalizer_before_durable_cleanup_test_hook(
-    hook: impl FnOnce() + Send + 'static,
-) {
-    CLOSE_FINALIZER_BEFORE_DURABLE_CLEANUP_TEST_HOOK.with(|slot| {
-        assert!(slot.replace(Some(Box::new(hook))).is_none());
-    });
-}
-
-#[cfg(test)]
-fn run_close_finalizer_before_durable_cleanup_test_hook() {
-    CLOSE_FINALIZER_BEFORE_DURABLE_CLEANUP_TEST_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().take() {
-            hook();
-        }
-    });
-}
-
 fn spawn_window_close_fallback_thread(
     task: WindowCloseFinalizerTask,
 ) -> std::io::Result<JoinHandle<()>> {
@@ -215,184 +159,9 @@ fn spawn_window_close_fallback_thread(
 /// return that lands in the same PTY write as the text into the text itself —
 /// the line is inserted on the prompt but never submitted — so the submit has
 /// to be a write of its own, after the TUI has settled.
-const PANE_SUBMIT_SETTLE: Duration = Duration::from_millis(400);
-
-/// Split one pane payload into the body and its submit terminator. Input that
-/// carries no terminator is not a submit and is returned whole, so raw
-/// keystroke forwarding stays byte-exact.
-fn split_pane_submit(text: &str) -> (&str, Option<&str>) {
-    for terminator in ["\r\n", "\r", "\n"] {
-        if let Some(body) = text.strip_suffix(terminator) {
-            return (body, Some(terminator));
-        }
-    }
-    (text, None)
-}
-
-/// Issue #4909: the body of one injected prompt as the PTY must receive it.
-///
-/// With bracketed-paste mode on (Claude Code and Codex both enable it), the
-/// body is delivered as one paste, `ESC [ 200 ~ … ESC [ 201 ~`, so the
-/// composer takes `@`, a leading `/`, `?`, and embedded newlines as pasted
-/// text instead of as the keys that open its file / slash-command pickers.
-/// The submit terminator is deliberately not part of the paste: it is still
-/// written on its own after the TUI has settled (SPEC-3431 FR-108c), so the
-/// provider's UserPromptSubmit hook sees exactly one prompt. With the mode
-/// off, the body is written raw, exactly as before.
-fn pane_input_body_bytes(body: &str, bracketed_paste: bool) -> Result<Vec<u8>, String> {
-    // Issue #5839: Windows Codex receives console key events even inside a
-    // bracketed paste. Ctrl+T / F3 (ESC O R) can therefore open Transcript/Find.
-    if let Some(byte) = body
-        .bytes()
-        .find(|byte| byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n'))
-    {
-        return Err(format!(
-            "prompt body contains terminal control byte 0x{byte:02x}; remove it before sending"
-        ));
-    }
-    if !bracketed_paste {
-        return Ok(body.as_bytes().to_vec());
-    }
-    let mut bytes = Vec::with_capacity(body.len() + 12);
-    bytes.extend_from_slice(BRACKETED_PASTE_START);
-    bytes.extend_from_slice(body.as_bytes());
-    bytes.extend_from_slice(BRACKETED_PASTE_END);
-    Ok(bytes)
-}
-
-const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
-const BRACKETED_PASTE_END: &[u8] = b"\x1b[201~";
-
-/// Result of a body-once, submit-until-verified delivery. Verification is a
-/// semantic target acknowledgement, never merely a successful PTY write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum VerifiedPaneSubmitOutcome {
-    Verified { submit_attempts: usize },
-    Unverified { submit_attempts: usize },
-}
-
-/// Write the prompt body once, then retry only its submit terminator until the
-/// injected semantic acknowledgement says the exact target turn started.
-pub(super) fn drive_verified_pane_submit(
-    text: &str,
-    bracketed_paste: bool,
-    max_submit_attempts: usize,
-    mut write: impl FnMut(&[u8]) -> Result<(), String>,
-    mut settle: impl FnMut(Duration),
-    mut is_verified: impl FnMut() -> Result<bool, String>,
-) -> Result<VerifiedPaneSubmitOutcome, String> {
-    let (body, submit) = split_pane_submit(text);
-    if !body.is_empty() {
-        write(&pane_input_body_bytes(body, bracketed_paste)?)?;
-    }
-    let Some(submit) = submit else {
-        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
-    };
-
-    // Give the TUI composer time to consume the body before the first submit.
-    settle(PANE_SUBMIT_SETTLE);
-    if body.is_empty() && is_verified()? {
-        return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts: 0 });
-    }
-    for submit_attempts in 1..=max_submit_attempts {
-        if submit_attempts > 1 && is_verified()? {
-            return Ok(VerifiedPaneSubmitOutcome::Verified {
-                submit_attempts: submit_attempts - 1,
-            });
-        }
-        write(submit.as_bytes())?;
-        // Every submit, including the final attempt, receives a full semantic
-        // ACK grace period before the operation can become Ambiguous.
-        settle(PANE_SUBMIT_SETTLE);
-        if is_verified()? {
-            return Ok(VerifiedPaneSubmitOutcome::Verified { submit_attempts });
-        }
-    }
-    Ok(VerifiedPaneSubmitOutcome::Unverified {
-        submit_attempts: max_submit_attempts,
-    })
-}
-
-/// Write one pane payload as the TUIs expect it: the body first, then the
-/// submit byte on its own once the TUI has settled (SPEC-3431 FR-108c). The
-/// delay runs on a detached thread holding an `Arc` clone of the pane, so the
-/// event loop is never blocked and every other pane keeps streaming.
-pub(super) fn write_pane_input_then_submit(
-    pane: &Arc<Mutex<Pane>>,
-    text: &str,
-) -> Result<(), String> {
-    let (body, submit) = split_pane_submit(text);
-    let Some(submit) = submit else {
-        return if body.is_empty() {
-            Ok(())
-        } else {
-            pane.lock()
-                .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
-                .map_err(|error| error.to_string())
-        };
-    };
-    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
-    let reservation = pty
-        .reserve_input_transaction()
-        .map_err(|error| error.to_string())?;
-    if !body.is_empty() {
-        // Issue #4909: a submit-bearing body is a prompt, so it is pasted
-        // when the composer accepts pastes.
-        reservation
-            .write_input(&pane_input_body_bytes(
-                body,
-                reservation.bracketed_paste_enabled(),
-            )?)
-            .map_err(|error| error.to_string())?;
-    }
-    let submit = submit.to_string();
-    thread::spawn(move || {
-        thread::sleep(PANE_SUBMIT_SETTLE);
-        if let Err(error) = reservation.write_input(submit.as_bytes()) {
-            tracing::warn!(%error, "pane submit byte could not be written");
-        }
-    });
-    Ok(())
-}
-
-/// Write one pane payload and wait for the physical submit byte to complete.
-/// This is only the physical boundary for autonomous-answer delivery; the
-/// provider's UserPromptSubmit hook remains the durable acknowledgment. Run it
-/// through [`super::BlockingTaskSpawner`] rather than the application loop.
-pub(super) fn write_pane_input_and_submit_blocking(
-    pane: &Arc<Mutex<Pane>>,
-    text: &str,
-) -> Result<(), String> {
-    let (body, submit) = split_pane_submit(text);
-    let Some(submit) = submit else {
-        return if body.is_empty() {
-            Ok(())
-        } else {
-            pane.lock()
-                .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
-                .map_err(|error| error.to_string())
-        };
-    };
-    let pty = pane.lock().map_err(|error| error.to_string())?.shared_pty();
-    let reservation = pty
-        .reserve_input_transaction()
-        .map_err(|error| error.to_string())?;
-    if !body.is_empty() {
-        // Issue #4909: see `write_pane_input_then_submit`.
-        reservation
-            .write_input(&pane_input_body_bytes(
-                body,
-                reservation.bracketed_paste_enabled(),
-            )?)
-            .map_err(|error| error.to_string())?;
-    }
-    thread::sleep(PANE_SUBMIT_SETTLE);
-    reservation
-        .write_input(submit.to_string().as_bytes())
-        .map_err(|error| error.to_string())
-}
+pub(super) use gwt::project_runtime::agent_dispatch::{
+    drive_verified_pane_submit, pane_input_body_bytes, split_pane_submit, VerifiedPaneSubmitOutcome,
+};
 
 pub(crate) use gwt::session_finalizer::pane_teardown_stall_message;
 
@@ -411,42 +180,207 @@ fn stop_all_before_joining<I, T>(
 }
 
 impl AppRuntime {
-    /// SPEC-2359 W-17 (FR-396): re-send full snapshots for panes whose
-    /// streamed output was dropped under client queue pressure, restoring
-    /// display consistency for the affected client only.
+    fn remote_command_refusal(
+        &self,
+        id: &str,
+        kind: &super::RemoteRuntimeCommandKind,
+        error: String,
+    ) -> Vec<OutboundEvent> {
+        if let super::RemoteRuntimeCommandKind::Input {
+            reply_client: Some(client_id),
+        } = kind
+        {
+            return vec![OutboundEvent::reply(
+                client_id.clone(),
+                BackendEvent::PaneSendResult {
+                    ok: false,
+                    window_id: Some(id.into()),
+                    error: Some(error),
+                },
+            )];
+        }
+        self.status_events(id.to_string(), WindowProcessStatus::Error, Some(error))
+    }
+
+    pub(super) fn queue_remote_runtime_command(
+        &mut self,
+        id: &str,
+        command: gwt::project_runtime::events::OwnerCommand,
+        kind: super::RemoteRuntimeCommandKind,
+    ) -> Vec<OutboundEvent> {
+        let Some(runtime) = self.runtimes.get(id) else {
+            return self.remote_command_refusal(
+                id,
+                &kind,
+                "The project execution is unavailable.".into(),
+            );
+        };
+        let Some(context) = self
+            .window_lookup
+            .get(id)
+            .and_then(|address| self.project_context(&address.tab_id))
+        else {
+            return Vec::new();
+        };
+        let Some(state) = self.project_state(&context) else {
+            return Vec::new();
+        };
+        if state.project_owner_identity.as_ref() != Some(&runtime.owner_identity)
+            || runtime.owner_pane_id.is_empty()
+        {
+            return self.remote_command_refusal(
+                id,
+                &kind,
+                "Refresh the project connection and try again.".into(),
+            );
+        }
+        let approval_resolution_started = match &command {
+            gwt::project_runtime::events::OwnerCommand::Input { data, .. } => {
+                gwt::window_state::is_approval_resolution_input(&String::from_utf8_lossy(data))
+            }
+            gwt::project_runtime::events::OwnerCommand::SendInput { text, .. } => {
+                gwt::window_state::is_approval_resolution_input(text)
+            }
+            _ => false,
+        };
+        let connection_id = state.project_owner_connection_id;
+        let identity = runtime.owner_identity.clone();
+        let incarnation = runtime.incarnation;
+        let client = runtime.client.clone();
+        let id = id.to_string();
+        let failure_id = id.clone();
+        let failure_kind = kind.clone();
+        let proxy = self.proxy.clone();
+        if approval_resolution_started {
+            self.begin_runtime_approval_resolution(&id);
+        }
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        tokio::time::timeout(Duration::from_secs(120), client.command(command))
+                            .await
+                            .map_err(|_| "project command timed out".to_string())?
+                            .map(|value| {
+                                value
+                                    .get("has_unsent_user_input")
+                                    .and_then(serde_json::Value::as_bool)
+                            })
+                    })
+                });
+            proxy.send(UserEvent::RemoteRuntimeCommandComplete(Box::new(
+                super::RemoteRuntimeCommandCompletion {
+                    context,
+                    connection_id,
+                    identity,
+                    id,
+                    incarnation,
+                    kind,
+                    approval_resolution_started,
+                    result,
+                },
+            )));
+        }) {
+            if approval_resolution_started {
+                self.cancel_runtime_approval_resolution(&failure_id);
+            }
+            return self.remote_command_refusal(&failure_id, &failure_kind, error.to_string());
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn handle_remote_runtime_command_complete(
+        &mut self,
+        completion: super::RemoteRuntimeCommandCompletion,
+    ) -> Vec<OutboundEvent> {
+        let super::RemoteRuntimeCommandCompletion {
+            context,
+            connection_id,
+            identity,
+            id,
+            incarnation,
+            kind,
+            approval_resolution_started,
+            result,
+        } = completion;
+        if !self.project_owner_event_is_current(&context, connection_id, &identity)
+            || !self.remote_runtime_is_current(&context, &identity, &id, incarnation)
+        {
+            return Vec::new();
+        }
+        let unsent = match result {
+            Err(error) => {
+                if approval_resolution_started {
+                    self.cancel_runtime_approval_resolution(&id);
+                }
+                return self.remote_command_refusal(&id, &kind, error);
+            }
+            Ok(unsent) => unsent,
+        };
+        if let Some(unsent) = unsent {
+            self.runtimes
+                .get(&id)
+                .expect("fenced remote input")
+                .has_unsent_user_input
+                .store(unsent, std::sync::atomic::Ordering::Release);
+            if !unsent {
+                self.flush_pending_pm_wake(&id);
+            }
+        }
+        match kind {
+            super::RemoteRuntimeCommandKind::Input {
+                reply_client: Some(client_id),
+            } => vec![OutboundEvent::reply(
+                client_id,
+                BackendEvent::PaneSendResult {
+                    ok: true,
+                    window_id: Some(id),
+                    error: None,
+                },
+            )],
+            super::RemoteRuntimeCommandKind::Stop => {
+                if let Some(runtime) = self.runtimes.get_mut(&id) {
+                    runtime.exit_confirmed = true;
+                    runtime.status = WindowProcessStatus::Stopped;
+                    runtime.status_revision = runtime.status_revision.saturating_add(1);
+                }
+                self.apply_owner_status_projection(&id, WindowProcessStatus::Stopped, None)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Immediate repair comes from the immutable owner cache; a fresh private snapshot follows.
     pub(crate) fn client_pane_snapshot_repair_events(
         &self,
         client_id: &str,
         pane_ids: &[String],
     ) -> Vec<OutboundEvent> {
-        pane_ids
-            .iter()
-            .filter_map(|id| {
-                let runtime = self.runtimes.get(id)?;
-                let (snapshot, seq) = runtime
-                    .pane
-                    .lock()
-                    .map(|pane| (pane.snapshot_bytes(), pane.output_seq()))
-                    .unwrap_or_default();
-                (!snapshot.is_empty()).then(|| {
-                    OutboundEvent::reply(
-                        client_id,
-                        BackendEvent::TerminalSnapshot {
-                            id: id.clone(),
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(snapshot),
-                        },
-                    )
-                    .with_terminal_stream_seq(Some(seq))
-                })
-            })
-            .collect()
+        let mut events = Vec::new();
+        for id in pane_ids {
+            if let Some(runtime) = self.runtimes.get(id) {
+                if !runtime.screen_ansi.is_empty() {
+                    events.push(
+                        OutboundEvent::reply(
+                            client_id,
+                            BackendEvent::TerminalSnapshot {
+                                id: id.clone(),
+                                data_base64: base64::engine::general_purpose::STANDARD
+                                    .encode(&runtime.screen_ansi),
+                            },
+                        )
+                        .with_terminal_stream_seq(Some(runtime.screen_seq)),
+                    );
+                }
+                events.extend(self.request_owner_snapshot(id, Some(client_id.to_string())));
+            }
+        }
+        events
     }
 
-    /// SPEC-3050 FR-001/FR-002: inject one line of input into the pane bound
-    /// to `session_id`. The event carries a session id instead of a window id,
-    /// so a caller can only ever reach the pane of the session it presents;
-    /// resolution + the live-runtime check both reply with an explicit
-    /// `pane_send_result` (FR-005: no silent drop, unlike `terminal_input`).
     pub(crate) fn pane_send_input_events(
         &mut self,
         client_id: ClientId,
@@ -471,11 +405,9 @@ impl AppRuntime {
                 },
             )];
         };
-
         self.pane_send_input_to_window_events(client_id, &window_id, text)
     }
 
-    /// Browser sessions can resolve a pane only inside their immutable project.
     pub(crate) fn pane_send_input_for_project_events(
         &mut self,
         client_id: ClientId,
@@ -483,931 +415,200 @@ impl AppRuntime {
         session_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
-        let target = self.tabs.iter().find_map(|tab| {
-            if self.project_key_for_tab(&tab.id) != Some(project_key) {
-                return None;
-            }
-            tab.workspace
-                .persisted()
-                .windows
-                .iter()
-                .find(|window| window.session_id.as_deref() == Some(session_id))
-                .map(|window| combined_window_id(&tab.id, &window.id))
-        });
+        let target = self
+            .tabs
+            .iter()
+            .filter(|tab| self.project_key_for_tab(&tab.id) == Some(project_key))
+            .find_map(|tab| {
+                tab.workspace
+                    .persisted()
+                    .windows
+                    .iter()
+                    .find(|window| window.session_id.as_deref() == Some(session_id))
+                    .map(|window| combined_window_id(&tab.id, &window.id))
+            });
         let Some(window_id) = target else {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::PaneSendResult {
                     ok: false,
                     window_id: None,
-                    error: Some(
-                        "no pane bound to this session in the connected project".to_string(),
-                    ),
+                    error: Some("no pane bound to this project session".into()),
                 },
             )];
         };
         self.pane_send_input_to_window_events(client_id, &window_id, text)
     }
 
-    /// Inject input into one already-authorized pane identity. Capability
-    /// callers resolve this exact combined window id inside their authenticated
-    /// project before reaching the PTY; this helper never performs a
-    /// process-global Session lookup.
     pub(crate) fn pane_send_input_to_window_events(
         &mut self,
         client_id: ClientId,
         window_id: &str,
         text: &str,
     ) -> Vec<OutboundEvent> {
-        // Issue #4145 AC-1: `pane.send` writes a whole prompt and submits it,
-        // so this is the prompt-send route for capability callers, alongside
-        // the WebSocket submit path in `embedded_server`.
-        let _perf_route = gwt::perf::RouteTimer::start(gwt::perf::PerfRoute::PromptSend);
-        let write_result = match self.runtimes.get(window_id) {
-            None => Err(format!("no live runtime for pane {window_id}")),
-            Some(runtime) => write_pane_input_then_submit(&runtime.pane, text),
+        let kind = super::RemoteRuntimeCommandKind::Input {
+            reply_client: Some(client_id),
         };
-
-        match write_result {
-            Ok(()) => {
-                if gwt::window_state::is_approval_resolution_input(text) {
-                    self.begin_runtime_approval_resolution(window_id);
-                }
-                vec![OutboundEvent::reply(
-                    client_id,
-                    BackendEvent::PaneSendResult {
-                        ok: true,
-                        window_id: Some(window_id.to_string()),
-                        error: None,
-                    },
-                )]
-            }
-            Err(error) => vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::PaneSendResult {
-                    ok: false,
-                    window_id: Some(window_id.to_string()),
-                    error: Some(error),
-                },
-            )],
-        }
+        let Some(runtime) = self.runtimes.get(window_id) else {
+            return self.remote_command_refusal(
+                window_id,
+                &kind,
+                "no remote pane is installed".into(),
+            );
+        };
+        self.queue_remote_runtime_command(
+            window_id,
+            gwt::project_runtime::events::OwnerCommand::SendInput {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+                text: text.to_string(),
+            },
+            kind,
+        )
     }
 
     pub(crate) fn terminal_input_events(&mut self, id: &str, data: &str) -> Vec<OutboundEvent> {
-        let (incarnation, write_result) = {
-            let Some(runtime) = self.runtimes.get(id) else {
-                tracing::debug!(
-                    target: "gwt_input_trace",
-                    stage = "event_loop_runtime_missing",
-                    window_id = %id,
-                    outcome = "runtime_missing",
-                    "terminal_input dropped: no runtime for window"
-                );
-                return Vec::new();
-            };
-
-            let lock_started = Instant::now();
-            let lock_result = runtime.pane.lock().map_err(|error| error.to_string());
-            let lock_wait_us = lock_started.elapsed().as_micros() as u64;
-
-            let write_result = match lock_result {
-                Ok(pane) => {
-                    let write_started = Instant::now();
-                    let result = pane
-                        .write_input(data.as_bytes())
-                        .map_err(|error| error.to_string());
-                    tracing::debug!(
-                        target: "gwt_input_trace",
-                        stage = "pty_write",
-                        window_id = %id,
-                        lock_wait_us,
-                        write_us = write_started.elapsed().as_micros() as u64,
-                        ok = result.is_ok(),
-                        "terminal_input forwarded to PTY writer"
-                    );
-                    result
-                }
-                Err(error) => {
-                    tracing::debug!(
-                        target: "gwt_input_trace",
-                        stage = "pane_lock_failed",
-                        window_id = %id,
-                        lock_wait_us,
-                        outcome = "lock_failed",
-                        "terminal_input dropped: pane mutex poisoned"
-                    );
-                    Err(error)
-                }
-            };
-            (runtime.incarnation, write_result)
+        let kind = super::RemoteRuntimeCommandKind::Input { reply_client: None };
+        let Some(runtime) = self.runtimes.get_mut(id) else {
+            return self.remote_command_refusal(id, &kind, "no remote pane is installed".into());
         };
-
-        match write_result {
-            Ok(()) => {
-                if gwt::window_state::is_approval_resolution_input(data) {
-                    self.begin_runtime_approval_resolution(id);
-                }
-                if !self.pane_has_unsent_user_input(id) {
-                    self.flush_pending_pm_wake(id);
-                }
-                Vec::new()
-            }
-            Err(error) => self.handle_runtime_status_event(
-                id.to_string(),
-                incarnation,
-                WindowProcessStatus::Error,
-                Some(error),
-                false,
-            ),
-        }
-    }
-
-    pub(crate) fn register_pty_writer(
-        &self,
-        id: &str,
-        session_snapshot: Option<&gwt_agent::Session>,
-    ) {
-        let Some(project_key) = self
-            .window_lookup
-            .get(id)
-            .and_then(|address| self.project_tab_incarnations.get(&address.tab_id))
-            .map(|incarnation| incarnation.project_key.clone())
-        else {
-            tracing::warn!(window_id = %id, "refusing PTY writer without project ownership");
-            return;
-        };
-        let Some(runtime) = self.runtimes.get(id) else {
-            tracing::warn!(window_id = %id, "refusing PTY writer without an installed runtime");
-            return;
-        };
-        let pty = Arc::clone(&runtime.pty);
-        let monitor_runtime = self
-            .active_agent_sessions
-            .get(id)
-            .zip(session_snapshot)
-            .and_then(|(active, session)| {
-                if session.id != active.session_id
-                    || !(session.launch_route == gwt_agent::LaunchRoute::Autonomous
-                        || session.launch_args.iter().any(|arg| {
-                            arg.contains(gwt::issue_monitor::ISSUE_MONITOR_LAUNCH_PROVENANCE)
-                        }))
-                {
-                    return None;
-                }
-                Some(gwt::monitor_duplicate_runtime::MonitorRuntimeRegistration {
-                    window_id: id.to_string(),
-                    session_id: active.session_id.clone(),
-                    issue_number: session.linked_issue_number?,
-                    worktree_path: active.worktree_path.clone(),
-                    project_root: self.tab(&active.tab_id)?.project_root.clone(),
-                    sessions_dir: self.sessions_dir.clone(),
-                    incarnation: runtime.incarnation,
-                    review_dispatch: self.issue_monitor_review_dispatch_windows.contains(id),
-                })
-            });
-        match self.pty_writers.write() {
-            Ok(mut guard) => {
-                let previous = guard.insert(
-                    id.to_string(),
-                    Arc::new(crate::PtyWriterEntry {
-                        project_key,
-                        handle: Arc::clone(&pty),
-                        monitor_runtime,
-                        pm_delivery_replay: Mutex::new(None),
-                    }),
-                );
-                drop(guard);
-                gwt::perf::startup::pty_ready(id);
-                if let Some(previous) = previous
-                    .map(|entry| Arc::clone(&entry.handle))
-                    .filter(|previous| !Arc::ptr_eq(previous, &pty))
-                {
-                    previous.revoke_input_generation();
-                    let window_id = id.to_string();
-                    if let Err(_error) = thread::Builder::new()
-                        .name("gwt-pty-generation-barrier".to_string())
-                        .spawn(move || previous.invalidate_input_generation())
-                    {
-                        tracing::warn!(
-                            target: "gwt_input_trace",
-                            window_id = %window_id,
-                            stage = "registry_replacement_barrier_spawn_failed",
-                            outcome = "revoked_without_background_barrier",
-                            "failed to spawn replaced PTY generation barrier"
-                        );
-                    }
-                }
-            }
-            Err(_error) => {
-                tracing::warn!(
-                    target: "gwt_input_trace",
-                    stage = "registry_write_poisoned",
-                    window_id = %id,
-                    outcome = "registry_lock_failed",
-                    "failed to register PTY writer: registry poisoned"
-                );
+        // A scheduling hint only. The project owner rechecks its physical
+        // composer before every wake and repairs this cache after input ACK.
+        for byte in data.bytes() {
+            match byte {
+                b'\r' | b'\n' | 3 | 4 | 21 => runtime
+                    .has_unsent_user_input
+                    .store(false, std::sync::atomic::Ordering::Release),
+                32..=255 => runtime
+                    .has_unsent_user_input
+                    .store(true, std::sync::atomic::Ordering::Release),
+                _ => {}
             }
         }
+        let command = gwt::project_runtime::events::OwnerCommand::Input {
+            id: runtime.owner_pane_id.clone(),
+            incarnation: runtime.incarnation,
+            data: data.as_bytes().to_vec(),
+        };
+        self.queue_remote_runtime_command(id, command, kind)
     }
 
-    pub(crate) fn deregister_pty_writer(&self, id: &str) {
-        gwt::perf::startup::forget_terminal(id);
-        match self.pty_writers.write() {
-            Ok(mut guard) => {
-                let previous = guard.remove(id);
-                drop(guard);
-                if let Some(previous) = previous {
-                    previous.handle.invalidate_input_generation();
-                }
-            }
-            Err(_error) => {
-                tracing::warn!(
-                    target: "gwt_input_trace",
-                    stage = "registry_deregister_poisoned",
-                    window_id = %id,
-                    outcome = "registry_lock_failed",
-                    "failed to deregister PTY writer: registry poisoned"
-                );
-            }
-        }
-    }
-
-    /// Issue #3783: accept a window close by detaching all process-local
-    /// ownership first, then run every potentially blocking lifecycle step on
-    /// one background finalizer. In particular, the GUI event loop must never
-    /// wait for the PTY writer barrier, durable execution leases, child reap,
-    /// or the repo-global WorkItems lock. A peer completion reply is dispatched
-    /// separately after process exit has been confirmed.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn queue_window_close_finalizer(
         &mut self,
         window_id: &str,
         close_project_root: Option<std::path::PathBuf>,
         closing_session_id: Option<String>,
         pm_close: bool,
-        notify_issue_monitor: bool,
-        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        _notify_issue_monitor: bool,
+        _self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
-        if let Err(error) = initialize_process_window_close_finalizer() {
-            tracing::error!(
-                target: "gwt.pane.teardown",
-                window_id,
-                %error,
-                "process-owned close finalizer worker was unavailable"
-            );
+        let _ = initialize_process_window_close_finalizer();
+        let runtime = self.runtimes.remove(window_id);
+        let pending = self.pending_launch_completions.remove(window_id);
+        if let Some(pending) = &pending {
+            pending
+                .current
+                .store(false, std::sync::atomic::Ordering::Release);
         }
-        enum CloseSessionAuthority {
-            Exact {
-                identity: Box<gwt_agent::SessionExecutionIdentity>,
-                incarnation: Option<u64>,
-            },
-            Legacy(Box<gwt_agent::Session>),
-            Unavailable(String),
-        }
-        // Closing the pane forgets its pending maps immediately. Carry the
-        // exact Prepared request into the same finalizer that owns its PTY.
-        let pending_fresh_execution = self
-            .pending_fresh_execution_launches
-            .get(window_id)
-            .cloned();
-
-        // Capture only immediately available evidence at the close ACK
-        // boundary: a busy pane is Unknown, never a reason to delay close.
-        // Durable diagnosis stays on the background finalizer and does not
-        // grant or replace its independent terminalization authority.
-        let termination_receipt = self
-            .active_agent_sessions
-            .get(window_id)
-            .zip(self.runtimes.get(window_id))
-            .and_then(|(active, runtime)| {
-                let has_exit = runtime.pane.try_lock().ok()?.last_exit().is_some();
-                Some((active.session_id.clone(), runtime.incarnation, has_exit))
-            });
-        let mut runtime = self.runtimes.remove(window_id);
-        let closing_pty = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty));
-        if let Some(runtime) = runtime.as_ref() {
-            runtime.pty.revoke_input_generation();
-        }
-        let session = self.active_agent_sessions.remove(window_id);
-        let project_root = close_project_root.or_else(|| {
-            session.as_ref().and_then(|session| {
-                self.tab(&session.tab_id)
-                    .map(|tab| tab.project_root.clone())
-            })
-        });
-        // Issue #5248: Stop may already have revoked every Monitor binding.
-        // Capture the complete canvas after removal, independently of the
-        // exact WindowClosed target. Whole-project teardown captures here
-        // before removal and remains on its existing reconciliation path.
-        let post_close_snapshot = (!self.tracked_window_exists(window_id))
-            .then(|| {
-                let tab_id =
-                    self.issue_monitor_tab_id_for_project_root(project_root.as_deref()?)?;
-                let now = chrono::Utc::now().to_rfc3339();
-                // Resolve survivor Session metadata off Tao along with transport.
-                let snapshot = self.issue_monitor_window_snapshot_with_session_metadata(
-                    &tab_id,
-                    &now,
-                    |_| (None, false),
-                )?;
-                let sessions = snapshot
-                    .windows
-                    .iter()
-                    .filter_map(|window| {
-                        let address = self.window_lookup.get(&window.window_id)?;
-                        let tab = self.tab(&address.tab_id)?;
-                        let session_id =
-                            tab.workspace.window(&address.raw_id)?.session_id.as_ref()?;
-                        Some((window.window_id.clone(), session_id.clone()))
-                    })
-                    .collect::<std::collections::HashMap<_, _>>();
-                Some((
-                    snapshot,
-                    self.issue_monitor_project_tab_ids(&tab_id),
-                    sessions,
-                ))
-            })
-            .flatten();
-        // The close ACK boundary is process-local only. The Launch Wizard
-        // cache is the in-memory Session snapshot populated off-thread; all
-        // durable Session reads and CAS persistence remain in the finalizer.
-        let cached_session = session.as_ref().and_then(|active| {
-            self.launch_wizard_cache
-                .session_by_id(&active.session_id)
-                .cloned()
-        });
-        let capability_token = self.agent_capability_tokens.remove(window_id);
-        let capability_issuer = self.agent_capability_issuer.clone();
-        let closing_prepared_candidate = pending_fresh_execution.as_ref().is_some_and(|pending| {
-            cached_session
-                .as_ref()
-                .and_then(|cached| gwt_agent::SessionExecutionIdentity::from_session(cached).ok())
-                .flatten()
-                .as_ref()
-                == Some(&pending.session_identity)
-                && capability_issuer
-                    .as_ref()
-                    .zip(capability_token.as_deref())
-                    .is_some_and(|(issuer, token)| {
-                        issuer.prepared_token_is_current(token, &pending.binding)
-                    })
-        });
-        let capability_binding = match (
-            capability_issuer.as_ref(),
-            self_close_ticket.as_ref(),
-            capability_token.as_deref(),
-        ) {
-            (Some(issuer), Some(ticket), _) => issuer.self_close_active_execution_binding(ticket),
-            (Some(issuer), None, Some(token)) => issuer.active_execution_binding_for_token(token),
-            _ => None,
-        };
-        // Natural process exit has no requesting bearer. Its authority is the
-        // captured local incarnation plus the exact durable Session/runtime
-        // lease below; a present manual/self-close bearer must still match.
-        let exact_local_runtime_without_bearer =
-            runtime.is_some() && self_close_ticket.is_none() && capability_token.is_none();
-        let session_authority = session.as_ref().map(|active| match cached_session.clone() {
-            Some(cached) => match gwt_agent::SessionExecutionIdentity::from_session(&cached) {
-                Ok(Some(identity))
-                    if capability_binding.as_ref() == Some(&identity.execution_binding)
-                        || exact_local_runtime_without_bearer =>
-                {
-                    CloseSessionAuthority::Exact {
-                        identity: Box::new(identity),
-                        incarnation: runtime.as_ref().map(|runtime| runtime.incarnation),
-                    }
-                }
-                Ok(Some(_)) => CloseSessionAuthority::Unavailable(
-                    "in-memory capability binding did not match the cached Session generation"
-                        .to_string(),
-                ),
-                Ok(None) if self_close_ticket.is_none() => {
-                    CloseSessionAuthority::Legacy(Box::new(cached))
-                }
-                Ok(None) => CloseSessionAuthority::Unavailable(
-                    "accepted self-close had no exact execution binding".to_string(),
-                ),
-                Err(error) => CloseSessionAuthority::Unavailable(error),
-            },
-            None => CloseSessionAuthority::Unavailable(format!(
-                "Session {} was unavailable in the in-memory launch cache",
-                active.session_id
-            )),
-        });
-        let exact_terminal = session_authority
-            .as_ref()
-            .and_then(|authority| match authority {
-                CloseSessionAuthority::Exact {
-                    identity,
-                    incarnation,
-                } => Some((identity.clone(), *incarnation)),
-                CloseSessionAuthority::Legacy(_) | CloseSessionAuthority::Unavailable(_) => None,
-            });
-        let mut exact_handoff = exact_terminal.as_ref().map(|(identity, _)| {
-            match (
-                capability_issuer.clone(),
-                self_close_ticket.as_ref(),
-                capability_token.as_deref(),
-            ) {
-                (Some(issuer), Some(ticket), _) => issuer
-                    .begin_self_close_manual_execution_handoff(ticket, &identity.execution_binding)
-                    .map(|reservation| Some(CloseHandoffReservation::new(issuer, reservation))),
-                (Some(issuer), None, Some(token)) => issuer
-                    .begin_manual_execution_handoff(token, &identity.execution_binding)
-                    .map(|reservation| Some(CloseHandoffReservation::new(issuer, reservation))),
-                _ => Ok(None),
-            }
-        });
-        if exact_handoff.as_ref().is_some_and(Result::is_err) || exact_terminal.is_none() {
-            if let Some(issuer) = capability_issuer.as_ref() {
-                match (self_close_ticket.as_ref(), capability_token.as_deref()) {
-                    (Some(ticket), _) => {
-                        issuer.finish_self_close(ticket);
-                    }
-                    (None, Some(token)) => {
-                        issuer.revoke_token(token);
-                    }
-                    (None, None) => {}
-                }
-            }
-        }
-        if let Some(session) = session.as_ref() {
-            if closing_prepared_candidate {
-                self.launch_wizard_cache.forget_session(&session.session_id);
-            } else {
-                self.launch_wizard_cache.mark_stopped(&session.session_id);
-            }
-            self.mark_cached_active_work_session_stopped(
-                &session.tab_id,
-                &session.session_id,
-                window_id,
-            );
-        }
-        self.remove_window_state_tracking(window_id);
-        self.window_details.remove(window_id);
-
-        let close_recorded_at = chrono::Utc::now();
-        let pause_task = session.as_ref().and_then(|session| {
-            project_root.as_ref().and_then(|project_root| {
-                Self::paused_work_record_task(project_root, session, close_recorded_at)
-            })
-        });
-        let pty_writers = Arc::clone(&self.pty_writers);
-        let sessions_dir = self.sessions_dir.clone();
-        // Durable cleanup belongs to the captured pane even after its project
-        // closes. Its in-memory completion, however, must not mutate a reopened
-        // project's PM close fence or monitor snapshot.
-        let proxy = project_root
-            .as_deref()
-            .and_then(|root| self.project_context_for_root(root))
-            .map(|context| self.proxy.for_project(context))
-            .unwrap_or_else(|| self.proxy.clone());
-        let window_lifecycle_generations = Arc::clone(&self.window_lifecycle_generations);
-        let fallback_commit_timeout = self.issue_monitor_fallback_commit_timeout;
+        self.active_agent_sessions.remove(window_id);
         let window_id = window_id.to_string();
         let scheduler_window_id = window_id.clone();
-        let task: Box<dyn FnOnce() + Send + 'static> = Box::new(move || {
-            let started = Instant::now();
-            // Transport belongs off Tao, but before PTY reap or durable
-            // cleanup can delay it. Snapshot timestamps fence late delivery
-            // against a newer observation of a same-ID successor.
-            if let (Some(root), Some((mut snapshot, tabs, sessions))) =
-                (project_root.as_deref(), post_close_snapshot)
-            {
-                for window in &mut snapshot.windows {
-                    let Some(session) = sessions.get(&window.window_id).and_then(|id| {
-                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
-                    }) else {
-                        continue;
-                    };
-                    window.issue_number = window.issue_number.or(session.linked_issue_number);
-                    window.monitor_owned |=
-                        gwt::cli::execution_state::session_launch_route_from_session(&session)
-                            == gwt_agent::LaunchRoute::Autonomous;
-                }
-                super::publish_issue_monitor_window_snapshot(root, &snapshot, &tabs);
-            }
-            let termination_classification = termination_receipt
-                .as_ref()
-                .map(|(session_id, incarnation, has_exit)| {
-                    Self::classify_issue_monitor_termination(
-                        &sessions_dir,
-                        session_id,
-                        *incarnation,
-                        *has_exit,
-                    )
-                })
-                .unwrap_or(gwt::IssueMonitorFailureClass::Unknown);
-            let mut finalizer_ok = true;
-            tracing::info!(
-                target: "gwt.pane.teardown",
-                window_id = %window_id,
-                stage = "close_finalizer",
-                outcome = "starting",
-                "starting detached pane close finalizer"
-            );
-
-            let monitor_close_target = if notify_issue_monitor {
-                match project_root.as_deref() {
-                    Some(project_root)
-                        if window_lifecycle_generation_is_current(
-                            &window_lifecycle_generations,
-                            &window_id,
-                            closing_window_generation,
-                        ) => Self::capture_issue_monitor_window_close_target_in_background(
-                            project_root,
-                            &window_id,
-                        ),
-                    Some(_) => Ok(None),
-                    None => Err(
-                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-                            "no owning project is available for window close".to_string(),
-                        ),
-                    ),
-                }
-            } else {
-                Ok(None)
-            };
-
-            let writer_to_invalidate = match pty_writers.write() {
-                Ok(mut writers) => {
-                    let writer = closing_pty.as_ref().and_then(|closing_pty| {
-                        writers
-                            .get(&window_id)
-                            .filter(|current| Arc::ptr_eq(&current.handle, closing_pty))
-                            .map(|entry| Arc::clone(&entry.handle))
-                    });
-                    if writer.is_some() {
-                        writers.remove(&window_id);
-                    }
-                    drop(writers);
-                    closing_pty.clone().or(writer)
-                }
-                Err(_) => {
-                    finalizer_ok = false;
-                    tracing::warn!(
-                        target: "gwt_input_trace",
-                        window_id = %window_id,
-                        stage = "close_finalizer_registry_deregister_poisoned",
-                        outcome = "registry_lock_failed",
-                        "failed to deregister PTY writer in close finalizer"
-                    );
-                    closing_pty.clone()
-                }
-            };
-
-            // A view-only result never becomes exit proof for Session/Work
-            // terminalization or a capability handoff.
-            let peer_exit_unconfirmed = runtime.is_none()
-                && peer_reply
-                    .as_ref()
-                    .is_some_and(|reply| reply.session_id.is_some());
-            let husk_session = cached_session.or_else(|| {
-                peer_reply
-                    .as_ref()
-                    .filter(|reply| reply.stopped_husk)
-                    .and_then(|reply| reply.session_id.as_ref())
-                    .and_then(|id| {
-                        gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok()
+        let proxy = self.proxy.clone();
+        let generations = Arc::clone(&self.window_lifecycle_generations);
+        let task: WindowCloseFinalizerTask = Box::new(move || {
+            let mut pm_outcome: Option<gwt::project_runtime::pm_delivery::PmLifecycleOutcome> =
+                None;
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+                .and_then(|executor| {
+                    executor.block_on(async {
+                        if let Some(pending) = &pending {
+                            super::cancel_remote_owner_launch(
+                                &pending.owner_pane_id,
+                                &pending.operation_id,
+                                &pending.client_cell,
+                                &pending.cancel_ack,
+                            )
+                            .await?;
+                        }
+                        if let Some(runtime) = runtime.filter(|runtime| {
+                            !pending.as_ref().is_some_and(|pending| {
+                                pending.owner_pane_id == runtime.owner_pane_id
+                            })
+                        }) {
+                            let receipt = tokio::time::timeout(
+                                Duration::from_secs(120),
+                                runtime.client.command(
+                                    gwt::project_runtime::events::OwnerCommand::Close {
+                                        id: runtime.owner_pane_id.clone(),
+                                        incarnation: runtime.incarnation,
+                                    },
+                                ),
+                            )
+                            .await
+                            .map_err(|_| "project close timed out".to_string())??;
+                            if receipt["id"].as_str() != Some(runtime.owner_pane_id.as_str())
+                                || receipt["incarnation"].as_u64() != Some(runtime.incarnation)
+                            {
+                                return Err("project close receipt identity changed".into());
+                            }
+                            pm_outcome = receipt
+                                .get("pm_lifecycle")
+                                .filter(|value| !value.is_null())
+                                .map(|value| serde_json::from_value(value.clone()))
+                                .transpose()
+                                .map_err(|error| error.to_string())?;
+                        } else if pending.is_none() {
+                            return Err(
+                                "exact remote runtime is unavailable; close was not confirmed"
+                                    .to_string(),
+                            );
+                        }
+                        Ok(())
                     })
-            });
-            let husk_removed = peer_exit_unconfirmed
-                && peer_reply.as_ref().is_some_and(|reply| reply.stopped_husk)
-                && window_lifecycle_generation_is_current(
-                    &window_lifecycle_generations,
-                    &window_id,
-                    closing_window_generation,
-                )
-                && husk_session.as_ref().is_some_and(|expected| {
-                    gwt::session_finalizer::remove_restored_stopped_view(&sessions_dir, expected)
-                        .unwrap_or(false)
-                })
-                && window_lifecycle_generation_is_current(
-                    &window_lifecycle_generations,
-                    &window_id,
-                    closing_window_generation,
-                );
-            let mut local_process_exited = runtime.is_none() && !peer_exit_unconfirmed;
-            let mut terminal_persisted = session.is_none();
-            if let Some(pty) = runtime.as_ref().map(|runtime| Arc::clone(&runtime.pty)) {
-                let kill_and_reap = || gwt::session_finalizer::kill_and_reap(&pty, &window_id);
-
-                match (exact_terminal.as_ref(), exact_handoff.as_mut()) {
-                    (Some((identity, Some(incarnation))), Some(Ok(_handoff))) => {
-                        let stopped = gwt::session_finalizer::finalize_exact_close(
-                            &sessions_dir,
-                            identity,
-                            *incarnation,
-                            &pty,
-                            &window_id,
-                        );
-                        terminal_persisted = matches!(&stopped, Ok(Some(())));
-                        // Even a reaped leader can leave a live captured group.
-                        // A failed durable finalizer never substitutes for kill.
-                        local_process_exited =
-                            terminal_persisted || kill_and_reap().unwrap_or(false);
-                        finalizer_ok &= terminal_persisted;
-                        if let Err(error) = stopped {
-                            tracing::warn!(
-                                target: "gwt.pane.teardown",
-                                window_id = %window_id,
-                                %error,
-                                "detached exact-holder finalizer failed"
-                            );
-                        }
-                    }
-                    (Some(_), Some(Err(error))) => {
-                        finalizer_ok = false;
-                        tracing::warn!(
-                            target: "gwt.pane.teardown",
-                            window_id = %window_id,
-                            %error,
-                            "exact-holder capability fence failed; stopping only the local PTY"
-                        );
-                        local_process_exited = kill_and_reap().unwrap_or(false);
-                    }
-                    _ => match kill_and_reap() {
-                        Ok(exited) => {
-                            local_process_exited = exited;
-                            finalizer_ok &= exited;
-                        }
-                        Err(error) => {
-                            finalizer_ok = false;
-                            tracing::warn!(
-                                target: "gwt.pane.teardown",
-                                window_id = %window_id,
-                                %error,
-                                "detached PTY kill/reap failed"
-                            );
-                        }
-                    },
-                }
-            }
-
+                });
             if let Some(reply) = peer_reply {
-                let process_tree_exited = local_process_exited && !peer_exit_unconfirmed;
                 proxy.send(UserEvent::Dispatch(vec![OutboundEvent::reply(
                     reply.client_id,
-                    if husk_removed {
-                        BackendEvent::PaneHuskRemoved {
-                            window_id: window_id.clone(),
-                        }
-                    } else {
-                        BackendEvent::PaneCloseResult {
-                            ok: process_tree_exited,
-                            window_id: window_id.clone(),
-                            reason: (!process_tree_exited)
-                                .then(|| "process-tree exit was not confirmed".to_string()),
-                        }
+                    BackendEvent::PaneCloseResult {
+                        ok: result.is_ok(),
+                        window_id: window_id.clone(),
+                        reason: result.as_ref().err().cloned(),
                     },
                 )]));
             }
-
-            if runtime.is_none() && local_process_exited {
-                if let Some((identity, None)) = exact_terminal.as_ref() {
-                    if let Some(Ok(_handoff)) = exact_handoff.as_mut() {
-                        terminal_persisted =
-                            gwt_agent::persist_session_restore_window_on_startup_if_execution_identity_matches(
-                            &sessions_dir,
-                            identity,
-                            false,
-                        )
-                        .unwrap_or(false);
-                    } else {
-                        terminal_persisted = false;
-                    }
-                    finalizer_ok &= terminal_persisted;
-                }
-            }
-
-            // Once the child is gone, invalidate the predecessor capability
-            // irreversibly but retain the committed reservation as a fence.
-            // Do this before any later barrier or durable cleanup can unwind;
-            // a non-exited child is the only case that restores a normal
-            // handoff bearer.
-            if let Some(Ok(Some(handoff))) = exact_handoff.as_mut() {
-                if local_process_exited {
-                    if !handoff.commit_and_hold() {
-                        finalizer_ok = false;
-                        tracing::warn!(
-                            target: "gwt.pane.teardown",
-                            window_id = %window_id,
-                            "detached exact-holder capability fence could not be committed"
-                        );
-                    }
-                } else if !handoff.rollback() {
-                    finalizer_ok = false;
-                    tracing::warn!(
-                        target: "gwt.pane.teardown",
-                        window_id = %window_id,
-                        "detached exact-holder capability rollback failed"
-                    );
-                }
-            }
-
-            // Logical revocation happened synchronously at close acceptance.
-            // Wait for the physical writer barrier only after kill/reap, so a
-            // write blocked on the child cannot prevent the child from being
-            // terminated and stall every later cleanup stage.
-            if let Some(writer) = writer_to_invalidate.as_ref() {
-                writer.invalidate_input_generation();
-            }
-
-            let mut fresh_candidate_removed = false;
-            if let Some(pending) = pending_fresh_execution
+            settle_window_lifecycle_generation(&generations, &window_id, closing_window_generation);
+            let pm_status = pm_outcome.as_ref().map(|outcome| {
+                gwt::project_runtime::pm_delivery::pm_status_from_launch_prefs(
+                    &gwt_core::paths::gwt_sessions_dir(),
+                    &outcome.prefs,
+                    None,
+                )
+            });
+            let pm_deregistered = pm_outcome
                 .as_ref()
-                .filter(|_| local_process_exited)
-            {
-                if super::continuation::pending_fresh_execution_attempt_status(pending)
-                    == Some(gwt::cli::execution_state::ContinuationAttemptStatus::Prepared)
-                {
-                    let cleanup =
-                        gwt::cli::execution_state::abort_successor_and_remove_exact_session(
-                            &pending.worktree_path,
-                            pending.owner,
-                            &pending.request,
-                            "fresh linked-owner pane closed before SessionStart",
-                            &sessions_dir,
-                            &pending.session_identity,
-                            || {
-                                super::continuation::reject_continue_work_workspace_commit(
-                                    &pending.project_root,
-                                    &pending.worktree_path,
-                                    &pending.operation_id,
-                                )
-                            },
-                        );
-                    match cleanup {
-                        Ok(true) => {
-                            fresh_candidate_removed = true;
-                            terminal_persisted = true;
-                            if let Err(error) = super::continuation::clear_durable_launch_recovery(
-                                &sessions_dir,
-                                &pending.binding.session_id,
-                            ) {
-                                finalizer_ok = false;
-                                tracing::warn!(%window_id, %error, "closed fresh-launch recovery receipt cleanup remains pending");
-                            }
-                        }
-                        result => {
-                            finalizer_ok = false;
-                            tracing::warn!(%window_id, ?result, "closed fresh-launch candidate retained exact recovery evidence");
-                        }
-                    }
-                }
-            }
-
-            if local_process_exited && !terminal_persisted {
-                match session_authority.as_ref() {
-                    Some(CloseSessionAuthority::Legacy(expected)) => {
-                        terminal_persisted = gwt::session_finalizer::finalize_legacy_session(
-                            &sessions_dir,
-                            expected,
-                        )
-                        .unwrap_or(false);
-                        finalizer_ok &= terminal_persisted;
-                    }
-                    Some(CloseSessionAuthority::Unavailable(error)) => {
-                        finalizer_ok = false;
-                        tracing::warn!(
-                            target: "gwt.pane.teardown",
-                            window_id = %window_id,
-                            %error,
-                            "predecessor Session authority was unavailable; skipped durable close projection"
-                        );
-                    }
-                    Some(CloseSessionAuthority::Exact { .. }) | None => {}
-                }
-            }
-
-            #[cfg(test)]
-            run_close_finalizer_before_durable_cleanup_test_hook();
-            let cleanup_generation_is_current = window_lifecycle_generation_is_current(
-                &window_lifecycle_generations,
-                &window_id,
-                closing_window_generation,
-            );
-            if let Some(session) = session.as_ref().filter(|_| {
-                !fresh_candidate_removed && terminal_persisted && cleanup_generation_is_current
-            }) {
-                let ephemeral = Self::session_uses_ephemeral_worktree_for_project(
-                    project_root.as_deref(),
-                    session,
-                );
-                if ephemeral {
-                    Self::finalize_ephemeral_worktree_for_project(project_root.as_deref(), session);
-                } else {
-                    if let Some(task) = pause_task {
-                        task();
-                    }
-                    if let Some(project_root) = project_root.as_ref() {
-                        if let Err(error) =
-                            gwt_core::workspace_projection::mark_workspace_agent_stopped(
-                                project_root,
-                                &session.session_id,
-                                Some(&session.window_id),
-                            )
-                        {
-                            finalizer_ok = false;
-                            tracing::warn!(
-                                error = %error,
-                                project_root = %project_root.display(),
-                                session_id = %session.session_id,
-                                window_id = %session.window_id,
-                                "failed to clean stopped Agent from Workspace projection"
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Some(Ok(Some(handoff))) = exact_handoff.as_mut() {
-                if handoff.is_committed() && !handoff.release_committed() {
-                    finalizer_ok = false;
-                    tracing::warn!(
-                        target: "gwt.pane.teardown",
-                        window_id = %window_id,
-                        "detached exact-holder capability fence could not be released"
-                    );
-                }
-            }
-
-            if let Some(runtime) = runtime.as_mut() {
-                // Issue #4014: the reader thread stays in `read` until the PTY
-                // signals EOF. On Windows the ConPTY output pipe only does so
-                // once the pseudoconsole is closed, and the reader itself pins
-                // the pane - and with it the master - alive, so joining first
-                // would never return. The child was killed and reaped above, so
-                // releasing the descriptors here (Issue #4142 already drops the
-                // master and writer together) closes the pseudoconsole and lets
-                // the join below complete.
-                runtime.pty.release_descriptors();
-                if let Some(handle) = runtime.output_thread.take() {
-                    finalizer_ok &= handle.join().is_ok();
-                }
-                if let Some(handle) = runtime.status_thread.take() {
-                    finalizer_ok &= handle.join().is_ok();
-                }
-            }
-
-            let (pm_deregistered, pm_status) = match (
-                project_root.as_deref(),
-                closing_session_id.as_deref().filter(|_| !husk_removed),
-            ) {
-                (Some(project_root), Some(session_id)) => {
-                    Self::deregister_pm_for_closed_window_in_background(project_root, session_id)
-                }
-                _ => (false, None),
-            };
-            let monitor_result = if notify_issue_monitor && !husk_removed {
-                match (project_root.as_deref(), monitor_close_target) {
-                    (Some(project_root), Ok(Some(target)))
-                        if window_lifecycle_generation_is_current(
-                            &window_lifecycle_generations,
-                            &window_id,
-                            closing_window_generation,
-                        ) =>
-                    {
-                        Self::finalize_issue_monitor_window_close_classified_in_background(
-                            project_root,
-                            &target,
-                            fallback_commit_timeout,
-                            termination_classification,
-                        )
-                    }
-                    (_, Ok(_)) => WindowCloseMonitorResult::Noop,
-                    (_, Err(error)) => WindowCloseMonitorResult::Failed(error),
-                }
-            } else {
-                WindowCloseMonitorResult::Noop
-            };
-            settle_window_lifecycle_generation(
-                &window_lifecycle_generations,
-                &window_id,
-                closing_window_generation,
-            );
+                .is_some_and(|outcome| outcome.deregistered);
             proxy.send(UserEvent::WindowCloseFinalized {
-                window_id: window_id.clone(),
-                project_root: project_root.clone(),
-                closing_session_id: closing_session_id.clone(),
+                window_id,
+                project_root: close_project_root,
+                closing_session_id,
                 pm_close,
                 pm_deregistered,
                 pm_status,
-                monitor_result,
+                monitor_result: match result {
+                    Ok(()) => WindowCloseMonitorResult::Noop,
+                    Err(error) => WindowCloseMonitorResult::Failed(
+                        gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(
+                            error,
+                        ),
+                    ),
+                },
             });
-            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            tracing::info!(
-                target: "gwt.pane.teardown",
-                window_id = %window_id,
-                stage = "close_finalizer",
-                elapsed_ms,
-                outcome = if finalizer_ok { "completed" } else { "failed" },
-                "detached pane close finalizer completed"
-            );
         });
-
         // Keep a recoverable copy of the task so a saturated or unavailable
         // runtime cannot turn an accepted close into leaked process ownership.
         let pending = Arc::new(Mutex::new(Some(task)));
@@ -1461,327 +662,29 @@ impl AppRuntime {
     }
 
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
-        let exact_holder = self
-            .active_agent_sessions
-            .get(window_id)
-            .and_then(|active| {
-                let runtime_incarnation = self.runtimes.get(window_id)?.incarnation;
-                let session = gwt_agent::Session::load(
-                    &self
-                        .sessions_dir
-                        .join(format!("{}.toml", active.session_id)),
-                )
-                .ok()?;
-                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
-                    .ok()
-                    .flatten()?;
-                Some((identity, runtime_incarnation))
-            });
-        if let Some((identity, runtime_incarnation)) = exact_holder {
-            if self
-                .stop_exact_manual_holder_runtime(window_id, runtime_incarnation, &identity, false)
-                .is_ok()
-            {
-                return;
-            }
-            // Exact authority could not be fenced. Still stop the local
-            // process for the user's close request, but retain Running
-            // authority bytes so another Host cannot mistake the failure for
-            // terminal successor permission.
-            let threads = self.start_window_runtime_stop(window_id, false);
-            Self::detach_runtime_stop_threads(window_id, threads);
-            self.mark_agent_session_stopped_with_persistence(window_id, false);
-            return;
-        }
-        self.stop_window_runtime_inner(window_id, true);
-    }
-
-    pub(crate) fn stop_window_runtime_without_session_projection(&mut self, window_id: &str) {
-        self.stop_window_runtime_inner(window_id, false);
-    }
-
-    /// Stop one exact locally-owned producing runtime. The runtime
-    /// incarnation and Session execution identity are rechecked before the
-    /// kill, and durable terminal evidence is written only after the child is
-    /// observed exited. Any failure leaves Session/sidecar authority bytes
-    /// untouched.
-    pub(crate) fn stop_exact_manual_holder_runtime(
-        &mut self,
-        window_id: &str,
-        expected_incarnation: u64,
-        expected_session: &gwt_agent::SessionExecutionIdentity,
-        retain_successor_handoff: bool,
-    ) -> Result<(), String> {
-        let active = self
-            .active_agent_sessions
-            .get(window_id)
-            .filter(|active| active.session_id == expected_session.session_id)
-            .cloned()
-            .ok_or_else(|| "The exact holder Session is no longer local".to_string())?;
-        let runtime = self
-            .runtimes
-            .get(window_id)
-            .filter(|runtime| runtime.incarnation == expected_incarnation)
-            .ok_or_else(|| "The exact holder runtime incarnation changed".to_string())?;
-        let pty = runtime.pty.clone();
-        let capability = self
-            .agent_capability_issuer
-            .clone()
-            .zip(self.agent_capability_tokens.get(window_id).cloned());
-        if retain_successor_handoff && capability.is_none() {
-            return Err("The exact holder capability is unavailable".to_string());
-        }
-        let sessions_dir = self.sessions_dir.clone();
-        gwt::session_finalizer::stop_exact_runtime(
-            &sessions_dir,
-            expected_session,
-            expected_incarnation,
-            &pty,
-            window_id,
-            capability,
-            retain_successor_handoff,
-        )?;
-        if self
-            .runtimes
-            .get(window_id)
-            .is_none_or(|runtime| runtime.incarnation != expected_incarnation)
-            || self
-                .active_agent_sessions
-                .get(window_id)
-                .is_none_or(|current| current.session_id != active.session_id)
-        {
-            return Err("The holder runtime changed while termination was confirmed".to_string());
-        }
-        let threads = self.start_window_runtime_stop(window_id, false);
-        Self::detach_runtime_stop_threads(window_id, threads);
-        self.mark_agent_session_stopped_with_persistence(window_id, false);
-        Ok(())
-    }
-
-    fn stop_window_runtime_inner(&mut self, window_id: &str, mark_session_stopped: bool) {
-        let threads = self.start_window_runtime_stop(window_id, mark_session_stopped);
-        Self::detach_runtime_stop_threads(window_id, threads);
-    }
-
-    fn start_window_runtime_stop(
-        &mut self,
-        window_id: &str,
-        mark_session_stopped: bool,
-    ) -> RuntimeStopThreads {
-        tracing::info!(
-            target: "gwt.pane.teardown",
-            window_id,
-            "starting PTY teardown"
-        );
-        let exact_terminal = self
-            .active_agent_sessions
-            .get(window_id)
-            .and_then(|active| {
-                let runtime = self.runtimes.get(window_id)?;
-                let session = gwt_agent::Session::load(
-                    &self
-                        .sessions_dir
-                        .join(format!("{}.toml", active.session_id)),
-                )
-                .ok()?;
-                let identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
-                    .ok()
-                    .flatten()?;
-                Some((identity, runtime.incarnation))
-            });
-        self.remove_window_state_tracking(window_id);
-        for state in self.project_states.values_mut() {
-            state.pending_pm_wakes.remove(window_id);
-        }
-        self.deregister_pty_writer(window_id);
-        let mut threads = RuntimeStopThreads {
-            output_thread: None,
-            status_thread: None,
-        };
-        let mut exact_terminal_persisted = false;
-        if let Some(mut runtime) = self.runtimes.remove(window_id) {
-            let pty = runtime.pty.clone();
-            tracing::info!(
-                target: "gwt.pane.teardown",
+        if let Some(runtime) = self.runtimes.get(window_id) {
+            let command = gwt::project_runtime::events::OwnerCommand::Close {
+                id: runtime.owner_pane_id.clone(),
+                incarnation: runtime.incarnation,
+            };
+            let events = self.queue_remote_runtime_command(
                 window_id,
-                stage = "pty_kill",
-                outcome = "starting",
-                "starting PTY teardown stage"
+                command,
+                super::RemoteRuntimeCommandKind::Stop,
             );
-            let kill_started = Instant::now();
-            let kill_result = pty.kill();
-            let kill_elapsed_ms =
-                u64::try_from(kill_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            tracing::info!(
-                target: "gwt.pane.teardown",
-                window_id,
-                stage = "pty_kill",
-                elapsed_ms = kill_elapsed_ms,
-                ok = kill_result.is_ok(),
-                outcome = if kill_result.is_ok() { "completed" } else { "failed" },
-                "PTY teardown stage completed"
-            );
-            if let Err(error) = &kill_result {
-                tracing::warn!(
-                    target: "gwt.pane.teardown",
-                    window_id,
-                    stage = "pty_kill",
-                    elapsed_ms = kill_elapsed_ms,
-                    outcome = "failed",
-                    %error,
-                    "PTY teardown stage failed"
-                );
+            if !events.is_empty() {
+                self.proxy.send(UserEvent::Dispatch(events));
             }
-            if kill_elapsed_ms >= 500 {
-                tracing::warn!(
-                    target: "gwt.pane.teardown",
-                    window_id,
-                    elapsed_ms = kill_elapsed_ms,
-                    "{}",
-                    pane_teardown_stall_message(window_id, "pty_kill", kill_elapsed_ms)
-                );
-            }
-            if let Some((identity, incarnation)) = exact_terminal.clone() {
-                exact_terminal_persisted = gwt::session_finalizer::persist_terminal_after_exit(
-                    pty,
-                    self.sessions_dir.clone(),
-                    identity,
-                    incarnation,
-                    window_id.to_string(),
-                );
-            }
-            threads.output_thread = runtime.output_thread.take();
-            threads.status_thread = runtime.status_thread.take();
-        }
-        if mark_session_stopped {
-            self.mark_agent_session_stopped_with_persistence(
-                window_id,
-                exact_terminal.is_none() && !exact_terminal_persisted,
-            );
-        }
-        self.window_details.remove(window_id);
-        threads
-    }
-
-    fn detach_runtime_stop_threads(window_id: &str, mut threads: RuntimeStopThreads) {
-        if threads.output_thread.is_none() && threads.status_thread.is_none() {
-            return;
-        }
-        let window_id = window_id.to_string();
-        thread::spawn(move || {
-            let started = Instant::now();
-            if let Some(handle) = threads.output_thread.take() {
-                let _ = handle.join();
-            }
-            if let Some(handle) = threads.status_thread.take() {
-                let _ = handle.join();
-            }
-            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-            if elapsed_ms >= 500 {
-                tracing::warn!(
-                    target: "gwt.pane.teardown",
-                    window_id = %window_id,
-                    elapsed_ms,
-                    "{}",
-                    pane_teardown_stall_message(&window_id, "join", elapsed_ms)
-                );
-            }
-        });
-    }
-
-    fn join_runtime_stop_threads_blocking(mut threads: RuntimeStopThreads) {
-        if let Some(handle) = threads.output_thread.take() {
-            // Shutdown is allowed to wait briefly so reader threads release
-            // their Pane Arcs before process exit. Cap the wait so a stuck
-            // `read` cannot hang quit. Issue #3705: pane.close must not use
-            // this path — it detaches instead.
-            let (tx, rx) = std_mpsc::channel();
-            thread::spawn(move || {
-                let _ = handle.join();
-                let _ = tx.send(());
-            });
-            let _ = rx.recv_timeout(Duration::from_millis(500));
-        }
-        if let Some(handle) = threads.status_thread.take() {
-            let (tx, rx) = std_mpsc::channel();
-            thread::spawn(move || {
-                let _ = handle.join();
-                let _ = tx.send(());
-            });
-            let _ = rx.recv_timeout(Duration::from_millis(500));
         }
     }
 
-    /// Stop every active window runtime. Called from the application shutdown
-    /// paths so no PTY / agent process outlives the GUI.
+    /// GUI shutdown detaches its caches; owner residency performs the exact lifetime drain.
     pub(crate) fn stop_all_runtimes(&mut self) {
-        let ids: Vec<String> = self.runtimes.keys().cloned().collect();
+        let ids = self.runtimes.keys().cloned().collect();
         self.stop_runtimes_in_shutdown_order(ids);
     }
-
     pub(super) fn stop_runtimes_in_shutdown_order(&mut self, ids: Vec<String>) {
-        stop_all_before_joining(
-            ids,
-            |id| self.start_window_runtime_stop(&id, false),
-            Self::join_runtime_stop_threads_blocking,
-        );
-    }
-
-    pub(crate) fn spawn_output_thread(
-        &self,
-        id: String,
-        incarnation: u64,
-        pane: Arc<Mutex<Pane>>,
-        _console_kind: Option<gwt_core::process_console::ProcessKind>,
-    ) -> JoinHandle<()> {
-        // Agent runtime output belongs to its terminal, not the launch Console.
-        let proxy = self.proxy.clone();
-        gwt::pane_runtime::spawn_output_thread(id, incarnation, pane, move |event| {
-            proxy.send(pane_runtime_user_event(event));
-        })
-    }
-
-    pub(crate) fn spawn_status_thread(
-        &self,
-        id: String,
-        incarnation: u64,
-        pane: Arc<Mutex<Pane>>,
-    ) -> JoinHandle<()> {
-        let proxy = self.proxy.clone();
-        gwt::pane_runtime::spawn_status_thread(id, incarnation, pane, move |event| {
-            proxy.send(pane_runtime_user_event(event));
-        })
-    }
-}
-
-fn pane_runtime_user_event(event: gwt::pane_runtime::PaneRuntimeEvent) -> UserEvent {
-    match event {
-        gwt::pane_runtime::PaneRuntimeEvent::Output {
-            id,
-            incarnation,
-            data,
-            seq,
-            screen,
-        } => UserEvent::RuntimeOutput {
-            id,
-            incarnation,
-            data,
-            seq,
-            screen,
-        },
-        gwt::pane_runtime::PaneRuntimeEvent::Status {
-            id,
-            incarnation,
-            status,
-            detail,
-            exit_confirmed,
-        } => UserEvent::RuntimeStatus {
-            id,
-            incarnation,
-            status,
-            detail,
-            exit_confirmed,
-        },
+        stop_all_before_joining(ids, |id| self.runtimes.remove(&id), drop);
     }
 }
 

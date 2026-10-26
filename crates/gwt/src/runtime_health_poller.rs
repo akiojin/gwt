@@ -13,7 +13,6 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::embedded_server::{ClientHub, ClientHubHealthStats};
 use crate::OutboundEvent;
-use crate::PtyWriterRegistry;
 
 const TICK_SECS: u64 = 5;
 /// Phase 70 FR-396 (Issue #3264): full OS process reconciliation at most
@@ -28,16 +27,12 @@ const WARN_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 const HOT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Spawn the runtime health poller onto the shared tokio runtime.
-pub fn spawn_runtime_health_poller(
-    runtime: &tokio::runtime::Runtime,
-    clients: ClientHub,
-    pty_writers: PtyWriterRegistry,
-) {
-    drop(runtime.handle().spawn(run(clients, pty_writers)));
+pub fn spawn_runtime_health_poller(runtime: &tokio::runtime::Runtime, clients: ClientHub) {
+    drop(runtime.handle().spawn(run(clients)));
 }
 
-async fn run(clients: ClientHub, pty_writers: PtyWriterRegistry) {
-    let mut poller = Poller::new(pty_writers);
+async fn run(clients: ClientHub) {
+    let mut poller = Poller::new();
     let mut ticker = interval(Duration::from_secs(TICK_SECS));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -119,13 +114,13 @@ struct Poller {
     sample_count: u64,
     last_dropped_lossy: u64,
     severity: SeverityTracker,
-    pty_writers: PtyWriterRegistry,
     budget: PollBudget,
     known_pids: Vec<sysinfo::Pid>,
+    direct_focus_windows: HashMap<u32, String>,
 }
 
 impl Poller {
-    fn new(pty_writers: PtyWriterRegistry) -> Self {
+    fn new() -> Self {
         let system =
             System::new_with_specifics(RefreshKind::nothing().with_cpu(CpuRefreshKind::nothing()));
         let logical_cpu_count = system.cpus().len().max(1);
@@ -136,9 +131,9 @@ impl Poller {
             sample_count: 0,
             last_dropped_lossy: 0,
             severity: SeverityTracker::default(),
-            pty_writers,
             budget: PollBudget::default(),
             known_pids: Vec::new(),
+            direct_focus_windows: HashMap::new(),
         }
     }
 
@@ -179,7 +174,9 @@ impl Poller {
             }
         };
         let parent_by_pid = parent_by_pid(&observed);
-        let direct_focus_windows = focus_window_ids_by_pty_pid(&self.pty_writers);
+        if scope == RefreshScope::FullReconcile {
+            self.direct_focus_windows = focus_window_ids_by_pty_pid();
+        }
         let mut selected = select_runtime_processes(self.root_pid, &observed);
         let raw_cpu_percent = selected
             .iter()
@@ -220,7 +217,7 @@ impl Poller {
                 self.root_pid,
                 selected,
                 &parent_by_pid,
-                &direct_focus_windows,
+                &self.direct_focus_windows,
             ),
         }
     }
@@ -500,23 +497,39 @@ fn has_any_seed_ancestor(
     false
 }
 
-fn focus_window_ids_by_pty_pid(pty_writers: &PtyWriterRegistry) -> HashMap<u32, String> {
-    let Ok(guard) = pty_writers.read() else {
-        tracing::warn!(
-            target: "gwt_runtime_health",
-            "failed to read PTY writer registry for runtime health focus targets"
-        );
-        return HashMap::new();
-    };
-    guard
-        .iter()
-        .filter_map(|(window_id, entry)| {
-            entry
-                .handle
-                .process_id()
-                .map(|pid| (pid, window_id.clone()))
-        })
-        .collect()
+/// Read-only focus hints from the canonical Session census and registry. A
+/// hint never authorizes input and disappears when its exact child proof does.
+fn focus_window_ids_by_pty_pid() -> HashMap<u32, String> {
+    let inventory =
+        gwt::session_inventory::observe_machine_sessions(&gwt_core::paths::gwt_sessions_dir());
+    let mut workspaces = HashMap::new();
+    let mut focus = HashMap::new();
+    for observed in inventory.sessions {
+        let workspace = workspaces
+            .entry(observed.project_root.clone())
+            .or_insert_with(|| {
+                gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(
+                    &observed.project_root,
+                ))
+                .ok()
+            });
+        let Some(workspace) = workspace else {
+            continue;
+        };
+        let mut rows = workspace.windows.iter().filter(|row| {
+            row.session_id.as_deref() == Some(observed.session.session_id.as_str())
+                && row.preset.is_agent_terminal()
+        });
+        let Some(row) = rows.next() else {
+            continue;
+        };
+        if rows.next().is_some() {
+            continue;
+        }
+        let project = gwt_core::paths::project_scope_hash(&observed.project_root);
+        focus.insert(observed.session.child_pid, format!("{project}::{}", row.id));
+    }
+    focus
 }
 
 fn focus_window_id_for_process(
@@ -989,7 +1002,7 @@ mod tests {
         // FR-396: the full reconciliation discovers the runtime PID set; the
         // known-PID refresh reuses it without projecting unrelated processes.
         let clients = crate::embedded_server::ClientHub::default();
-        let mut poller = Poller::new(crate::PtyWriterRegistry::default());
+        let mut poller = Poller::new();
         assert_eq!(
             poller.logical_cpu_count,
             poller.system.cpus().len().max(1),

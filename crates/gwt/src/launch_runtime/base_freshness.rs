@@ -21,7 +21,7 @@ pub(super) fn refresh_and_record(repo: &Path, branch: &str, worktree: &Path) {
     draft.origin.branch = branch.to_string();
     draft.mentions = vec![BoardMention::new(BoardMentionTargetKind::Branch, branch)];
     if let Ok(entry) = draft.finalize() {
-        if let Err(error) = gwt::board_provider::post_entry_outcome(repo, entry) {
+        if let Err(error) = crate::board_provider::post_entry_outcome(repo, entry) {
             tracing::warn!(%error, branch, "launch base freshness Board delivery failed; see launch log");
         }
     }
@@ -187,7 +187,7 @@ mod tests {
     }
 
     fn report(worktree: &Path) -> String {
-        let snapshot = gwt::board_provider::load_snapshot(worktree).unwrap();
+        let snapshot = crate::board_provider::load_snapshot(worktree).unwrap();
         let entry = snapshot
             .board
             .entries

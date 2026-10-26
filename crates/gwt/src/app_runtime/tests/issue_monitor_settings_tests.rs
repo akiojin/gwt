@@ -1794,15 +1794,16 @@ fn app_runtime_issue_monitor_auto_tier_change_starts_fresh() {
     let prefs = serde_json::from_value(value).expect("tier prefs");
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save tier prefs");
 
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete("fresh tier launch", &fixture.recorded_events);
-    assert_monitor_fresh_successor(result, &fixture);
+    assert_owner_monitor_fresh_successor(&pane, &fixture);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload tier prefs");
     let value = serde_json::to_value(prefs).expect("serialize tier result");
     assert_eq!(value["issue_tiers"]["3165"]["launch_tier"], 2);
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -1837,19 +1838,17 @@ fn app_runtime_issue_monitor_auto_same_tier_override_starts_fresh() {
     prefs.launch_tiers = vec![vec![profile.clone()], vec![profile]];
     prefs.record_tier_launch(3165, 1);
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save updated tier");
-    prepare_monitor_relaunch(
+    let (owner, window_id, pane, _) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result = take_monitor_launch_complete("same tier override", &fixture.recorded_events);
-    let result = result.expect("launch result");
-    assert_eq!(result.9, gwt_agent::SessionMode::Normal);
-    let session =
-        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{}.toml", result.1)))
-            .expect("fresh session");
+    let session = pane.session.as_ref().unwrap();
+    assert_eq!(session.session_mode, gwt_agent::SessionMode::Normal);
     assert_eq!(session.model.as_deref(), Some("gpt-6-astra"));
     assert_eq!(session.reasoning_level.as_deref(), Some("high"));
     assert!(session.agent_session_id.is_none());
+    authenticate_monitor_owner_readiness(&owner, &pane);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]
@@ -1884,7 +1883,7 @@ fn app_runtime_issue_monitor_auto_answered_handoff_defers_tier_selection() {
     prefs.record_tier_launch(3165, 0);
     let history = prefs.issue_tiers.clone();
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save changed auto tiers");
-    let events = prepare_monitor_relaunch(
+    let (owner, window_id, pane, events) = materialize_monitor_relaunch_at_owner(
         &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
     );
@@ -1894,13 +1893,13 @@ fn app_runtime_issue_monitor_auto_answered_handoff_defers_tier_selection() {
         )),
         "answer delivery must bypass changed auto candidates"
     );
-    let result = take_monitor_launch_complete("auto answer delivery", &fixture.recorded_events);
-    assert_monitor_exact_resume(result, &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
     let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
     assert_eq!(
         persisted.issue_tiers, history,
         "answer delivery does not select a new tier"
     );
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 /// SPEC #3914 FR-007 (PR #3968 review): a non-head selection is reported on
@@ -1941,16 +1940,11 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
         .insert("claude".to_string(), "2999-01-01T04:00:00Z".to_string());
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("save pooled Monitor prefs");
 
-    let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
-        &fixture.runtime.test_context(),
-        3165,
-        LinkedIssueKind::Spec,
-        None,
+    let (owner, window_id, pane, events) = materialize_monitor_relaunch_at_owner(
+        &mut fixture,
         gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
     );
-    let result =
-        take_monitor_launch_complete("resume with a skipped head", &fixture.recorded_events);
-    assert_monitor_exact_resume(result, &fixture);
+    assert_owner_monitor_exact_resume(&owner, &pane, &fixture);
     let toast = events
         .iter()
         .find_map(|event| match &event.event {
@@ -1966,6 +1960,7 @@ fn app_runtime_issue_monitor_resume_reports_skipped_candidates() {
     assert_eq!(toast.0, "info");
     assert!(toast.1.contains("codex"), "{}", toast.1);
     assert!(toast.1.contains("04:00"), "{}", toast.1);
+    close_test_owner_runtime(&mut fixture.runtime, &window_id);
 }
 
 #[test]

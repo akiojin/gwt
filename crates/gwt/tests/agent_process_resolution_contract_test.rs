@@ -38,7 +38,7 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
-    let path = repo_root().join("crates/gwt/src/app_runtime/launch.rs");
+    let path = repo_root().join("crates/gwt/src/project_runtime/launch.rs");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let policy = function_source(&source, "codex_hook_discovery_mode_for_launch_config");
@@ -56,7 +56,7 @@ fn codex_hook_discovery_reuses_the_single_canonical_host_health_result() {
     assert!(policy.contains("health_report"));
     assert!(policy.contains("version_output"));
 
-    let launch = function_source(&source, "spawn_agent_window_async_with_claim");
+    let launch = function_source(&source, "prepare_agent_launch");
     assert_eq!(
         launch
             .matches("resolve_host_runner_health_checked(")
@@ -333,13 +333,18 @@ fn every_reachable_app_route_enters_the_shared_agent_launch_transaction() {
     );
     assert!(transaction.contains("Self::spawn_agent_window_async_with_claim("));
     let asynchronous = function_source(&launch, "spawn_agent_window_async_with_claim");
+    assert!(asynchronous.contains("gwt::project_runtime::launch::prepare_agent_launch("));
+    let worker_path = root.join("crates/gwt/src/project_runtime/launch.rs");
+    let worker_source = fs::read_to_string(&worker_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", worker_path.display()));
+    let worker = function_source(&worker_source, "prepare_agent_launch");
     for boundary in [
         "resolve_host_runner_health_checked(&mut config)",
         "apply_windows_host_shell_wrapper(&mut config)",
     ] {
         assert!(
-            asynchronous.contains(boundary),
-            "shared asynchronous launch transaction must own {boundary}"
+            worker.contains(boundary),
+            "shared launch preparation must own {boundary}"
         );
     }
 }
