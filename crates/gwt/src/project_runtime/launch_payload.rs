@@ -9,6 +9,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerLaunchMetadata {
+    #[serde(default)]
+    pub selected_agent_member_id: Option<String>,
     pub inherited_agent_name: Option<String>,
     pub workspace_resume_context: Option<WorkspaceResumeContext>,
     pub launch_feedback_context: Option<LaunchFeedbackContext>,

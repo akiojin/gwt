@@ -2881,14 +2881,18 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         WindowProcessStatus::Stopped,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    // AC27: the two direct routes need two enabled project members.
+    // AC27/40: each direct route needs an enabled member with its fixed tool.
+    gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir)
+        .expect("registered Codex member");
     gwt::agent_names::mutate_project_roster(
         &repo,
         &runtime.sessions_dir,
-        gwt::agent_names::AgentRosterAction::Resize { size: 2 },
+        gwt::agent_names::AgentRosterAction::Add {
+            agent_id: Some("claude".into()),
+        },
         None,
     )
-    .expect("two simultaneous direct agent members");
+    .expect("registered Claude member for the second direct route");
     let codex_id = combined_window_id("tab-1", "legacy-codex");
     let (spawn_env, _) = runtime
         .active_profile_spawn_env()

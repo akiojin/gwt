@@ -66,6 +66,45 @@ pub(crate) struct WindowRuntime {
     pub(crate) agent: Option<AgentRuntimeRecord>,
 }
 
+impl Drop for WindowRuntime {
+    fn drop(&mut self) {
+        self.current.store(false, Ordering::Release);
+        self.pty.revoke_input_generation();
+        if let Some(agent) = &self.agent {
+            agent.current.store(false, Ordering::Release);
+        }
+        if self.pty.tree_exit_confirmed()
+            && self.output_thread.is_none()
+            && self.status_thread.is_none()
+        {
+            return;
+        }
+        // Reader/status workers retain the PTY. Dispose of the captured
+        // physical resources off the actor, without locking the Pane.
+        let pty = self.pty.clone();
+        let output_thread = self.output_thread.take();
+        let status_thread = self.status_thread.take();
+        let prompt_file = self._initial_prompt_file.take();
+        spawn_owner_worker(move || {
+            let _prompt_file = prompt_file;
+            if !pty.tree_exit_confirmed() {
+                match crate::session_finalizer::kill_and_reap(&pty, "dropped-owner-runtime") {
+                    Ok(true) => {}
+                    result => {
+                        tracing::error!(?result, "dropped owner runtime tree exit is unconfirmed")
+                    }
+                }
+            }
+            pty.release_descriptors();
+            for worker in [output_thread, status_thread].into_iter().flatten() {
+                if worker.join().is_err() {
+                    tracing::error!("dropped owner runtime worker panicked");
+                }
+            }
+        });
+    }
+}
+
 pub(crate) struct AgentRuntimeRecord {
     pub(crate) feedback: Option<super::launch_payload::LaunchFeedbackContext>,
     monitor_owner: Option<(PathBuf, String)>,
@@ -237,6 +276,11 @@ fn runtime_uses_pm_worktree(runtime: &WindowRuntime) -> bool {
 
 pub(crate) enum Retirement {
     StoppedWindow(Box<super::agent_dispatch::StoppedWindowRetirement>),
+    SwitchStoppedWindow {
+        proof: Box<crate::issue_monitor::IssueMonitorRuntimeStopRequest>,
+        pty: Arc<PtyHandle>,
+        cleanup: Box<super::agent_dispatch::OwnedWindowRecordCleanup>,
+    },
     Runtime {
         runtime: Box<WindowRuntime>,
         cause: CloseCause,
@@ -280,6 +324,12 @@ pub(crate) struct LegacyFocusPublication {
 }
 
 pub(crate) enum OwnerMessage {
+    AgentSwitchFinished {
+        drove: bool,
+        result: OwnerReply,
+        reply: oneshot::Sender<OwnerReply>,
+    },
+    AgentSwitchSourceExited(Box<super::agent_switch::AgentSwitchSourceExited>),
     LegacyFocusPublished(Box<LegacyFocusPublication>),
     BoardNotificationFinished {
         result: Result<(), String>,
@@ -678,6 +728,22 @@ impl OwnerHandle {
             .map_err(|_| "project owner stopped before launch checkpoint setup".into())
     }
     #[cfg(any(test, feature = "test-gh-guard"))]
+    pub(crate) fn test_agent_switch_source_exited(
+        &self,
+        proof: crate::issue_monitor::IssueMonitorRuntimeStopRequest,
+        pty: Arc<PtyHandle>,
+    ) -> Result<(), String> {
+        self.sender
+            .send(OwnerMessage::AgentSwitchSourceExited(Box::new(
+                super::agent_switch::AgentSwitchSourceExited {
+                    operation_id: "actual-owner-switch-fixture".into(),
+                    proof,
+                    pty,
+                },
+            )))
+            .map_err(|_| "project owner unavailable".into())
+    }
+    #[cfg(any(test, feature = "test-gh-guard"))]
     pub(crate) async fn test_launch_prepared_continuation(
         &self,
         config: Box<gwt_agent::LaunchConfig>,
@@ -778,6 +844,7 @@ pub(crate) struct OwnerState {
     shutdown_replies: Vec<oneshot::Sender<()>>,
     retiring: usize,
     input_jobs: usize,
+    switch_job_inflight: bool,
     pm_wake_permits: super::pm_delivery::PmWakePermits,
     agent_operations: HashMap<String, AgentOperation>,
     retirements: HashMap<(String, u64), Option<Retirement>>,
@@ -856,6 +923,7 @@ impl OwnerState {
             shutdown_replies: Vec::new(),
             retiring: 0,
             input_jobs: 0,
+            switch_job_inflight: false,
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
@@ -941,6 +1009,18 @@ impl OwnerState {
                 }
             };
             match message {
+                OwnerMessage::AgentSwitchFinished {
+                    drove,
+                    result,
+                    reply,
+                } => {
+                    self.input_jobs -= 1;
+                    if drove {
+                        self.switch_job_inflight = false;
+                    }
+                    let _ = reply.send(result);
+                }
+                OwnerMessage::AgentSwitchSourceExited(exited) => self.retire_switch_source(exited),
                 OwnerMessage::BoardNotificationFinished { result, reply } => {
                     self.input_jobs -= 1;
                     let _ = reply.send(result.map(|_| json!({"ok":true})));
@@ -1349,6 +1429,15 @@ impl OwnerState {
                             }
                         }
                     }
+                    if result.is_ok() {
+                        if let Retirement::SwitchStoppedWindow { proof, .. } = &captured {
+                            let _ = self.events.send(OwnerEvent::WindowRemoved {
+                                id: id.clone(),
+                                incarnation,
+                                session_id: Some(proof.session_id.clone()),
+                            });
+                        }
+                    }
                     if result.is_err() {
                         self.retirements
                             .insert((id.clone(), incarnation), Some(captured));
@@ -1751,9 +1840,196 @@ impl OwnerState {
             json!({"id":id,"incarnation":incarnation,"child_pid":child_pid,"host_pid":std::process::id(),"host_instance_id":self.host_instance_id,"started_at_ms":started_at_ms}),
         )
     }
+    fn retire_switch_source(&mut self, exited: Box<super::agent_switch::AgentSwitchSourceExited>) {
+        let proof = &exited.proof;
+        let id = &proof.window_id;
+        if !exited.pty.tree_exit_confirmed()
+            || exited.pty.process_id() != Some(proof.child_pid)
+            || proof.host_pid != std::process::id()
+            || crate::process::host_process_start_time(proof.host_pid)
+                != Some(proof.host_started_at)
+        {
+            return;
+        }
+        if let Some(closing) = self.closing.get(id) {
+            if closing.incarnation != proof.runtime_incarnation {
+                return;
+            }
+            // Observe the already-owned close receipt, never poll or start a
+            // competing finalizer. Shutdown tracks this continuation as input.
+            let (reply, done) = oneshot::channel();
+            self.close_replies
+                .entry((id.clone(), proof.runtime_incarnation))
+                .or_default()
+                .push(reply);
+            self.input_jobs += 1;
+            let sender = self.sender.clone();
+            spawn_owner_worker(move || {
+                let result = done
+                    .blocking_recv()
+                    .unwrap_or_else(|_| Err("owner close receipt unavailable".into()));
+                if result.is_ok() {
+                    let _ = sender.send(OwnerMessage::AgentSwitchSourceExited(exited));
+                }
+                let (reply, _) = oneshot::channel();
+                let _ = sender.send(OwnerMessage::AgentSwitchFinished {
+                    drove: false,
+                    result,
+                    reply,
+                });
+            });
+            return;
+        }
+        if let Some(runtime) = self.runtimes.get(id) {
+            if runtime.incarnation != proof.runtime_incarnation
+                || !Arc::ptr_eq(&runtime.pty, &exited.pty)
+                || runtime.agent.as_ref().is_none_or(|agent| {
+                    agent.active.session_id != proof.session_id
+                        || gwt_agent::SessionExecutionIdentity::from_session(&agent.snapshot)
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            != Some(&proof.execution_identity)
+                })
+            {
+                return;
+            }
+            let mut runtime = self.runtimes.remove(id).unwrap();
+            self.capture_close_monitor_snapshot(id, &mut runtime);
+            let (reply, _) = oneshot::channel();
+            self.start_close(id.clone(), runtime, CloseCause::ExplicitClose, reply);
+            return;
+        }
+        if self.pending.contains_key(id)
+            || self
+                .retirements
+                .keys()
+                .any(|(candidate, _)| candidate == id)
+            || !self.agent_operations.values().any(|operation| {
+                operation.id == *id
+                    && operation.incarnation == proof.runtime_incarnation
+                    && operation.session_id.as_deref() == Some(proof.session_id.as_str())
+                    && operation.result.as_ref().is_some_and(|result| {
+                        result.as_ref().is_ok_and(|receipt| {
+                            receipt["closed"] == true && receipt["diagnostic_exit"] == true
+                        })
+                    })
+            })
+        {
+            return;
+        }
+        let Some(raw) = id.strip_prefix(&format!("{}::", self.project_key)) else {
+            return;
+        };
+        if !self
+            .registry_projection
+            .windows
+            .iter()
+            .any(|row| row.id == raw && row.session_id.as_deref() == Some(&proof.session_id))
+        {
+            return;
+        }
+        let Ok(registry) = &self.agent_registry else {
+            return;
+        };
+        let cleanup = super::agent_dispatch::OwnedWindowRecordCleanup {
+            registry: registry.clone(),
+            registry_path: crate::persistence::workspace_state_path(&self.root),
+            root: self.root.clone(),
+            project_key: self.project_key.clone(),
+            canonical_id: id.clone(),
+            expected_session_id: Some(proof.session_id.clone()),
+        };
+        self.start_retirement(
+            id.clone(),
+            proof.runtime_incarnation,
+            Retirement::SwitchStoppedWindow {
+                proof: Box::new(exited.proof),
+                pty: exited.pty,
+                cleanup: Box::new(cleanup),
+            },
+            None,
+            None,
+        );
+    }
+
+    fn begin_agent_switch(
+        &mut self,
+        action: Option<crate::issue_monitor::AgentSwitchAction>,
+        reply: oneshot::Sender<OwnerReply>,
+    ) {
+        if self.stopping {
+            let _ = reply.send(Err("project owner is stopping".into()));
+            return;
+        }
+        let drove = action.is_none();
+        if drove && self.switch_job_inflight {
+            let _ = reply.send(Ok(json!({"busy":true})));
+            return;
+        }
+        if drove {
+            self.switch_job_inflight = true;
+        }
+        let root = self.root.clone();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let entries = self
+            .pty_writers
+            .read()
+            .map(|entries| {
+                entries
+                    .values()
+                    .filter(|entry| {
+                        entry.project_key.as_str() == self.project_key
+                            && entry.monitor_runtime.is_some()
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let writers = self.pty_writers.clone();
+        let sender = self.sender.clone();
+        self.input_jobs += 1;
+        spawn_owner_worker(move || {
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                gwt_core::operation_deadline::now() + std::time::Duration::from_secs(60),
+            );
+            let result = match action {
+                Some(action) => super::agent_switch::apply_action(&root, &sessions, action),
+                None => super::agent_switch::drive_pending(
+                    &root,
+                    &sessions,
+                    &entries,
+                    &writers,
+                    |exited| {
+                        let _ =
+                            sender.send(OwnerMessage::AgentSwitchSourceExited(Box::new(exited)));
+                    },
+                ),
+            }
+            .map(|snapshot| json!({"snapshot":snapshot}));
+            let _ = sender.send(OwnerMessage::AgentSwitchFinished {
+                drove,
+                result,
+                reply,
+            });
+        });
+    }
+
     fn request(&mut self, request: OwnerRequest, reply: oneshot::Sender<OwnerReply>) {
         if request.project_key != self.project_key {
             let _ = reply.send(Err("project key mismatch".into()));
+            return;
+        }
+        if matches!(
+            request.command,
+            OwnerCommand::AgentSwitch { .. } | OwnerCommand::DriveAgentSwitch
+        ) {
+            let action = match request.command {
+                OwnerCommand::AgentSwitch { action } => Some(*action),
+                OwnerCommand::DriveAgentSwitch => None,
+                _ => unreachable!(),
+            };
+            self.begin_agent_switch(action, reply);
             return;
         }
         if let OwnerCommand::NotifyBoardDecision {
@@ -2145,7 +2421,9 @@ impl OwnerState {
                 .map(|_| json!({"ok":true})),
             OwnerCommand::Snapshot { id, incarnation } => self.pane_snapshot(&id, incarnation),
 
-            OwnerCommand::DeliverAutonomousAnswer { .. }
+            OwnerCommand::AgentSwitch { .. }
+            | OwnerCommand::DriveAgentSwitch
+            | OwnerCommand::DeliverAutonomousAnswer { .. }
             | OwnerCommand::NotifyBoardDecision { .. }
             | OwnerCommand::AcknowledgeMonitorLaunch { .. }
             | OwnerCommand::AdoptMonitorLaunch { .. }
@@ -3355,18 +3633,10 @@ impl OwnerState {
             })
             .chain(std::iter::once(self.project_key.clone()))
             .collect();
-        let retained_names: Vec<_> = self
+        let known_names: HashSet<_> = self
             .runtimes
-            .iter()
-            .filter_map(|(id, runtime)| {
-                let agent = runtime.agent.as_ref()?;
-                Some(crate::agent_names::RetainedAgentName {
-                    project_root: self.root.clone(),
-                    window_id: id.clone(),
-                    session_id: Some(agent.active.session_id.clone()),
-                    name: agent.snapshot.agent_name.clone()?,
-                })
-            })
+            .values()
+            .filter_map(|runtime| runtime.agent.as_ref()?.snapshot.agent_name.clone())
             .collect();
         let owner_registry = self.agent_registry.clone();
         let owner_registry_path = crate::persistence::workspace_state_path(&self.root);
@@ -3569,7 +3839,6 @@ impl OwnerState {
             };
             let output_id = id.clone();
             let output_operation_id = operation_id.clone();
-            let mut name_reservation = None;
             let mut purpose_title = None;
             let result = manual_stop_result
                 .map_err(AgentLaunchError::from)
@@ -3610,7 +3879,7 @@ impl OwnerState {
                             host_project_roots: &host_project_roots,
                             snapshot,
                             snapshot_tabs,
-                            retained_names: &retained_names,
+                            known_names: &known_names,
                             metadata: *metadata,
                             is_continue_work: input.is_continue_work,
                             restore_source: input.auto_resume_source_snapshot.as_ref(),
@@ -3625,7 +3894,6 @@ impl OwnerState {
                         .as_deref()
                         .filter(|path| crate::pm_registry::is_canonical_pm_worktree(path))
                         .map(|_| root.clone());
-                    name_reservation = admitted.name_reservation.take();
                     purpose_title = admitted.purpose_title.take();
                     if let Some(restore) = restore.as_mut() {
                         restore.launch_started = true;
@@ -3824,7 +4092,6 @@ impl OwnerState {
                     }
                     success
                 });
-            drop(name_reservation);
             let mut durable_candidate_removed = input.removed_genesis_session.is_some();
             if result.is_err() {
                 if let Some(pending) = input.pending_continue_work.as_ref() {
@@ -4370,6 +4637,7 @@ impl OwnerState {
                     let _ = self.events.send(OwnerEvent::WindowRemoved {
                         id: id.clone(),
                         incarnation,
+                        session_id: None,
                     });
                     self.finish_agent_operation(
                         &operation_id,
@@ -4972,10 +5240,14 @@ impl OwnerState {
                         outcome: outcome.clone(),
                     });
                 }
-                if natural_terminal && !matches!(cause, CloseCause::DiagnosticExit) {
+                if matches!(cause, CloseCause::ExplicitClose | CloseCause::NaturalExit) {
                     let _ = self.events.send(OwnerEvent::WindowRemoved {
                         id: id.clone(),
                         incarnation,
+                        session_id: runtime
+                            .agent
+                            .as_ref()
+                            .map(|agent| agent.snapshot.id.clone()),
                     });
                 }
             }
@@ -5201,6 +5473,58 @@ impl OwnerState {
                     })
                 }),
                 Retirement::StoppedWindow(capture) => capture.finish(),
+                Retirement::SwitchStoppedWindow {
+                    proof,
+                    pty,
+                    cleanup,
+                } => (|| {
+                    let sessions = gwt_core::paths::gwt_sessions_dir();
+                    crate::cli::execution_state::with_exact_owned_runtime_cleanup_lease(
+                        &sessions,
+                        &proof.execution_identity,
+                        gwt_agent::ManualLaunchRuntimeProof {
+                            host_pid: proof.host_pid,
+                            runtime_incarnation: proof.runtime_incarnation,
+                        },
+                        || {
+                            let snapshot = gwt_agent::Session::load(
+                                &sessions.join(format!("{}.toml", proof.session_id)),
+                            )?;
+                            let runtime = gwt_agent::SessionRuntimeState::load(
+                                &gwt_agent::runtime_state_path_for_pid(
+                                    &sessions,
+                                    proof.host_pid,
+                                    &proof.session_id,
+                                ),
+                            )?;
+                            if !pty.tree_exit_confirmed()
+                                || pty.process_id() != Some(proof.child_pid)
+                                || gwt_agent::SessionExecutionIdentity::from_session(&snapshot)
+                                    .map_err(std::io::Error::other)?
+                                    .as_ref()
+                                    != Some(&proof.execution_identity)
+                                || !matches!(
+                                    snapshot.status,
+                                    gwt_agent::AgentStatus::Stopped
+                                        | gwt_agent::AgentStatus::Interrupted
+                                )
+                                || snapshot.restore_window_on_startup
+                                || runtime.status != gwt_agent::AgentStatus::Stopped
+                                || !proof.matches_runtime(&snapshot.id, proof.host_pid, &runtime)
+                            {
+                                return Err(std::io::Error::other(
+                                    "Switch source terminal identity or tree exit changed",
+                                ));
+                            }
+                            // Diagnostic close already committed the Session.
+                            // Keep its terminal sidecar; remove only its exact
+                            // canvas record under the same cleanup authority.
+                            cleanup.finish().map_err(std::io::Error::other)
+                        },
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "Switch source cleanup authority changed".into())
+                })(),
                 Retirement::Pane { pane, .. } => {
                     crate::session_finalizer::kill_and_reap(&pane.shared_pty(), &id)
                         .map_err(|error| error.to_string())
@@ -8918,6 +9242,7 @@ mod tests {
             shutdown_replies: Vec::new(),
             retiring: 0,
             input_jobs: 0,
+            switch_job_inflight: false,
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
@@ -9610,6 +9935,7 @@ mod tests {
             shutdown_replies: Vec::new(),
             retiring: 0,
             input_jobs: 0,
+            switch_job_inflight: false,
             pm_wake_permits: Default::default(),
             agent_operations: HashMap::new(),
             retirements: HashMap::new(),
@@ -10038,5 +10364,122 @@ mod tests {
             gwt_agent::Session::load(&sessions.join(format!("{}.toml", snapshot.id))).unwrap();
         assert_eq!(stopped.status, gwt_agent::AgentStatus::Stopped);
         assert!(stopped.restore_window_on_startup);
+    }
+}
+
+#[cfg(test)]
+mod drop_tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct TestPtyGuard(Arc<PtyHandle>);
+    impl Drop for TestPtyGuard {
+        fn drop(&mut self) {
+            let _ = crate::session_finalizer::kill_and_reap(&self.0, "drop-runtime");
+            self.0.release_descriptors();
+        }
+    }
+    #[test]
+    fn dropping_window_runtime_reclaims_worker_owned_pty_without_the_pane_lock() {
+        let _lock = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/d", "/s", "/c", "exit /b 0"])
+        } else {
+            ("/bin/cat", vec![])
+        };
+        // No frontend answers ConPTY's startup query: even this exit command
+        // remains alive until its owning runtime explicitly tears it down.
+        let pane = Arc::new(Mutex::new(
+            Pane::new(
+                "drop-runtime".into(),
+                command.into(),
+                args.into_iter().map(str::to_owned).collect(),
+                80,
+                24,
+                HashMap::new(),
+                Some(temp.path().to_owned()),
+            )
+            .unwrap(),
+        ));
+        let pty = pane.lock().unwrap().shared_pty();
+        let _cleanup = TestPtyGuard(pty.clone());
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let output_tx = exit_tx.clone();
+        let mut runtime = WindowRuntime {
+            project_root: temp.path().into(),
+            policy: Default::default(),
+            _initial_prompt_file: None,
+            started_at_ms: 0,
+            child_started_at: None,
+            current: Arc::new(AtomicBool::new(true)),
+            registry_cleanup: None,
+            close_handoff: None,
+            close_monitor_snapshot: None,
+            pm_lifecycle: None,
+            rollback_monitor_failure: None,
+            member_cleanup: None,
+            detail: None,
+            last_output_at: None,
+            pty: pty.clone(),
+            incarnation: 1,
+            pane: pane.clone(),
+            output_thread: None,
+            status_thread: None,
+            pty_status: crate::WindowProcessStatus::Running,
+            hook_status: None,
+            output_bytes: 0,
+            agent: None,
+        };
+        runtime.output_thread = Some(crate::pane_runtime::spawn_output_thread(
+            "drop-runtime".into(),
+            1,
+            pane.clone(),
+            move |event| {
+                if matches!(event, crate::pane_runtime::PaneRuntimeEvent::Status { .. }) {
+                    let _ = output_tx.send("output");
+                }
+            },
+        ));
+        runtime.status_thread = Some(crate::pane_runtime::spawn_status_thread(
+            "drop-runtime".into(),
+            1,
+            pane.clone(),
+            move |_| {
+                let _ = exit_tx.send("status");
+            },
+        ));
+        let pane_lock = pane.lock().unwrap();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(runtime);
+            let _ = dropped_tx.send(());
+        });
+        // test-hygiene: allow-wall-clock-deadline Bound a regressed pane mutex wait; the channel establishes Drop completion.
+        let dropped_without_pane_lock = dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(pane_lock);
+        dropper.join().unwrap();
+        assert!(
+            dropped_without_pane_lock,
+            "runtime Drop must dispatch cleanup without taking the pane lock"
+        );
+        let mut exited = [
+            exit_rx
+                // test-hygiene: allow-wall-clock-deadline Bound actual OS child exit; this event establishes completion.
+                .recv_timeout(Duration::from_secs(5))
+                .expect("runtime Drop must stop its owned child"),
+            exit_rx
+                // test-hygiene: allow-wall-clock-deadline Bound actual PTY reader exit; this event establishes completion.
+                .recv_timeout(Duration::from_secs(5))
+                .expect("runtime Drop must release its PTY reader"),
+        ];
+        exited.sort_unstable();
+        assert_eq!(exited, ["output", "status"]);
+        assert!(
+            pty.try_wait().unwrap().is_some(),
+            "owned child must be reaped before verification ends"
+        );
     }
 }

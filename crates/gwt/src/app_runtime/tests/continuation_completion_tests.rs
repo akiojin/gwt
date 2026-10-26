@@ -766,7 +766,7 @@ fn launch_failure_status_preserves_worker_profile_and_uses_background_snapshot_o
         Some("worker-profile"),
         gwt_agent::AgentId::Codex,
     );
-    assert!(events.iter().any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation } if id == &evidence.id && *incarnation == evidence.incarnation)));
+    assert!(events.iter().any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::WindowRemoved { id, incarnation, .. } if id == &evidence.id && *incarnation == evidence.incarnation)));
     let mut stale_gui_session = evidence.session.unwrap();
     assert_eq!(stale_gui_session.agent_id, gwt_agent::AgentId::Codex);
     assert_eq!(stale_gui_session.model.as_deref(), Some("worker-profile"));

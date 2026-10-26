@@ -151,6 +151,8 @@ impl LaunchWizardState {
             launch_target_options: launch_target_options_view(),
             selected_launch_target: launch_target_value(self.launch_target).to_string(),
             agent_options: self.agent_options_view(),
+            agent_member_options: Vec::new(),
+            selected_agent_member_id: None,
             selected_agent_id: self.effective_agent_id().to_string(),
             model_options: self.model_options_view(),
             selected_model: self.model.clone(),

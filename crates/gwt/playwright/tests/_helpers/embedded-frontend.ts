@@ -119,7 +119,6 @@ const ROOT_MODULES = new Set([
   "ui-trace-profiler.js",
   "ui-trace-wiring.js",
   "update-cta.js",
-  "window-list-model.js",
   "issue-other-surface.js",
   // SPEC-2359 US-42 — Workspace Resume Picker modal renderer.
   "workspace-resume-picker-modal.js",

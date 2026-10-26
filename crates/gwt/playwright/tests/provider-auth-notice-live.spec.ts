@@ -47,11 +47,11 @@ test("Issue #4224 reauthentication needs human attention while quota remains que
     await gotoLiveGwt(page, base, { enableTestBridge: true });
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
     await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue", bounds: { x: 40, y: 40, width: 1400, height: 900 } });
-    const settings = page.locator('.workspace-window[data-preset="settings"]').last();
-    const surface = settings.locator('[data-settings-panel="issues"]');
+    const issueWindow = page.locator('.workspace-window[data-preset="issue"]').last();
+    const surface = issueWindow.locator('.issue-bridge-root');
     await expect(surface).toBeVisible();
     await page.waitForFunction(() => (window as any).__providerAuthFixtureLoad);
-    const id = await settings.getAttribute("data-id");
+    const id = await issueWindow.getAttribute("data-id");
     const authReason = "Claude Code reauthentication required; sign in to the provider CLI, then retry the Issue.";
     const quotaReason = "Codex usage limit reached — resumes after 2026-10-23T03:00:00Z";
     const items = [

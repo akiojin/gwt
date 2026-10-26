@@ -172,6 +172,48 @@ mod persisted_review_launch_tests {
     use super::*;
 
     #[test]
+    fn restored_custom_session_retains_configured_command_args_env_and_resume() {
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let config_path = gwt_core::paths::gwt_config_path();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            config_path,
+            r#"[tools.customCodingAgents.fixture]
+id = "fixture"
+displayName = "Fixture"
+agentType = "command"
+command = "fixture-cli"
+defaultArgs = ["--flag"]
+[tools.customCodingAgents.fixture.modeArgs]
+resume = ["--resume"]
+[tools.customCodingAgents.fixture.env]
+FIXTURE_ENV = "configured"
+"#,
+        )
+        .unwrap();
+        let mut session = gwt_agent::Session::new(
+            home.path(),
+            "main",
+            gwt_agent::AgentId::Custom("fixture".into()),
+        );
+        session.agent_session_id = Some("saved-conversation".into());
+
+        let config = launch_config_from_persisted_session(&session);
+        assert_eq!(config.command, "fixture-cli");
+        assert_eq!(config.args, ["--flag", "--resume"]);
+        assert_eq!(
+            config.env_vars.get("FIXTURE_ENV").map(String::as_str),
+            Some("configured")
+        );
+        assert_eq!(config.session_mode, gwt_agent::SessionMode::Resume);
+        assert_eq!(
+            config.resume_session_id.as_deref(),
+            Some("saved-conversation")
+        );
+    }
+
+    #[test]
     fn restored_review_retains_observation_contract_and_isolated_worktree() {
         let mut session = gwt_agent::Session::new(
             "/tmp/isolated-review-checkout",

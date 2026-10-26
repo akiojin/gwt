@@ -118,6 +118,20 @@ struct LocalAgentActivityCandidate {
     is_pm: bool,
 }
 
+struct LocalAgentActivityRequest {
+    context: ProjectContext,
+    candidates: Vec<LocalAgentActivityCandidate>,
+    sessions_dir: PathBuf,
+    owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+}
+
+#[derive(Default)]
+struct LocalAgentActivityRefresh {
+    running: bool,
+    pending: Option<LocalAgentActivityRequest>,
+    latest: Option<gwt::LocalAgentActivityView>,
+}
+
 /// Called only by the blocking projection workers. The inventory supplies
 /// actual child PID/start proof; the captured authenticated owner fences
 /// restoration remnants and another host's otherwise live Session.
@@ -248,6 +262,7 @@ struct ActiveWorkProjectionPrepareInput {
     window_pty_statuses: HashMap<String, WindowProcessStatus>,
     local_agent_candidates: Vec<LocalAgentActivityCandidate>,
     local_agent_owner: Option<gwt::daemon_subscriber::ProjectOwnerIdentity>,
+    local_activity_refresh: Arc<Mutex<LocalAgentActivityRefresh>>,
     sessions_dir: PathBuf,
     issue_link_cache_dir: PathBuf,
     session_ledger_cache: Arc<Mutex<crate::session_ledger_cache::SessionLedgerCache>>,
@@ -427,6 +442,7 @@ struct ActiveWorkProjectionProjectRefresh {
     pending: Option<(u64, ActiveWorkProjectionPrepareInput)>,
     memo: Option<Arc<ActiveWorkProjectionMemo>>,
     close_cache_current: bool,
+    local_activity_refresh: Arc<Mutex<LocalAgentActivityRefresh>>,
 }
 
 #[derive(Default)]
@@ -3991,7 +4007,7 @@ fn agent_roster_view(
                 .collect();
             gwt::AgentRosterMemberView {
                 member: member.clone(),
-                provider: latest.map(|session| session.agent_id.command().to_string()),
+                provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
                 history: assigned
                     .iter()
@@ -4363,7 +4379,7 @@ impl AppRuntime {
 
     /// Cache replay may subtract retired/replaced runtimes, but must never
     /// promote a candidate or refresh the timestamp of earlier process proof.
-    fn retain_current_local_agent_activity(
+    pub(crate) fn retain_current_local_agent_activity(
         &self,
         tab_id: &str,
         activity: Option<gwt::LocalAgentActivityView>,
@@ -4395,12 +4411,21 @@ impl AppRuntime {
     }
 
     fn cached_local_agent_activity(&self, tab_id: &str) -> Option<gwt::LocalAgentActivityView> {
-        let activity = self.project_state_for_tab(tab_id).and_then(|state| {
-            state
-                .active_work_projection_cache
+        let observed = self.tab(tab_id).and_then(|tab| {
+            self.active_work_projection_refresh
                 .borrow()
-                .get(tab_id)
-                .and_then(|view| view.local_agent_activity.clone())
+                .projects
+                .get(&tab.project_root)
+                .and_then(|project| lock_recover(&project.local_activity_refresh).latest.clone())
+        });
+        let activity = observed.or_else(|| {
+            self.project_state_for_tab(tab_id).and_then(|state| {
+                state
+                    .active_work_projection_cache
+                    .borrow()
+                    .get(tab_id)
+                    .and_then(|view| view.local_agent_activity.clone())
+            })
         });
         self.retain_current_local_agent_activity(tab_id, activity)
     }
@@ -4634,6 +4659,14 @@ impl AppRuntime {
         profile_context: Option<RuntimeHookProjectionProfileContext>,
     ) -> ActiveWorkProjectionPrepareInput {
         let project_root = tab.project_root.clone();
+        let local_activity_refresh = self
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .entry(project_root.clone())
+            .or_default()
+            .local_activity_refresh
+            .clone();
         ActiveWorkProjectionPrepareInput {
             context: self.project_context(&tab.id).expect("open project context"),
             project_root: project_root.clone(),
@@ -4648,6 +4681,7 @@ impl AppRuntime {
             window_pty_statuses: self.window_pty_statuses.clone(),
             local_agent_candidates: self.local_agent_activity_candidates(&tab.id),
             local_agent_owner: self.local_agent_activity_owner(&tab.id),
+            local_activity_refresh,
             sessions_dir: self.sessions_dir.clone(),
             issue_link_cache_dir: self.issue_link_cache_dir.clone(),
             session_ledger_cache: self.active_work_session_ledger_cache.clone(),
@@ -4687,6 +4721,55 @@ impl AppRuntime {
         }
     }
 
+    /// Census requests coalesce independently of Work history. The queue holds
+    /// only one observer and the latest pending capture, even during hook bursts.
+    fn schedule_local_agent_activity_refresh(&self, input: &ActiveWorkProjectionPrepareInput) {
+        let refresh = input.local_activity_refresh.clone();
+        {
+            let mut state = lock_recover(&refresh);
+            state.pending = Some(LocalAgentActivityRequest {
+                context: input.context.clone(),
+                candidates: input.local_agent_candidates.clone(),
+                sessions_dir: input.sessions_dir.clone(),
+                owner: input.local_agent_owner.clone(),
+            });
+            if state.running {
+                return;
+            }
+            state.running = true;
+        }
+        let worker_refresh = refresh.clone();
+        let proxy = self.proxy.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || loop {
+            let request = {
+                let mut state = lock_recover(&worker_refresh);
+                let Some(request) = state.pending.take() else {
+                    state.running = false;
+                    return;
+                };
+                request
+            };
+            if let Some(activity) = observe_local_agent_activity(
+                &request.context,
+                &request.candidates,
+                &request.sessions_dir,
+                request.owner.as_ref(),
+            ) {
+                lock_recover(&worker_refresh).latest = Some(activity.clone());
+                proxy.send(UserEvent::ProjectDispatch {
+                    context: request.context.clone(),
+                    events: vec![OutboundEvent::project(
+                        request.context.project_key,
+                        BackendEvent::LocalAgentActivity { activity },
+                    )],
+                });
+            }
+        }) {
+            lock_recover(&refresh).running = false;
+            tracing::warn!(%error, "local agent activity observer could not be scheduled");
+        }
+    }
+
     fn spawn_active_work_projection_prepare(
         &self,
         generation: u64,
@@ -4709,12 +4792,7 @@ impl AppRuntime {
             })
             .unwrap_or_default();
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
-            let local_activity = observe_local_agent_activity(
-                &input.context,
-                &input.local_agent_candidates,
-                &input.sessions_dir,
-                input.local_agent_owner.as_ref(),
-            );
+            let local_activity = lock_recover(&input.local_activity_refresh).latest.clone();
             let mut load_error = None;
             let result =
                 prepare_active_work_projection(input, local_activity.clone()).map_err(|error| {
@@ -4778,6 +4856,7 @@ impl AppRuntime {
             .pending_cache_evictions
             .retain(|root| !projection_worktree_paths_match(root, project_root));
         let mut input = self.active_work_projection_prepare_input(tab, profile_context);
+        self.schedule_local_agent_activity_refresh(&input);
         let key = input.project_root.clone();
         let next = {
             let mut broker = self.active_work_projection_refresh.borrow_mut();
@@ -6238,8 +6317,8 @@ mod bounded_cache_merge_tests {
         );
         assert_eq!(
             tasks.lock().unwrap().len(),
-            1,
-            "recapture on the existing worker"
+            2,
+            "recapture census independently of the existing Work worker"
         );
     }
 
@@ -6251,7 +6330,7 @@ mod bounded_cache_merge_tests {
         let (spawner, tasks) = super::super::BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         assert!(!runtime.prepared_active_work_dispatch_is_current("tab-1", &payload));
-        assert_eq!(tasks.lock().unwrap().len(), 1);
+        assert_eq!(tasks.lock().unwrap().len(), 2);
         assert!(!runtime
             .project_state_for_tab("tab-1")
             .unwrap()
@@ -6306,8 +6385,8 @@ mod bounded_cache_merge_tests {
         );
         assert_eq!(
             tasks.lock().unwrap().len(),
-            1,
-            "recapture on the existing worker"
+            2,
+            "recapture census independently of the existing Work worker"
         );
     }
 

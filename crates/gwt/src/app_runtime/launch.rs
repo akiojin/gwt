@@ -105,6 +105,7 @@ pub(super) use gwt::project_runtime::installation::{
 
 #[derive(Debug, Clone, Default)]
 struct AgentWindowSpawnOptions {
+    selected_agent_member_id: Option<String>,
     inherited_agent_name: Option<String>,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
@@ -427,6 +428,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -449,6 +451,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -470,11 +473,13 @@ impl AppRuntime {
         prepared: Option<PreparedIssueMonitorSpawnAdmission>,
         requested_tier: Option<u8>,
         deliver_pending_answer: bool,
+        selected_agent_member_id: Option<String>,
     ) -> Result<Vec<OutboundEvent>, String> {
         self.spawn_agent_window_with_options(
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id,
                 workspace_resume_context,
                 launch_feedback_context: Some(feedback),
                 prepared_monitor_admission: prepared,
@@ -498,6 +503,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -521,6 +527,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context,
@@ -543,6 +550,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name,
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -645,6 +653,7 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
+            selected_agent_member_id,
             inherited_agent_name,
             workspace_resume_context,
             launch_feedback_context,
@@ -670,6 +679,7 @@ impl AppRuntime {
             workspace_resume_context
         };
         let metadata = OwnerLaunchMetadata {
+            selected_agent_member_id,
             inherited_agent_name: inherited_agent_name.clone(),
             workspace_resume_context: resume_context.clone(),
             launch_feedback_context,

@@ -507,7 +507,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
     });
     if let Some(member_root) = member_root {
         let token = uuid::Uuid::new_v4().to_string();
-        let member = crate::agent_names::reserve_project_member(
+        let member = crate::agent_names::reserve_project_member_for_agent(
             member_root,
             sessions_dir,
             &token,
@@ -517,6 +517,8 @@ pub(crate) fn prepare_owner_saved_session_restore(
             }),
             None,
             restore.source.agent_member_id.as_deref(),
+            restore.source.agent_id.command(),
+            None,
         )?;
         let reservation = member
             .assignment
@@ -1618,7 +1620,7 @@ enum IssueMonitorAdmissionDependencyRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct IssueMonitorAdmissionFileStamp {
+pub(super) struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
     role: IssueMonitorAdmissionDependencyRole,
     version: IssueMonitorAdmissionFileVersion,
@@ -1761,7 +1763,7 @@ impl IssueMonitorAdmissionFileStamp {
         })
     }
 
-    fn is_current(&self) -> bool {
+    pub(super) fn is_current(&self) -> bool {
         match &self.version {
             IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(expected) => {
                 IssueMonitorPrefsStamp::matches_current(expected.as_ref(), &self.path)
@@ -2036,7 +2038,7 @@ impl IssueMonitorSpawnAdmissionInput {
     }
 }
 
-fn prepare_issue_monitor_spawn_capacity(
+pub(super) fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
     issue_number: u64,
     dependencies: &mut Vec<IssueMonitorAdmissionFileStamp>,
@@ -2552,7 +2554,7 @@ pub(crate) struct OwnerAgentAdmissionInput<'a> {
     pub host_project_roots: &'a [PathBuf],
     pub snapshot: crate::IssueMonitorWindowSnapshot,
     pub snapshot_tabs: std::collections::BTreeSet<String>,
-    pub retained_names: &'a [crate::agent_names::RetainedAgentName],
+    pub known_names: &'a std::collections::HashSet<String>,
     pub metadata: OwnerLaunchMetadata,
     pub is_continue_work: bool,
     pub restore_source: Option<&'a gwt_agent::Session>,
@@ -2564,8 +2566,6 @@ pub(crate) struct PreparedOwnerAgentAdmission {
     pub issue_monitor_trust_candidate: Option<super::launch::IssueMonitorTrustCandidate>,
     pub issue_monitor_launch: bool,
     pub purpose_title: Option<String>,
-    // Hold through the scanner-visible physical Session/runtime proof, not readiness.
-    pub name_reservation: Option<crate::agent_names::GlobalAgentNameReservation>,
 }
 pub(crate) fn prepare_owner_agent_admission(
     input: OwnerAgentAdmissionInput<'_>,
@@ -2594,6 +2594,7 @@ pub(crate) fn prepare_owner_agent_admission(
             .flatten()
         });
     let OwnerLaunchMetadata {
+        selected_agent_member_id,
         inherited_agent_name,
         workspace_resume_context,
         mut launch_feedback_context,
@@ -2870,21 +2871,33 @@ pub(crate) fn prepare_owner_agent_admission(
         .working_dir
         .as_deref()
         .is_some_and(crate::pm_registry::is_canonical_pm_worktree);
-    let name_reservation = if is_pm || is_review {
+    if is_pm || is_review {
         config.env_vars.remove("GWT_AGENT_MEMBER_ID");
         config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
-        let reservation = crate::agent_names::reserve_global_agent_name(
-            input.project_root,
-            input.sessions_dir,
-            Some(input.window_id),
-            name_predecessor_session_id.as_deref(),
-            inherited_agent_name,
-            input.retained_names,
-        )?;
-        config
-            .env_vars
-            .insert("GWT_AGENT_NAME".into(), reservation.name().into());
-        Some(reservation)
+        let inherited = inherited_agent_name.or_else(|| {
+            name_predecessor_session_id
+                .as_ref()
+                .and_then(|id| {
+                    gwt_agent::Session::load(&input.sessions_dir.join(format!("{id}.toml"))).ok()
+                })
+                .and_then(|session| session.agent_name)
+        });
+        let name = match inherited {
+            Some(name) => name,
+            None => {
+                let language = gwt_config::Settings::load()
+                    .map(|settings| settings.ai.effective_language())
+                    .unwrap_or("en");
+                crate::agent_names::allocate(
+                    &gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
+                        .join("agent-names.jsonl"),
+                    language,
+                    input.known_names,
+                    input.known_names,
+                )?
+            }
+        };
+        config.env_vars.insert("GWT_AGENT_NAME".into(), name);
     } else {
         let reservation_id = config
             .env_vars
@@ -2892,49 +2905,33 @@ pub(crate) fn prepare_owner_agent_admission(
             .filter(|_| inherited_agent_name.is_some())
             .cloned()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let delivery_id = launch_feedback_context
-            .as_ref()
-            .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref());
-        let member = crate::agent_names::reserve_project_member(
+        let member = crate::agent_names::reserve_project_member_for_agent(
             input.project_root,
             input.sessions_dir,
             &reservation_id,
             config.linked_issue_number,
             roster_spec_number,
-            delivery_id,
+            launch_feedback_context
+                .as_ref()
+                .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref()),
             config
                 .env_vars
                 .get("GWT_AGENT_MEMBER_ID")
                 .filter(|_| inherited_agent_name.is_some() || input.is_continue_work)
                 .map(String::as_str),
+            config.agent_id.command(),
+            selected_agent_member_id.as_deref(),
         )?;
         let assignment = member.assignment.as_ref().expect("reserved assignment");
         config
             .env_vars
-            .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id.clone());
+            .insert("GWT_AGENT_MEMBER_ID".into(), member.agent_member_id);
         config.env_vars.insert(
             "GWT_AGENT_RESERVATION_ID".into(),
             assignment.reservation_id.clone(),
         );
-        let reservation = crate::agent_names::reserve_global_agent_name(
-            input.project_root,
-            input.sessions_dir,
-            Some(input.window_id),
-            name_predecessor_session_id.as_deref(),
-            Some(member.name.clone()),
-            input.retained_names,
-        )
-        .inspect_err(|_| {
-            let _ = crate::agent_names::release_project_member(
-                input.project_root,
-                input.sessions_dir,
-                &member.agent_member_id,
-                &assignment.reservation_id,
-            );
-        })?;
         config.env_vars.insert("GWT_AGENT_NAME".into(), member.name);
-        Some(reservation)
-    };
+    }
     let prepared_manual_launch_claim = super::continuation::claim_prepared_manual_successor_launch(
         input.sessions_dir,
         input.project_root,
@@ -2961,7 +2958,6 @@ pub(crate) fn prepare_owner_agent_admission(
         issue_monitor_trust_candidate,
         issue_monitor_launch: issue_monitor_issue_number.is_some(),
         purpose_title,
-        name_reservation,
     })
 }
 

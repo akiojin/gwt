@@ -471,8 +471,8 @@ Common windows include:
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
-  `Issues` for Autonomous, Max active, queue refill and allowed labels, or
-  the same Issues section to edit launch profiles and candidate order/preferences.
+  `Issues execution settings` for Autonomous, Max active, queue refill, allowed
+  labels, launch profiles, and candidate order/preferences.
   Candidate edits save automatically when committed; text fields save when focus
   leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
@@ -502,7 +502,8 @@ Implementation Agents are persistent project members with memorable names in the
 A new Issue reuses an available member; a continuation prefers its previous member when available.
 New member names are unique within the project and use localized family names when needed.
 Restoration and restart preserve the member identity. Names appear in Works, Agents, Fleet,
-Kanban, Board, Issue comments, and PR attribution. The resident PM keeps its own role identity.
+Kanban, Board, Issue comments, and PR attribution. The resident PM shows its assigned name
+alongside a PM badge in PM, Works, and Agents.
 
 On Windows Host launches, Launch Agent lets you choose Command Prompt, Windows
 PowerShell, or PowerShell 7. Docker launches continue to use the container
@@ -515,7 +516,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Issue surface and Issue Monitor
 
-Open **Settings → Project → Issues**, or use the **Issues** rail shortcut, to browse cached GitHub Issues in four columns:
+Open **Issues** from the rail to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
 actions. Drag Backlog items into Queued to schedule them, drag them back to remove
 them, or reorder items within Queued. Selecting multiple items sends one queue
@@ -543,10 +544,11 @@ Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue cou
 a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
 **Issues settings**. The switches show the server-confirmed On / Off state.
 Only current failures appear red; error details and history stay in the notification center.
-Use **Issues settings** to
-expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
+Use **Issues settings** to open **Settings → Project → Issues execution settings**.
+It contains **Launch control** (Autonomous, Max active, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. The summary switches remain available when settings are collapsed.
+profiles. Issues and Settings have independent views and can appear side by side
+in Split view, preserving Issue search/selection and unfinished settings edits.
 Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
 edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
 Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
@@ -605,7 +607,7 @@ and the shared `agent_capacity` measurement. Roster projects also report
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
-**Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
+**Allowed labels** in Settings → Issues execution settings accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
 cancelling running agents. Automation can set the same list with `issue.monitor.config.set`
@@ -1784,12 +1786,19 @@ an entry removes its copied policy on the next refresh.
 ## Surface Navigation
 
 - Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
-- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works.
+- Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
+- Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
 - **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
+- Choose a tool when adding a member in **Agents**. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; model and runtime settings remain available for each candidate. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates are imported with their settings and configured concurrency capacity preserved.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
+- **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
+
+**Active** counts live agents on this machine, including PM. **Busy**, **Team**, and concurrent
+capacity count implementation members only. Member identities, enabled capacity, and confirmed
+planned-issue reassignments survive an app restart.
 
 Works shows session-attributed input, cache and output usage, a thirty-minute activity graph,
 branch and verification facts. Unavailable measurements display **—**, including context remaining
@@ -1850,15 +1859,15 @@ falls back to system colors so accessibility is preserved.
 | `⌘?` | Toggle the Hotkey Overlay (cheat sheet) |
 | `Esc` | Close any open palette / overlay / drawer / dropdown |
 
-The rail keeps **PM** separate from the four labeled surfaces: **Issues**,
-**Agents**, **Board**, and **Settings**. The selected surface fills a fixed pane;
+The rail keeps **PM** separate from the labeled **Issues**, **Works**, **Agents**,
+**Board**, **Settings**, **Logs**, **Index**, and **Profile** entries. The selected surface fills a fixed pane;
 **Split view** adds an optional second pane. The status strip remains below the
 content area. Reach other actions through the Command Palette or their hotkeys.
 
 ### Accessibility
 
 Every modal dialog (Command Palette, Hotkey Overlay, branch cleanup,
-worktree migration, launch wizard, Add Window) follows the WAI-ARIA
+worktree migration, launch wizard) follows the WAI-ARIA
 dialog convention: `role="dialog"` with an accessible name, `aria-modal`,
 focus moves into the dialog on open and returns to the trigger on close,
 Tab cycles within the dialog (no keyboard trap escape), and Escape

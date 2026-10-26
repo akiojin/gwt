@@ -4,6 +4,7 @@
 //! handshake guard through publication or uncertain-launch reconciliation.
 pub mod agent_dispatch;
 pub mod agent_frontend;
+pub(crate) mod agent_switch;
 pub mod client;
 pub mod continuation;
 pub mod events;

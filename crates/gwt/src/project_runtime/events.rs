@@ -54,6 +54,10 @@ pub enum OwnerCommand {
         issue_number: u64,
         delivery_id: Option<String>,
     },
+    AgentSwitch {
+        action: Box<crate::issue_monitor::AgentSwitchAction>,
+    },
+    DriveAgentSwitch,
     Health,
     ListPanes,
     ContinueWork {
@@ -205,6 +209,8 @@ pub enum OwnerEvent {
     WindowRemoved {
         id: String,
         incarnation: u64,
+        #[serde(default)]
+        session_id: Option<String>,
     },
     Closed {
         id: String,

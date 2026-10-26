@@ -1,6 +1,111 @@
 # Changelog
 
 All notable changes to this project will be documented in this file.
+## [9.145.0] - 2026-10-25
+
+### Bug Fixes
+
+- **lint:** 書き換えられた共有モデルの信頼を無効にする
+- **execution:** 完了後のreceipt障害でbuild終了を止めない
+- **lint:** Loop宣言のモデル信頼をスコープ内に閉じる
+- **ui:** Isolate branch entries through shared state
+- **monitor:** Tier変更で候補を失った未所有配送を解放する
+- **monitor:** Reassign automatic plans from busy members
+- **monitor:** Identify status strip navigation
+- **bridge:** Allow slow host materialization probes
+- **startup:** Protect restoring owners from scan recovery
+- **ui:** Keep live works visible during catalog updates
+- **monitor:** Release unowned specs after readiness loss
+- **monitor:** Explain start without saved agent settings
+- **gui:** Preserve PM report and execution log scroll positions
+- **ui:** 検索応答を共有状態経由で隔離する
+- **gui:** Align live agent activity across project surfaces
+- **gui:** Publish agent census independently of work history
+- **gui:** Scope agent metadata to the observed project
+- **gui:** Preserve mission convergence outside the live census
+- **agents:** 自動予定調停で切り替え先のメンバーを保持する
+- **agents:** 切り替え要求がない通常 tick の worker を増やさない
+- **agents:** UUID API がない環境でも名簿の読み取りを開く
+- **monitor:** Release unowned deliveries after source exclusion
+- **ui:** Isolate knowledge detail response snapshots
+- **monitor:** Release dependency-blocked unowned deliveries
+- **monitor:** Honor branch-prune maintenance deadlines
+- **test:** Make target remeasurement independent of scan deadlines
+- **test:** Isolate remote head verification fixtures
+- **test:** Isolate full parallel acceptance fixtures
+- **test:** Isolate index refresh fixture home
+- **test:** Pin monitor delivery projection inputs
+- **test:** Normalize Windows monitor status fixture path
+- **test:** Own projection in materializer replay fixture
+- **test:** Own reserved search queue fixture
+- **test:** Own deadline and Windows handoff fixtures
+- **test:** Own failed handoff projection inputs
+- **test:** Pin equal-marker rebase transaction clock
+- **test:** Isolate quota rebase fixture home
+- **test:** Own claim projections and lock clocks
+- **test:** Own replay fixture projections
+- **test:** Own successful live handoff projection
+- **test:** Observe cache age across status projection
+- **test:** Own cache fallback source projection
+- **test:** Own competing subscriber projection inputs
+- **test:** Expire pr metadata budget on observed contention
+- **test:** Own fresh required delivery projection inputs
+
+### Features
+
+- **pm:** Goal別の直接依存影響を表示する
+- **pm:** Roadmap項目の直接依存影響を表示する
+- **agents:** 作業を保存して同じメンバーの次担当へ切り替える
+
+### Miscellaneous Tasks
+
+- **work:** Issue #3590 の記帳復旧案内の受入証跡を記録
+- **work:** Issue #3431のPR配信記録を保存する
+- **work:** Link session payload PR
+- **work:** Issue #3431のPR関連付けを保存する
+- **work:** Record issue 5876 runtime recovery evidence
+- **work:** Issue #4735のPR関連付けを保存する
+- **work:** Issue #4735のPR関連付けを保存する
+- **work:** Record Issue #6301 PR association
+- **work:** Issue #4735のPR配送記録を同期する
+- **work:** Record Issue #6369 pull request
+- **work:** Record Issue #6235 PR association
+- **work:** Record Issue #6362 pull request association
+- **work:** PR #6392 の配信記録を保存する
+- **work:** Issue 5876の信頼性実測を記録
+- **work:** Record issue 5330 delivery verification scope
+- **work:** Record issue 5330 final delivery audit
+- **work:** Record issue 5330 delivery continuation
+- **work:** Record issue 5330 delivery resumption
+- **work:** Record issue 5330 delivery continuation
+- **work:** Record issue 5330 generation delivery
+- **work:** Record issue 5330 delivery generation
+- **work:** Record issue 5330 delivery audit
+- **scope:** Exclude unrelated fixtures from capacity delivery
+- **work:** 容量走査修正の再開と配信監査を記録
+- **work:** Record capacity delivery after recovery fixture repair
+
+### Refactor
+
+- **runtime:** Share launch worker session payloads
+- **ui:** Resume一覧の受信を共有状態へ統合
+- **runtime:** Prepared起動候補の回復を共有化する
+- **runtime:** 起動失敗時のexact rollbackを共有化する
+- **runtime:** GenesisのWork補償を共有libraryへ移す
+- **ui:** Commit knowledge errors through shared state
+
+### Testing
+
+- **monitor:** Verify dependency warning transitions and queue order
+- **ui:** Align works fixtures with project identity
+- **monitor:** 未設定 Start の容量と永続設定を検証
+- **monitor:** Honor Codex config probes in recovery fixture
+- **gui:** Retain census work while catalog metadata is missing
+- **gui:** Verify census counts across roles and launch reservations
+- **monitor:** Verify saved-profile start in browser
+- **agents:** 再描画後の計画表示順序を待って検証する
+- **monitor:** Wait for initial browser status
+
 ## [9.144.0] - 2026-10-25
 
 ### Bug Fixes

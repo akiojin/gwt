@@ -355,6 +355,17 @@ impl ProjectOwnerHarness {
         self.client.command(command).await
     }
 
+    pub async fn agent_switch_source_exited(
+        &self,
+        proof: crate::issue_monitor::IssueMonitorRuntimeStopRequest,
+        pty: Arc<gwt_terminal::PtyHandle>,
+    ) -> Result<(), String> {
+        self.owner.test_agent_switch_source_exited(proof, pty)?;
+        self.command(super::events::OwnerCommand::Health)
+            .await
+            .map(|_| ())
+    }
+
     pub async fn probe(&self, id: &str, incarnation: u64) -> Result<OwnerRuntimeProbe, String> {
         self.owner.test_probe_runtime(id, incarnation).await
     }

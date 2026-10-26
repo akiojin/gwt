@@ -288,9 +288,11 @@ async function showShell(page: Page, id: string) {
   });
   const index = windows.findIndex((window: any) => window.id === id);
   expect(index, "the exact Shell belongs to this project").toBeGreaterThanOrEqual(0);
-  await page.locator("#window-list-button").click();
-  const rows = page.locator("#window-list-panel .window-list-row");
-  await expect(rows).toHaveCount(windows.length);
-  await rows.nth(index).click();
+  await sendLiveGwtEvent(page, { kind: "focus_window", id });
+  await expect.poll(() => page.evaluate(() => {
+    const state = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
+    return state.tabs.flatMap((tab: any) => tab.workspace.windows).reduce((top: any, window: any) => !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null)?.id;
+  })).toBe(id);
+  await page.reload();
   await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
 }

@@ -899,8 +899,8 @@ fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_
 
         assert_eq!(
             tasks.lock().unwrap().len(),
-            usize::from(should_refresh),
-            "only the exact registered PM requests the existing observer"
+            usize::from(should_refresh) * 2,
+            "only the exact registered PM requests the census and Work preparation"
         );
         assert_eq!(runtime.window_status(&id), status_before);
         assert_eq!(runtime.window_approval_waiting.get(&id), Some(&latch));
@@ -909,8 +909,10 @@ fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_
             BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
         )));
         if should_refresh {
-            let task = tasks.lock().unwrap().remove(0);
-            task();
+            for _ in 0..2 {
+                let task = tasks.lock().unwrap().remove(0);
+                task();
+            }
             assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
                 recorded_project_payload(event),
                 UserEvent::ActiveWorkProjectionPrepared(_)

@@ -72,7 +72,9 @@ pub(super) fn initialize_process_window_close_finalizer() -> std::io::Result<()>
     Ok(())
 }
 
-fn enqueue_process_window_close_finalizer(task: WindowCloseFinalizerTask) -> Result<(), ()> {
+pub(super) fn enqueue_process_window_close_finalizer(
+    task: WindowCloseFinalizerTask,
+) -> Result<(), ()> {
     let Some(dispatcher) = PROCESS_WINDOW_CLOSE_FINALIZER.get() else {
         return Err(());
     };

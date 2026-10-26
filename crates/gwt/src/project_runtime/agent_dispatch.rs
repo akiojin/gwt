@@ -1196,8 +1196,6 @@ pub fn principal_session_window(
 pub struct PreparedPaneName {
     window_id: String,
     name: String,
-    _allocated: Option<crate::agent_names::GlobalAgentNameReservation>,
-    _existing: Option<gwt_core::operation_deadline::NamedFileLock>,
 }
 impl PreparedPaneName {
     pub fn window_id(&self) -> &str {
@@ -1205,7 +1203,7 @@ impl PreparedPaneName {
     }
 }
 
-/// Acquire before the producing ECR/Session dispatch lease; no writer runs here.
+/// Resolve identity before the producing dispatch lease; no Session/registry writer runs here.
 pub fn prepare_pane_name(
     panes: &[PaneProjection],
     principal: &AgentSessionPrincipal,
@@ -1238,75 +1236,65 @@ fn prepare_pane_name_for_window(
         .session_id
         .as_ref()
         .and_then(|id| gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok());
-    if pane.window.is_pm
+    let is_pm = pane.window.is_pm
         || crate::pm_registry::session_is_registered_pm(
             &crate::pm_registry::pm_prefs_path_for_repo_path(&pane.project_root),
             pane.window.session_id.as_deref().unwrap_or_default(),
         )
         || session.as_ref().is_some_and(|session| {
             crate::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
-        })
+        });
+    if is_pm && !allow_fixed_pm {
+        return Err("PM windows keep their fixed identity".into());
+    }
+    let member_name = if let Some(member_id) = session
+        .as_ref()
+        .and_then(|session| session.agent_member_id.as_deref())
     {
-        if !allow_fixed_pm {
-            return Err("PM windows keep their fixed identity".into());
+        let roster = crate::agent_names::read_project_roster(&pane.project_root, sessions_dir)?;
+        let member = roster
+            .members
+            .into_iter()
+            .find(|member| member.agent_member_id == member_id)
+            .ok_or("Registered Agent is missing")?;
+        if member.agent_id.as_deref() != session.as_ref().map(|session| session.agent_id.command())
+        {
+            return Err("Registered Agent has a different fixed tool".into());
         }
-        let name = pane.window.agent_name.clone().or_else(|| {
+        Some(member.name)
+    } else {
+        None
+    };
+    let existing = member_name
+        .or_else(|| {
             session
                 .as_ref()
                 .and_then(|session| session.agent_name.clone())
-        });
-        if let Some(name) = name {
-            let lock = crate::agent_names::lock_global_agent_names()?;
-            crate::agent_names::remember(
+        })
+        .or_else(|| pane.window.agent_name.clone());
+    let name = match existing {
+        Some(name) => name,
+        None => {
+            let known = panes
+                .iter()
+                .filter(|other| other.project_root == pane.project_root)
+                .filter_map(|other| other.window.agent_name.clone())
+                .collect();
+            let language = gwt_config::Settings::load()
+                .map(|settings| settings.ai.effective_language())
+                .unwrap_or("en");
+            crate::agent_names::allocate(
                 &gwt_core::paths::gwt_project_dir_for_repo_path(&pane.project_root)
                     .join("agent-names.jsonl"),
-                &HashSet::from([name.clone()]),
-            )?;
-            return Ok(PreparedPaneName {
-                window_id: id,
-                name,
-                _allocated: None,
-                _existing: Some(lock),
-            });
+                language,
+                &known,
+                &known,
+            )?
         }
-    }
-    if let Some(name) = &pane.window.agent_name {
-        let lock = crate::agent_names::lock_global_agent_names()?;
-        return Ok(PreparedPaneName {
-            window_id: id,
-            name: name.clone(),
-            _allocated: None,
-            _existing: Some(lock),
-        });
-    }
-    let retained = panes
-        .iter()
-        .filter(|pane| pane.window.preset.is_agent_terminal())
-        .filter_map(|pane| {
-            pane.window
-                .agent_name
-                .as_ref()
-                .map(|name| crate::agent_names::RetainedAgentName {
-                    project_root: pane.project_root.clone(),
-                    window_id: pane.window.id.clone(),
-                    session_id: pane.window.session_id.clone(),
-                    name: name.clone(),
-                })
-        })
-        .collect::<Vec<_>>();
-    let reserved = crate::agent_names::reserve_global_agent_name(
-        &pane.project_root,
-        sessions_dir,
-        Some(&id),
-        pane.window.session_id.as_deref(),
-        session.and_then(|session| session.agent_name),
-        &retained,
-    )?;
+    };
     Ok(PreparedPaneName {
         window_id: id,
-        name: reserved.name().to_string(),
-        _allocated: Some(reserved),
-        _existing: None,
+        name,
     })
 }
 
@@ -1315,7 +1303,7 @@ pub struct AssignedPaneName {
     pub name: String,
     pub already_named: bool,
 }
-/// The caller holds the prepared global reservation and the accepted grant/lease.
+/// The caller holds the accepted grant/lease and the exact Session CAS.
 pub fn assign_prepared_pane_name(
     panes: &[PaneProjection],
     sessions_dir: &Path,
@@ -1332,7 +1320,7 @@ pub fn assign_legacy_pane_name(
 }
 
 /// The physical owner also names retained rows whose provider never requests
-/// pane.name. Keep the same global reservation and Session CAS as that request.
+/// pane.name. Keep the same registered identity and Session CAS as that request.
 pub(crate) fn backfill_owner_pane_names(
     root: &Path,
     sessions_dir: &Path,
@@ -1446,6 +1434,19 @@ fn assign_prepared_name_inner(
         return Err("Session changed during Agent naming; retry on the next tick".into());
     }
     if let Some(session) = &mut session {
+        if session.agent_name.is_none() {
+            let previous = session.clone();
+            session.agent_name = Some(prepared.name.clone());
+            let saved = if gwt_agent::current_thread_holds_session_lease() {
+                session.save_if_unchanged_under_lease(sessions_dir, &previous)
+            } else {
+                session.save_if_unchanged(sessions_dir, &previous)
+            }
+            .map_err(|error| error.to_string())?;
+            if !saved {
+                return Err("Session changed during Agent naming; retry on the next tick".into());
+            }
+        }
         if !is_pm
             && !matches!(
                 session.status,
@@ -1461,19 +1462,6 @@ fn assign_prepared_name_inner(
                 sessions_dir,
                 session,
             )?;
-        }
-        if session.agent_name.is_none() {
-            let previous = session.clone();
-            session.agent_name = Some(prepared.name.clone());
-            let saved = if gwt_agent::current_thread_holds_session_lease() {
-                session.save_if_unchanged_under_lease(sessions_dir, &previous)
-            } else {
-                session.save_if_unchanged(sessions_dir, &previous)
-            }
-            .map_err(|error| error.to_string())?;
-            if !saved {
-                return Err("Session changed during Agent naming; retry on the next tick".into());
-            }
         }
     }
     Ok(AssignedPaneName {

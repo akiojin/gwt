@@ -3888,7 +3888,10 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.active_work_projection_broadcast_for_tab("tab");
-    tasks.lock().unwrap().remove(0)();
+    for _ in 0..2 {
+        let task = tasks.lock().unwrap().remove(0);
+        task();
+    }
     let old_completion = recorded
         .lock()
         .unwrap()
@@ -4065,4 +4068,267 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         Some("Falcon")
     );
     owner_fixture_block_on(owner.shutdown());
+}
+
+fn switch_source_retirement_fixture(
+    root: &Path,
+) -> (
+    AppRuntime,
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    gwt::issue_monitor::IssueMonitorRuntimeStopRequest,
+) {
+    let project = root.join("project");
+    control_init_repo(&project);
+    seed_owner_fixture_roster(&project, 8);
+    let tab = sample_project_tab_with_window_at(
+        "source",
+        "agent",
+        project.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Error,
+    );
+    let (mut runtime, _) = sample_runtime_with_events(root, vec![tab], Some("source"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let id = combined_window_id("source", "agent");
+    drive_owner_agent_fixture(
+        &mut runtime,
+        &id,
+        control_launch_config(&project, 43),
+        Default::default(),
+    );
+    let owner = runtime.test_project_owners[&project].clone();
+    let remote = &runtime.runtimes[&id];
+    let mut probe =
+        owner_fixture_block_on(owner.probe(&remote.owner_pane_id, remote.incarnation)).unwrap();
+    let source = probe.session.as_ref().unwrap();
+    let mut ready = runtime_hook_state_for_event("Waiting", "SessionStart", &source.id);
+    ready.project_root = Some(project.display().to_string());
+    ready.branch = Some(source.branch.clone());
+    ready.continuation_readiness_nonce = probe
+        .pending_fresh_execution
+        .as_ref()
+        .map(|pending| pending.readiness_nonce.clone());
+    assert!(owner_fixture_block_on(probe.runtime_hook(&ready))
+        .unwrap()
+        .is_success());
+    // test-hygiene: allow-wall-clock-deadline Bound canonical readiness activation; the owner's pending receipt establishes completion.
+    probe = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the actual child/owner completion; output or the exact owner receipt establishes progress.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let current = owner.probe(&probe.id, probe.incarnation).await.unwrap();
+                if current.pending_fresh_execution.is_none() {
+                    return current;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Switch fixture must activate through authenticated SessionStart")
+    });
+    let source = probe.session.as_ref().unwrap();
+    let proof = gwt::issue_monitor::IssueMonitorRuntimeStopRequest {
+        issue_number: 43,
+        window_id: probe.id.clone(),
+        session_id: source.id.clone(),
+        host_pid: std::process::id(),
+        host_started_at: gwt::process::host_process_start_time(std::process::id()).unwrap(),
+        runtime_incarnation: probe.incarnation,
+        child_pid: probe.pty.process_id().unwrap(),
+        child_started_at: gwt::process::host_process_start_time(probe.pty.process_id().unwrap())
+            .unwrap(),
+        requested_at: Utc::now().to_rfc3339(),
+        execution_identity: gwt_agent::SessionExecutionIdentity::from_session(source)
+            .unwrap()
+            .unwrap(),
+    };
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    (runtime, owner, probe, proof)
+}
+
+fn switch_removed_event(
+    events: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+    id: &str,
+) -> gwt::project_runtime::events::OwnerEvent {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound exact owner finalization; an authenticated removal event establishes completion.
+        let mut observed = Vec::new();
+        // test-hygiene: allow-wall-clock-deadline Bound actual exact owner finalization; the matching removal event establishes completion.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                observed.push(format!("{event:?}"));
+                if matches!(&event, gwt::project_runtime::events::OwnerEvent::WindowRemoved { id: removed, .. } if removed == id) {
+                    return event;
+                }
+            }
+        }).await;
+        result.unwrap_or_else(|error| panic!("the owner must publish exact Switch source removal: {error}; observed={observed:?}"))
+    })
+}
+
+#[test]
+fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for keep_runtime in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, owner, source, proof) = switch_source_retirement_fixture(temp.path());
+        let id = combined_window_id("source", "agent");
+        let mut events = owner.subscribe();
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof.clone(), source.pty.clone()))
+            .unwrap();
+        assert!(
+            owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_ok(),
+            "a live tree is never retirement authority"
+        );
+        assert!(runtime.window_lookup.contains_key(&id));
+        if !keep_runtime {
+            let session = source.session.as_ref().unwrap();
+            let mut failed = runtime_hook_state_for_event("Error", "PostToolUse", &session.id);
+            failed.project_root = Some(
+                runtime
+                    .tab("source")
+                    .unwrap()
+                    .project_root
+                    .display()
+                    .to_string(),
+            );
+            failed.branch = Some(session.branch.clone());
+            assert!(owner_fixture_block_on(source.runtime_hook(&failed))
+                .unwrap()
+                .is_success());
+            owner_fixture_block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::Health),
+            )
+            .unwrap();
+        }
+        assert!(source
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        if !keep_runtime {
+            owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bound the pre-existing diagnostic finalizer; its exact close receipt proves the runtime is retired.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if let gwt::project_runtime::events::OwnerEvent::Closed {
+                            id: closed,
+                            incarnation,
+                            error,
+                        } = events.recv().await.unwrap()
+                        {
+                            if closed == source.id && incarnation == source.incarnation {
+                                assert!(error.is_none(), "diagnostic close failed: {error:?}");
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("actual diagnostic source retirement");
+            });
+            assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
+            runtime.runtimes.remove(&id);
+            runtime.active_agent_sessions.remove(&id);
+        }
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof.clone(), source.pty.clone()))
+            .unwrap();
+        let removed = switch_removed_event(&mut events, &source.id);
+        let context = runtime.test_context();
+        let identity = owner.client().identity().unwrap().clone();
+        assert!(!runtime.handle_project_owner_event(&context, 1, &identity, removed.clone()).is_empty(), "the exact physically exited source must leave the canvas even without a writer registration");
+        assert!(!runtime.window_lookup.contains_key(&id));
+        assert!(runtime
+            .handle_project_owner_event(&context, 1, &identity, removed)
+            .is_empty());
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+            .unwrap();
+        assert!(
+            !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+                event,
+                gwt::project_runtime::events::OwnerEvent::WindowRemoved { .. }
+            )),
+            "the exact source is finalized once"
+        );
+        assert!(
+            owner_fixture_block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)
+            )
+            .unwrap()["panes"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "normal admission must see the released physical slot"
+        );
+    }
+}
+
+#[test]
+fn switch_source_exit_preserves_reused_session_and_runtime() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for replace_session in [true, false] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (mut runtime, owner, source, proof) = switch_source_retirement_fixture(temp.path());
+        let id = combined_window_id("source", "agent");
+        let mut events = owner.subscribe();
+        assert!(source
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(5))
+            .unwrap());
+        let removed = if replace_session {
+            runtime
+                .tab_mut("source")
+                .unwrap()
+                .workspace
+                .set_session_id("agent", Some("successor-session".into()));
+            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+                .unwrap();
+            switch_removed_event(&mut events, &source.id)
+        } else {
+            control_close(&owner, &source);
+            let removed = switch_removed_event(&mut events, &source.id);
+            let project = runtime.tab("source").unwrap().project_root.clone();
+            drive_owner_agent_fixture(
+                &mut runtime,
+                &id,
+                control_launch_config(&project, 44),
+                Default::default(),
+            );
+            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+                .unwrap();
+            let current = &runtime.runtimes[&id];
+            let current =
+                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
+                    .unwrap();
+            assert!(!Arc::ptr_eq(&current.pty, &source.pty));
+            assert!(
+                !current.pty.tree_exit_confirmed(),
+                "a stale Switch must not stop the replacement tree"
+            );
+            removed
+        };
+        let context = runtime.test_context();
+        let identity = owner.client().identity().unwrap().clone();
+        assert!(runtime
+            .handle_project_owner_event(&context, 1, &identity, removed)
+            .is_empty());
+        assert!(runtime.window_lookup.contains_key(&id));
+        if !replace_session {
+            let current = &runtime.runtimes[&id];
+            let current =
+                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
+                    .unwrap();
+            control_close(&owner, &current);
+        }
+    }
 }

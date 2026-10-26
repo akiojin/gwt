@@ -25,13 +25,12 @@ fn app_runtime_surface_owner_keeps_pm_settings_separate_and_reuses_them() {
     let windows = &tab.workspace.persisted().windows;
     assert_eq!(
         windows.len(),
-        2,
-        "PM Settings reuse must not steal ordinary Settings"
+        3,
+        "PM Settings reuse must not steal ordinary Settings or Issues"
     );
-    assert!(
-        windows[0].z_index > windows[1].z_index,
-        "Work must reuse the ordinary view"
-    );
+    assert_eq!(windows[0].preset, WindowPreset::Settings);
+    assert_eq!(windows[1].preset, WindowPreset::Settings);
+    assert_eq!(windows[2].preset, WindowPreset::Issue);
     let snapshot = serde_json::to_value(runtime.workspace_view_for_tab(tab)).expect("snapshot");
     assert_eq!(snapshot["windows"][1]["surface_owner"], "pm");
     assert!(windows.iter().all(|window| !window.is_pm));
@@ -1289,7 +1288,7 @@ fn app_runtime_rejects_removed_legacy_memo_window_creation() {
 }
 
 #[test]
-fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views() {
+fn app_runtime_legacy_issue_create_routes_to_issues_and_keeps_distinct_views() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1312,8 +1311,8 @@ fn app_runtime_legacy_issue_create_routes_to_settings_and_keeps_distinct_views()
             .persisted()
             .windows
         {
-            assert_eq!(window.preset, WindowPreset::Settings);
-            assert_eq!(window.title, "Settings");
+            assert_eq!(window.preset, WindowPreset::Issue);
+            assert_eq!(window.title, "Issues");
         }
     }
     let before = runtime
@@ -1382,7 +1381,7 @@ fn app_runtime_work_singleton_reuses_create_before_hydration() {
         "repeated Work create must reuse the window"
     );
     assert_eq!(windows[0].id, first.id);
-    assert_eq!(windows[0].preset, WindowPreset::Settings);
+    assert_eq!(windows[0].preset, WindowPreset::Issue);
     assert!(
         windows[0].z_index > first.z_index,
         "reuse must raise the existing Work window"

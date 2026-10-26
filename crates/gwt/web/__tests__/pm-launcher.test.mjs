@@ -48,10 +48,18 @@ test("AC-11: opening an Issue never returns PM auxiliary Settings as its detail 
   const start = appJs.indexOf("      function focusOrSpawnPreset(");
   const end = appJs.indexOf("      document.addEventListener", start);
   const document = doc();
+  const windows = [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }], sent = [], focused = [];
   const open = new Function("normalizeSurfacePreset", "document", "CustomEvent", "activeWorkspace",
+    "isSingletonSurfacePreset", "openExistingSurfaceWindow", "windowCatalogModel", "frontendUnits",
     `${appJs.slice(start, end)}; return focusOrSpawnPreset;`)(value => value, document,
-    document.defaultView.CustomEvent, () => ({ windows: [{ id: "pm-settings", preset: "settings", surface_owner: "pm" }] }));
+    document.defaultView.CustomEvent, () => ({ windows }), () => true, data => focused.push(data.id),
+    { update: reducer => reducer({ catalog: { appState: { active_tab_id: "tab" } } }) },
+    { socketTransport: { send: message => sent.push(message) } });
   assert.equal(open("issue"), null);
+  assert.deepEqual(sent, [{ kind: "create_window", preset: "issue" }]);
+  windows.push({ id: "issue", preset: "issue" });
+  assert.equal(open("issue"), "issue");
+  assert.deepEqual(focused, ["issue"]);
 });
 
 test("FR-018: PM launcher は rail の Navigate グループ先頭にある", () => {

@@ -15,7 +15,7 @@ const members = [
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
 ];
 const current = { window_id: "one", session_id: "s1", runtime_incarnation: 4, issue_number: 4777, is_pm: false };
-async function fixture({ onOpenWork = () => {}, schedule } = {}) {
+async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, isContinuePending, schedule, switching } = {}) {
   const { document, window } = parseHTML("<main></main>");
   // linkedom does not track focus; keep that browser state local to this fixture.
   let activeElement = null;
@@ -25,13 +25,17 @@ async function fixture({ onOpenWork = () => {}, schedule } = {}) {
   const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
   const rosterModel = createUiStateStore({ members, revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] }, options);
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
+  const switchModel = switching ? createUiStateStore(switching, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
   const windowCatalogModel = createUiStateStore({ catalog: { runtimeStates: {}, version: 1, appState: { active_tab_id: "p", tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", agent_member_id: "m1", dynamic_title: "Current issue", status: "running" }] } }] } } }, options);
-  const opened = [], rested = [], added = [], reassigned = [], refreshed = [];
-  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, scheduleModel, onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: () => added.push(true), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
+  const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
+  const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
+  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: tool => added.push(tool), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  for (const node of surface.element.querySelectorAll("select")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed };
+  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
 
 test("Agents replaces the old terminal surface with the approved roster contract", () => {
@@ -66,6 +70,11 @@ test("Agents identifies the exact PM before the implementation pool without addi
   assert.equal(f.surface.element.querySelector('.roster-row[aria-selected="true"]').dataset.memberId, "m1");
   withPm("Yuu updated"); f.flush();
   assert.equal(identity.querySelector(".roster-pm-name").textContent, "Yuu updated");
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: state.catalog.version + 1,
+    appState: { ...state.catalog.appState, tabs: state.catalog.appState.tabs.map(tab => ({ ...tab, project_key: "another-project" })) } } }));
+  f.flush();
+  assert.equal(identity.hidden, true, "another project's catalog cannot supply the current PM's name");
   f.activityModel.update(() => ({ count: 1, agents: [current] })); f.flush();
   assert.equal(identity.hidden, true, "a stale PM catalog window cannot supply a live identity");
 });
@@ -95,13 +104,79 @@ test("Agents current pill, row task and Now task open the exact assignment, whil
   const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
   assert.equal(task.tagName, "BUTTON"); task.click();
   assert.deepEqual(f.opened, [current, current, current]);
+  const row = task.closest(".roster-row"), pill = row.querySelector(".roster-current");
+  task.focus();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, name: "Updated member", tokens: 6000 } : member) }));
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2, appState: { ...state.catalog.appState,
+    tabs: [{ id: "p", workspace: { windows: [{ id: "one", session_id: "s1", dynamic_title: "Updated purpose" }] } }] } } }));
+  f.flush();
+  assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row, "ordinary frames retain the same member row");
+  assert.ok(row.querySelector(".roster-purpose") === task);
+  assert.ok(row.querySelector(".roster-current") === pill);
+  assert.ok(task.isConnected && f.document.activeElement === task, "ordinary frames retain the native keyboard target");
+  assert.equal(task.textContent, "Updated purpose");
+  assert.equal(row.querySelector("h3").textContent, "Updated member");
+  assert.equal(row.querySelector(".roster-row-stats .roster-stat:last-child b").textContent, "6K");
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...row.parentElement.children].map(node => node.dataset.memberId), ["m2", "m1"]);
+  f.rosterModel.update(state => ({ ...state, members: [...state.members].reverse() })); f.flush();
+  assert.deepEqual([...row.parentElement.children].map(node => node.dataset.memberId), ["m1", "m2"]);
+  assert.ok(row.querySelector(".roster-purpose") === task && task.isConnected, "reordered members retain exact native controls");
+  const now = f.surface.element.querySelector(".roster-now button");
+  const open = f.surface.element.querySelector(".roster-open");
+  now.focus();
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id === "m1" ? { ...member, tokens: 7000 } : member) }));
+  f.flush();
+  assert.ok(f.surface.element.querySelector(".roster-now button") === now && now.isConnected && f.document.activeElement === now,
+    "ordinary telemetry retains the native current-work keyboard target");
+  assert.ok(f.surface.element.querySelector(".roster-open") === open, "ordinary telemetry retains the native detail action");
+  f.surface.selectMember("m2"); assert.equal(row.getAttribute("aria-selected"), "false");
+  f.surface.selectMember("m1"); assert.equal(row.getAttribute("aria-selected"), "true");
+  const successor = { ...current, runtime_incarnation: 5 };
+  f.activityModel.update(() => ({ agents: [successor], count: 1 })); task.click(); pill.click(); now.click(); open.click();
+  assert.equal(f.opened.length, 3, "captured buttons never redirect to a successor runtime");
+  f.flush(); assert.equal(row.isConnected, false);
+  f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').click();
+  assert.deepEqual(f.opened[3], successor);
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-purpose').tagName, "SPAN");
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m2"] .roster-current'), null);
   f.activityModel.update(() => ({ agents: [], count: 0 }));
   f.surface.element.querySelector(".roster-now button").click();
   task.click();
-  assert.equal(f.opened.length, 3, "links captured before the frame must recheck live membership");
+  assert.equal(f.opened.length, 4, "links captured before the frame must recheck live membership");
   f.flush(); assert.equal(f.surface.element.querySelector(".roster-now"), null);
+});
+
+test("Issue #6362 Agents keeps census-proven work busy before catalog hydration and across project tabs", async () => {
+  const f = await fixture();
+  const catalog = f.windowCatalogModel.read().catalog;
+  const project = catalog.appState.tabs[0];
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 2,
+    appState: { ...catalog.appState, tabs: [{ ...project, workspace: { windows: [] } }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/,
+    "an observed child stays busy while its window catalog is hydrating");
+  assert.doesNotMatch(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent,
+    /Waiting for the next issue|Activity unavailable/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent, "Issue #4777");
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 3,
+    appState: { ...catalog.appState, tabs: [
+      { ...project, workspace: { windows: [] } }, { ...project, id: "sibling" },
+    ] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  const task = f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose');
+  assert.equal(task.textContent, "Current issue", "window metadata enriches the same observed assignment across tabs");
+  task.click();
+  assert.deepEqual(f.opened, [current]);
+  f.activityModel.update(state => ({ ...state, snapshot: { project_key: "this-project" } }));
+  f.windowCatalogModel.update(() => ({ catalog: { ...catalog, version: 4,
+    appState: { ...catalog.appState, tabs: [{ ...project, project_key: "another-project" }] } } }));
+  f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy 1 \/ Team 2/);
+  assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-purpose').textContent,
+    "Issue #4777", "another project's catalog cannot enrich the observed assignment");
+  f.surface.dispose();
 });
 
 const planned = () => ({ snapshot: { project_key: "project", roster_revision: 3, queue_revision: "queue-v1:one", schedule_revision: 7,
@@ -151,6 +226,9 @@ test("Agents reassigns once with captured revisions and waits for canonical read
     { agent_member_id: "m2", issues: [state.snapshot.members[0].issues[0]], empty_reason: null },
   ] } })); f.flush();
   assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]'), null);
+  const updated = f.surface.element.querySelector(".roster-plans");
+  assert.ok(updated.previousElementSibling.classList.contains("roster-current-work"), "changed plans remain after the retained current work");
+  assert.equal(updated.nextElementSibling.className, "roster-history");
   f.surface.selectMember("m2");
   assert.equal(f.surface.element.querySelector('.roster-plan[data-issue-number="5002"]')?.dataset.issueNumber, "5002");
 });
@@ -186,8 +264,8 @@ test("Agents planned controls use Operator styles and stay inert in split previe
   f.surface.dispose();
 });
 
-test("Agents keeps a selected plan control and keyboard focus across unrelated catalog and usage updates", async () => {
-  const f = await fixture({ schedule: planned() }); chooseTarget(f);
+test("Agents keeps a selected plan control and keyboard focus across unrelated catalog, usage and switch progress updates", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() }); chooseTarget(f);
   const section = f.surface.element.querySelector(".roster-plans"), select = section.querySelector("select"), button = section.querySelector(".roster-plan button");
   select.focus();
   f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } }));
@@ -196,6 +274,9 @@ test("Agents keeps a selected plan control and keyboard focus across unrelated c
   assert.ok(section.querySelector("select") === select);
   assert.equal(select.value, "m2"); assert.equal(button.disabled, false);
   assert.ok(select.isConnected); assert.ok(f.document.activeElement === select);
+  f.switchModel.update(state => ({ ...state, intents: [{ operation_id: "op", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "checkpointing" }] })); f.flush();
+  assert.ok(f.surface.element.querySelector(".roster-plans select") === select, "switch progress preserves Reassign controls");
+  assert.ok(f.document.activeElement === select); assert.equal(select.value, "m2");
   f.surface.dispose();
 });
 
@@ -203,7 +284,7 @@ test("Agents add and rest actions target a member and Past shows measured contri
   const f = await fixture();
   f.surface.element.querySelector('[data-action="add"]').click();
   f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, [true]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, ["codex"]); assert.deepEqual(f.rested, ["m1"]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -222,6 +303,7 @@ test("Agents batches shared updates, keeps stable member selection, and releases
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-past-kpis .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
   assert.match(f.surface.element.textContent, /Read unavailable/);
   f.activityModel.update(() => ({ agents: [], count: null })); f.surface.selectMember("m1"); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-capacity-note").textContent, /Busy — \/ Team 2/);
   assert.match(f.surface.element.querySelector('.roster-row[data-member-id="m1"]').textContent, /Activity unavailable/);
   assert.equal(f.surface.element.querySelector('.roster-row[data-member-id="m1"] .roster-current, .roster-detail .roster-open'), null);
   assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Activity unavailable/);
@@ -270,4 +352,133 @@ test("an observation timestamp alone preserves roster detail, controls and selec
   assert.ok(f.surface.element.querySelector('.roster-row[data-member-id="m1"]') === row);
   assert.equal(row.getAttribute("aria-selected"), "true");
   f.surface.dispose();
+});
+
+
+const switchingState = () => ({ snapshot: { project_key: "project", intents: [] }, intents: [], pending: null, error: null, disconnected: false });
+
+test("Agents switches only the next planned issue from an exact live source and sends one stable request", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() });
+  const buttons = f.surface.element.querySelectorAll('[data-action="switch-next"]');
+  assert.equal(buttons.length, 1);
+  assert.equal(buttons[0].textContent, "Switch to next issue");
+  assert.equal(buttons[0].closest(".roster-plan").dataset.issueNumber, "5002");
+  buttons[0].click(); buttons[0].click();
+  assert.equal(f.switched.length, 1);
+  const action = f.switched[0];
+  assert.match(action.operation_id, /^[0-9a-f-]{36}$/i);
+  assert.deepEqual(Object.keys(action).sort(), ["expected_roster_revision", "kind", "member_id", "operation_id", "target_issue_number"]);
+  assert.deepEqual({ ...action, operation_id: "id" }, { kind: "request", operation_id: "id", member_id: "m1", expected_roster_revision: 3, target_issue_number: 5002 });
+  const status = f.surface.element.querySelector(".roster-switch-status");
+  assert.equal(status.getAttribute("role"), "status");
+  assert.equal(status.getAttribute("aria-live"), "polite");
+  assert.match(status.textContent, /#4777.*#5002.*Awaiting/s);
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]').disabled, true);
+  f.surface.selectMember("m2");
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]'), null, "an idle member never supplies a source");
+  f.surface.dispose();
+});
+
+test("Agents rechecks captured live source and schedule authority before switching", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() });
+  let button = f.surface.element.querySelector('[data-action="switch-next"]');
+  assert.ok(button);
+  f.activityModel.update(() => ({ count: 1, agents: [{ ...current, runtime_incarnation: 5 }] }));
+  button.click();
+  assert.equal(f.switched.length, 0, "a new child incarnation cannot reuse a captured source");
+  f.flush(); button = f.surface.element.querySelector('[data-action="switch-next"]');
+  f.scheduleModel.update(state => ({ ...state, snapshot: { ...state.snapshot, schedule_revision: 8 } }));
+  button.click();
+  assert.equal(f.switched.length, 0);
+  f.activityModel.update(() => ({ count: 1, agents: [{ ...current, is_pm: true }] })); f.flush();
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]'), null, "PM and stale window records are not sources");
+  f.surface.dispose();
+});
+
+test("Agents announces switch stages, cancels before stop, and offers saved Works after failure", async () => {
+  const f = await fixture({ schedule: planned(), switching: switchingState() });
+  const intent = { operation_id: "op", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "checkpointing" };
+  const progress = value => { f.switchModel.update(state => ({ ...state, intents: [value], pending: null })); f.flush(); };
+  progress(intent);
+  assert.match(f.surface.element.querySelector(".roster-switch-status").textContent, /#4777.*#5002.*Saving/s);
+  const cancel = f.surface.element.querySelector('[data-action="cancel-switch"]');
+  assert.ok(cancel); cancel.click(); cancel.click();
+  assert.deepEqual(f.switched, [{ kind: "cancel", operation_id: "op" }]);
+  progress({ ...intent, stage: "stopping_current" });
+  assert.match(f.surface.element.querySelector(".roster-switch-status").textContent, /Stopping current/);
+  assert.equal(f.surface.element.querySelector('[data-action="cancel-switch"]'), null);
+  progress({ ...intent, stage: "launching_next" });
+  assert.match(f.surface.element.querySelector(".roster-switch-status").textContent, /Launching next/);
+  progress({ ...intent, stage: "failed", reason: "Launch failed; saved work is retained" });
+  const recovery = f.surface.element.querySelector('[data-action="open-saved-work"]');
+  assert.equal(recovery?.textContent, "Open saved work in Works"); recovery.click();
+  assert.deepEqual(f.opened, [current], "a pre-stop failure focuses the exact still-live source in Works");
+  assert.deepEqual(f.saved, []);
+  f.switchModel.update(state => ({ ...state, disconnected: true })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-switch-status").textContent, /Unknown.*Reconnect/s);
+  f.switchModel.update(() => ({ ...switchingState(), intents: [{ ...intent, stage: "completed" }], notice: { member_id: "m1", message: "No saved request was observed. Request again to recheck the current member." } })); f.flush();
+  const absent = f.surface.element.querySelector(".roster-switch-status");
+  assert.equal(absent?.getAttribute("role"), "status");
+  assert.equal(absent?.textContent, "No saved request was observed. Request again to recheck the current member.");
+  assert.equal(f.surface.element.querySelector('[data-action="switch-next"]').disabled, false);
+  f.surface.dispose();
+});
+
+test("Project app routes switch receipts and reads switches with Agents refresh without a poller", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /case "agent_switch":\s*applyAgentSwitchSnapshot\(event\.snapshot\)/);
+  assert.match(app, /case "agent_switch_error":\s*applyAgentSwitchError\(event\)/);
+  assert.match(app, /send\(\{ kind: "agent_switch", action \}\)/);
+  assert.match(app, /onRefreshSchedule:.*requestAgentSwitch\(\)/);
+  assert.match(app, /if \(host && changed\).*requestAgentSwitch\(\)/);
+  assert.match(app, /clearAgentSwitch\(\)/);
+});
+
+
+test("Agents continues only server-eligible saved work through the existing correlated dispatcher", async () => {
+  const { createContinueWorkDispatcher, createLaunchPendingController } = await import("../launch-pending-controller.js");
+  let dispatcher, pending;
+  const f = await fixture({ schedule: planned(), switching: switchingState(), onContinueSavedWork: id => dispatcher.dispatch(id), isContinuePending: id => pending.isPending(`continue:${id}`) });
+  const sent = [];
+  pending = createLaunchPendingController({ onChange: () => f.surface.sync(), setTimeoutFn: () => 1, clearTimeoutFn() {} });
+  dispatcher = createContinueWorkDispatcher({ launchPending: pending, send: action => sent.push(action) });
+  const intent = { operation_id: "switch-operation", member_id: "m1", source_issue_number: 4777, target_issue_number: 5002, stage: "unknown", saved_work_id: "opaque-saved-work", can_resume_saved: false };
+  const update = value => { f.switchModel.update(state => ({ ...state, intents: [value] })); f.flush(); };
+  update(intent);
+  assert.equal(f.surface.element.querySelector('[data-action="continue-saved-work"]'), null, "an opaque Work id alone cannot authorize continuation");
+  update({ ...intent, saved_work_id: null, can_resume_saved: true });
+  assert.equal(f.surface.element.querySelector('[data-action="continue-saved-work"]'), null);
+  update({ ...intent, can_resume_saved: true });
+  const button = f.surface.element.querySelector('[data-action="continue-saved-work"]');
+  assert.equal(button?.textContent, "Continue saved work");
+  button.click(); button.click();
+  assert.deepEqual(f.continued, ["opaque-saved-work"]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].kind, "continue_work"); assert.equal(sent[0].work_id, "opaque-saved-work");
+  assert.match(sent[0].operation_id, /^continue-[0-9a-f-]{36}$/i);
+  assert.equal(button.disabled, true);
+  const outcome = { kind: "continue_work_outcome", operation_id: sent[0].operation_id, work_id: "opaque-saved-work", outcome: "failed", message: "Source authority changed" };
+  assert.deepEqual(dispatcher.handleOutcome(outcome), outcome);
+  assert.equal(button.disabled, false, "the real outcome settles existing continuation pending state");
+  assert.match(f.surface.element.querySelector(".roster-switch-status").textContent, /Unknown/);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-switch-status").textContent, /completed|continued successfully/i);
+  update({ ...intent, stage: "launching_next", can_resume_saved: true });
+  assert.ok(f.surface.element.querySelector('[data-action="continue-saved-work"]'), "saved source recovery does not require an automatic-exit receipt");
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  assert.match(app, /onContinueSavedWork:.*continueWorkDispatcher\.dispatch\(workId\)/);
+  f.surface.dispose();
+});
+
+
+test("Agents registers a member with the explicitly selected supported or custom tool", async () => {
+  const f = await fixture();
+  const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
+  assert.ok(select, "registration exposes the fixed Tool attribute");
+  assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
+  select.querySelector('[value="custom-cli"]').selected = true;
+  f.surface.element.querySelector('[data-action="add"]').click();
+  assert.deepEqual(f.added, ["custom-cli"]);
+  select.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1 })); f.flush();
+  assert.ok(f.surface.element.querySelector('[aria-label="Tool for new member"]') === select && f.document.activeElement === select);
+  assert.equal(select.value, "custom-cli");
 });

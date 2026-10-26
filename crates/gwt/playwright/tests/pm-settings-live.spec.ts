@@ -298,8 +298,7 @@ async function suppressStartupOverlays(page: any): Promise<void> {
     content: `
       #op-briefing,
       #project-picker,
-      #project-onboarding,
-      #preset-modal {
+      #project-onboarding {
         display: none !important;
         pointer-events: none !important;
       }

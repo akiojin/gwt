@@ -514,7 +514,6 @@ impl WindowRegistry {
             .persisted
             .windows
             .iter()
-            .filter(|window| window.preset == preset)
             .filter_map(|window| {
                 window
                     .id
@@ -810,7 +809,7 @@ mod tests {
     #[test]
     fn placing_agent_window_in_issue_preview_sets_containment_placement() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
 
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));
@@ -831,11 +830,13 @@ mod tests {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
         let issue = workspace.add_window(WindowPreset::Issue);
         let board = workspace.add_window(WindowPreset::Board);
+        let settings = workspace.add_window(WindowPreset::Settings);
         let shell = workspace.add_window(WindowPreset::Shell);
         let agent = workspace.add_window(WindowPreset::Agent);
 
         assert!(!workspace.place_agent_window_in_issue_preview(&shell.id, &issue.id, 3671));
         assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, &board.id, 3671));
+        assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, &settings.id, 3671));
         assert!(!workspace.place_agent_window_in_issue_preview(&agent.id, "missing-window", 3671));
         assert_eq!(
             workspace.window(&agent.id).expect("agent").placement,
@@ -885,7 +886,7 @@ mod tests {
     #[test]
     fn docking_agent_window_back_to_issue_returns_it_to_the_preview() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3885));
         assert!(workspace.undock_agent_window(&agent.id));
@@ -955,8 +956,8 @@ mod tests {
     #[test]
     fn closing_issue_window_releases_its_previews_to_a_surface() {
         let mut workspace = WindowRegistry::from_persisted(empty_workspace_state());
-        let issue = workspace.add_window(WindowPreset::Settings);
-        let other_issue = workspace.add_window(WindowPreset::Settings);
+        let issue = workspace.add_window(WindowPreset::Issue);
+        let other_issue = workspace.add_window(WindowPreset::Issue);
         let agent = workspace.add_window(WindowPreset::Agent);
         let kept = workspace.add_window(WindowPreset::Agent);
         assert!(workspace.place_agent_window_in_issue_preview(&agent.id, &issue.id, 3671));

@@ -571,6 +571,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
                 gwt::project_runtime::events::OwnerEvent::WindowRemoved {
                     id: "owner-pane-a".into(),
                     incarnation: 6,
+                    session_id: None,
                 }
             )
             .is_empty(),
@@ -584,6 +585,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         gwt::project_runtime::events::OwnerEvent::WindowRemoved {
             id: "owner-pane-a".into(),
             incarnation: 7,
+            session_id: None,
         },
     );
     assert!(!runtime.runtimes.contains_key("a::agent"));

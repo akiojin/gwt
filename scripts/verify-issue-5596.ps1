@@ -4,11 +4,14 @@ param(
   [ValidateSet('baseline','after')][string]$Phase = 'after',
   [string]$EvidenceDirectory,
   [switch]$Sequential,
+  [ValidateRange(1,10)][int]$LaunchCount = 10,
+  [switch]$CargoLoad,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This harness requires Windows and PowerShell 7.' }
+if (($CargoLoad -or $PSBoundParameters.ContainsKey('LaunchCount')) -and -not $Sequential) { throw 'LaunchCount and CargoLoad require Sequential.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gwt = Join-Path $repoRoot 'target/debug/gwt.exe'
 $gwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
@@ -46,7 +49,7 @@ $environment.GIT_CONFIG_NOSYSTEM = '1'
 $environment.GIT_TERMINAL_PROMPT = '0'
 $environment.GH_PROMPT_DISABLED = '1'
 $environment.GWT5596_REAL_GIT = $realGit
-$environment.RUST_LOG = 'info,gwt.frontend.timing=debug'
+$environment.RUST_LOG = 'info,gwt.frontend.timing=debug,gwt_input_trace=debug'
 [IO.File]::WriteAllText("$checkHome/.gitconfig", "[user]`nname = GwtFixture`nemail = fixture@example.invalid`n[protocol]`nallow = never`n[protocol `"file`"]`nallow = always`n")
 [IO.File]::WriteAllText("$checkHome/.codex/config.toml", "approval_policy = 'never'`nsuppress_unstable_features_warning = true`n")
 [IO.File]::WriteAllText("$checkHome/.codex/auth.json", '{"OPENAI_API_KEY":"fixture-only"}')
@@ -103,6 +106,7 @@ function Assert-Hooks($Envelope) {
 $gui = $null
 $github = $null
 $runner = $null
+$cargoLoadProcess = $null
 $anchor = $null
 $state = $null
 $exitCode = 1
@@ -217,8 +221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   $environment.PATH = "$checkHome/bin;$($environment.PATH)"
   $environment.GWT_TEST_GH = "$checkHome/bin/gh.exe"
   $environment.GWT_TEST_GH_SANDBOX = '1'
-  $launchCount = if ($Sequential) { 10 } else { 12 }
-  $issues = @(1..$launchCount | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
+  $fixtureCount = if ($Sequential) { $LaunchCount } else { 12 }
+  $issues = @(1..$fixtureCount | ForEach-Object { @{number=(559600+$_);title="Offline launch fixture $_";state='OPEN';body="## Acceptance Criteria`n- [ ] AC-1: Record local provider handoff.";labels=@(@{name='gwt-queued'});comments=@();updatedAt='2026-10-16T00:00:00Z';url="https://github.com/fixture/launch-perf/issues/$(559600+$_)"} })
   [IO.File]::WriteAllText("$checkHome/github-issues.json", ($issues | ConvertTo-Json -Depth 5 -AsArray))
   # Read-only loopback owner API. Every unsupported/mutating request fails locally.
   $serverSource = @'
@@ -297,14 +301,15 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()
   $streams.guiErr = $gui.StandardError.ReadToEndAsync()
   $sourceRevision = (& $realGit -C $repoRoot rev-parse HEAD).Trim()
-  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
+  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/launch_runtime/base_freshness.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/paths.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
+    'crates/gwt/web/app.js','crates/gwt/web/terminal-viewport-reflow.js',
     'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs') | ForEach-Object {
-    $fromCommit = $Phase -eq 'baseline' -and $_.StartsWith('crates/gwt/src/')
+    $fromCommit = $Phase -eq 'baseline' -and ($_.StartsWith('crates/gwt/src/') -or $_.StartsWith('crates/gwt-core/src/') -or $_.StartsWith('crates/gwt/web/'))
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }
     @{path=$_;blob_sha=$blobSha;source= $(if ($fromCommit) { $sourceRevision } else { 'working-tree' })}
   }
   $expectedDeliveries = @($deliveries | ForEach-Object { @{issue_number=$_.issue_number;delivery_id=$_.delivery_id;claim_id=$_.claim_id} })
-  $fixture = @{phase=$Phase;sequential=[bool]$Sequential;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
+  $fixture = @{phase=$Phase;sequential=[bool]$Sequential;launch_count=$fixtureCount;gui_pid=$gui.Id;gui_started_at=$gui.StartTime.ToUniversalTime().ToString('o');checkout_binary=$gwt;binary_sha256=(Get-FileHash -LiteralPath $gwt -Algorithm SHA256).Hash;binary_modified_at=(Get-Item -LiteralPath $gwt).LastWriteTimeUtc.ToString('o');source_snapshot=@($sourceSnapshot);checkout=$repoRoot;checkout_sha=(& $realGit -C $repoRoot rev-parse HEAD).Trim();isolated_home=$checkHome;project=$project;project_key=$key;issues=@($issues.number);expected_deliveries=$expectedDeliveries;evidence_directory=$EvidenceDirectory}
   $fixture.checkout_daemon = $gwtd
   $fixture.hook_generation_fallback = $hookBin
   $fixture.daemon_sha256 = (Get-FileHash -LiteralPath $gwtd -Algorithm SHA256).Hash
@@ -350,6 +355,64 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   } while ([DateTime]::UtcNow -lt $daemonDeadline)
   if (-not $daemonProof) { throw 'Owned checkout daemon authority readiness timed out.' }
   if (-not $daemonMatches) { throw 'Owned GUI selected a daemon outside this checkout; see daemon-authority.json.' }
+  if ($CargoLoad) {
+    # A real, dependency-free cargo build runs CPU work in its build script.
+    # Leave two logical cores available while exercising a genuinely busy host.
+    $loadRoot = "$checkHome/cargo-load"
+    [void](New-Item -ItemType Directory -Path $loadRoot -Force)
+    [IO.File]::WriteAllText("$loadRoot/Cargo.toml", "[package]`nname='gwt-launch-load'`nversion='0.0.0'`nedition='2021'`n[workspace]`n[lib]`npath='lib.rs'`n")
+    [IO.File]::WriteAllText("$loadRoot/lib.rs", '')
+    $loadSource = @'
+use std::{fs::{self, File}, io::Write, path::PathBuf, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}, thread, time::{Duration, Instant}};
+fn main() -> std::io::Result<()> {
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let workers = thread::available_parallelism().map_or(2, usize::from).saturating_sub(2).max(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicBool::new(false));
+    let work = Arc::new(AtomicU64::new(0));
+    let handles: Vec<_> = (0..workers).map(|worker| {
+        let (stop, active, work) = (stop.clone(), active.clone(), work.clone());
+        thread::spawn(move || {
+            let mut value = worker as u64 + 1;
+            while !stop.load(Ordering::Relaxed) {
+                if !active.load(Ordering::Relaxed) { thread::sleep(Duration::from_millis(200)); continue; }
+                for _ in 0..100_000 { value = std::hint::black_box(value.wrapping_mul(6364136223846793005).wrapping_add(1)); }
+                work.fetch_add(100_000, Ordering::Relaxed);
+            }
+        })
+    }).collect();
+    let started = Instant::now();
+    let mut progress = File::create(root.join("progress.jsonl"))?;
+    while !root.join("stop").exists() && started.elapsed() < Duration::from_secs(1500) {
+        let enabled = root.join("start").exists();
+        active.store(enabled, Ordering::Relaxed);
+        writeln!(progress, "{{\"pid\":{},\"workers\":{},\"elapsed_ms\":{},\"work_units\":{}}}", std::process::id(), if enabled { workers } else { 0 }, started.elapsed().as_millis(), work.load(Ordering::Relaxed))?;
+        progress.flush()?;
+        thread::sleep(Duration::from_millis(200));
+    }
+    stop.store(true, Ordering::Relaxed);
+    for handle in handles { handle.join().expect("CPU workload worker"); }
+    fs::write(root.join("finished"), b"complete\n")
+}
+'@
+    [IO.File]::WriteAllText("$loadRoot/build.rs", $loadSource)
+    $start = New-OwnedProcess $cargo @('build','--offline','--manifest-path',"$loadRoot/Cargo.toml",'--target-dir',"$loadRoot/target") $loadRoot
+    $start.Environment['RUSTC'] = $rustc
+    $start.Environment['RUSTFLAGS'] = '-C linker=rust-lld'
+    $cargoLoadProcess = [Diagnostics.Process]::Start($start)
+    $streams.cargoOut = $cargoLoadProcess.StandardOutput.ReadToEndAsync()
+    $streams.cargoErr = $cargoLoadProcess.StandardError.ReadToEndAsync()
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    do {
+      if ($cargoLoadProcess.HasExited) { throw 'Cargo load exited before launch measurement.' }
+      if (Test-Path -LiteralPath "$loadRoot/progress.jsonl") { break }
+      Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not (Test-Path -LiteralPath "$loadRoot/progress.jsonl")) { throw 'Cargo load readiness timed out.' }
+    $fixture.cargo_load = @{cargo_pid=$cargoLoadProcess.Id;progress_path="$loadRoot/progress.jsonl";workload='bounded parallel CPU work in a real cargo build script; active only after browser/page readiness';logical_cores=[Environment]::ProcessorCount}
+    [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
+    [IO.File]::WriteAllText("$EvidenceDirectory/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
+  }
   $version = [IO.File]::ReadAllText("$repoRoot/scripts/playwright-version.txt").Trim()
   $depsRoot = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version" }
   $cli = Join-Path $depsRoot 'node_modules/playwright/cli.js'
@@ -362,6 +425,7 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $start.Environment['GWT_PLAYWRIGHT_BASE_URL'] = $url
   $start.Environment['GWT5596_HOME'] = $checkHome
   if ($Sequential) { $start.Environment['GWT5596_SEQUENTIAL'] = '1' }
+  $start.Environment['GWT5596_LAUNCH_COUNT'] = [string]$fixtureCount
   $start.Environment['GWT_PLAYWRIGHT_NODE_MODULES'] = Join-Path $depsRoot 'node_modules'
   $start.Environment['NODE_OPTIONS'] = "--require `"$($resolver.Replace('\','/'))`""
   if ($env:GWT_HEADED_E2E_REPORT) { $start.Environment['GWT_HEADED_E2E_REPORT'] = $env:GWT_HEADED_E2E_REPORT }
@@ -374,6 +438,25 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   Write-Output $streams.runnerErr.GetAwaiter().GetResult()
 } finally {
   $cleanupErrors = [Collections.Generic.List[string]]::new()
+  $logSources = @("$checkHome/.gwt/logs")
+  if ($state) { $logSources += Join-Path (Split-Path $state -Parent) 'logs' }
+  foreach ($logSource in $logSources) {
+    if (Test-Path -LiteralPath $logSource) {
+      try { Copy-Item -LiteralPath $logSource -Destination "$EvidenceDirectory/startup-$([IO.Path]::GetFileName((Split-Path $logSource -Parent)))" -Recurse -Force -ErrorAction Stop }
+      catch { $cleanupErrors.Add('Owned startup log preservation failed.') }
+    }
+  }
+  if ($cargoLoadProcess) {
+    [IO.File]::WriteAllText("$checkHome/cargo-load/stop", 'stop')
+    try {
+      if (-not $cargoLoadProcess.WaitForExit(10000)) { $cargoLoadProcess.Kill($true); [void]$cargoLoadProcess.WaitForExit(10000) }
+      if ($cargoLoadProcess.ExitCode -ne 0) { $cleanupErrors.Add('Owned cargo load did not finish successfully.') }
+      Copy-Item -LiteralPath "$checkHome/cargo-load/progress.jsonl" -Destination "$EvidenceDirectory/cargo-load-progress.jsonl" -ErrorAction Stop
+      [IO.File]::WriteAllText("$EvidenceDirectory/cargo-Out.log", $streams.cargoOut.GetAwaiter().GetResult())
+      [IO.File]::WriteAllText("$EvidenceDirectory/cargo-Err.log", $streams.cargoErr.GetAwaiter().GetResult())
+    } catch { $cleanupErrors.Add("Owned cargo load cleanup failed: $($_.Exception.Message)") }
+    $cargoLoadProcess.Dispose()
+  }
   if ($state -and (Test-Path -LiteralPath "$state/issue-monitor.json")) {
     try { Copy-Item -LiteralPath "$state/issue-monitor.json" -Destination "$EvidenceDirectory/issue-monitor-final.json" -ErrorAction Stop }
     catch { $cleanupErrors.Add('Final Monitor prefs snapshot failed.') }

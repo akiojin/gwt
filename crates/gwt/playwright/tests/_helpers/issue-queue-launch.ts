@@ -9,7 +9,9 @@ import type { TestInfo } from "@playwright/test";
 import { startExactRelaunchFixture } from "./exact-relaunch";
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
-export async function startIssueQueueLaunchFixture(info: TestInfo) {
+export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
+  targetIssueNumber?: 44; switching?: boolean; positive?: boolean;
+} = {}) {
   const comments: { id: number; body: string; updated_at: string }[] = [];
   const requests: { method: string; url: string }[] = [];
   const issue = {
@@ -19,6 +21,12 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
     url: "https://github.com/fixture/queue/issues/43",
     updatedAt: new Date().toISOString(),
   };
+  const issues = [issue, ...(options.targetIssueNumber ? [{ ...issue, number: options.targetIssueNumber,
+    title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : [])];
+  const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
+  let nextCommentId = 1;
+  const restIssue = (value: typeof issue) => ({ ...value, state: "open", html_url: value.url,
+    updated_at: value.updatedAt, user: { login: "fixture" } });
   const server = createServer(async (request, response) => {
     requests.push({ method: request.method || "", url: request.url || "" });
     let body = "";
@@ -26,23 +34,39 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
     const payload = body ? JSON.parse(body) : {};
     let result: unknown;
     if (request.url === "/graphql" && request.method === "POST") {
-      result = { data: { repository: { issue: { ...issue,
-        labels: { nodes: issue.labels },
-        comments: { nodes: comments.map(comment => ({ databaseId: comment.id,
+      const number = Number(payload.variables?.number ?? /issue\s*\(\s*number:\s*(\d+)/.exec(payload.query || "")?.[1] ?? issue.number);
+      const selected = issues.find(value => value.number === number);
+      if (!selected) { response.writeHead(404); response.end("{}"); return; }
+      result = { data: { repository: { issue: { ...selected,
+        labels: { nodes: selected.labels },
+        comments: { nodes: issueComments.get(number)!.map(comment => ({ databaseId: comment.id,
           body: comment.body, updatedAt: comment.updated_at })),
           pageInfo: { hasNextPage: false, endCursor: null } },
         timelineItems: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
       } } } };
-    } else if (request.url === "/repos/fixture/queue/issues/43/comments" && request.method === "POST") {
-      const comment = { id: comments.length + 1, body: payload.body, updated_at: new Date().toISOString() };
-      comments.push(comment);
+    } else if (/^\/repos\/fixture\/queue\/issues\/\d+\/comments$/.test(request.url || "") && request.method === "POST") {
+      const number = Number(request.url!.split("/").at(-2));
+      const selected = issueComments.get(number);
+      if (!selected) { response.writeHead(404); response.end("{}"); return; }
+      const comment = { id: nextCommentId++, body: payload.body, updated_at: new Date().toISOString() };
+      selected.push(comment);
       result = comment;
     } else if (/^\/repos\/fixture\/queue\/issues\/comments\/\d+$/.test(request.url || "") && request.method === "PATCH") {
-      const comment = comments.find(entry => entry.id === Number(request.url!.split("/").at(-1)));
+      const comment = [...issueComments.values()].flat().find(entry => entry.id === Number(request.url!.split("/").at(-1)));
       if (!comment) { response.writeHead(404); response.end("{}"); return; }
       comment.body = payload.body;
       comment.updated_at = new Date().toISOString();
       result = comment;
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues(?:\?|$)/.test(request.url || "")) {
+      result = issues.map(restIssue);
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues\/\d+(?:\?|$)/.test(request.url || "")) {
+      const number = Number(request.url!.split("/").at(-1)!.split("?")[0]);
+      const selected = issues.find(value => value.number === number);
+      if (!selected) { response.writeHead(404); response.end("{}"); return; }
+      result = restIssue(selected);
+    } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues\/\d+\/comments(?:\?|$)/.test(request.url || "")) {
+      const number = Number(request.url!.split("/").at(-2));
+      result = (issueComments.get(number) || []).map(comment => ({ ...comment, user: { login: "fixture" }, created_at: comment.updated_at }));
     } else {
       response.writeHead(500); response.end(JSON.stringify({ message: "Unimplemented fixture request" })); return;
     }
@@ -58,6 +82,8 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
   let stableHook = "";
   let projectLogs = "";
   let projectState = "";
+  let remotePath = "";
+  let realGitPath = "";
   const hookAudits: unknown[] = [];
   function auditHooks(cwd: string, repair: boolean) {
     const operation = repair ? "hook.doctor" : "hook.health";
@@ -89,6 +115,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
+      freshNativeIds: !!options.switching,
+      switching: options.switching ? { sourceIssueNumber: issue.number,
+        positive: !!options.positive && process.platform === "linux" && process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE === "1" } : undefined,
       monitorPreferences: {
         enabled: true, autonomous_mode: false, auto_close_merged_issues: false,
         auto_apply_updates: false, terminal_queue_auto_refill: false,
@@ -123,11 +152,13 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         auditEnv = env;
         checkoutGwtd = join(bin, "gwtd");
         const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+        realGitPath = realGit;
         const git = (...args: string[]) => {
           const result = spawnSync(realGit, args, { cwd: project, env, encoding: "utf8" });
           if (result.status !== 0) throw new Error(`Fixture git failed: ${result.stderr}`);
         };
         const remote = join(home, "origin.git");
+        remotePath = remote;
         git("init", "--bare", "-q", remote);
         git("remote", "add", "origin", remote);
         git("push", "-q", "-u", "origin", "main");
@@ -142,13 +173,14 @@ export async function startIssueQueueLaunchFixture(info: TestInfo) {
         const gh = `#!${process.execPath}
 const fs=require('node:fs');const a=process.argv.slice(2);const text=a.join(' ');
 fs.appendFileSync(${JSON.stringify(ghLog)},JSON.stringify(a)+'\\n');
-const issue=${JSON.stringify(issue)};
+const issues=${JSON.stringify(issues)};
+const selected=issues.find(issue=>issue.number===Number(a[2]))||issues[0];
 if(a[0]==='--version'){console.log('gh version 2.80.0');process.exit(0);}
 if(a[0]==='auth'){if(a[1]==='token')console.log('fixture-only');process.exit(0);}
 if(a.includes('--include'))process.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n');
-if(a[0]==='api' && text.includes('/issues?')){console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?[issue]:[]));process.exit(0);}
+if(a[0]==='api' && text.includes('/issues?')){console.log(JSON.stringify(/[?&]page=1(?:&| |$)/.test(text)?issues:[]));process.exit(0);}
 if(a[0]==='api' && text.includes('/pulls?')){console.log('[]');process.exit(0);}
-if(a[0]==='issue'&&a[1]==='view'){console.log(JSON.stringify({...issue,comments:[]}));process.exit(0);}
+if(a[0]==='issue'&&a[1]==='view'){console.log(JSON.stringify({...selected,comments:[]}));process.exit(0);}
 if(a[0]==='api'&&a[1]==='graphql'){console.log(JSON.stringify({data:{repository:{issue:{timelineItems:{nodes:[],pageInfo:{hasNextPage:false,endCursor:null}}}}}}));process.exit(0);}
 if(a[0]==='pr'&&a[1]==='list'){console.log('[]');process.exit(0);}
 console.error('Unimplemented fixture gh: '+text);process.exit(64);
@@ -249,7 +281,28 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return null;
   }
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
-    issueNumber: issue.number, requests, comments, hookAudits, restoreSummary,
+    issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
+    actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
+      .split("\n").filter(Boolean).map(line => JSON.parse(line)),
+    processAlive: (pid: number) => {
+      const result = spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" });
+      return result.status === 0 && !/^[ZX]/.test(result.stdout.trim());
+    },
+    launchIssues: async () => Promise.all((await active.launches()).map(async launch => {
+      const record = await readFile(join(active.home, ".gwt", "sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      return Number(/^linked_issue_number\s*=\s*(\d+)/m.exec(record)?.[1]);
+    })),
+    savedSource: (cwd: string) => {
+      const read = (...args: string[]) => {
+        const result = spawnSync(realGitPath, args, { cwd, env: auditEnv, encoding: "utf8" });
+        if (result.status !== 0) throw new Error(`Fixture source observation failed: ${result.stderr}`);
+        return result.stdout.trim();
+      };
+      const branch = read("symbolic-ref", "--short", "HEAD");
+      return { branch, head: read("rev-parse", "HEAD"),
+        remoteHead: read("--git-dir", remotePath, "rev-parse", `refs/heads/${branch}`),
+        porcelain: read("status", "--porcelain=v1", "--untracked-files=all") };
+    },
     workItems, eventShardPath, stagedDiff, seedActiveOrphan,
     scheduleOperation,
     monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),

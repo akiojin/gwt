@@ -809,7 +809,9 @@ fn monitor_owned_pre_pty_launch_failure_is_committed_then_closed_while_manual_is
     let incarnation = events
         .iter()
         .find_map(|event| match event {
-            OwnerEvent::WindowRemoved { id, incarnation } if id == &owned_id => Some(*incarnation),
+            OwnerEvent::WindowRemoved {
+                id, incarnation, ..
+            } if id == &owned_id => Some(*incarnation),
             _ => None,
         })
         .expect("actual exact Monitor window cleanup receipt");

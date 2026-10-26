@@ -430,6 +430,9 @@ pub enum FrontendEvent {
     AgentSchedule {
         action: crate::issue_monitor::AgentScheduleAction,
     },
+    AgentSwitch {
+        action: crate::issue_monitor::AgentSwitchAction,
+    },
     StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
@@ -975,6 +978,9 @@ pub enum FrontendEvent {
         tier: u8,
         expected_config_token: String,
     },
+    /// Audit-only notice for client-side Open Monitor navigation.
+    /// It does not control monitoring or create/focus a backend window.
+    OpenIssueMonitor,
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,
@@ -2197,6 +2203,15 @@ pub enum BackendEvent {
         project_key: String,
         message: String,
     },
+    AgentSwitch {
+        snapshot: crate::issue_monitor::AgentSwitchSnapshot,
+    },
+    AgentSwitchError {
+        project_key: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
+    },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
     /// types directly.
@@ -3120,8 +3135,8 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "local_agent_activity",
-        BackendEventDeliveryClass::IdempotentLatest,
-        BackendEventBackpressurePolicy::LatestWins,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
         "active_work_projection",
@@ -3170,6 +3185,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "agent_schedule_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
+        "agent_switch",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_switch_error",
         BackendEventDeliveryClass::Error,
         BackendEventBackpressurePolicy::FailOpenError,
     ),
@@ -3696,6 +3721,8 @@ impl BackendEvent {
             BackendEvent::AgentRosterError { .. } => "agent_roster_error",
             BackendEvent::AgentSchedule { .. } => "agent_schedule",
             BackendEvent::AgentScheduleError { .. } => "agent_schedule_error",
+            BackendEvent::AgentSwitch { .. } => "agent_switch",
+            BackendEvent::AgentSwitchError { .. } => "agent_switch_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -4254,6 +4281,70 @@ mod tests {
     }
 
     #[test]
+    fn agent_switch_actions_require_typed_project_bound_requests() {
+        let request = serde_json::json!({"kind":"request", "operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":3, "target_issue_number":42});
+        for action in [
+            serde_json::json!({"kind":"read"}),
+            request.clone(),
+            serde_json::json!({"kind":"cancel", "operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
+        ] {
+            let _: FrontendEvent =
+                serde_json::from_value(serde_json::json!({"kind":"agent_switch", "action":action}))
+                    .expect("typed switch action");
+        }
+        for field in [
+            "operation_id",
+            "member_id",
+            "expected_roster_revision",
+            "target_issue_number",
+        ] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<FrontendEvent>(
+                serde_json::json!({"kind":"agent_switch", "action":incomplete})
+            )
+            .is_err());
+        }
+        let mut forged = request;
+        forged["session_id"] = serde_json::json!("another-session");
+        assert!(serde_json::from_value::<FrontendEvent>(
+            serde_json::json!({"kind":"agent_switch", "action":forged})
+        )
+        .is_err());
+        let snapshot = backend_event_policy("agent_switch").expect("switch snapshot policy");
+        assert_eq!(snapshot.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            snapshot.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+        assert_eq!(
+            backend_event_policy("agent_switch_error").unwrap().delivery,
+            BackendEventDeliveryClass::Error
+        );
+        let event = BackendEvent::AgentSwitch {
+            snapshot: crate::issue_monitor::AgentSwitchSnapshot {
+                project_key: "project".into(),
+                intents: vec![],
+                request_id: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({"kind":"agent_switch", "snapshot":{"project_key":"project", "intents":[]}})
+        );
+        assert_eq!(event.delivery_policy(), snapshot);
+        let error = BackendEvent::AgentSwitchError {
+            project_key: "project".into(),
+            message: "refused".into(),
+            operation_id: Some("operation".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["operation_id"],
+            "operation"
+        );
+    }
+
+    #[test]
     fn agent_schedule_actions_and_snapshot_use_project_scoped_wire_contract() {
         for action in [
             serde_json::json!({"kind": "read"}),
@@ -4785,14 +4876,23 @@ mod tests {
         );
         assert!(workspace_state.coalesces_on_frontend());
 
-        for kind in ["active_work_projection", "local_agent_activity"] {
-            let policy = backend_event_policy(kind).expect("projection policy");
-            assert_eq!(policy.delivery, BackendEventDeliveryClass::IdempotentLatest);
-            assert_eq!(
-                policy.backpressure,
-                BackendEventBackpressurePolicy::LatestWins
-            );
-        }
+        let projection = backend_event_policy("active_work_projection").expect("projection policy");
+        assert_eq!(
+            projection.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            projection.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+
+        let activity = backend_event_policy("local_agent_activity").expect("local activity policy");
+        assert_eq!(activity.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            activity.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+        assert!(!activity.coalesces_on_frontend());
 
         let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
         assert_eq!(

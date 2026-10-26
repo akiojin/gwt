@@ -5634,8 +5634,9 @@ fn assert_expired_launch_ack_cleanup(
             // test-hygiene: allow-wall-clock-deadline Bound the real owner startup-failure commit and exact physical retirement; the existing deadline is explicitly advanced above.
             tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
                 loop {
-                    if let OwnerEvent::WindowRemoved { id, incarnation } =
-                        events.recv().await.unwrap()
+                    if let OwnerEvent::WindowRemoved {
+                        id, incarnation, ..
+                    } = events.recv().await.unwrap()
                     {
                         if id == pane.id && incarnation == pane.incarnation {
                             break;
@@ -5756,6 +5757,7 @@ fn assert_expired_launch_ack_cleanup(
                     if let OwnerEvent::WindowRemoved {
                         id: closed,
                         incarnation: closed_incarnation,
+                        ..
                     } = events.recv().await.unwrap()
                     {
                         if closed == id && closed_incarnation == incarnation {

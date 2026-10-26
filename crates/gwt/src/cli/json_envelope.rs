@@ -921,6 +921,31 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 issue_numbers: required_u64_vec(params, "issue_numbers")?,
             })
         }
+        "issue.monitor.switch.read" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Read { request_id: None },
+        }),
+        "issue.monitor.switch.request" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Request {
+                operation_id: required_string(params, "operation_id")?,
+                member_id: required_string(params, "member_id")?,
+                expected_roster_revision: required_u64(params, "expected_roster_revision")?,
+                target_issue_number: required_u64(params, "target_issue_number")?,
+            },
+        }),
+        "issue.monitor.switch.cancel" => CliCommand::Issue(IssueCommand::MonitorSwitch {
+            project_root: optional_path(params, "project_root")?,
+            action: crate::issue_monitor::AgentSwitchAction::Cancel {
+                operation_id: required_string(params, "operation_id")?,
+            },
+        }),
+        "issue.monitor.switch.ack" => CliCommand::Issue(IssueCommand::MonitorSwitchAck {
+            operation_id: required_string(params, "operation_id")?,
+            head: required_string(params, "head")?,
+            work_id: required_string(params, "work_id")?,
+            board_entry_id: required_string(params, "board_entry_id")?,
+        }),
         "issue.monitor.schedule.read" => CliCommand::Issue(IssueCommand::MonitorSchedule {
             project_root: optional_path(params, "project_root")?,
             action: crate::issue_monitor::AgentScheduleAction::Read,
@@ -6421,6 +6446,42 @@ mod tests {
         ] {
             params["recovered_at"] = json!("2026-10-20T01:00:00Z");
             let _ = err("issue.monitor.recovery.record", params);
+        }
+    }
+
+    #[test]
+    fn issue_monitor_switch_operations_require_typed_self_acknowledgements() {
+        let read = ok("issue.monitor.switch.read", json!({}));
+        assert!(format!("{read:?}").contains("MonitorSwitch"));
+        let request = json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":3, "target_issue_number":42});
+        let parsed = ok("issue.monitor.switch.request", request.clone());
+        assert!(format!("{parsed:?}").contains("expected_roster_revision: 3"));
+        for field in [
+            "operation_id",
+            "member_id",
+            "expected_roster_revision",
+            "target_issue_number",
+        ] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let _ = err("issue.monitor.switch.request", incomplete);
+        }
+        let _ = ok(
+            "issue.monitor.switch.cancel",
+            json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
+        );
+        let ack = json!({"operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "head":"a".repeat(40), "work_id":"work", "board_entry_id":"board"});
+        let parsed = ok("issue.monitor.switch.ack", ack.clone());
+        assert!(format!("{parsed:?}").contains("MonitorSwitchAck"));
+        for field in ["operation_id", "head", "work_id", "board_entry_id"] {
+            let mut incomplete = ack.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            let _ = err("issue.monitor.switch.ack", incomplete);
+        }
+        for field in ["project_root", "session_id", "capability", "command"] {
+            let mut forged = ack.clone();
+            forged[field] = json!("untrusted");
+            let _ = err("issue.monitor.switch.ack", forged);
         }
     }
 

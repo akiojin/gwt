@@ -12,6 +12,24 @@ test("Board destination updates and runtime hook refresh preserve controls and f
   page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
   const theme = info.project.name.includes("light") ? "light" : "dark";
   await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+  await page.route("**/ui-state-store.js", async route => {
+    const response = await route.fetch();
+    const source = await response.text();
+    const anchor = "export function createUiStateStore(";
+    expect(source).toContain(anchor);
+    const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+      export function createUiStateStore(...args) {
+        const store = originalCreateUiStateStore(...args);
+        const update = store.update;
+        store.update = reduce => {
+          update(reduce);
+          const receipt = store.read()?.receipt;
+          if (receipt?.kind?.startsWith("board_")) window.__boardReceipt = receipt;
+        };
+        return store;
+      }`;
+    await route.fulfill({ response, contentType: "text/javascript", body });
+  });
   await gotoLiveGwt(page, base!);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("op:command", { detail: { id: "open-board" } })));
@@ -32,7 +50,7 @@ test("Board destination updates and runtime hook refresh preserve controls and f
     };
     const inject = (detail: any) => window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail }));
     const receive = () => inject({ kind: "board_entries", id,
-      entries: [{ id: "hook-post", author: "Fixture", body: "Retained entry", created_at: "2026-10-20T00:00:00Z" }], has_more_before: false });
+      entries: [{ id: "hook-post", author: "Fixture", body: "Retained entry", audience: [], created_at: "2026-10-20T00:00:00Z" }], has_more_before: false });
     receive();
     const card = root.querySelector('[data-board-entry-id="hook-post"]');
     const input = root.querySelector(".board-textarea") as HTMLTextAreaElement;
@@ -71,8 +89,23 @@ test("Board destination updates and runtime hook refresh preserve controls and f
       hook({ kind: "coordination_event" });
       const whileLoading = sent.length;
       receive(); hook({ kind: "coordination_event" }); receive();
-      return { destination, batch, ignored, loading, whileLoading, loads: sent.map(event => event.id),
-        sameCard: !!card && card === root.querySelector('[data-board-entry-id="hook-post"]'),
+      const sameCard = !!card && card === root.querySelector('[data-board-entry-id="hook-post"]');
+      const receipt = (window as any).__boardReceipt;
+      const frozen = !!receipt && Object.isFrozen(receipt) && Object.isFrozen(receipt.entries)
+        && Object.isFrozen(receipt.entries[0]) && Object.isFrozen(receipt.entries[0].audience);
+      inject({ kind: "board_history_page", id, entries: [], has_more_before: false });
+      const history = (window as any).__boardReceipt;
+      const historyFrozen = history?.kind === "board_history_page" && Object.isFrozen(history)
+        && Object.isFrozen(history.entries);
+      inject({ kind: "board_error", id, message: "Board receipt recovery" });
+      const error = (window as any).__boardReceipt;
+      const errorShown = root.querySelector(".board-status")!.textContent!.includes("Board receipt recovery")
+        && error?.kind === "board_error" && Object.isFrozen(error);
+      receive();
+      const recovered = !root.querySelector(".board-status")!.textContent!.includes("Board receipt recovery")
+        && root.querySelector('[data-board-entry-id="hook-post"]')?.textContent?.includes("Retained entry");
+      return { frozen, historyFrozen, errorShown, recovered, destination, batch, ignored, loading, whileLoading, loads: sent.map(event => event.id),
+        sameCard,
         sameInput: input === root.querySelector(".board-textarea"), focused: document.activeElement === input,
         draft: input.value, selection: [input.selectionStart, input.selectionEnd] };
     } finally {
@@ -82,7 +115,7 @@ test("Board destination updates and runtime hook refresh preserve controls and f
       chip.replaceChildren = originalReplace;
     }
   }, { id, projectRoot: process.env.GWT_PLAYWRIGHT_PROJECT_ROOT! });
-  expect(result).toEqual({ destination: "Slack #shared-49 ⚠", batch: { before: 0, sameBefore: true, frames: 1, after: 1 },
+  expect(result).toEqual({ frozen: true, historyFrozen: true, errorShown: true, recovered: true, destination: "Slack #shared-49 ⚠", batch: { before: 0, sameBefore: true, frames: 1, after: 1 },
     ignored: 0, loading: expect.stringContaining("Loading"), whileLoading: 1,
     loads: [id, id], sameCard: true, sameInput: true, focused: true,
     draft: "Unsent draft", selection: [2, 5] });

@@ -6031,13 +6031,13 @@ mod tests {
                 3
             );
         }
-        let settings_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        let issue_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
         let board_id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Board, 0);
         assert_eq!(
-            runtime.window_status(&settings_id),
+            runtime.window_status(&issue_id),
             Some(WindowProcessStatus::Running)
         );
-        assert_eq!(runtime.focus_window_events(&settings_id).len(), 1);
+        assert_eq!(runtime.focus_window_events(&issue_id).len(), 1);
         assert_eq!(
             runtime
                 .cycle_focus_events(&runtime.test_context(), FocusCycleDirection::Forward)
@@ -6075,6 +6075,7 @@ mod tests {
             WindowPreset::Settings,
             WindowPreset::Profile,
             WindowPreset::Logs,
+            WindowPreset::Issue,
         ] {
             assert_eq!(
                 runtime
@@ -6083,7 +6084,11 @@ mod tests {
                 3
             );
         }
-        let id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0);
+        let id = window_id_for_preset(&runtime, "tab-1", WindowPreset::Issue, 0);
+        assert_ne!(
+            id,
+            window_id_for_preset(&runtime, "tab-1", WindowPreset::Settings, 0)
+        );
         let raw = runtime.window_lookup[&id].raw_id.clone();
         let before = runtime
             .tab("tab-1")
@@ -11143,7 +11148,12 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::ProjectDispatch { context, events }) if app.project_context_is_current(&context) => {
-                clients.dispatch(events);
+                clients.dispatch(events.into_iter().filter(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => app
+                        .retain_current_local_agent_activity(&context.tab_id, Some(activity.clone()))
+                        .as_ref() == Some(activity),
+                    _ => true,
+                }).collect());
             }
             Event::UserEvent(UserEvent::PreparedActiveWorkDispatch {
                 context,
