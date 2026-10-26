@@ -1744,6 +1744,24 @@ mod tests {
         session.project_state_root = Some(foreign);
         session.agent_id = gwt_agent::AgentId::ClaudeCode;
         session.save(&sessions).unwrap();
+        let mut legacy = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let index = legacy
+            .agent_roster
+            .as_ref()
+            .unwrap()
+            .members
+            .iter()
+            .position(|entry| entry.agent_member_id == member.agent_member_id)
+            .unwrap();
+        legacy.agent_roster.as_mut().unwrap().members[index].agent_id = None;
+        let mut profile = legacy.launch_profile_pool()[0].clone();
+        profile.agent_id = "codex".into();
+        profile.agent_member_id = Some(member.agent_member_id.clone());
+        legacy.set_launch_profile_pool(vec![profile]);
+        synchronize_roster_tools(&root, &mut legacy, &prefs_path, &sessions, None).unwrap();
+        let legacy_member = &legacy.agent_roster.as_ref().unwrap().members[index];
+        assert_eq!(legacy_member.agent_id.as_deref(), Some("codex"));
+        assert_eq!(legacy_member.assignment.as_ref(), Some(&assignment));
         assert!(
             read_project_roster(&root, &sessions)
                 .unwrap()
