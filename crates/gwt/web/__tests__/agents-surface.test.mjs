@@ -166,7 +166,16 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
   assert.equal(f.surface.element.querySelectorAll(".roster-row").length, 2);
   assert.equal(f.surface.element.querySelectorAll(".roster-detail .roster-stat").length, 4);
-  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*GPT-6.*2026-10-20/s);
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*2026-10-20/s);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /GPT-6/);
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Saved manual candidate.*Unavailable.*Automatic launches use tier settings/s);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: — · Tool: — · Recorded model: —");
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
+    saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
+    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+  }) })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
@@ -174,10 +183,14 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.equal(history[2].querySelector(".roster-history-config")?.textContent, "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model");
   f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, name: "Renamed current", provider: "codex", model: "current-model" })) })); f.flush();
   assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "Renamed current");
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model/);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent), [
     "Recorded name: — · Tool: — · Recorded model: —", "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
   ]);
   const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector(".roster-saved-settings").textContent, f.surface.element.querySelector(".roster-saved-settings").textContent);
+  assert.equal(preview.querySelector(".roster-current-config").textContent, f.surface.element.querySelector(".roster-current-config").textContent);
   assert.deepEqual([...preview.querySelectorAll(".roster-history-config")].map(node => node.textContent), [...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent));
   assert.equal(f.surface.selectMember("m2"), true);
   assert.ok(f.document.activeElement === f.surface.element.querySelector('.roster-row[data-member-id="m2"]'), "selection restores keyboard focus to the new selected row");

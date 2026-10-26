@@ -427,6 +427,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-detail .roster-stat")).toHaveCount(4);
     await expect(roster(page).locator(".roster-detail")).toContainText("Codex");
     await expect(roster(page).locator(".roster-detail")).toContainText("Member since 2026-10-20");
+    await expect(roster(page).locator(".roster-detail-heading")).not.toContainText("Fixture model");
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: saved-manual-model");
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Automatic launches use tier settings");
+    await expect(roster(page).locator(".roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringMatching(/Now.*#4777.*Current issue/), expect.stringContaining("Later slice"), expect.stringContaining("Earlier slice"),
     ]);
@@ -563,6 +567,8 @@ test.describe("Works and Agents approved baseline", () => {
       "Recorded name: — · Tool: — · Recorded model: —",
       "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
     ]);
+    await expect(page.locator(".agents-surface--preview .roster-saved-settings")).toContainText("Model: saved-manual-model");
+    await expect(page.locator(".agents-surface--preview .roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   });
 
   test("ordered member plans keep current work through pending readback, stale rejection and reassignment", async ({ page }, info) => {
@@ -656,7 +662,8 @@ async function installWorksAgentsBackend(page: Page) {
     ];
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
     const members: any[] = [
-      { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+      { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+        { session_id: "s-one", name: "Launch author", provider: "codex", model: "launch-model", issue_number: 4777, title: "Current issue", result: "Running", started_at: "2026-10-23T00:00:00Z", ended_at: null },
         { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
         { session_id: "s-later", issue_number: 4600, title: "Later slice", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
       ] },

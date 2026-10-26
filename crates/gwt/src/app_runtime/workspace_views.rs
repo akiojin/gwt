@@ -4069,13 +4069,18 @@ fn merge_workspace_projection_membership_cache_only(
 
 fn agent_roster_view(
     context: &ProjectContext,
-    roster: gwt::agent_names::AgentRoster,
+    prefs: &gwt::IssueMonitorPrefs,
     sessions: &[Arc<gwt_agent::Session>],
     entries: &[gwt_core::coordination::BoardEntry],
     past_complete: bool,
     sessions_dir: &Path,
 ) -> gwt::AgentRosterView {
     use std::collections::{BTreeMap, BTreeSet};
+    let roster = prefs
+        .agent_roster
+        .as_ref()
+        .expect("initialized roster snapshot");
+    let saved_profiles = prefs.launch_profile_pool();
     let normalized_root =
         dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
@@ -4146,6 +4151,13 @@ fn agent_roster_view(
                 member: member.clone(),
                 provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
+                saved_manual_profile: saved_profiles
+                    .iter()
+                    .find(|profile| {
+                        profile.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+                            && member.agent_id.as_deref() == Some(profile.agent_id.as_str())
+                    })
+                    .cloned(),
                 history: assigned
                     .iter()
                     .map(|session| history_for(session))
@@ -4389,24 +4401,26 @@ impl AppRuntime {
         let sessions_dir = self.sessions_dir.clone();
         let reply_request_id = request_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
-            let result = gwt::agent_names::mutate_project_roster(
+            let result = gwt::agent_names::mutate_project_roster_snapshot(
                 &context_owned.project_root,
                 &sessions_dir,
                 action,
                 expected_revision,
             );
-            let (roster, error) = match result {
-                Ok(roster) => (Some(roster), None),
+            let (prefs, error) = match result {
+                Ok(prefs) => (Some(prefs), None),
                 Err(error) => (
-                    gwt::agent_names::read_project_roster(
+                    gwt::agent_names::mutate_project_roster_snapshot(
                         &context_owned.project_root,
                         &sessions_dir,
+                        gwt::agent_names::AgentRosterAction::Read,
+                        None,
                     )
                     .ok(),
                     Some(error),
                 ),
             };
-            let event = if let Some(roster) = roster {
+            let event = if let Some(prefs) = prefs {
                 match gwt_agent::session_ledger::load_sessions_shared(&sessions_dir) {
                     Ok(sessions) => {
                         let entries = gwt_core::coordination::load_entries_since(
@@ -4416,7 +4430,7 @@ impl AppRuntime {
                         let complete = entries.is_ok();
                         let mut view = agent_roster_view(
                             &context_owned,
-                            roster,
+                            &prefs,
                             &sessions,
                             &entries.unwrap_or_default(),
                             complete,
@@ -6467,9 +6481,25 @@ mod bounded_cache_merge_tests {
             .into_iter()
             .map(Arc::new)
             .collect::<Vec<_>>();
+        let mut prefs = gwt::IssueMonitorPrefs {
+            agent_roster: Some(roster.clone()),
+            launch_auto: true,
+            ..Default::default()
+        };
+        let saved: gwt::IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id":"claude", "agent_member_id":"member-1", "model":"saved-model",
+            "reasoning":"high", "runtime_target":"Docker", "docker_service":"worker",
+            "skip_permissions":false
+        }))
+        .unwrap();
+        prefs.set_launch_profile_pool(vec![saved.clone()]);
+        prefs.launch_tiers = vec![vec![serde_json::from_value(serde_json::json!({
+            "agent_id":"claude", "model":"tier-model"
+        }))
+        .unwrap()]];
         let view = agent_roster_view(
             &context,
-            roster.clone(),
+            &prefs,
             &sessions,
             &[],
             true,
@@ -6495,13 +6525,26 @@ mod bounded_cache_merge_tests {
         );
         assert_eq!(view.members[0].member.name, "Current name");
         assert_eq!(view.members[0].provider.as_deref(), Some("claude"));
+        let mut member_payload = serde_json::to_value(&view.members[0]).unwrap();
+        assert_eq!(
+            member_payload["saved_manual_profile"],
+            serde_json::to_value(&saved).unwrap()
+        );
+        member_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("saved_manual_profile");
+        let legacy_member: gwt::AgentRosterMemberView =
+            serde_json::from_value(member_payload).unwrap();
+        assert!(legacy_member.saved_manual_profile.is_none());
         // Missing legacy facts stay unknown, never borrow the current member.
         let mut unknown = sessions[0].as_ref().clone();
         unknown.agent_name = None;
         unknown.model = None;
+        prefs.launch_profiles[0].agent_member_id = Some("another-member".into());
         let unknown_view = agent_roster_view(
             &context,
-            roster,
+            &prefs,
             &[Arc::new(unknown)],
             &[],
             true,
@@ -6510,6 +6553,7 @@ mod bounded_cache_merge_tests {
         let history = serde_json::to_value(&unknown_view.members[0].history[0]).unwrap();
         assert!(history["name"].is_null());
         assert!(history["model"].is_null());
+        assert!(unknown_view.members[0].saved_manual_profile.is_none());
         let legacy = view
             .past_contributors
             .iter()
@@ -6914,7 +6958,10 @@ mod bounded_cache_merge_tests {
             .unwrap();
             let view = agent_roster_view(
                 &context,
-                roster,
+                &gwt::IssueMonitorPrefs {
+                    agent_roster: Some(roster),
+                    ..Default::default()
+                },
                 std::slice::from_ref(&source_session),
                 &[],
                 true,
