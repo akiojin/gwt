@@ -160,6 +160,7 @@ fn canonical_tool(value: &str) -> Result<String, String> {
 /// Current assignments keep their person and tool, including when their future
 /// slot is rested to preserve the configured capacity for the saved primary.
 fn synchronize_roster_tools(
+    root: &Path,
     prefs: &mut crate::IssueMonitorPrefs,
     path: &Path,
     sessions_dir: &Path,
@@ -184,7 +185,19 @@ fn synchronize_roster_tools(
             .assignment
             .as_ref()
             .and_then(|assignment| assignment.session_id.as_ref())
-            .and_then(|id| gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml"))).ok())
+            .and_then(|id| {
+                gwt_agent::Session::load(&sessions_dir.join(format!("{id}.toml")))
+                    .ok()
+                    .filter(|session| {
+                        session.id == *id
+                            && gwt_core::paths::project_scope_hash(
+                                session
+                                    .project_state_root
+                                    .as_deref()
+                                    .unwrap_or(&session.worktree_path),
+                            ) == gwt_core::paths::project_scope_hash(root)
+                    })
+            })
             .map(|session| session.agent_id.command().to_string());
         if let Some(fixed) = member.agent_id.as_deref() {
             let fixed = canonical_tool(fixed)?;
@@ -338,6 +351,7 @@ pub(crate) fn synchronize_roster_capacity(
 }
 
 fn ensure_roster(
+    root: &Path,
     prefs: &mut crate::IssueMonitorPrefs,
     prefs_path: &Path,
     seed: &[AgentMember],
@@ -381,7 +395,7 @@ fn ensure_roster(
         prefs.max_active_agents = roster.enabled_count();
         prefs.agent_roster = Some(roster);
     }
-    synchronize_roster_tools(prefs, prefs_path, sessions_dir, requested_tool)?;
+    synchronize_roster_tools(root, prefs, prefs_path, sessions_dir, requested_tool)?;
     prefs
         .agent_roster
         .as_ref()
@@ -477,7 +491,8 @@ pub fn mutate_project_roster(
     let seed = initial_project_members(root, &path, sessions_dir)?;
     let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let (_, roster) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
+        ensure_roster(root, prefs, &path, &seed, sessions_dir, None)
+            .map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         let default_tool = prefs
             .launch_profile_pool()
@@ -890,7 +905,7 @@ fn reserve_project_member_inner(
     };
     let dead = dead_project_assignments(root, &path, sessions_dir)?;
     let (_, member) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
+        ensure_roster(root, prefs, &path, &seed, sessions_dir, requested_tool.as_deref()).map_err(std::io::Error::other)?;
         let dead = unpinned_dead_assignments(prefs, &dead.assignments);
         if selected_member_id.is_some_and(|id| !prefs.launch_profile_pool().iter().any(|profile| profile.agent_member_id.as_deref() == Some(id) && requested_tool.as_ref() == Some(&profile.agent_id))) {
             return Err(std::io::Error::other("Selected registered Agent profile changed; wait and reload before launching"));
@@ -1128,7 +1143,8 @@ pub fn adopt_project_member_session(
         seed.push(candidate.clone());
     }
     let (_, member_id) = crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
-        ensure_roster(prefs, &path, &seed, sessions_dir, None).map_err(std::io::Error::other)?;
+        ensure_roster(root, prefs, &path, &seed, sessions_dir, None)
+            .map_err(std::io::Error::other)?;
         let roster = prefs.agent_roster.as_mut().expect("initialized roster");
         if let Some(member) = roster.members.iter().find(|member| {
             member.origin_session_id.as_deref() == Some(session.id.as_str())
@@ -1822,7 +1838,26 @@ mod tests {
         let foreign = temp.path().join("foreign-project");
         std::fs::create_dir_all(&foreign).unwrap();
         session.project_state_root = Some(foreign);
+        session.agent_id = gwt_agent::AgentId::ClaudeCode;
         session.save(&sessions).unwrap();
+        let mut legacy = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let index = legacy
+            .agent_roster
+            .as_ref()
+            .unwrap()
+            .members
+            .iter()
+            .position(|entry| entry.agent_member_id == member.agent_member_id)
+            .unwrap();
+        legacy.agent_roster.as_mut().unwrap().members[index].agent_id = None;
+        let mut profile = legacy.launch_profile_pool()[0].clone();
+        profile.agent_id = "codex".into();
+        profile.agent_member_id = Some(member.agent_member_id.clone());
+        legacy.set_launch_profile_pool(vec![profile]);
+        synchronize_roster_tools(&root, &mut legacy, &prefs_path, &sessions, None).unwrap();
+        let legacy_member = &legacy.agent_roster.as_ref().unwrap().members[index];
+        assert_eq!(legacy_member.agent_id.as_deref(), Some("codex"));
+        assert_eq!(legacy_member.assignment.as_ref(), Some(&assignment));
         assert!(
             read_project_roster(&root, &sessions)
                 .unwrap()
@@ -1835,6 +1870,12 @@ mod tests {
             "a same-id Session belonging to another project must retain the assignment"
         );
         session.project_state_root = None;
+        session.save(&sessions).unwrap();
+        assert!(
+            read_project_roster(&root, &sessions).is_err(),
+            "a same-project Session with a different tool still refuses synchronization"
+        );
+        session.agent_id = gwt_agent::AgentId::Codex;
         session.save(&sessions).unwrap();
         let restarted = reserve_project_member(
             &root,
