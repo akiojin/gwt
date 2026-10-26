@@ -323,16 +323,32 @@ test("a late initial load cannot move a newer explicit selection (AS-17.5)", asy
 
   // The initial load completes late, still claiming row A as selected and
   // no longer containing row B.
+  const entries = [{ ...ROW_A, labels: ["bug"] }];
   surface.applyKnowledgeReceiveEvent({
     kind: "knowledge_entries",
     id: "win-1",
     knowledge_kind: "issue",
     request_id: staleLoadRequestId,
-    entries: [ROW_A],
+    entries,
     selected_number: ROW_A.number,
     empty_message: "",
     refresh_enabled: true,
   });
+
+  entries[0].labels.push("caller");
+  entries.push(ROW_B);
+  assert.equal(state.baseEntries.length, 1, "the list receipt must own its outer array");
+  assert.deepEqual(state.baseEntries[0].labels, ["bug"], "nested caller mutation must be isolated");
+  assert.ok(Object.isFrozen(state.baseEntries[0].labels));
+  assert.equal(Object.isFrozen(state.baseEntries), false, "Phase ACKs replace local list slots");
+  assert.equal(Object.isFrozen(state.entries), false);
+  const fresh = { ...ROW_A, title: "Confirmed Alpha" };
+  surface.applyKnowledgeReceiveEvent({
+    kind: "knowledge_bridge_phase_updated", id: "win-1", issue_number: ROW_A.number,
+    result: { kind: "ok", fresh_entry: fresh },
+  });
+  assert.equal(state.baseEntries[0], fresh);
+  assert.equal(state.entries[0], fresh);
 
   assert.equal(
     state.selectedNumber,
