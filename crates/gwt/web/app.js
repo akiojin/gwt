@@ -420,7 +420,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
-      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        onRename: request => {
+          if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
+            request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
+        },
+      });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -572,6 +578,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_name");
           appendRenderKeyPart(parts, windowData?.agent_name || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -888,9 +896,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // A switch is valid only on this live Host connection. Never replay
-        // an unacknowledged request or cancellation after a Host restart.
-        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+        // Revisioned names and switches belong to this live connection.
+        // Never replay an unacknowledged write after reconnect.
+        if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
+            (message.kind === "agent_roster" && message.action.kind === "rename")) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1146,7 +1155,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -1691,7 +1700,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim();
+          const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
+            && member.assignment?.session_id === windowData.session_id);
+          const name = String(member?.name || windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
           if (name) return purpose ? `${name} — ${purpose}` : name;
         }
@@ -5010,7 +5021,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyAgentRosterError(event);
             break;
           case "agent_roster":
-            applyAgentRosterSnapshot(event.roster);
+            applyAgentRosterSnapshot(event.roster, event.request_id);
             refreshProfilesAfterRoster(event.roster);
             break;
           case "agent_switch":
@@ -5542,6 +5553,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      let renderedRosterNames = null;
+      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id])), names => {
+        if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
+        renderedRosterNames = names;
+      });
       rosterModel.subscribe(state => state.revision, () => {
         if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
       });
@@ -5581,6 +5598,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return worksSurface.openWork(live);
       }
       agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onRenameMember: editAgentMemberName,
+        onRetryName: retryAgentMemberName,
         onAddMember: (agentId, name) => {
           applyAgentRosterError({ project_key: routeProjectKey, message: null });
           requestAgentRoster({ kind: "add", agent_id: agentId, name });

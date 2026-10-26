@@ -492,6 +492,71 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-approved-400.png") });
   });
 
+  test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
+    await openRail(page, "agents");
+    const name = roster(page).getByRole("textbox", { name: "Display name", exact: true });
+    const status = roster(page).locator(".roster-name-status");
+    const writes = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "rename");
+    const identity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
+    await page.evaluate(() => (window as any).__worksAgentsFixture.deferRename());
+    await name.fill("Maple current");
+    await expect(status).toContainText("Saving");
+    await name.fill("Oak current");
+    expect(await writes()).toHaveLength(1);
+    await name.focus();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("idle"));
+    await expect(name).toBeFocused();
+    await expect(name).toHaveValue("Oak current");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect.poll(async () => (await writes()).length).toBe(2);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.replayRename());
+    await expect(name).toHaveValue("Oak current");
+    await expect(roster(page).locator(".roster-detail h3")).toHaveText("Oak current");
+    await name.fill("  ");
+    await expect(name).toHaveAttribute("aria-invalid", "true");
+    await name.fill(" BIRCH ");
+    await expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(await writes()).toHaveLength(2);
+    await name.dispatchEvent("compositionstart");
+    await name.fill("楓");
+    expect(await writes()).toHaveLength(2);
+    await name.dispatchEvent("compositionend");
+    await expect.poll(async () => (await writes()).length).toBe(3);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    await name.fill("Draft after conflict");
+    await expect.poll(async () => (await writes()).length).toBe(4);
+    await page.evaluate(() => { (window as any).__worksAgentsFixture.renameElsewhere("Remote name"); (window as any).__worksAgentsFixture.releaseRename(); });
+    await expect(status).toContainText("changed");
+    await expect(name).toHaveValue("Draft after conflict");
+    await expect(roster(page).locator(".roster-detail h3")).toHaveText("Remote name");
+    await roster(page).getByRole("button", { name: "Retry name", exact: true }).click();
+    await expect.poll(async () => (await writes()).length).toBe(5);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    const renamedIdentity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
+    // The fixture's explicit status refresh is unrelated to the rename.
+    expect(renamedIdentity.agents).toEqual(identity.agents);
+    expect(renamedIdentity.assignments).toEqual(identity.assignments);
+    await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
+    await expect(roster(page).locator(".roster-past tbody")).toContainText("Earlier author");
+    await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
+    await openRail(page, "works");
+    await expect(workRow(page, "agent-one").locator(".work-name")).toHaveText("Draft after conflict");
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal", exact: true }).click();
+    await expect(full(page).locator(".works-full-name")).toContainText("Draft after conflict");
+    await openRail(page, "agents");
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await name.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("inline-name-400.png") });
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    await expect(page.locator('.agents-surface--preview [aria-label="Display name"]')).toBeDisabled();
+  });
+
   test("ordered member plans keep current work through pending readback, stale rejection and reassignment", async ({ page }, info) => {
     await openRail(page, "agents");
     const plans = roster(page).locator(".roster-plans");
@@ -601,7 +666,7 @@ async function installWorksAgentsBackend(page: Page) {
     const sentMessages: any[] = [], rejectedRevisions: any[] = [];
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
-    let pendingSchedule: any = null;
+    let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
@@ -610,6 +675,18 @@ async function installWorksAgentsBackend(page: Page) {
     let socket: FixtureWebSocket;
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
     const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const applyRename = (message: any) => {
+      const member = members.find(member => member.agent_member_id === message.action.member_id);
+      const name = message.action.name.trim();
+      let error: string | null = null;
+      if (message.expected_revision !== revision) error = "Agent roster changed; reload before retrying";
+      else if (!member || !name || members.some(other => other !== member && other.name.trim().toLowerCase() === name.toLowerCase())) error = "Invalid display name";
+      else if (member.name !== name) { member.name = name; revision++; }
+      const receipt = { ...rosterSnapshot(), request_id: message.request_id };
+      receipt.roster.error = error as any;
+      if (!firstRenameReceipt) firstRenameReceipt = JSON.parse(JSON.stringify(receipt));
+      socket.emit(receipt);
+    };
     const scheduleSnapshot = () => ({ kind: "agent_schedule", schedule: { project_key: projectKey, roster_revision: revision, queue_revision: queueRevision, schedule_revision: scheduleRevision, members: members.filter(member => member.enabled).map(member => ({ agent_member_id: member.agent_member_id, issues: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues || [], empty_reason: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues.length ? null : "No queued issue" })) } });
     const applySchedule = (action: any) => {
       if (action.expected_roster_revision !== revision || action.expected_queue_revision !== queueRevision || action.expected_schedule_revision !== scheduleRevision) {
@@ -652,6 +729,11 @@ async function installWorksAgentsBackend(page: Page) {
         ] });
         if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
         if (message.kind === "agent_roster") {
+          if (message.action.kind === "rename") {
+            if (deferredRename) pendingRename = message;
+            else applyRename(message);
+            return;
+          }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
           if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
@@ -669,6 +751,10 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      deferRename() { deferredRename = true; },
+      releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
+      replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
+      renameElsewhere(name: string) { members[0].name = name; revision++; socket.emit(rosterSnapshot()); },
       activityForWorks(session_id: string, runtime_incarnation: number) {
         agents = [{ window_id: "agent-one", session_id, runtime_incarnation, issue_number: 4777,
           is_pm: false, current_task: `Live ${session_id}` }];

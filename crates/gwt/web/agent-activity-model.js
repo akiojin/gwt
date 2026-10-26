@@ -122,31 +122,112 @@ export function createAgentSwitchModel(projectKey) {
   return { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch };
 }
 
-export function createAgentRosterModel(projectKey) {
+export function createAgentRosterModel(projectKey, { onRename = () => {}, scheduleFrame } = {}) {
   let latestSnapshot = null, memberUsage = {};
   const model = createUiStateStore({ members: [], revision: null, capacity: null,
-    recommended_capacity: null, past_contributors: [], error: null });
-  function applyAgentRosterSnapshot(snapshot) {
+    recommended_capacity: null, past_contributors: [], error: null, name_edits: {}, pending_name: null }, { scheduleFrame });
+  function nameError(state, memberId, value) {
+    const name = value.trim();
+    if (!name) return "Enter a display name.";
+    if (state.members.some(member => member.member_id !== memberId && member.name.trim().toLowerCase() === name.toLowerCase())) {
+      return "This name is already registered, including resting members.";
+    }
+    return "";
+  }
+  function updateNameEdit(memberId, reduce) {
+    model.update(state => ({ ...state, name_edits: { ...state.name_edits, [memberId]: reduce(state.name_edits[memberId]) } }));
+  }
+  function sendNextName() {
+    const state = model.read();
+    if (state.pending_name || !Number.isSafeInteger(state.revision)) return;
+    const next = Object.entries(state.name_edits).find(([, edit]) => edit.status === "queued" && !edit.composing && !edit.blocked);
+    if (!next) return;
+    const [memberId, edit] = next, member = state.members.find(member => member.member_id === memberId && !member.is_pm);
+    const error = member ? nameError(state, memberId, edit.value) : "This member is no longer available.";
+    if (error) {
+      updateNameEdit(memberId, current => ({ ...current, error, status: "invalid" })); sendNextName(); return;
+    }
+    const name = edit.value.trim();
+    if (name === member.name) {
+      updateNameEdit(memberId, current => ({ ...current, value: name, error: "", status: "saved" })); sendNextName(); return;
+    }
+    const request = { kind: "agent_roster", action: { kind: "rename", member_id: memberId, name },
+      expected_revision: state.revision, request_id: createLaunchOperationId("member-name") };
+    model.update(current => ({ ...current, pending_name: request,
+      name_edits: { ...current.name_edits, [memberId]: { ...current.name_edits[memberId], status: "saving", error: "" } } }));
+    try { onRename(request); } catch (_error) {
+      applyAgentRosterError({ project_key: projectKey, request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
+    }
+  }
+  function editAgentMemberName(memberId, value, { composing = false } = {}) {
+    const state = model.read();
+    if (typeof value !== "string" || !state.members.some(member => member.member_id === memberId && !member.is_pm)) return;
+    const error = composing ? "" : nameError(state, memberId, value);
+    updateNameEdit(memberId, previous => ({ value, composing, blocked: previous?.blocked || false,
+      error: error || (previous?.blocked ? previous.error : ""),
+      status: composing ? "editing" : error ? "invalid" : previous?.blocked ? "error" : "queued" }));
+    sendNextName();
+  }
+  function retryAgentMemberName(memberId) {
+    const state = model.read(), edit = state.name_edits[memberId];
+    if (!edit || edit.composing || !edit.blocked || nameError(state, memberId, edit.value)) return;
+    updateNameEdit(memberId, current => ({ ...current, blocked: false, error: "", status: "queued" }));
+    sendNextName();
+  }
+  function settleName(requestId, error = "") {
+    const state = model.read(), pending = state.pending_name;
+    if (!requestId || pending?.request_id !== requestId) return;
+    const memberId = pending.action.member_id, edit = state.name_edits[memberId];
+    const validationError = edit.composing ? "" : nameError(state, memberId, edit.value);
+    model.update(current => ({ ...current, pending_name: null,
+      name_edits: { ...current.name_edits, [memberId]: error
+        ? { ...edit, blocked: true, error, status: "error" }
+        : !edit.composing && edit.value.trim() === pending.action.name
+          ? { ...edit, value: pending.action.name, error: "", status: "saved" }
+          : { ...edit, error: validationError, status: edit.composing ? "editing" : validationError ? "invalid" : "queued" } } }));
+  }
+  function applyAgentRosterSnapshot(snapshot, requestId) {
     if (!snapshot || snapshot.project_key !== projectKey || !Array.isArray(snapshot.members) ||
         !Number.isSafeInteger(snapshot.revision)) return;
     model.update(state => {
       if (state.revision !== null && snapshot.revision < state.revision) return state;
       latestSnapshot = snapshot;
-      return { ...snapshot, members: snapshot.members.map(member => ({ ...member,
+      const nameEdits = { ...state.name_edits };
+      for (const member of snapshot.members) {
+        const edit = nameEdits[member.agent_member_id];
+        if (edit?.status === "saved" && edit.value !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
+      }
+      return { ...snapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
         member_id: member.agent_member_id, tokens: member.tokens ?? memberUsage[member.agent_member_id] ?? null })) };
     });
+    const state = model.read(), pending = state.pending_name;
+    if (requestId && pending?.request_id === requestId) {
+      const member = state.members.find(member => member.member_id === pending.action.member_id);
+      settleName(requestId, snapshot.error || (member?.name !== pending.action.name
+        ? "This name changed elsewhere. Review your draft and retry." : ""));
+    }
   }
   function applyAgentRosterError(event) {
     if (event?.project_key === projectKey) {
+      if (event.request_id) { settleName(event.request_id, event.message || "Name could not be saved. Retry."); return; }
       if (latestSnapshot) latestSnapshot = { ...latestSnapshot, error: event.message };
       model.update(state => ({ ...state, error: event.message }));
     }
+  }
+  function clearAgentRosterRename() {
+    const pending = model.read().pending_name;
+    if (pending) settleName(pending.request_id, "Connection lost. Review your draft and retry.");
   }
   function applyAgentRosterUsage(sessions, projectRoot) {
     memberUsage = selectWorksTelemetry({ sessions, projectRoot }).by_member;
     if (latestSnapshot) applyAgentRosterSnapshot(latestSnapshot);
   }
-  return { model, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage };
+  // Receipts only commit data. Continue queued transport on the store's
+  // existing frame boundary, independently of whichever view is mounted.
+  model.subscribeFrame(state => state.pending_name ? null
+    : Object.values(state.name_edits).find(edit => edit.status === "queued"), sendNextName);
+  return { model, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
+    editAgentMemberName, retryAgentMemberName, clearAgentRosterRename };
 }
 
 // Inputs are session-attributed measurements, never provider account totals.

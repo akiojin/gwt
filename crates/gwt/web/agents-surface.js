@@ -8,7 +8,7 @@ const date = value => value && Number.isFinite(Date.parse(value)) ? new Date(val
 
 export function createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
   scheduleModel, switchModel, onSwitch = () => {}, onOpenSavedWork = () => {}, onContinueSavedWork = () => {}, isContinuePending = () => false, onReassign = () => {}, onRefreshSchedule = () => {},
-  onAddMember = () => {}, onRestMember = () => {}, onOpenWork = () => {} }) {
+  onAddMember = () => {}, onRestMember = () => {}, onRenameMember = () => {}, onRetryName = () => {}, onOpenWork = () => {} }) {
   const element = document.createElement("section"); element.className = "agents-surface"; element.setAttribute("aria-label", "Agents");
   element.innerHTML = `<header class="roster-heading"><h2>Agents</h2><div class="roster-tabs" role="tablist" aria-label="Agent roster views"><button type="button" id="roster-tab-team" data-tab="team" role="tab" aria-controls="roster-team" aria-selected="true">Team</button><button type="button" id="roster-tab-past" data-tab="past" role="tab" aria-controls="roster-past" aria-selected="false" tabindex="-1">Past</button></div><span class="roster-active"></span></header>
     <div class="roster-pm-identity" role="group" aria-label="Project Manager" hidden><span class="roster-pm-name"></span><span class="window-role-badge">PM</span></div>
@@ -61,6 +61,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   let renderedPlans = null;
   let renderedDetail = null;
   const memberRows = new Map();
+  const nameFields = new Map();
   let submittedSnapshot = null, scheduleNotice = "", pendingSource = null;
   const emptySwitch = { intents: [], pending: null, error: null, disconnected: false };
   const switchState = () => switchModel?.read() || emptySwitch;
@@ -97,6 +98,9 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   }
   function selectMember(memberId) {
     if (disposed || !rosterModel.read().members.some(member => member.member_id === memberId && (member.enabled || liveWork(member)))) return false;
+    // Removing an IME target is not a commit. Preserve that unfinished draft
+    // until a later input explicitly supplies a completed value.
+    if (memberId !== selectedId && nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
     selectedId = memberId; tab = "team"; sync();
     [...element.querySelectorAll(".roster-row")].find(row => row.dataset.memberId === memberId)?.focus({ preventScroll: true });
     return true;
@@ -234,18 +238,18 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
   }
   function renderDetail(member) {
     const panel = element.querySelector(".roster-detail"), plans = member ? renderPlans(member) : null;
+    const head = member ? memberNameField(member) : null;
     const current = liveWork(member), key = member ? JSON.stringify([member.member_id,
       current?.window_id, current?.session_id, current?.runtime_incarnation]) : null;
     if (renderedDetail?.key !== key) renderedDetail = null;
     let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions;
     // Refresh presentation around unchanged native controls without detaching
     // their keyboard targets. A different member/runtime retires those controls.
-    for (const child of [...panel.childNodes]) if (child !== plans && child !== currentWork && child !== actions) child.remove();
+    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
-    const head = document.createElement("header"); head.className = "roster-detail-heading";
-    const who = document.createElement("div"); const name = document.createElement("h3"), meta = document.createElement("p");
-    name.textContent = member.name; meta.textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`; who.append(name, meta); head.append(avatar(member), who); panel.insertBefore(head, currentWork || plans); panel.insertBefore(stats(member), currentWork || plans);
+    if (head.parentElement !== panel) panel.prepend(head);
+    panel.insertBefore(stats(member), currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol");
     if (current) {
@@ -278,6 +282,44 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     actions.querySelector('[data-action="rest"]').disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1;
     panel.insertBefore(history, actions);
     renderedDetail = { key, currentWork, actions };
+  }
+  function memberNameField(member) {
+    let field = nameFields.get(member.member_id);
+    if (!field) {
+      const head = document.createElement("header"); head.className = "roster-detail-heading";
+      const who = document.createElement("div"), name = document.createElement("h3"), meta = document.createElement("p");
+      const label = document.createElement("label"); label.className = "settings-field roster-name-field"; label.textContent = "Display name";
+      const input = document.createElement("input"); input.type = "text"; input.className = "settings-input";
+      input.setAttribute("aria-label", "Display name"); input.setAttribute("autocomplete", "off"); input.required = true;
+      const status = document.createElement("p"); status.className = "roster-name-status"; status.id = `roster-name-status-${member.member_id}`;
+      status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); input.setAttribute("aria-describedby", status.id);
+      const retry = document.createElement("button"); retry.type = "button"; retry.dataset.action = "retry-name"; retry.textContent = "Retry name";
+      retry.addEventListener("click", () => { onRetryName(member.member_id); sync(); });
+      field = { head, input, status, retry, composing: false }; nameFields.set(member.member_id, field);
+      const edit = composing => { onRenameMember(member.member_id, input.value, { composing }); sync(); };
+      input.addEventListener("compositionstart", () => { field.composing = true; edit(true); });
+      input.addEventListener("compositionend", () => {
+        const completed = field.composing && selectedId === member.member_id && input.isConnected;
+        field.composing = false; if (completed) edit(false);
+      });
+      input.addEventListener("input", event => {
+        if (selectedId === member.member_id && input.isConnected) edit(field.composing || event.isComposing === true);
+      });
+      label.append(input); who.append(name, meta, label, status, retry); head.append(avatar(member), who);
+    }
+    const edit = rosterModel.read().name_edits?.[member.member_id];
+    field.head.querySelector("h3").textContent = member.name;
+    field.head.querySelector(".roster-avatar").textContent = Array.from(member.name || "?")[0];
+    field.head.querySelector("p").textContent = `${member.provider || "—"} · ${member.model || "—"} · Member since ${date(member.created_at)} UTC`;
+    const value = edit?.value ?? member.name;
+    if (field.input.value !== value) field.input.value = value;
+    field.input.disabled = !Number.isSafeInteger(rosterModel.read().revision);
+    field.input.setAttribute("aria-invalid", String(!!edit?.error));
+    field.status.textContent = edit?.error || ({ saving: "Saving…", queued: "Saving…", saved: "Saved" }[edit?.status] || "");
+    field.status.hidden = !field.status.textContent;
+    field.retry.hidden = !edit?.blocked;
+    field.retry.disabled = edit?.composing || edit?.status === "invalid" || !!rosterModel.read().pending_name;
+    return field.head;
   }
   function renderPast(contributors, complete) {
     const kpis = element.querySelector(".roster-past-kpis"); kpis.replaceChildren();
@@ -357,7 +399,10 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const enabledMembers = (roster.members || []).filter(member => member.enabled && !member.is_pm);
     const members = (roster.members || []).filter(member => !member.is_pm && (member.enabled || liveWork(member)));
     const enabledCount = enabledMembers.length;
-    if (!members.some(member => member.member_id === selectedId)) selectedId = members[0]?.member_id || null;
+    if (!members.some(member => member.member_id === selectedId)) {
+      if (nameFields.has(selectedId)) nameFields.get(selectedId).composing = false;
+      selectedId = members[0]?.member_id || null;
+    }
     const selected = members.find(member => member.member_id === selectedId);
     element.querySelector(".roster-count").textContent = String(enabledCount);
     element.querySelector(".roster-capacity-value").textContent = number(roster.capacity);

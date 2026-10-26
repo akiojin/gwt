@@ -421,6 +421,8 @@ pub enum FrontendEvent {
         action: crate::agent_names::AgentRosterAction,
         #[serde(default)]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Read or reassign the authenticated project's persistent Agent schedule.
     AgentSchedule {
@@ -2158,10 +2160,14 @@ pub enum BackendEvent {
     /// Project-scoped persistent membership and assignment history.
     AgentRoster {
         roster: AgentRosterView,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     AgentRosterError {
         project_key: String,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     AgentSchedule {
         schedule: crate::issue_monitor::AgentScheduleSnapshot,
@@ -5311,12 +5317,20 @@ mod tests {
             serde_json::json!({"kind":"read"}),
             serde_json::json!({"kind":"add"}),
             serde_json::json!({"kind":"rest","member_id":"member-1"}),
+            serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3
             }));
             assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
         }
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind":"agent_roster", "action":{"kind":"read"}, "request_id":"name-write-1"
+        }))
+        .unwrap();
+        assert!(
+            matches!(event, FrontendEvent::AgentRoster { request_id: Some(id), .. } if id == "name-write-1")
+        );
     }
 
     #[test]

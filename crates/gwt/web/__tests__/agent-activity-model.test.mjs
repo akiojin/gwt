@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createAgentActivityModel, createAgentScheduleModel } from "../agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel } from "../agent-activity-model.js";
 
 test("plans accept only canonical project revisions and keep the current plan until readback", () => {
   const { model, applyAgentScheduleSnapshot, applyAgentScheduleError,
@@ -56,6 +56,99 @@ test("roster receipts are project-scoped and stale revisions cannot undo a membe
   assert.match(model.read().error, /refresh/);
   applyAgentRosterError({ project_key: "project", message: "Read unavailable" });
   assert.equal(model.read().error, "Read unavailable");
+});
+
+const namedRoster = (revision, name = "Ada", overrides = {}) => ({ project_key: "project", revision,
+  members: [{ agent_member_id: "m1", name, enabled: true, assignment: { session_id: "s1" }, agent_id: "codex", history: [{ name: "Ada" }] },
+    { agent_member_id: "m2", name: "Resting", enabled: false }], ...overrides });
+function nameController(sent) {
+  const frames = new Set(), controller = createAgentRosterModel("project", { onRename: request => sent.push(request),
+    scheduleFrame: callback => { frames.add(callback); return () => frames.delete(callback); } });
+  return { ...controller, flush() { for (const callback of [...frames]) { frames.delete(callback); callback(); } } };
+}
+
+test("member name autosave serializes latest drafts and accepts only correlated receipts", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError, flush } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3));
+  editAgentMemberName("m1", "  Maple  ");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].action, { kind: "rename", member_id: "m1", name: "Maple" });
+  assert.equal(sent[0].expected_revision, 3); assert.ok(sent[0].request_id);
+  assert.equal(model.read().members[0].name, "Ada", "sending never changes canonical identity");
+  editAgentMemberName("m1", "Cedar"); editAgentMemberName("m1", "Birch");
+  applyAgentRosterSnapshot(namedRoster(3));
+  applyAgentRosterError({ project_key: "project", request_id: "older", message: "Old error" });
+  assert.equal(sent.length, 1, "uncorrelated traffic cannot release the serialized writer");
+  applyAgentRosterSnapshot(namedRoster(4, "Maple"), sent[0].request_id);
+  assert.equal(sent.length, 1, "a receive handler only commits state; queued transport waits for the model effect frame");
+  flush();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].action.name, "Birch"); assert.equal(sent[1].expected_revision, 4);
+  assert.notEqual(sent[1].request_id, sent[0].request_id);
+  applyAgentRosterSnapshot(namedRoster(5, "Birch"), sent[1].request_id);
+  assert.equal(model.read().name_edits.m1.status, "saved");
+  assert.equal(model.read().name_edits.m1.value, "Birch");
+  assert.equal(model.read().members[0].member_id, "m1");
+  assert.deepEqual(model.read().members[0].assignment, { session_id: "s1" });
+  assert.deepEqual(model.read().members[0].history, [{ name: "Ada" }]);
+  applyAgentRosterSnapshot(namedRoster(6, "Current canonical name"));
+  assert.equal(model.read().name_edits.m1.value, "Current canonical name", "a completed draft follows a later canonical rename");
+});
+
+test("member names preserve invalid and composing drafts without submitting them", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3));
+  editAgentMemberName("m1", "   ");
+  assert.equal(model.read().name_edits.m1.value, "   "); assert.match(model.read().name_edits.m1.error, /display name/i);
+  editAgentMemberName("m1", "  rEsTiNg  ");
+  assert.match(model.read().name_edits.m1.error, /already registered/);
+  editAgentMemberName("m1", "ま", { composing: true });
+  assert.equal(sent.length, 0);
+  editAgentMemberName("m1", "楓");
+  assert.equal(sent.length, 1);
+  editAgentMemberName("m1", "", { composing: true });
+  applyAgentRosterSnapshot(namedRoster(4, "楓"), sent[0].request_id);
+  assert.equal(model.read().name_edits.m1.value, "", "an earlier success never erases unfinished IME input");
+  editAgentMemberName("m1", "");
+  assert.equal(sent.length, 1); assert.match(model.read().name_edits.m1.error, /display name/i);
+});
+
+test("stale or failed name receipts retain drafts until explicit retry at the current revision", () => {
+  const sent = [], controller = nameController(sent);
+  const { model, editAgentMemberName, retryAgentMemberName, applyAgentRosterSnapshot, applyAgentRosterError } = controller;
+  applyAgentRosterSnapshot(namedRoster(3)); editAgentMemberName("m1", "Maple");
+  applyAgentRosterSnapshot(namedRoster(5, "Another writer"));
+  applyAgentRosterSnapshot(namedRoster(4, "Maple"), sent[0].request_id);
+  assert.equal(model.read().revision, 5); assert.equal(model.read().members[0].name, "Another writer");
+  assert.equal(model.read().name_edits.m1.value, "Maple"); assert.equal(model.read().name_edits.m1.status, "error");
+  applyAgentRosterSnapshot(namedRoster(6, "Another writer")); editAgentMemberName("m1", "Cedar");
+  assert.equal(sent.length, 1, "conflicts require an explicit retry, even after further editing or refresh");
+  retryAgentMemberName("m1"); assert.equal(sent.length, 2); assert.equal(sent[1].expected_revision, 6);
+  applyAgentRosterError({ project_key: "other", request_id: sent[1].request_id, message: "Unrelated" });
+  assert.equal(model.read().name_edits.m1.status, "saving");
+  applyAgentRosterError({ project_key: "project", request_id: sent[1].request_id, message: "Connection lost; retry" });
+  assert.equal(model.read().name_edits.m1.status, "error"); assert.equal(model.read().name_edits.m1.value, "Cedar");
+  retryAgentMemberName("m1");
+  applyAgentRosterSnapshot(namedRoster(7, "Cedar"), sent[2].request_id);
+  assert.equal(model.read().name_edits.m1.status, "saved");
+});
+
+test("the name writer preserves other member drafts and revalidates coalesced edits after readback", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, clearAgentRosterRename, flush } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3));
+  editAgentMemberName("m1", "Maple"); editAgentMemberName("m1", "Cedar"); editAgentMemberName("m2", "Birch");
+  assert.equal(sent.length, 1);
+  applyAgentRosterSnapshot(namedRoster(4, "Maple", { members: [
+    { agent_member_id: "m1", name: "Maple", enabled: true }, { agent_member_id: "m2", name: "Cedar", enabled: false },
+  ] }), sent[0].request_id);
+  assert.equal(model.read().name_edits.m1.status, "invalid");
+  assert.match(model.read().name_edits.m1.error, /already registered/);
+  flush();
+  assert.equal(sent.length, 2); assert.equal(sent[1].action.member_id, "m2");
+  assert.equal(sent[1].action.name, "Birch"); assert.equal(sent[1].expected_revision, 4);
+  clearAgentRosterRename();
+  assert.equal(model.read().pending_name, null); assert.equal(model.read().name_edits.m2.status, "error");
+  assert.match(model.read().name_edits.m2.error, /Connection lost/);
 });
 
 test("Works telemetry sums measured project conversations once, preserves missing and excludes account totals", async () => {

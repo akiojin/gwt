@@ -407,6 +407,7 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         &"operator".into(),
         gwt::agent_names::AgentRosterAction::Read,
         None,
+        Some("read-successor".into()),
     );
     drain_queued_blocking_tasks(&tasks);
     let roster = fixture
@@ -418,7 +419,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         .find_map(|event| match recorded_project_payload(event) {
             UserEvent::ProjectDispatch { events, .. } => {
                 events.iter().find_map(|event| match &event.event {
-                    BackendEvent::AgentRoster { roster } => Some(roster.clone()),
+                    BackendEvent::AgentRoster { roster, request_id } => {
+                        assert_eq!(request_id.as_deref(), Some("read-successor"));
+                        Some(roster.clone())
+                    }
                     _ => None,
                 })
             }

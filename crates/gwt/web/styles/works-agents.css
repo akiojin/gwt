@@ -253,6 +253,7 @@
 .roster-detail { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; border: 1px solid var(--color-border); padding: var(--space-3) var(--space-4); }
 .roster-detail-heading { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .roster-detail-heading > div { min-width: 0; }
+:root[data-theme] .agents-surface .roster-name-field { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); margin-top: var(--space-2); }
 .roster-detail-heading .roster-avatar { flex-shrink: 0; }
 .roster-detail-heading h3 { margin: 0; font-size: var(--type-md); white-space: nowrap; overflow-x: auto; }
 .roster-detail-heading p { margin: var(--space-1) 0 0; font-size: var(--type-xs); color: var(--color-text-muted); overflow-wrap: anywhere; }
