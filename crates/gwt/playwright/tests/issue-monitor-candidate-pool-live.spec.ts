@@ -74,6 +74,7 @@ test.describe("Issue Monitor candidate pool", () => {
         await tool.selectOption(agentId);
         const beforeIds = new Set(roster.members.map((member: any) => member.agent_member_id));
         const cursor = await sequence();
+        await page.getByLabel("Name for new member", { exact: true }).fill(`Candidate ${roster.revision}`);
         await page.locator('.roster-capacity [data-action="add"]').click();
         const next = await freshRoster(cursor, roster.revision);
         const added = next.members.filter((member: any) => !beforeIds.has(member.agent_member_id));

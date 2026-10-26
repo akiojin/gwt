@@ -161,6 +161,72 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
+  test("named registration persists its UUID through rejection, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    const name = surface.getByRole("textbox", { name: "Name for new member", exact: true });
+    const register = surface.locator('.roster-capacity [data-action="add"]');
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      await expect(register).toBeDisabled();
+      await name.fill(` ${before.members[0].name.toLowerCase()} `);
+      await expect(name).toHaveAttribute("aria-invalid", "true");
+      await expect(register).toBeDisabled();
+      await name.fill("  Maple contributor  ");
+      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const sequence = await cursor(page);
+      await register.click();
+      const added = await rosterAfter(page, sequence, before.revision);
+      expect(added.error).toBeNull();
+      expect(added.members).toHaveLength(before.members.length + 1);
+      const member = added.members.find(member => member.name === "Maple contributor")!;
+      expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(member.agent_id).toBe("codex");
+      expect(member.assignment).toBeNull();
+      await expect(name).toHaveValue("");
+      // A stale writer must not replace the registered identity or this draft.
+      await name.fill("Retry contributor");
+      const staleSequence = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
+        action: { kind: "add", agent_id: "codex", name: "Retry contributor" } });
+      const rejected: AgentRoster = await page.waitForFunction(after =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+          && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("changed"))?.payload.roster,
+      staleSequence).then(handle => handle.jsonValue());
+      expect(rejected.error).toContain("changed");
+      expect(rejected.revision).toBe(added.revision);
+      expect(rejected.members).toEqual(added.members);
+      await expect(name).toHaveValue("Retry contributor");
+      const retrySequence = await cursor(page);
+      await register.click();
+      const retried = await rosterAfter(page, retrySequence, added.revision);
+      expect(retried.error).toBeNull();
+      expect(retried.members.find(member => member.name === "Retry contributor")?.agent_member_id).toBeTruthy();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await expect.poll(() => surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await page.screenshot({ path: info.outputPath(`named-registration-${theme}.png`) });
+      await page.reload();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const restored = await readRoster(page);
+      expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
+        .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
+      expect(errors, "actual registration/reload/restart console and page errors").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
   test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {
     const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
     const fixture = await startExactRelaunchFixture(info, {
@@ -615,6 +681,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await page.getByRole("button", { name: "Agents", exact: true }).click();
       const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
       await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();
       const added = await rosterAfter(page, beforeAdd, initialRoster.revision);

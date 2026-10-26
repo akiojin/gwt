@@ -53,6 +53,7 @@ test("Issue #5787 candidate choices preserve saved values and persist dependent 
       await page.locator('.op-rail [data-surface="agents"]').click();
       const before = new Set((await members()).map((member: any) => member.agent_member_id));
       await page.getByLabel("Tool for new member", { exact: true }).selectOption(agentId);
+      await page.getByLabel("Name for new member", { exact: true }).fill(`Settings ${agentId} ${before.size}`);
       await page.locator('.roster-capacity [data-action="add"]').click();
       await expect.poll(async () => (await members()).find((member: any) => member.agent_id === agentId && !before.has(member.agent_member_id))?.agent_member_id).toBeTruthy();
       return (await members()).find((member: any) => member.agent_id === agentId && !before.has(member.agent_member_id));

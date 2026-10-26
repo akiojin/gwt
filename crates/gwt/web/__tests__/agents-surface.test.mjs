@@ -31,8 +31,8 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: tool => added.push(tool), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
-  for (const node of surface.element.querySelectorAll("select")) node.focus = () => { activeElement = node; };
+  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
   return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
@@ -282,9 +282,11 @@ test("Agents keeps a selected plan control and keyboard focus across unrelated c
 
 test("Agents add and rest actions target a member and Past shows measured contributor data", async () => {
   const f = await fixture();
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
   f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, ["codex"]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple" }]); assert.deepEqual(f.rested, ["m1"]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -470,15 +472,40 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
-test("Agents registers a member with the explicitly selected supported or custom tool", async () => {
+test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
   const f = await fixture();
   const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
-  assert.ok(select, "registration exposes the fixed Tool attribute");
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  assert.ok(name, "registration exposes an accessible display name field");
+  assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
+  const register = f.surface.element.querySelector('[data-action="add"]');
+  const input = value => { name.value = value; name.dispatchEvent(new f.window.Event("input")); };
+  assert.equal(register.disabled, true, "empty names cannot register");
+  input("  oNe  ");
+  assert.equal(register.disabled, true, "normalized duplicates are rejected");
+  assert.equal(name.getAttribute("aria-invalid"), "true");
+  input("  Maple  ");
   assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
   select.querySelector('[value="custom-cli"]').selected = true;
-  f.surface.element.querySelector('[data-action="add"]').click();
-  assert.deepEqual(f.added, ["custom-cli"]);
-  select.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1 })); f.flush();
+  register.click();
+  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple" }]);
+  f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
+  assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
+  name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
+  assert.ok(f.surface.element.querySelector('[aria-label="Name for new member"]') === name && f.document.activeElement === name);
+  select.focus();
   assert.ok(f.surface.element.querySelector('[aria-label="Tool for new member"]') === select && f.document.activeElement === select);
   assert.equal(select.value, "custom-cli");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[aria-label="Name for new member"]').disabled, true);
+  assert.equal(register.disabled, false, "a rejected request can be retried");
+  f.rosterModel.update(state => ({ ...state, revision: state.revision + 1,
+    members: [...state.members, { member_id: "other-writer", name: "Maple", enabled: true }] })); f.flush();
+  assert.equal(name.value, "  Maple  ", "a later read must not mistake another writer's member for the rejected registration");
+  f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
+  input("Cedar"); register.click();
+  f.activityModel.update(state => ({ ...state, count: 2 })); f.flush();
+  f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
+    members: [...state.members, { member_id: "retry", name: "Cedar", enabled: true }] })); f.flush();
+  assert.equal(name.value, "", "retry success clears the submitted draft after unrelated activity redraw");
 });
