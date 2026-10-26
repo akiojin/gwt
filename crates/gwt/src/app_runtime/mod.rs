@@ -4896,6 +4896,7 @@ impl AppRuntime {
         };
         if let Some(session) = &mut session {
             if !is_pm
+                && session.agent_member_id.is_none()
                 && !matches!(
                     session.status,
                     gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted

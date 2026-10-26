@@ -5061,6 +5061,55 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
 }
 
 #[test]
+fn agent_name_keeps_bound_session_independent_of_roster_readback() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut session = gwt_agent::Session::new(&root, "work/test", gwt_agent::AgentId::Codex);
+    session.agent_name = Some("Falcon".into());
+    session.agent_member_id = Some("bound-member".into());
+    session.update_status(gwt_agent::AgentStatus::Running);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("agent", Some(session.id.clone()));
+    tab.workspace
+        .set_agent_name("agent", session.agent_name.clone());
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    session.save(&runtime.sessions_dir).unwrap();
+    let pid = std::process::id();
+    let started = gwt::process::host_process_start_time(pid).unwrap();
+    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    sidecar.host_started_at = Some(started);
+    sidecar.child_pid = Some(pid);
+    sidecar.child_started_at = Some(started);
+    sidecar
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &runtime.sessions_dir,
+            pid,
+            &session.id,
+        ))
+        .unwrap();
+    let prefs = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    fs::write(&prefs, "unreadable roster").unwrap();
+
+    let result = runtime.ensure_window_agent_name("tab", "agent");
+    assert_eq!(result, Ok(Some("Falcon".into())));
+    assert_eq!(fs::read_to_string(prefs).unwrap(), "unreadable roster");
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(saved.agent_member_id, session.agent_member_id);
+}
+
+#[test]
 fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
