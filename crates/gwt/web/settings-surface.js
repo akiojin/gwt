@@ -1060,7 +1060,15 @@ export function createSettingsSurface({
         renderSystemPanelInAllSettingsWindows(state, true);
       });
       let nextProfilesRequest = 0;
-      const issueSettingsModel = createUiStateStore({});
+      const issueSettingsModel = createUiStateStore({}, { scheduleFrame });
+      issueSettingsModel.subscribeFrame(state => {
+        const root = activeProjectTab()?.project_root;
+        return root ? state[root]?.profilesSaveToken : null;
+      }, token => {
+        const root = activeProjectTab()?.project_root;
+        if (!root || !token || issueSettingsModel.read()[root]?.profilesSaveToken !== token) return;
+        send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+      });
       const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
       const renderedUpdateStatuses = new WeakMap();
       function renderUpdateStatus(body, state) {
@@ -1159,6 +1167,7 @@ export function createSettingsSurface({
         const bound = Array.isArray(event.profiles) && event.profiles.every(profile => profile.agent_member_id);
         issueSettingsModel.update(state => ({ ...state, [root]: {
           ...state[root], profiles: event.profiles, choices: event.choices, profilesRequestId: event.request_id,
+          profilesSaveToken: event.request_id == null ? state[root]?.profilesSaveToken : JSON.stringify([root, event.request_id]),
           rosterProfilesPending: bound ? false : state[root]?.rosterProfilesPending,
         } }));
       }
