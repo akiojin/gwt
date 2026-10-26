@@ -30,9 +30,19 @@ use crate::{
 };
 
 mod schedule;
+mod switch;
+mod switch_checkpoint;
 pub use schedule::{
     mutate_project_agent_schedule, AgentIssueReservation, AgentIssueSchedule, AgentMemberSchedule,
     AgentScheduleAction, AgentScheduleReason, AgentScheduleSnapshot, AgentScheduledIssue,
+};
+pub use switch::{
+    mutate_project_agent_switch, AgentSwitchAction, AgentSwitchCheckpoint, AgentSwitchIntent,
+    AgentSwitchRequest, AgentSwitchSnapshot, AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
+};
+pub use switch_checkpoint::{
+    observe_agent_switch_cwd, verify_switch_continuation, verify_switch_git_checkpoint,
+    AgentSwitchCwdObservation,
 };
 
 mod urgent;
@@ -997,6 +1007,8 @@ pub struct IssueMonitorPrefs {
     pub agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
     pub agent_issue_schedule: AgentIssueSchedule,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_switch_intents: BTreeMap<String, AgentSwitchIntent>,
     /// Unversioned legacy preferences use the same known-compatible schema.
     #[serde(
         default = "current_issue_monitor_prefs_schema_version",
@@ -1343,6 +1355,7 @@ impl Default for IssueMonitorPrefs {
         Self {
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_switch_intents: BTreeMap::new(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: false,
             max_active_agents: 1,
@@ -5052,6 +5065,8 @@ pub struct IssueMonitorState {
     agent_roster: Option<crate::agent_names::AgentRoster>,
     #[serde(default)]
     agent_issue_schedule: AgentIssueSchedule,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    agent_switch_intents: BTreeMap<String, AgentSwitchIntent>,
     // Automatic scan proposals are valid only against this exact source snapshot.
     #[serde(skip)]
     agent_schedule_source: Option<(AgentIssueSchedule, String, u64)>,
@@ -7985,6 +8000,7 @@ impl IssueMonitorState {
         Self {
             agent_roster: None,
             agent_issue_schedule: AgentIssueSchedule::default(),
+            agent_switch_intents: BTreeMap::new(),
             agent_schedule_source: None,
             roster_machine_policy: None,
             source_repository: IssueMonitorSourceRepository::Unresolved,
@@ -8096,6 +8112,7 @@ impl IssueMonitorState {
         let mut state = Self::new(config);
         state.agent_roster = prefs.agent_roster.clone();
         state.agent_issue_schedule = prefs.agent_issue_schedule.clone();
+        state.agent_switch_intents = prefs.agent_switch_intents.clone();
         state.max_active_agents_mode = prefs.max_active_agents_mode;
         state.max_active_last_change = prefs.max_active_last_change.clone();
         state.apply_agent_capacity_limit();
@@ -8276,6 +8293,7 @@ impl IssueMonitorState {
         IssueMonitorPrefs {
             agent_roster: self.agent_roster.clone(),
             agent_issue_schedule: self.agent_issue_schedule.clone(),
+            agent_switch_intents: self.agent_switch_intents.clone(),
             schema_version: ISSUE_MONITOR_PREFS_SCHEMA_VERSION,
             enabled: self.config.enabled,
             // Auto persists its accepted limit for incomplete measurements and restarts.
@@ -11607,6 +11625,8 @@ impl IssueMonitorState {
         self.apply_priority_order_to_queue();
         self.apply_priority_order_to_inbox();
         self.rebase_agent_issue_schedule(disk);
+        // Switch intents are written only by explicit controls and Host transactions.
+        self.agent_switch_intents = disk.agent_switch_intents.clone();
         // SPEC #3914 FR-012: the pool has no daemon control of its own for
         // GUI saves, so disk owns it; a stale in-memory copy must not shrink it.
         self.launch_profiles = disk.launch_profile_pool();
@@ -11957,13 +11977,20 @@ impl IssueMonitorState {
                     && !self.has_monitor_pane_for_issue(delivery.issue_number)
             })
             .filter_map(|delivery| {
-                self.permission_readiness_block_for_launch(delivery.issue_number, &now)
-                    .map(|record| (delivery.issue_number, record))
+                let record =
+                    self.permission_readiness_block_for_launch(delivery.issue_number, &now);
+                (record.is_some()
+                    || (self.launch_auto
+                        && !self.retry_ready_for_saved_profile(delivery.issue_number, &now)))
+                .then_some((delivery.issue_number, record))
             })
             .collect::<BTreeMap<_, _>>();
         self.compensate_uncommitted_claims(&blocked.keys().copied().collect());
         for (number, record) in blocked {
-            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+            if let (Some(record), Some(issue)) = (
+                record,
+                self.inbox_item(number).map(|item| item.issue.clone()),
+            ) {
                 self.record_permission_readiness_block(issue, &record);
             }
         }
@@ -17365,6 +17392,63 @@ impl IssueMonitorState {
         self.apply_priority_order_to_inbox();
     }
 
+    /// Commit candidate-exclusion cancellation only from a newer complete live scan,
+    /// after the caller has adopted the latest durable ownership under its CAS.
+    pub fn reconcile_unowned_excluded_launches(&mut self, last_committed_scan: Option<&str>) {
+        if !matches!(
+            self.queue_label_observation,
+            Some((IssueMonitorCandidateSource::Live, _))
+        ) {
+            return;
+        }
+        let Some(scan_at) = self.last_scan_at.as_deref().and_then(parse_rfc3339_utc) else {
+            return;
+        };
+        if last_committed_scan
+            .is_some_and(|at| parse_rfc3339_utc(at).is_none_or(|committed| scan_at <= committed))
+        {
+            return;
+        }
+        let candidates = self
+            .inbox
+            .iter()
+            .filter(|item| {
+                let number = item.issue.number;
+                // Keep reservations while dependency proof is pending. Only a
+                // current negative can turn dependency waiting into compensation.
+                let confirmed_dependency_blocker =
+                    self.dependency_status(number, None).is_some_and(|status| {
+                        status.blocked_by.iter().any(|blocker| {
+                            self.dependency_outcome(blocker.number, None) == Some(Some(false))
+                        })
+                    });
+                (matches!(
+                    issue_monitor_candidate_exclusion(&item.issue, self.source_repository),
+                    Some((
+                        MonitorInboxState::NotReady | MonitorInboxState::SourceExcluded,
+                        _
+                    ))
+                ) || confirmed_dependency_blocker)
+                    && !self.launched_windows.contains_key(&number)
+                    && !self.process_held_issues.contains(&number)
+                    && !self.has_monitor_pane_for_issue(number)
+                    && self
+                        .pending_launch_deliveries
+                        .iter()
+                        .filter(|delivery| delivery.issue_number == number)
+                        .all(|delivery| {
+                            delivery.materializer_id.is_none()
+                                && delivery.materialized_window_id.is_none()
+                        })
+            })
+            .map(|item| item.issue.clone())
+            .collect::<Vec<_>>();
+        self.compensate_uncommitted_claims(&candidates.iter().map(|issue| issue.number).collect());
+        for issue in candidates {
+            self.record_candidate(issue);
+        }
+    }
+
     pub fn record_candidate(&mut self, issue: IssueMonitorIssue) {
         self.observe_dependency_candidate(&issue);
         let issue_number = issue.number;
@@ -21326,10 +21410,10 @@ impl IssueMonitorState {
     }
 
     /// Adopt an exact cancellation before replacing the local delivery journal.
-    /// Otherwise the launch-reservation union can resurrect a committed pool
+    /// Otherwise the launch-reservation union can resurrect a committed
     /// cancellation and prevent the control receipt from converging.
     fn adopt_compensated_launch_deliveries(&mut self, disk: &IssueMonitorPrefs) {
-        if disk.effect_authority_epoch <= self.effect_authority_epoch {
+        if disk.effect_authority_epoch < self.effect_authority_epoch {
             return;
         }
         let protected = disk
@@ -21392,6 +21476,11 @@ impl IssueMonitorState {
             .map(|delivery| delivery.issue_number)
             .collect::<BTreeSet<_>>();
         self.compensate_uncommitted_claims(&cancelled);
+        for number in cancelled {
+            if let Some(issue) = self.inbox_item(number).map(|item| item.issue.clone()) {
+                self.record_candidate(issue);
+            }
+        }
     }
 
     /// Exact pre-materialization compensation shared by provider holds and

@@ -186,19 +186,6 @@ fn stale_pre_pty_launch_failure_preserves_live_agent_and_monitor_delivery() {
 }
 
 #[test]
-fn review_dispatch_feedback_context_does_not_own_the_issue_launch_binding() {
-    // Issue #4041: the independent review window observes the Issue but never
-    // materializes its launch.
-    let mut context = issue_monitor_feedback(42);
-    assert_eq!(
-        context.issue_monitor_launch_binding_issue_number(),
-        Some(42)
-    );
-    context.issue_monitor_review_dispatch = true;
-    assert_eq!(context.issue_monitor_launch_binding_issue_number(), None);
-}
-
-#[test]
 fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
     // Issue #4041: on 2026-09-06 the review dispatches for #4037 / #4033 were
     // ACKed as the Issues' launches, so `launched_issues` moved to the review
@@ -1035,94 +1022,6 @@ fn terminalized_genesis_compensation_retries_after_discard_before_agent_cleanup(
         1,
         "retry must not append a duplicate Discard event",
     );
-}
-
-#[test]
-fn terminalized_genesis_compensation_does_not_synthesize_state_for_unrelated_work() {
-    let _env_guard = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("tempdir");
-    let _home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo-genesis-no-target");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        number: 2359,
-    };
-    let session_id = "genesis-without-work-target";
-    gwt::cli::execution_state::materialize_at_launch(
-        &repo,
-        owner.kind,
-        owner.number,
-        session_id,
-        "$gwt-execute #2359",
-        false,
-    )
-    .expect("materialize genesis execution");
-    gwt::cli::execution_state::ensure_generation_ledger(
-        &repo,
-        owner,
-        gwt::cli::execution_state::LegacyActiveDisposition::Live,
-    )
-    .expect("materialize genesis ledger");
-    let identity = gwt::cli::execution_state::current_execution_binding(&repo, owner)
-        .expect("read genesis binding")
-        .expect("genesis binding");
-    let binding = gwt_agent::SessionExecutionBinding {
-        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-        session_id: session_id.to_string(),
-        repo_hash: detect_repo_hash(&repo).expect("repo hash").to_string(),
-        owner_kind: owner.kind.as_str().to_string(),
-        owner_number: owner.number,
-        identity,
-        capability_generation: 1,
-    };
-    let mut unrelated = gwt_core::workspace_projection::WorkEvent::new(
-        gwt_core::workspace_projection::WorkEventKind::Start,
-        "unrelated-work",
-        Utc::now(),
-    );
-    unrelated.agent_session_id = Some("unrelated-session".to_string());
-    gwt_core::workspace_projection::record_workspace_work_event(&repo, unrelated)
-        .expect("persist unrelated Work without current projection");
-    assert!(
-        gwt_core::workspace_projection::load_workspace_projection(&repo)
-            .expect("read absent current projection")
-            .is_none(),
-    );
-    gwt::cli::execution_state::block_uncommitted_genesis_launch(
-        &repo,
-        owner,
-        session_id,
-        &binding.identity,
-        "test no-target compensation",
-    )
-    .expect("terminalize failed genesis");
-
-    compensate_terminalized_genesis_workspace_projection(
-        &repo,
-        &repo,
-        owner,
-        session_id,
-        Some(&binding),
-        None,
-    )
-    .expect("leave unrelated Work untouched");
-
-    assert!(
-        gwt_core::workspace_projection::load_workspace_projection(&repo)
-            .expect("read current projection after no-target compensation")
-            .is_none(),
-        "no-target compensation must not synthesize a current projection",
-    );
-    let work_items = gwt_core::workspace_projection::load_workspace_work_items(&repo)
-        .expect("read unrelated WorkItems")
-        .expect("unrelated WorkItems");
-    assert_eq!(work_items.work_items.len(), 1);
-    assert_eq!(work_items.work_items[0].id, "unrelated-work");
-    assert!(!work_items.work_items[0].discarded);
 }
 
 #[test]

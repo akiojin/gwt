@@ -272,6 +272,7 @@ async function installFocusCycleBackend(page: Page): Promise<void> {
           {
             id: "tab-1",
             title: "Agent Focus Cycle Fixture",
+            project_key: location.pathname.split("/").filter(Boolean).at(-1),
             project_root: "/fixture",
             kind: "git",
             workspace: {

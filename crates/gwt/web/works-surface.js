@@ -4,17 +4,24 @@ const seconds = value => finite(value) ? `${Math.floor(value / 3600)}h ${Math.fl
 const stateFor = status => ({ running: "running", starting: "running", waiting: "waiting", idle: "idle", ready: "idle", error: "error", interrupted: "error" })[status] || "unknown";
 const labelFor = state => state.charAt(0).toUpperCase() + state.slice(1);
 
-// Membership is display-only: a recorded Work or a matching name never proves
-// that a local terminal still belongs to the observed session.
+// Live activity owns membership; a separately arriving catalog only enriches
+// the row and authorizes access to its exact session's local terminal.
 function currentWorks(catalog, activity, roster) {
   const app = catalog.appState, members = roster.members || [];
-  const windows = app.tabs.find(tab => tab.id === app.active_tab_id)?.workspace?.windows || [];
-  const order = work => work.member ? members.indexOf(work.member) : members.length + windows.findIndex(data => data.id === work.data.id);
-  return (activity.agents || []).flatMap(assignment => {
-    const data = windows.find(data => data.id === assignment.window_id && data.session_id === assignment.session_id);
-    if (!data || data.preset === "shell") return [];
+  const windows = (app.tabs || []).filter(tab => !activity.snapshot?.project_key
+    || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
+  const order = work => {
+    if (work.member) return members.indexOf(work.member);
+    const index = windows.findIndex(data => data.id === work.data.id);
+    return members.length + (index < 0 ? windows.length : index);
+  };
+  return (activity.agents || []).map(assignment => {
+    const matched = windows.find(data => data.id === assignment.window_id
+      && data.session_id === assignment.session_id && data.preset !== "shell");
+    const data = matched || { id: assignment.window_id };
     const member = assignment.is_pm ? null : members.find(member => member.assignment?.session_id === assignment.session_id);
-    return [{ data, assignment, member, state: stateFor(catalog.runtimeStates[data.id] ?? data.status) }];
+    return { data, assignment, member, ready: !!matched,
+      state: matched ? stateFor(catalog.runtimeStates[data.id] ?? data.status) : "unknown" };
   }).sort((a, b) => Number(!!b.assignment.is_pm) - Number(!!a.assignment.is_pm) || order(a) - order(b));
 }
 
@@ -93,7 +100,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function park(entry, rehost = false) {
     const moved = entry.terminal.parentElement !== entry.cache;
     if (moved) entry.cache.append(entry.terminal);
-    if (isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true });
+    if (exactWork(entry.work.assignment) && isPresented() && (moved || rehost)) mountTerminal(entry.work.data.id, entry.terminal, { readOnly: true });
   }
   function back(restore = true) {
     const previous = selected; selected = null; full.hidden = true; overview.hidden = false;
@@ -105,7 +112,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     const requested = typeof target === "string" ? { window_id: target } : target;
     if (!requested?.window_id) return null;
     return currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).find(work =>
-      work.assignment.window_id === requested.window_id &&
+      work.ready && work.assignment.window_id === requested.window_id &&
       (!requested.session_id || requested.session_id === work.assignment.session_id) &&
       (requested.runtime_incarnation === undefined || requested.runtime_incarnation === work.assignment.runtime_incarnation));
   }
@@ -154,6 +161,9 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   function updateEntry(entry, work, max) {
     entry.work = work;
     const row = entry.row, t = telemetryFor(work);
+    row.setAttribute("aria-disabled", String(!work.ready));
+    row.querySelector(".work-open").disabled = !work.ready;
+    row.querySelector(".work-open").textContent = work.ready ? "Open terminal" : "Syncing terminal…";
     row.dataset.state = work.state;
     row.setAttribute("aria-label", `${nameFor(work)} · ${purposeFor(work)} · ${labelFor(work.state)}. Open terminal`);
     setName(row.querySelector(".work-name-host"), work);
@@ -173,6 +183,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     previewElement.replaceChildren();
     const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; previewElement.append(note);
     if (selected) {
+      if (!exactWork(selected)) return;
       const heading = full.querySelector(".works-full-header").cloneNode(true);
       for (const button of heading.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
       const output = document.createElement("div"); output.className = "works-preview-output";
@@ -184,6 +195,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       for (const button of clone.querySelectorAll("button")) { button.disabled = true; button.tabIndex = -1; }
       for (const row of clone.querySelectorAll(".work-row")) {
         row.tabIndex = -1; const tail = row.querySelector(".work-tail"); tail.replaceChildren();
+        if (!exactWork(entries.get(row.dataset.windowId)?.work.assignment)) continue;
         previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: 3 }));
       }
       previewElement.append(clone);
@@ -223,7 +235,11 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     element.querySelector(".works-empty").hidden = works.length > 0;
     element.dataset.catalogVersion = String(catalog.version);
     if (selected) { const work = exactWork(selected); if (work) showFull(work, rehost); else back(false); }
+    for (const entry of entries.values()) if (!entry.work.ready) {
+      entry.cleanup?.(); entry.cleanup = null; entry.previewMounted = false;
+    }
     if (isPresented()) for (const entry of entries.values()) {
+      if (!entry.work.ready) continue;
       if (!selected || entry.work.data.id !== selected.window_id) park(entry, rehost || !entry.previewMounted);
       if (!entry.previewMounted) {
         entry.cleanup = mountPreview(entry.work.data.id, entry.row.querySelector(".work-tail"), { tailLines: 3 });
@@ -235,7 +251,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   element.querySelector('[data-action="back"]').addEventListener("click", () => back());
   for (const [action, delta] of [["previous", -1], ["next", 1]]) element.querySelector(`[data-action="${action}"]`).addEventListener("click", () => {
-    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read());
+    const works = currentWorks(windowCatalogModel.read().catalog, activityModel.read(), rosterModel.read()).filter(work => work.ready);
     const index = works.findIndex(work => work.assignment.window_id === selected?.window_id && work.assignment.session_id === selected?.session_id && work.assignment.runtime_incarnation === selected?.runtime_incarnation);
     if (index < 0 || !works.length) { back(false); return; }
     openWork(works[(index + delta + works.length) % works.length].assignment);

@@ -1987,6 +1987,7 @@ enum UserEvent {
     IssueMonitorLaunchDeliveryAcknowledged(
         Box<app_runtime::IssueMonitorLaunchDeliveryAcknowledged>,
     ),
+    AgentSwitchSourceExited(Box<app_runtime::AgentSwitchSourceExited>),
     DrainAppEvents,
     TransientBrowserEnded {
         generation: u64,
@@ -11145,6 +11146,9 @@ fn main() -> std::io::Result<()> {
                     let _ = proxy.send_event(UserEvent::QuitApp { reason });
                 }
             }
+            Event::UserEvent(UserEvent::AgentSwitchSourceExited(exited)) => {
+                clients.dispatch(app.agent_switch_source_exited_events(*exited));
+            }
             Event::UserEvent(UserEvent::ContinueWorkReadyTimeout { window_id, watch }) => {
                 clients.dispatch(app.handle_continue_work_ready_timeout(&window_id, &watch));
             }
@@ -11368,7 +11372,12 @@ fn main() -> std::io::Result<()> {
                 }
             }
             Event::UserEvent(UserEvent::ProjectDispatch { context, events }) if app.project_context_is_current(&context) => {
-                clients.dispatch(events);
+                clients.dispatch(events.into_iter().filter(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => app
+                        .retain_current_local_agent_activity(&context.tab_id, Some(activity.clone()))
+                        .as_ref() == Some(activity),
+                    _ => true,
+                }).collect());
             }
             Event::UserEvent(UserEvent::PreparedActiveWorkDispatch {
                 context,

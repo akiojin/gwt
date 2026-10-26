@@ -2,7 +2,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from './_helpers/live-gwt';
 
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:0/';
@@ -32,6 +33,133 @@ test.describe('PM reports', () => {
   test.skip(!process.env.GWT_PLAYWRIGHT_BASE_URL || !HOME, 'requires isolated checkout fixture');
   test.use({ viewport: { width: 1440, height: 1000 } });
   test.setTimeout(90_000);
+
+  test('Issue #6235 Reports follows the tail and preserves reading position through updates and reveal', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      const projects = join(HOME, '.gwt', 'projects');
+      const ledgers = readdirSync(projects).map(hash => join(projects, hash, 'project-state', 'pm-reports.jsonl')).filter(existsSync);
+      expect(ledgers, 'one owned isolated PM report ledger').toHaveLength(1);
+      const history = ledgers[0];
+      const original = readFileSync(history);
+      const report = (index: number) => JSON.stringify({ id: `scroll-${theme}-${index}`, kind: 'progress',
+        body: `Report ${index}\n\nA durable progress update for the scroll regression.`, created_at: '2026-10-24T00:00:00Z' });
+      try {
+        writeFileSync(history, Array.from({ length: 35 }, (_, index) => report(index)).join('\n') + '\n');
+        await gotoPmReports(page);
+        const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+        const body = pane.locator('.pm-chat__body');
+        const messages = pane.locator('.pm-chat__message');
+        const gap = () => body.evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop);
+        await expect(messages).toHaveCount(35);
+        await expect.poll(gap, { message: 'first Reports display starts at the latest report' }).toBeLessThanOrEqual(2);
+        expect(await body.evaluate(node => node.scrollTop)).toBeGreaterThan(0);
+        appendFileSync(history, report(35) + '\n');
+        await refreshPmReports(page);
+        await expect(messages).toHaveCount(36);
+        await expect.poll(gap, { message: 'new Reports follow the tail' }).toBeLessThanOrEqual(2);
+
+        const reading = await body.evaluate(node => { node.scrollTop = 180; node.dispatchEvent(new Event('scroll')); return node.scrollTop; });
+        appendFileSync(history, report(36) + '\n');
+        await refreshPmReports(page);
+        await expect(messages).toHaveCount(37);
+        await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
+        await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+        await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+        await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
+
+        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        await expect(body).toBeHidden();
+        appendFileSync(history, report(37) + '\n');
+        await refreshPmReports(page);
+        await expect(messages).toHaveCount(38);
+        await page.locator('#op-pm-entry').click();
+        await expect(body).toBeVisible();
+        await expect.poll(() => body.evaluate(node => node.scrollTop)).toBe(reading);
+        await body.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event('scroll')); });
+        await page.getByRole('button', { name: 'Works', exact: true }).click();
+        appendFileSync(history, report(38) + '\n');
+        await refreshPmReports(page);
+        await expect(messages).toHaveCount(39);
+        await page.locator('#op-pm-entry').click();
+        await expect.poll(gap, { message: 'hidden tail intent survives new Reports' }).toBeLessThanOrEqual(2);
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+        const screenshot = info.outputPath(`reports-scroll-${theme}.png`);
+        await pane.screenshot({ path: screenshot });
+        await info.attach('Reports scroll', { path: screenshot, contentType: 'image/png' });
+        expect(errors).toEqual([]);
+      } finally {
+        writeFileSync(history, original);
+      }
+    });
+  });
+
+  test('Issue #6235 Execution log preserves scrollback across replacement snapshots and reveal', async ({ page }, info) => {
+    await withLiveGwtBackendLock(BASE, info, async () => {
+      const errors: string[] = [];
+      page.on('pageerror', error => errors.push(error.message));
+      page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+      const theme = info.project.name.includes('light') ? 'light' : 'dark';
+      await page.addInitScript(value => localStorage.setItem('gwt:ui:theme', value), theme);
+      await gotoPmReports(page);
+      const pane = page.locator('.workspace-window').filter({ has: page.locator('.pm-chat') });
+      const id = await pane.getAttribute('data-id');
+      expect(id).toBeTruthy();
+      const metrics = () => page.evaluate(id => window.__gwtTerminalTestApi!.metrics(id!), id);
+      const emit = (kind: string, lines: number) => page.evaluate(({ id, kind, lines }) => {
+        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+        if (!socket) throw new Error('Missing live project socket');
+        const text = Array.from({ length: lines }, (_, index) => `Execution line ${index + 1}`).join('\r\n') + '\r\n';
+        socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ kind, id, data_base64: btoa(text) }) }));
+      }, { id, kind, lines });
+      await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await emit('terminal_snapshot', 160);
+      await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(0);
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY === value.baseY; }).toBe(true);
+      await emit('terminal_snapshot', 180);
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 180');
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY === value.baseY; }).toBe(true);
+
+      await pane.locator('.xterm-screen').hover();
+      await page.mouse.wheel(0, -600);
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY < value.baseY; }).toBe(true);
+      const reading = (await metrics()).viewportY;
+      expect(reading).toBeGreaterThan(0);
+      await emit('terminal_snapshot', 200);
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 200');
+      await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
+      const beforeLiveOutput = (await metrics()).baseY;
+      await emit('terminal_output', 5);
+      await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(beforeLiveOutput);
+      await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
+      await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+      await emit('terminal_snapshot', 220);
+      await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 220');
+      await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
+      await page.getByRole('button', { name: 'Works', exact: true }).click();
+      await emit('terminal_snapshot', 240);
+      await page.locator('#op-pm-entry').click();
+      await expect(pane.locator('.pm-conversation-log')).toBeVisible();
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.bufferText(id!), id)).toContain('Execution line 240');
+      await expect.poll(async () => (await metrics()).viewportY).toBe(reading);
+      await page.evaluate(id => window.__gwtTerminalTestApi!.scrollToBottom(id!), id);
+      const previousBase = (await metrics()).baseY;
+      await emit('terminal_output', 8);
+      await expect.poll(async () => (await metrics()).baseY).toBeGreaterThan(previousBase);
+      await expect.poll(async () => { const value = await metrics(); return value.viewportY === value.baseY; }).toBe(true);
+      await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+      const screenshot = info.outputPath(`execution-log-scroll-${theme}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('Execution log scroll', { path: screenshot, contentType: 'image/png' });
+      expect(errors).toEqual([]);
+    });
+  });
 
   test('Reports and Execution log render the same window version for every receive', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {

@@ -118,13 +118,13 @@ impl IssueMonitorPrefs {
         )
     }
 
-    fn scheduled_issue_has_pending_claim(&self, number: u64) -> bool {
+    pub(super) fn scheduled_issue_has_pending_claim(&self, number: u64) -> bool {
         self.pending_effects.iter().any(|effect| {
             matches!(&effect.payload, IssueMonitorEffectPayload::AcquireClaim { issue_number, .. } if *issue_number == number)
         })
     }
 
-    fn scheduled_issue_in_flight(&self, number: u64) -> bool {
+    pub(super) fn scheduled_issue_in_flight(&self, number: u64) -> bool {
         self.launching_issues
             .iter()
             .any(|entry| entry.issue_number == number)
@@ -237,6 +237,12 @@ fn reconcile(
                         .any(|queued| queued.number == entry.issue_number)
                     && !prefs.scheduled_issue_in_flight(entry.issue_number)
                     && (prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+                        || prefs.agent_switch_intents.values().any(|intent| {
+                            intent.has_admission_pin()
+                                && intent.request.target_issue_number == entry.issue_number
+                                && intent.request.member_id == entry.agent_member_id
+                                && intent.source.assignment.host_id == host
+                        })
                         || members
                             .iter()
                             .any(|member| member.agent_member_id == entry.agent_member_id)))
@@ -250,6 +256,19 @@ fn reconcile(
                 .iter()
                 .any(|reservation| reservation.issue_number == entry.number)
         {
+            continue;
+        }
+        if let Some(pin) = prefs.agent_switch_intents.values().find(|intent| {
+            intent.has_admission_pin()
+                && intent.request.target_issue_number == entry.number
+                && intent.source.assignment.host_id == host
+        }) {
+            reservations.push(AgentIssueReservation {
+                host_id: host.into(),
+                agent_member_id: pin.request.member_id.clone(),
+                issue_number: entry.number,
+                reason: AgentScheduleReason::QueueOrder,
+            });
             continue;
         }
         let spec = specs.get(&entry.number);
@@ -294,6 +313,62 @@ fn reconcile(
                     AgentScheduleReason::QueueOrder
                 },
             });
+        }
+    }
+    // Automatic plans are preferences until claiming starts. A busy member
+    // must not strand them while another member can admit the work now.
+    let switch_exclusion = |number, member: &str| {
+        prefs.agent_switch_admission_exclusion(Some(number), member, false, host)
+    };
+    for index in 0..reservations.len() {
+        let entry = &reservations[index];
+        if entry.host_id != host
+            || entry.reason == AgentScheduleReason::AssignedByYou
+            || prefs.scheduled_issue_has_pending_claim(entry.issue_number)
+            || prefs.agent_switch_intents.values().any(|intent| {
+                intent.request.target_issue_number == entry.issue_number
+                    && intent.request.member_id == entry.agent_member_id
+                    && intent.source.assignment.host_id == host
+                    && !matches!(
+                        intent.stage,
+                        AgentSwitchStage::Completed
+                            | AgentSwitchStage::Cancelled
+                            | AgentSwitchStage::Failed
+                    )
+            })
+            || !members.iter().any(|member| {
+                member.agent_member_id == entry.agent_member_id
+                    && (member.assignment.is_some()
+                        || switch_exclusion(entry.issue_number, &member.agent_member_id).is_some())
+            })
+        {
+            continue;
+        }
+        let idle = members
+            .iter()
+            .copied()
+            .filter(|member| {
+                member.assignment.is_none()
+                    && switch_exclusion(entry.issue_number, &member.agent_member_id).is_none()
+                    && !prefs.pending_launch_deliveries.iter().any(|delivery| {
+                        delivery.agent_member_id.as_deref() == Some(&member.agent_member_id)
+                    })
+                    && !reservations.iter().any(|reservation| {
+                        reservation.agent_member_id == member.agent_member_id
+                            && prefs.scheduled_issue_has_pending_claim(reservation.issue_number)
+                    })
+            })
+            .min_by_key(|member| {
+                reservations
+                    .iter()
+                    .filter(|entry| entry.agent_member_id == member.agent_member_id)
+                    .count()
+            });
+        if let Some(member) = idle {
+            reservations[index]
+                .agent_member_id
+                .clone_from(&member.agent_member_id);
+            reservations[index].reason = AgentScheduleReason::QueueOrder;
         }
     }
     // Preserve the canonical queue order within each member's plan.
@@ -377,6 +452,9 @@ pub fn mutate_project_agent_schedule(
             let snapshot = prefs.agent_schedule_snapshot(&host)?;
             if snapshot.roster_revision != *expected_roster_revision || snapshot.queue_revision != *expected_queue_revision || snapshot.schedule_revision != *expected_schedule_revision {
                 return Err(io::Error::other(format!("Agent schedule changed: expected roster={expected_roster_revision}, queue={expected_queue_revision}, schedule={expected_schedule_revision}; current roster={}, queue={}, schedule={}; read issue.monitor.schedule.read and retry",snapshot.roster_revision,snapshot.queue_revision,snapshot.schedule_revision)));
+            }
+            if prefs.agent_switch_intents.values().any(|intent| intent.has_admission_pin() && intent.request.target_issue_number == *issue_number) {
+                return Err(io::Error::other("Switch target is pinned to its selected member; wait for the switch or resume its saved source work"));
             }
             if prefs.scheduled_issue_in_flight(*issue_number) || prefs.scheduled_issue_has_pending_claim(*issue_number) {return Err(io::Error::other("Issue already claiming, launching or running; read issue.monitor.schedule.read and retry"));}
             let target = prefs.agent_roster.as_ref().and_then(|roster| roster.members.iter().find(|member| member.agent_member_id == *target_member_id)).ok_or_else(|| io::Error::other("Target Agent member is absent; read issue.monitor.schedule.read and retry"))?;
@@ -488,6 +566,11 @@ impl IssueMonitorState {
         {
             return Some(format!("scheduled_on_other_host: expected host={}, current host={host}; read issue.monitor.schedule.read on that host before changing its queue", foreign.host_id));
         }
+        if let Some(reason) = self.agent_switch_intents.values().find_map(|intent| {
+            intent.admission_exclusion(Some(number), self.scheduled_agent_member_id(number), false)
+        }) {
+            return Some(reason);
+        }
         // Legacy direct requests do not belong to the saved queue. A filtered
         // queued row still needs a plan and never becomes a legacy request.
         let legacy = self.agent_roster.is_none()
@@ -594,6 +677,379 @@ mod tests {
             expected_queue_revision: snapshot.queue_revision.clone(),
             expected_schedule_revision: snapshot.schedule_revision,
         }
+    }
+
+    fn install_switch_pin(root: &Path, member: &str, stage: AgentSwitchStage, exited: bool) {
+        crate::try_mutate_issue_monitor_prefs(&crate::issue_monitor_prefs_path_for_repo_path(root), |prefs| {
+            let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+            let intent = serde_json::from_value(serde_json::json!({
+                "request":{"operation_id":operation,"member_id":member,"expected_roster_revision":1,"target_issue_number":41},
+                "source":{"assignment":{"reservation_id":"old-reservation","session_id":"old-session","issue_number":99,"host_id":crate::process::current_hostname(),"host_pid":1,"host_started_at":2},
+                    "window_id":"old-window","claim_id":"old-claim","confirmation":{"window_id":"old-window","claim_id":"old-claim","confirmed_at":"2026-10-26T00:00:00Z"}},
+                "stage":stage,"runtime_exit_confirmed":exited,
+                "checkpoint":{"verified_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","work_id":"saved-work","board_entry_id":"handoff"}
+            })).unwrap();
+            prefs.agent_switch_intents.insert(operation.into(), intent);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn agent_switch_pin_fences_monitor_admission_and_target_reassignment() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        let snapshot =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        let member = &roster.members[0].agent_member_id;
+        install_switch_pin(&root, member, AgentSwitchStage::StoppingCurrent, false);
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let prefs = load_issue_monitor_prefs(&path).unwrap();
+        let mut automatic = prefs.clone();
+        let operation = automatic
+            .agent_switch_intents
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        automatic
+            .agent_switch_intents
+            .get_mut(&operation)
+            .unwrap()
+            .stage = AgentSwitchStage::Checkpointing;
+        let mut assignment = automatic.agent_switch_intents[&operation]
+            .source
+            .assignment
+            .clone();
+        automatic.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment.clone());
+        let host = crate::process::current_hostname();
+        let owner = |prefs: &IssueMonitorPrefs, number| {
+            prefs
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .find(|entry| entry.issue_number == number)
+                .unwrap()
+                .agent_member_id
+                .clone()
+        };
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let selected_target_kept = owner(&automatic, 41) == *member;
+        let unrelated_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
+
+        automatic
+            .agent_switch_intents
+            .get_mut(&operation)
+            .unwrap()
+            .stage = AgentSwitchStage::Unknown;
+        automatic.agent_roster.as_mut().unwrap().members[0].assignment = None;
+        automatic
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 43)
+            .unwrap()
+            .agent_member_id = member.clone();
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let pinned_plan_moved = owner(&automatic, 43) == roster.members[1].agent_member_id;
+        assignment.issue_number = Some(100);
+        assignment.session_id = None;
+        automatic.agent_roster.as_mut().unwrap().members[1].assignment = Some(assignment);
+        reconcile(&mut automatic, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let pinned_destination_skipped = owner(&automatic, 42) == roster.members[1].agent_member_id;
+        assert!(selected_target_kept && unrelated_moved && pinned_plan_moved && pinned_destination_skipped,
+            "selected target kept={selected_target_kept}, ordinary busy plan moved={unrelated_moved}, unrelated pinned plan moved={pinned_plan_moved}, pinned destination skipped={pinned_destination_skipped}");
+
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
+        assert!(
+            monitor.agent_schedule_launch_exclusion(43).is_some(),
+            "the freed member is pinned against its other queued Issues"
+        );
+        assert!(
+            monitor.agent_schedule_launch_exclusion(41).is_some(),
+            "the selected target must wait for physical exit"
+        );
+        assert!(
+            monitor.agent_schedule_launch_exclusion(42).is_none(),
+            "another member is unaffected"
+        );
+        let before = fs::read(&path).unwrap();
+        assert!(mutate_project_agent_schedule(
+            &root,
+            &sessions,
+            move_action(&snapshot, 41, member, &roster.members[1].agent_member_id)
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut launching = prefs;
+        let pin = launching.agent_switch_intents.values_mut().next().unwrap();
+        pin.stage = AgentSwitchStage::LaunchingNext;
+        pin.runtime_exit_confirmed = true;
+        assert!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launching.clone())
+                .agent_schedule_launch_exclusion(41)
+                .is_none()
+        );
+        launching
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 41)
+            .unwrap()
+            .agent_member_id = roster.members[1].agent_member_id.clone();
+        assert!(
+            IssueMonitorState::with_prefs(IssueMonitorConfig::default(), launching)
+                .agent_schedule_launch_exclusion(41)
+                .is_some(),
+            "moving a reservation cannot bypass the pinned member"
+        );
+        install_switch_pin(&root, member, AgentSwitchStage::Unknown, true);
+        let monitor = IssueMonitorState::with_prefs(
+            IssueMonitorConfig::default(),
+            load_issue_monitor_prefs(&path).unwrap(),
+        );
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        assert!(monitor.agent_schedule_launch_exclusion(43).is_some());
+        crate::agent_names::mutate_project_roster(
+            &root,
+            &sessions,
+            crate::agent_names::AgentRosterAction::Rest {
+                member_id: member.clone(),
+            },
+            None,
+        )
+        .unwrap();
+        mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert_eq!(
+            load_issue_monitor_prefs(&path)
+                .unwrap()
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .find(|entry| entry.issue_number == 41)
+                .unwrap()
+                .agent_member_id,
+            *member,
+            "reconciliation must retain the selected target's member even while resting"
+        );
+    }
+
+    #[test]
+    fn agent_switch_pin_reaches_physical_reservation_and_allows_only_explicit_saved_resume() {
+        let (_temp, _home, root, sessions, roster) = fixture();
+        mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        let member = &roster.members[0].agent_member_id;
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        install_switch_pin(&root, member, AgentSwitchStage::StoppingCurrent, false);
+        let before = fs::read(&path).unwrap();
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "other",
+            Some(43),
+            None,
+            None,
+            Some(member)
+        )
+        .is_err());
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "target",
+            Some(41),
+            None,
+            None,
+            None
+        )
+        .is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        install_switch_pin(&root, member, AgentSwitchStage::LaunchingNext, true);
+        let next = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "target",
+            Some(41),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(next.agent_member_id, *member);
+        crate::agent_names::release_project_member(&root, &sessions, member, "target").unwrap();
+        install_switch_pin(&root, member, AgentSwitchStage::Unknown, false);
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            let source = prefs
+                .agent_switch_intents
+                .values()
+                .next()
+                .unwrap()
+                .source
+                .assignment
+                .clone();
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(source);
+            Ok(())
+        })
+        .unwrap();
+        let uncertain = fs::read(&path).unwrap();
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "resume",
+            Some(99),
+            None,
+            None,
+            Some(member)
+        )
+        .is_err());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            uncertain,
+            "an unobserved source Session cannot be cleared by the resume exception"
+        );
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = None;
+            Ok(())
+        })
+        .unwrap();
+        for (stage, reservation) in [
+            (AgentSwitchStage::Unknown, "saved-unknown"),
+            (AgentSwitchStage::LaunchingNext, "saved-waiting"),
+        ] {
+            install_switch_pin(&root, member, stage, false);
+            let monitor = IssueMonitorState::with_prefs(
+                IssueMonitorConfig::default(),
+                load_issue_monitor_prefs(&path).unwrap(),
+            );
+            assert!(monitor
+                .agent_schedule_launch_exclusion(41)
+                .is_some_and(|reason| reason.contains("agent_switch_pending")));
+            assert!(
+                crate::agent_names::reserve_project_member(
+                    &root,
+                    &sessions,
+                    "automatic-target",
+                    Some(41),
+                    None,
+                    None,
+                    None
+                )
+                .is_err(),
+                "automatic admission still requires physical exit receipt"
+            );
+            let resumed = crate::agent_names::reserve_project_member(
+                &root,
+                &sessions,
+                reservation,
+                Some(99),
+                None,
+                None,
+                Some(member),
+            )
+            .unwrap();
+            assert_eq!(resumed.agent_member_id, *member);
+            let saved = load_issue_monitor_prefs(&path).unwrap();
+            let pin = saved.agent_switch_intents.values().next().unwrap();
+            assert_eq!(pin.stage, AgentSwitchStage::Failed);
+            assert!(!pin.runtime_exit_confirmed && pin.checkpoint.is_some());
+            crate::agent_names::release_project_member(&root, &sessions, member, reservation)
+                .unwrap();
+        }
+        install_switch_pin(&root, member, AgentSwitchStage::Unknown, true);
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "wrong-member",
+            Some(99),
+            None,
+            None,
+            Some(&roster.members[1].agent_member_id)
+        )
+        .is_err());
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "wrong-issue",
+            Some(43),
+            None,
+            None,
+            Some(member)
+        )
+        .is_err());
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.launching_issues.push(IssueMonitorLaunchingIssue {
+                issue_number: 41,
+                claimed_at: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "target-in-flight",
+            Some(99),
+            None,
+            None,
+            Some(member)
+        )
+        .is_err());
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.launching_issues.clear();
+            prefs
+                .agent_issue_schedule
+                .reservations
+                .push(AgentIssueReservation {
+                    host_id: crate::process::current_hostname(),
+                    agent_member_id: member.clone(),
+                    issue_number: 99,
+                    reason: AgentScheduleReason::QueueOrder,
+                });
+            prefs.agent_issue_schedule.revision = u64::MAX;
+            Ok(())
+        })
+        .unwrap();
+        assert!(crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "failed-commit",
+            Some(99),
+            None,
+            None,
+            Some(member)
+        )
+        .is_err());
+        assert_eq!(
+            load_issue_monitor_prefs(&path)
+                .unwrap()
+                .agent_switch_intents
+                .values()
+                .next()
+                .unwrap()
+                .stage,
+            AgentSwitchStage::Unknown
+        );
+        crate::try_mutate_issue_monitor_prefs(&path, |prefs| {
+            prefs.agent_issue_schedule.revision = 1;
+            Ok(())
+        })
+        .unwrap();
+        let resumed = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "resume",
+            Some(99),
+            None,
+            None,
+            Some(member),
+        )
+        .unwrap();
+        assert_eq!(resumed.name, roster.members[0].name);
+        let saved = load_issue_monitor_prefs(&path).unwrap();
+        let pin = saved.agent_switch_intents.values().next().unwrap();
+        assert_eq!(
+            pin.stage,
+            AgentSwitchStage::Failed,
+            "only a committed explicit source reservation releases the pin"
+        );
+        assert!(pin.runtime_exit_confirmed && pin.checkpoint.is_some());
     }
     #[test]
     fn agent_schedule_reassignment_is_atomic_and_stale_observations_preserve_bytes() {
@@ -730,13 +1186,61 @@ mod tests {
         )
         .unwrap();
         prefs.agent_roster.as_mut().unwrap().members[1] = busy;
+        let mut manual = prefs.clone();
+        manual
+            .agent_issue_schedule
+            .reservations
+            .iter_mut()
+            .find(|entry| entry.issue_number == 41)
+            .unwrap()
+            .reason = AgentScheduleReason::AssignedByYou;
+        reconcile(&mut manual, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let manual = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), manual);
+        assert_eq!(
+            manual.scheduled_agent_member_id(41),
+            Some(roster.members[1].agent_member_id.as_str()),
+            "an explicit member choice keeps its busy reservation"
+        );
+        assert!(manual.agent_schedule_launch_exclusion(41).is_some());
+
+        let revision = prefs.agent_issue_schedule.revision;
         reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
         let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), prefs.clone());
-        assert!(monitor.agent_schedule_launch_exclusion(41).is_some());
+        assert!(monitor.agent_schedule_launch_exclusion(41).is_none());
         assert_eq!(
             monitor.scheduled_agent_member_id(41),
-            Some(roster.members[1].agent_member_id.as_str())
+            Some(roster.members[0].agent_member_id.as_str()),
+            "an automatic reservation uses the idle member even with more future work"
         );
+        assert_eq!(prefs.agent_issue_schedule.revision, revision + 1);
+        assert_eq!(
+            prefs
+                .agent_issue_schedule
+                .reservations
+                .iter()
+                .map(|entry| (entry.issue_number, entry.reason))
+                .collect::<Vec<_>>(),
+            [41, 42, 43].map(|number| (number, AgentScheduleReason::QueueOrder))
+        );
+        let planned = prefs.agent_issue_schedule.clone();
+        prefs = serde_json::from_value(serde_json::to_value(&prefs).unwrap()).unwrap();
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert_eq!(prefs.agent_issue_schedule, planned);
+
+        let busy = crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy-other",
+            Some(100),
+            None,
+            None,
+            Some(&roster.members[0].agent_member_id),
+        )
+        .unwrap();
+        let mut all_busy = prefs.clone();
+        all_busy.agent_roster.as_mut().unwrap().members[0] = busy;
+        reconcile(&mut all_busy, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert_eq!(all_busy.agent_issue_schedule, planned);
         prefs
             .terminal_queues
             .get_mut(&host)
@@ -861,6 +1365,26 @@ mod tests {
         assert!(
             monitor.agent_schedule_launch_exclusion(42).is_none(),
             "a different free member remains available"
+        );
+
+        crate::agent_names::reserve_project_member(
+            &root,
+            &sessions,
+            "busy-42-member",
+            Some(99),
+            None,
+            None,
+            Some(&roster.members[1].agent_member_id),
+        )
+        .unwrap();
+        let read =
+            mutate_project_agent_schedule(&root, &sessions, AgentScheduleAction::Read).unwrap();
+        assert!(
+            read.members[1]
+                .issues
+                .iter()
+                .any(|issue| issue.issue_number == 42),
+            "a member pinned by another pending claim is not an idle destination"
         );
 
         crate::try_mutate_issue_monitor_prefs(&path, |prefs| {

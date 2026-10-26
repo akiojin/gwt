@@ -1005,6 +1005,13 @@ row order, repeats and missing dependency data; absent Monitor yields null, whil
 matching rows yields []. Keep `unobserved_issues` and the Monitor provenance. These
 observations do not prove Goal achievement, metric attainment, critical path or readiness,
 and authorize no priority or launch changes.
+Each Goal's `dependency_impacts` filters the global direct inverse to those same roadmap
+member dependents. It retains external blockers, numeric order and distinct direct
+dependents, and omits other dependents and empty blocker rows. Duplicate or blank Goal
+IDs resolve no members. Absent Monitor yields null; no supplied member blocker edges
+yields []. Degraded or aborted facts keep the enclosing Monitor provenance and limits.
+This inverse proves neither Goal/metric attainment, transitive delay nor critical path,
+and grants no priority, readiness or launch authority.
 Each roadmap item's `dependency_observations` selects only that row's directly saved
 Issues, retaining supplied row order, repeats and missing dependency data. Empty or
 duplicate IDs and invalid links keep independent membership; it never expands through
@@ -1012,6 +1019,14 @@ a Goal, milestone or another row. Absent Monitor yields null even for empty memb
 supplied snapshots without matching rows yield []. Keep `unobserved_issues` and the
 Monitor source, scan time and coverage limits. This join does not establish a complete
 graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that
+row's direct member dependents. It keeps external/shared blockers, numeric order and
+distinct direct dependents, omitting other dependents and empty blocker rows.
+Duplicate/blank IDs and invalid links keep independent membership; no Goal, milestone
+or other row adds members. Absent Monitor yields null even for empty membership;
+no supplied member blocker edges yields []. Degraded or aborted facts retain the
+enclosing Monitor provenance and limits. This inverse proves neither a complete graph,
+transitive delay, critical path nor health, and grants no priority, readiness or launch authority.
 Each `policy.roadmap_items` row shows its directly saved `issues`, preserving
 their order and duplicates. `observed_issue_states` and `unobserved_issues` use
 distinct Issue numbers in ascending order; typed states retain their supplied
@@ -1776,6 +1791,7 @@ an entry removes its copied policy on the next refresh.
 - **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
+- **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
 - **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 

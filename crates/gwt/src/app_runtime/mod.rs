@@ -134,6 +134,7 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
         UserEvent::AgentFrontend { .. }
         | UserEvent::FreshExecutionReadyResend { .. }
         | UserEvent::CommitAgentSelfClose { .. }
+        | UserEvent::AgentSwitchSourceExited(_)
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }
@@ -636,6 +637,8 @@ pub(crate) use issue_monitor_profiles::{
     IssueMonitorProfileSaveLane, IssueMonitorProfilesSaveCompletion,
 };
 pub(crate) mod agent_maintenance;
+mod agent_switch;
+pub(crate) use agent_switch::AgentSwitchSourceExited;
 mod attachments;
 mod board;
 pub(crate) mod continuation;
@@ -770,72 +773,11 @@ struct WorkspaceWorktreeReconcileOutcome {
     backfilled: usize,
 }
 
-#[derive(Debug, Clone)]
-pub struct ActiveAgentSession {
-    pub(crate) window_id: String,
-    pub(crate) session_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) branch_name: String,
-    pub(crate) display_name: String,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) agent_project_root: String,
-    pub(crate) runtime_target: gwt_agent::LaunchRuntimeTarget,
-    pub(crate) tab_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceResumeContext {
-    pub(crate) title: Option<String>,
-    pub(crate) owner: Option<String>,
-    pub(crate) summary: Option<String>,
-    pub(crate) next_action: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingContinueWork {
-    pub(crate) client_id: ClientId,
-    pub(crate) operation_id: String,
-    pub(crate) work_id: String,
-    pub(crate) project_root: PathBuf,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    pub(crate) work_branch: String,
-    pub(crate) work_agent_id: gwt_agent::AgentId,
-    pub(crate) work_agent_session_id: Option<String>,
-    pub(crate) execution: PendingContinueWorkExecution,
-    pub(crate) binding: gwt_agent::SessionExecutionBinding,
-    pub(crate) readiness_nonce: String,
-    pub(crate) outcome: gwt::ContinueWorkOutcomeKind,
-    pub(crate) resume_context: WorkspaceResumeContext,
-    pub(crate) predecessor_session_id: String,
-    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PendingContinueWorkExecution {
-    Successor(gwt::cli::execution_state::SuccessorRequest),
-    #[allow(dead_code)] // Retained for reconciliation of legacy in-memory fixtures.
-    Takeover(gwt::cli::execution_state::GenerationTakeoverRequest),
-}
-
-/// Explicit linked-owner launch that is waiting for an authenticated
-/// SessionStart before replacing an integrity-valid Blocked generation.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingFreshExecutionLaunch {
-    pub(crate) operation_id: String,
-    pub(crate) project_root: PathBuf,
-    pub(crate) worktree_path: PathBuf,
-    pub(crate) owner: gwt::cli::execution_state::ExecutionOwnerKey,
-    pub(crate) request: gwt::cli::execution_state::SuccessorRequest,
-    pub(crate) binding: gwt_agent::SessionExecutionBinding,
-    pub(crate) session_identity: gwt_agent::SessionExecutionIdentity,
-    pub(crate) readiness_nonce: String,
-    pub(crate) predecessor_binding: gwt_agent::ExecutionBindingIdentity,
-    pub(crate) base_branch: Option<String>,
-    pub(crate) linked_issue_number: Option<u64>,
-    pub(crate) resume_context: Option<WorkspaceResumeContext>,
-    pub(crate) launch_feedback_context: Option<LaunchFeedbackContext>,
-}
+pub use gwt::project_runtime::launch_payload::{ActiveAgentSession, LaunchFeedbackContext};
+pub(crate) use gwt::project_runtime::launch_payload::{
+    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
+    WorkspaceResumeContext,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct CachedContinueWorkOutcome {
@@ -844,18 +786,6 @@ pub(crate) struct CachedContinueWorkOutcome {
     pub(crate) message: Option<String>,
     pub(crate) error_code: Option<String>,
     pub(crate) retryable: bool,
-}
-
-impl WorkspaceResumeContext {
-    fn purpose_title(&self) -> Option<String> {
-        self.title
-            .as_deref()
-            .or(self.summary.as_deref())
-            .or(self.owner.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1169,29 +1099,6 @@ pub struct AgentKanbanLaunchTarget {
 }
 
 #[derive(Debug, Clone)]
-pub struct LaunchFeedbackContext {
-    pub(crate) client_id: ClientId,
-    pub(crate) title: String,
-    pub(crate) issue_monitor_issue_number: Option<u64>,
-    pub(crate) issue_monitor_delivery_id: Option<String>,
-    pub(crate) issue_monitor_project_root: Option<PathBuf>,
-    pub(crate) issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
-    /// Write-ahead answered handoff carried by a native Resume. Only the
-    /// provider's UserPromptSubmit receipt may mark it delivered.
-    pub(crate) issue_monitor_autonomous_handoff: Option<gwt::AutonomousHandoffDeliveryAttempt>,
-    /// Set immediately before the provider process spawn call. Failures while
-    /// false are definitely pre-submit and keep the bounded retry ladder;
-    /// failures while true have an ambiguous provider outcome.
-    pub(crate) issue_monitor_autonomous_submit_started: bool,
-    /// SPEC #3200 Option A / Issue #4041: the independent review agent is
-    /// subordinate to the implementing launch. Its window must never be
-    /// ACKed as the Issue's launch: that rebinds `launched_issues` to the
-    /// review window, drops the implementation claim, and takes an active
-    /// slot while the implementation window is still running.
-    pub(crate) issue_monitor_review_dispatch: bool,
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct PreparedIssueMonitorLaunchFailure {
     retryable: bool,
     monitor: Option<gwt::IssueMonitorState>,
@@ -1260,19 +1167,6 @@ pub(crate) struct PreparedRuntimeHookAgentFailure {
     issue_number_hint: Option<u64>,
     result: PreparedIssueMonitorAgentFailure,
     status: Option<Box<gwt::IssueMonitorStatusView>>,
-}
-
-impl LaunchFeedbackContext {
-    /// The Issue whose Monitor launch this window materializes. `None` for a
-    /// review dispatch, whose window observes the Issue without owning its
-    /// launch binding (Issue #4041).
-    pub(crate) fn issue_monitor_launch_binding_issue_number(&self) -> Option<u64> {
-        if self.issue_monitor_review_dispatch {
-            None
-        } else {
-            self.issue_monitor_issue_number
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2848,6 +2742,7 @@ fn prepare_and_persist_issue_monitor_scan_without_authority_fence<T>(
             *monitor = preparation_baseline.clone();
             monitor.rebase_gui_observer_prefs(&observed);
             let result = mutation(monitor);
+            monitor.reconcile_unowned_excluded_launches(observed.last_scan_at.as_deref());
             let proposed = monitor.prefs();
             // A long scan's budget does not grant a long writer-lock wait.
             let _commit_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
@@ -4237,6 +4132,7 @@ fn observe_local_issue_completion(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scheduled_issue_monitor_scan(
     project_root: &Path,
     expected_project_tab_id: Option<&str>,
@@ -4245,6 +4141,7 @@ fn run_scheduled_issue_monitor_scan(
     window_snapshot_tabs: Option<&std::collections::BTreeSet<String>>,
     now: &str,
     issue_client_factory: &RuntimeIssueClientFactory,
+    restoring_session_ids: &HashSet<String>,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     run_scheduled_issue_monitor_scan_with_budgets(
         project_root,
@@ -4256,6 +4153,7 @@ fn run_scheduled_issue_monitor_scan(
         issue_client_factory,
         ISSUE_MONITOR_SCAN_BUDGET,
         ISSUE_MONITOR_COMMIT_BUDGET,
+        restoring_session_ids,
     )
 }
 
@@ -4354,7 +4252,11 @@ impl Drop for ScanGenerationReaperFlight {
 
 /// The prefs path already identifies the canonical project store, so linked
 /// worktrees and duplicate tabs share one reservation without another Git probe.
-fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
+fn enqueue_scan_generation_reaper(
+    project_root: &Path,
+    prefs_path: &Path,
+    restoring_session_ids: &HashSet<String>,
+) {
     if !scan_generation_reapers()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4368,6 +4270,7 @@ fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
     // Unwinding the worker releases it as well, without queuing another worker.
     let flight = ScanGenerationReaperFlight(prefs_path.to_path_buf());
     let project_root = project_root.to_path_buf();
+    let restoring_session_ids = restoring_session_ids.clone();
     #[cfg(test)]
     let user_home = gwt_config::home::user_home().expect("test user home");
     if let Err(error) = std::thread::Builder::new()
@@ -4377,7 +4280,7 @@ fn enqueue_scan_generation_reaper(project_root: &Path, prefs_path: &Path) {
             // The recovery can outlive the scan fixture's process-global HOME.
             #[cfg(test)]
             let _home = gwt_core::test_support::ScopedGwtHome::set(user_home);
-            reap_scan_defunct_active_generations(&project_root);
+            reap_scan_defunct_active_generations(&project_root, &restoring_session_ids);
         })
     {
         tracing::warn!(%error, "could not schedule scan Active generation recovery");
@@ -4445,11 +4348,12 @@ impl Drop for ScopedScanGenerationReaperTestHook {
 /// Issue #3934: recover generations after startup without changing the exact
 /// liveness checks and execution leases used by startup recovery.
 ///
-/// The scan worker has no `AppRuntime`, so it protects nothing by identity;
-/// it does not need to. Startup's protection list exists only for sessions it
-/// is about to restore, and every window this process already owns publishes a
-/// live runtime sidecar that the exact revalidation reads as `Live`.
-fn reap_scan_defunct_active_generations(project_root: &Path) {
+/// Restore sources have no live sidecar until asynchronous launch preparation
+/// finishes. Preserve their admitted identity alongside ordinary runtime checks.
+fn reap_scan_defunct_active_generations(
+    project_root: &Path,
+    restoring_session_ids: &HashSet<String>,
+) {
     #[cfg(test)]
     {
         let hook = scan_generation_reaper_test_hooks()
@@ -4479,7 +4383,7 @@ fn reap_scan_defunct_active_generations(project_root: &Path) {
         &gwt_core::paths::gwt_sessions_dir(),
         &worktrees,
         &[],
-        &std::collections::HashSet::new(),
+        restoring_session_ids,
         startup::GenerationReaperFailureLog::Debug,
     );
     if summary.reaped > 0 || summary.replayed > 0 {
@@ -4510,6 +4414,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     issue_client_factory: &RuntimeIssueClientFactory,
     scan_budget: std::time::Duration,
     commit_budget: std::time::Duration,
+    restoring_session_ids: &HashSet<String>,
 ) -> Result<ScheduledIssueMonitorScanOutcome, String> {
     // Issue #3609: this runs on the worker thread `enqueue_issue_monitor_scan_worker`
     // spawned, so the prefs path is resolved from the process-global `HOME` here, not
@@ -4536,7 +4441,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
     // before the authority probe (#3964): daemon-owned scans still need local
     // recovery, which retains its exact liveness revalidation and own leases.
     if prefs.enabled {
-        enqueue_scan_generation_reaper(project_root, &prefs_path);
+        enqueue_scan_generation_reaper(project_root, &prefs_path, restoring_session_ids);
     }
 
     // Cheap authority probe before any remote I/O. The lease is intentionally
@@ -10280,7 +10185,8 @@ impl AppRuntime {
         if !self.issue_monitor_materializer_ready() {
             return Vec::new();
         }
-        let mut events = self.reconcile_activated_issue_monitor_launches();
+        let mut events = self.agent_switch_tick_events();
+        events.extend(self.reconcile_activated_issue_monitor_launches());
         events.extend(self.advance_issue_monitor_launch_queue_events());
         let mut seen_prefs_paths = HashSet::new();
         let projects: Vec<(PathBuf, PathBuf, String)> = self
@@ -10624,6 +10530,7 @@ impl AppRuntime {
         let worker_now = now.to_string();
         let window_snapshot_tabs = self.issue_monitor_project_tab_ids(expected_project_tab_id);
         let issue_client_factory = self.issue_client_factory.clone();
+        let restoring_session_ids = self.restoring_session_ids();
         let spawn = self.blocking_tasks.try_spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Issue #4244: automatic disappearance belongs to the scan
@@ -10644,6 +10551,7 @@ impl AppRuntime {
                     Some(&window_snapshot_tabs),
                     &worker_now,
                     &issue_client_factory,
+                    &restoring_session_ids,
                 );
                 (outcome, Vec::new())
             }))
@@ -12712,6 +12620,7 @@ impl AppRuntime {
             | FrontendEvent::RestartPmAgent
             | FrontendEvent::AgentRoster { .. }
             | FrontendEvent::AgentSchedule { .. }
+            | FrontendEvent::AgentSwitch { .. }
             | FrontendEvent::ListIssueMonitor
             | FrontendEvent::IssueMonitorLaunchNow { .. }
             | FrontendEvent::IssueMonitorQueuePush { .. }
@@ -13181,6 +13090,9 @@ impl AppRuntime {
             } => self.agent_roster_events(context, &client_id, action, expected_revision),
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
+            }
+            FrontendEvent::AgentSwitch { action } => {
+                self.agent_switch_events(context, &client_id, action)
             }
             FrontendEvent::RefreshUsage => self.request_usage_refresh_events(),
             FrontendEvent::StartupAutoResumeReady {} => {

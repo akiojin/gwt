@@ -38,8 +38,11 @@ pub(crate) use gwt::project_runtime::launch_finalization::heal_lost_generation_p
 #[cfg(test)]
 use gwt::project_runtime::launch_finalization::persist_genesis_session_binding_with;
 use gwt::project_runtime::launch_finalization::{
-    materialized_genesis_launch_from_session, terminalize_materialized_genesis_launch,
-    FinalizedAgentCapabilityLaunch, MaterializedGenesisLaunch,
+    materialized_genesis_launch_from_session, pending_fresh_execution_launch_from_session,
+    rollback_materialized_fresh_execution_launch, rollback_worker_continue_work,
+    rollback_worker_fresh_execution, rollback_worker_genesis,
+    terminalize_materialized_genesis_launch, FinalizedAgentCapabilityLaunch,
+    MaterializedGenesisLaunch,
 };
 pub use gwt::project_runtime::launch_payload::{
     AgentLaunchCompletion, AgentLaunchError, AgentLaunchResult, AgentLaunchRuntimeContext,
@@ -58,13 +61,10 @@ use super::agent_maintenance;
 #[cfg(test)]
 use super::continuation::persist_durable_launch_recovery;
 use super::continuation::{
-    abort_prepared_execution_and_remove_exact_session,
     bind_durable_launch_recovery_session_identity, clear_durable_launch_recovery,
-    compensate_terminalized_genesis_workspace_projection, durable_launch_recovery_exists,
-    durable_launch_recovery_session_identity, pending_continue_work_session_identity,
+    durable_launch_recovery_exists, pending_continue_work_session_identity,
     pending_execution_activation_status, pending_fresh_execution_activation_status,
-    persist_durable_launch_recovery_with_identity, resolve_split_workspace_state_external_commit,
-    DurableLaunchRecoveryKind,
+    persist_durable_launch_recovery_with_identity, DurableLaunchRecoveryKind,
 };
 
 use super::{
@@ -164,210 +164,6 @@ fn pty_gate_launch_parts() -> Result<(PathBuf, Vec<String>), String> {
         "--nocapture".to_string(),
     ];
     Ok((gate_program, gate_args))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pending_fresh_execution_launch_from_session(
-    sessions_dir: &Path,
-    session_id: &str,
-    worktree_path: &Path,
-    agent_project_root: &str,
-    linked_issue_number: Option<u64>,
-    base_branch: Option<String>,
-    resume_context: Option<WorkspaceResumeContext>,
-    launch_feedback_context: Option<LaunchFeedbackContext>,
-    readiness_nonce: &str,
-    expected_agent_id: &gwt_agent::AgentId,
-) -> Result<PendingFreshExecutionLaunch, String> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let session = gwt_agent::Session::load(&session_path).map_err(|error| {
-        format!(
-            "fresh linked-owner launch Session could not be read at {}: {error}",
-            session_path.display()
-        )
-    })?;
-    if session.id != session_id
-        || &session.agent_id != expected_agent_id
-        || !same_worktree_path(&session.worktree_path, worktree_path)
-    {
-        return Err(
-            "fresh linked-owner launch Session does not match its materialized worktree"
-                .to_string(),
-        );
-    }
-    let binding = session.execution_binding.clone().ok_or_else(|| {
-        "fresh linked-owner launch Session has no Prepared execution binding".to_string()
-    })?;
-    if binding.session_id != session_id
-        || session.linked_issue_number != Some(binding.owner_number)
-        || linked_issue_number != Some(binding.owner_number)
-    {
-        return Err(
-            "fresh linked-owner launch owner does not match its persisted Session binding"
-                .to_string(),
-        );
-    }
-    let owner_kind = match binding.owner_kind.as_str() {
-        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
-        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        _ => return Err("fresh linked-owner launch owner kind is not canonical".to_string()),
-    };
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: owner_kind,
-        number: binding.owner_number,
-    };
-    let ledger = gwt::cli::execution_state::load_generation_ledger(worktree_path, owner)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "fresh linked-owner launch owner ledger is missing".to_string())?;
-    let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
-        worktree_path,
-        owner,
-        session_id,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| {
-        "fresh linked-owner launch has no unique Prepared successor attempt".to_string()
-    })?;
-    let expected_status = match attempt.predecessor_status {
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Blocked => {
-            gwt::cli::execution_state::ExecutionControlStatus::Blocked
-        }
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Completed => {
-            gwt::cli::execution_state::ExecutionControlStatus::Completed
-        }
-        gwt::cli::execution_state::SuccessorPredecessorStatus::Active => {
-            gwt::cli::execution_state::ExecutionControlStatus::Active
-        }
-    };
-    if ledger.current_effective_status() != Some(expected_status) {
-        return Err("fresh linked-owner launch predecessor status changed".to_string());
-    }
-    if !gwt::cli::execution_state::prepared_execution_binding_matches(
-        worktree_path,
-        owner,
-        session_id,
-        &binding.identity,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "fresh linked-owner launch Session does not match its Prepared successor".to_string(),
-        );
-    }
-    let predecessor_binding =
-        gwt::cli::execution_state::current_execution_binding(worktree_path, owner)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| {
-                "fresh linked-owner launch predecessor binding is missing".to_string()
-            })?;
-    if predecessor_binding == binding.identity {
-        return Err(
-            "fresh linked-owner launch candidate is already the current generation".to_string(),
-        );
-    }
-    let project_root = session
-        .project_state_root
-        .clone()
-        .or_else(|| {
-            (!agent_project_root.trim().is_empty()).then(|| PathBuf::from(agent_project_root))
-        })
-        .ok_or_else(|| {
-            "fresh linked-owner launch canonical Project State root is missing".to_string()
-        })?;
-    let session_identity = gwt_agent::SessionExecutionIdentity::from_session(&session)
-        .map_err(|error| format!("fresh linked-owner Session identity is invalid: {error}"))?
-        .ok_or_else(|| "fresh linked-owner Session identity is missing".to_string())?;
-    if durable_launch_recovery_session_identity(sessions_dir, session_id)?
-        != Some(session_identity.clone())
-    {
-        return Err(
-            "fresh linked-owner Session no longer matches its durable launch identity".to_string(),
-        );
-    }
-    Ok(PendingFreshExecutionLaunch {
-        operation_id: attempt.request.operation_id.clone(),
-        project_root,
-        worktree_path: worktree_path.to_path_buf(),
-        owner,
-        request: attempt.request,
-        binding,
-        session_identity,
-        readiness_nonce: readiness_nonce.to_string(),
-        predecessor_binding,
-        base_branch,
-        linked_issue_number,
-        resume_context,
-        launch_feedback_context,
-    })
-}
-
-fn rollback_materialized_fresh_execution_launch(
-    sessions_dir: &Path,
-    session_id: &str,
-    worktree_path: &Path,
-    reason: &str,
-    expected_agent_id: &gwt_agent::AgentId,
-) -> Result<(), String> {
-    let session_path = sessions_dir.join(format!("{session_id}.toml"));
-    let session = gwt_agent::Session::load(&session_path).map_err(|error| error.to_string())?;
-    let binding = session.execution_binding.clone().ok_or_else(|| {
-        "fresh linked-owner rollback cannot prove the candidate Session binding".to_string()
-    })?;
-    let session_identity = durable_launch_recovery_session_identity(sessions_dir, session_id)?
-        .ok_or_else(|| "fresh linked-owner rollback identity is missing".to_string())?;
-    if session.id != session_id
-        || &session.agent_id != expected_agent_id
-        || binding.session_id != session_id
-        || !same_worktree_path(&session.worktree_path, worktree_path)
-    {
-        return Err("fresh linked-owner rollback candidate identity no longer matches".to_string());
-    }
-    let owner_kind = match binding.owner_kind.as_str() {
-        "spec" => gwt::cli::execution_state::ExecutionOwnerKind::Spec,
-        "issue" => gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-        _ => {
-            return Err("fresh linked-owner rollback candidate owner is not canonical".to_string())
-        }
-    };
-    let owner = gwt::cli::execution_state::ExecutionOwnerKey {
-        kind: owner_kind,
-        number: binding.owner_number,
-    };
-    let attempt = gwt::cli::execution_state::prepared_fresh_linked_owner_launch_for_session(
-        worktree_path,
-        owner,
-        session_id,
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "fresh linked-owner rollback found no unique Prepared candidate".to_string())?;
-    if !gwt::cli::execution_state::prepared_execution_binding_matches(
-        worktree_path,
-        owner,
-        session_id,
-        &binding.identity,
-    )
-    .map_err(|error| error.to_string())?
-    {
-        return Err(
-            "fresh linked-owner rollback candidate binding is no longer Prepared".to_string(),
-        );
-    }
-    match gwt::cli::execution_state::abort_successor_and_remove_exact_session(
-        worktree_path,
-        owner,
-        &attempt.request,
-        reason,
-        sessions_dir,
-        &session_identity,
-        || Ok(()),
-    ) {
-        Ok(true) => clear_durable_launch_recovery(sessions_dir, session_id),
-        Ok(false) => Err(
-            "fresh linked-owner rollback retained a Session whose binding no longer matches"
-                .to_string(),
-        ),
-        Err(error) => Err(error.to_string()),
-    }
 }
 
 pub(super) fn claim_prepared_manual_successor_launch(
@@ -746,43 +542,6 @@ struct PreparedAgentLaunchSuccess {
     materialized_genesis: Option<MaterializedGenesisLaunch>,
 }
 
-fn rollback_worker_genesis(
-    sessions_dir: &Path,
-    project_root: &Path,
-    active: &ActiveAgentSession,
-    genesis: &MaterializedGenesisLaunch,
-    reason: &str,
-    removed_session: &mut Option<gwt_agent::SessionExecutionIdentity>,
-) -> Result<(), String> {
-    let removed = gwt::cli::execution_state::block_genesis_and_remove_exact_session(
-        &genesis.worktree_path,
-        genesis.owner,
-        &genesis.session_id,
-        &genesis.binding.identity,
-        reason,
-        sessions_dir,
-        &genesis.session_identity,
-        || {
-            compensate_terminalized_genesis_workspace_projection(
-                project_root,
-                &genesis.worktree_path,
-                genesis.owner,
-                &genesis.session_id,
-                Some(&genesis.binding),
-                Some(&active.branch_name),
-            )
-            .map_err(std::io::Error::other)
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    if !removed {
-        return Err("failed genesis Session changed before exact rollback".into());
-    }
-    // Preserve exact removal even if the durable receipt still needs cleanup.
-    *removed_session = Some(genesis.session_identity.clone());
-    clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
-}
-
 fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch {
     // Keep the existing Work lock budget, including PM/Execution lock waits.
     // Expired authority operations retain their exact reconciliation evidence.
@@ -933,115 +692,6 @@ fn prepare_agent_launch(mut input: LaunchCompletionInput) -> PreparedAgentLaunch
         issuer: input.issuer,
         blocking_tasks: input.blocking_tasks,
     }))
-}
-
-/// Return false only for an irreversible Activated generation. Exact candidate
-/// conflicts and unreadable authority retain their evidence for reconciliation.
-fn rollback_worker_continue_work(
-    sessions_dir: &Path,
-    pending: &PendingContinueWork,
-) -> Result<bool, String> {
-    match pending_execution_activation_status(pending) {
-        Some(true) => return Ok(false),
-        Some(false) => {}
-        None => return Err("continuation activation status is unreadable".into()),
-    }
-    let identity = pending_continue_work_session_identity(pending)?;
-    let cleanup = abort_prepared_execution_and_remove_exact_session(
-        &pending.worktree_path,
-        pending.owner,
-        &pending.execution,
-        "continuation launch failed before SessionStart",
-        sessions_dir,
-        &identity,
-        || {
-            reject_worker_launch_projection_commit(
-                &pending.project_root,
-                &pending.worktree_path,
-                &pending.operation_id,
-            )
-        },
-    );
-    match cleanup {
-        Ok(true) => {}
-        Ok(false) => {
-            return Err("continuation candidate Session changed before exact rollback".into())
-        }
-        Err(_) if pending_execution_activation_status(pending) == Some(true) => return Ok(false),
-        Err(error) => return Err(error.to_string()),
-    }
-    clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
-    Ok(true)
-}
-
-fn rollback_worker_fresh_execution(
-    sessions_dir: &Path,
-    pending: &PendingFreshExecutionLaunch,
-) -> Result<bool, String> {
-    match pending_fresh_execution_activation_status(pending) {
-        Some(true) => return Ok(false),
-        Some(false) => {}
-        None => return Err("fresh launch activation status is unreadable".into()),
-    }
-    let cleanup = gwt::cli::execution_state::abort_successor_and_remove_exact_session(
-        &pending.worktree_path,
-        pending.owner,
-        &pending.request,
-        "fresh linked-owner launch failed before SessionStart",
-        sessions_dir,
-        &pending.session_identity,
-        || {
-            reject_worker_launch_projection_commit(
-                &pending.project_root,
-                &pending.worktree_path,
-                &pending.operation_id,
-            )
-        },
-    );
-    match cleanup {
-        Ok(true) => {}
-        Ok(false) => return Err("fresh candidate Session changed before exact rollback".into()),
-        Err(_) if pending_fresh_execution_activation_status(pending) == Some(true) => {
-            return Ok(false)
-        }
-        Err(error) => return Err(error.to_string()),
-    }
-    if !pending
-        .launch_feedback_context
-        .as_ref()
-        .is_some_and(|context| {
-            context
-                .issue_monitor_launch_binding_issue_number()
-                .is_some()
-                && context.issue_monitor_delivery_id.is_some()
-                && context.issue_monitor_autonomous_handoff.is_none()
-        })
-    {
-        clear_durable_launch_recovery(sessions_dir, &pending.binding.session_id)?;
-    }
-    Ok(true)
-}
-
-fn reject_worker_launch_projection_commit(
-    project_root: &Path,
-    worktree: &Path,
-    operation_id: &str,
-) -> std::io::Result<()> {
-    match resolve_split_workspace_state_external_commit(
-        project_root,
-        worktree,
-        operation_id,
-        gwt_core::workspace_projection::ExternalWorkspaceCommitDecision::Reject,
-    ) {
-        Ok(
-            gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Rejected
-            | gwt_core::workspace_projection::ExternalWorkspaceCommitResolution::Missing,
-        ) => Ok(()),
-        Ok(resolution) => Err(std::io::Error::other(format!(
-            "continuation Work rejection returned {resolution:?}"
-        ))),
-        Err(error) => Err(std::io::Error::other(error.to_string())),
-    }
 }
 
 fn prepare_agent_launch_inner(
@@ -1816,7 +1466,7 @@ enum IssueMonitorAdmissionDependencyRole {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct IssueMonitorAdmissionFileStamp {
+pub(super) struct IssueMonitorAdmissionFileStamp {
     path: PathBuf,
     role: IssueMonitorAdmissionDependencyRole,
     version: IssueMonitorAdmissionFileVersion,
@@ -1961,7 +1611,7 @@ impl IssueMonitorAdmissionFileStamp {
         })
     }
 
-    fn is_current(&self) -> bool {
+    pub(super) fn is_current(&self) -> bool {
         match &self.version {
             IssueMonitorAdmissionFileVersion::IssueMonitorPrefs(expected) => {
                 super::IssueMonitorPrefsStamp::matches_current(expected.as_ref(), &self.path)
@@ -2236,7 +1886,7 @@ impl IssueMonitorSpawnAdmissionInput {
     }
 }
 
-fn prepare_issue_monitor_spawn_capacity(
+pub(super) fn prepare_issue_monitor_spawn_capacity(
     project_root: &Path,
     issue_number: u64,
     dependencies: &mut Vec<IssueMonitorAdmissionFileStamp>,
@@ -7547,195 +7197,6 @@ mod agent_endpoint_env_tests {
                 holder_bytes
             );
         }
-    }
-
-    /// SPEC #3590 FR-001 / US-1 / US-4: a live Active holder must not refuse
-    /// another launch. The second launch starts its own generation beside the
-    /// holder's; the holder keeps its Active generation and its binding.
-    #[test]
-    fn prepared_successor_concurrent_launch_recovers_and_rolls_back_its_exact_candidate() {
-        let _env_lock = crate::env_test_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = tempfile::tempdir().expect("home tempdir");
-        let _home = ScopedEnvVar::set("HOME", home.path());
-        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
-        let mut launch = persisted_execution_launch(home.path());
-        let issuer = AgentCapabilityIssuer::for_test(
-            "http://127.0.0.1:45123/internal/hook-live",
-            "ws://127.0.0.1:46234/ws",
-            "ws://127.0.0.1:45123/internal/pane-ws",
-        );
-        let mut genesis_env = HashMap::new();
-        FinalizedAgentCapabilityLaunch {
-            issuer: Some(&issuer),
-            sessions_dir: &launch.sessions_dir,
-            session: &mut launch.session,
-            project_root: &launch.project,
-            worktree: &launch.project,
-            producing_owner: Some(launch.owner),
-            prepared_continuation: None,
-            rebound_continuation: None,
-            execution_entrypoint: "$gwt-execute #2359",
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            container_runtime: None,
-            permission_decision: None,
-        }
-        .install(&mut genesis_env)
-        .expect("materialize the first producing generation");
-
-        let holder_id = launch.session.id.clone();
-        let holder_identity = gwt_agent::SessionExecutionIdentity::from_session(
-            &gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
-                .expect("reload holder Session"),
-        )
-        .expect("read holder identity")
-        .expect("holder must be bound");
-
-        let mut relaunch = gwt_agent::Session::new(
-            &launch.project,
-            "work/issue-2359",
-            gwt_agent::AgentId::Codex,
-        );
-        relaunch.project_state_root = Some(launch.project.clone());
-        relaunch.linked_issue_number = Some(launch.owner.number);
-        relaunch.update_status(gwt_agent::AgentStatus::Running);
-
-        let mut env = HashMap::new();
-        FinalizedAgentCapabilityLaunch {
-            issuer: Some(&issuer),
-            sessions_dir: &launch.sessions_dir,
-            session: &mut relaunch,
-            project_root: &launch.project,
-            worktree: &launch.project,
-            producing_owner: Some(launch.owner),
-            prepared_continuation: None,
-            rebound_continuation: None,
-            execution_entrypoint: "$gwt-execute #2359",
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            container_runtime: None,
-            permission_decision: None,
-        }
-        .install(&mut env)
-        .expect("a concurrent launch must start beside a live holder");
-
-        assert!(
-            env.contains_key(gwt_agent::GWT_HOOK_FORWARD_TOKEN_ENV),
-            "the concurrent launch must receive its own producing capability"
-        );
-        let binding = relaunch
-            .execution_binding
-            .clone()
-            .expect("the concurrent launch must be bound");
-        assert_ne!(
-            binding.identity.generation_id,
-            holder_identity.execution_binding.identity.generation_id,
-            "the concurrent launch must own a new generation, not the holder's"
-        );
-
-        let ledger =
-            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                .expect("load owner ledger")
-                .expect("owner ledger exists");
-        assert!(
-            !ledger.lifecycle_events.iter().any(|event| {
-                event.generation_id == holder_identity.execution_binding.identity.generation_id
-            }),
-            "the live holder generation must not be terminalized by a concurrent launch"
-        );
-        let holder_session =
-            gwt_agent::Session::load(&launch.sessions_dir.join(format!("{holder_id}.toml")))
-                .expect("reload holder Session after the concurrent launch");
-        assert_eq!(
-            gwt_agent::SessionExecutionIdentity::from_session(&holder_session)
-                .expect("read holder identity after the concurrent launch")
-                .expect("holder must stay bound"),
-            holder_identity,
-            "the existing window must be untouched by the concurrent launch"
-        );
-
-        // A second Prepared launch for the owner must not make recovery of
-        // this Session ambiguous (Issue #4395 AC-3).
-        let mut other = gwt_agent::Session::new(
-            &launch.project,
-            "work/issue-2359",
-            gwt_agent::AgentId::Codex,
-        );
-        other.project_state_root = Some(launch.project.clone());
-        other.linked_issue_number = Some(launch.owner.number);
-        other.update_status(gwt_agent::AgentStatus::Running);
-        FinalizedAgentCapabilityLaunch {
-            issuer: Some(&issuer),
-            sessions_dir: &launch.sessions_dir,
-            session: &mut other,
-            project_root: &launch.project,
-            worktree: &launch.project,
-            producing_owner: Some(launch.owner),
-            prepared_continuation: None,
-            rebound_continuation: None,
-            execution_entrypoint: "$gwt-execute #2359",
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            container_runtime: None,
-            permission_decision: None,
-        }
-        .install(&mut HashMap::new())
-        .expect("prepare another concurrent candidate");
-        let other_path = launch.sessions_dir.join(format!("{}.toml", other.id));
-        let other_before = std::fs::read(&other_path).unwrap();
-        assert!(
-            gwt::cli::execution_state::prepared_owner_launch_successor_for_predecessor(
-                &launch.project,
-                launch.owner,
-                &holder_identity.execution_binding.identity,
-            )
-            .expect("concurrent launches are not terminal manual-launch replays")
-            .is_none()
-        );
-        let nonce = &env[gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV];
-        let recover = |issue| {
-            pending_fresh_execution_launch_from_session(
-                &launch.sessions_dir,
-                &relaunch.id,
-                &launch.project,
-                launch.project.to_str().unwrap(),
-                issue,
-                None,
-                None,
-                None,
-                nonce,
-                &gwt_agent::AgentId::Codex,
-            )
-        };
-        let pending = recover(Some(launch.owner.number))
-            .expect("recover the exact concurrent candidate among two Prepared launches");
-        assert_eq!(pending.binding, binding);
-        assert!(recover(Some(launch.owner.number + 1)).is_err());
-
-        rollback_materialized_fresh_execution_launch(
-            &launch.sessions_dir,
-            &relaunch.id,
-            &launch.project,
-            "readiness reconstruction failed",
-            &gwt_agent::AgentId::Codex,
-        )
-        .expect("a failed concurrent launch must roll back its candidate");
-        assert!(!launch
-            .sessions_dir
-            .join(format!("{}.toml", relaunch.id))
-            .exists());
-        let remaining =
-            gwt::cli::execution_state::load_generation_ledger(&launch.project, launch.owner)
-                .unwrap()
-                .unwrap();
-        let prepared = gwt::cli::execution_state::blocking_prepared_transactions(
-            &launch.sessions_dir,
-            &remaining,
-        );
-        assert_eq!(prepared.len(), 1);
-        assert_eq!(prepared[0].candidate_session_id, other.id);
-        assert_eq!(std::fs::read(other_path).unwrap(), other_before);
-        assert_eq!(remaining.generations, ledger.generations);
-        assert_eq!(remaining.lifecycle_events, ledger.lifecycle_events);
     }
 
     /// SPEC #3590 FR-009: each concurrent session settles its own generation.

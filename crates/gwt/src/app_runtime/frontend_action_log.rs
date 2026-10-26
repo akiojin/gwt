@@ -153,6 +153,7 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         FrontendEvent::AgentSchedule { .. } => {
             FrontendUserActionLog::new("agent_schedule", "agents")
         }
+        FrontendEvent::AgentSwitch { .. } => FrontendUserActionLog::new("agent_switch", "agents"),
         FrontendEvent::RefreshUsage => FrontendUserActionLog::new("refresh_usage", "usage"),
         FrontendEvent::OpenProjectDialog => {
             FrontendUserActionLog::new("open_project_dialog", "project")

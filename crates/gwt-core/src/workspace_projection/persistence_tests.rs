@@ -15178,6 +15178,7 @@ const SESSION_BOUND_BOARD_FOREIGN_SESSION_ID: &str = "session-bound-board-foreig
 
 struct SessionBoundBoardFixture {
     project_root: PathBuf,
+    work_event_root: PathBuf,
     current_path: PathBuf,
     work_items_path: PathBuf,
     events_path: PathBuf,
@@ -15190,6 +15191,7 @@ struct SessionBoundBoardWorkBytes {
     current: Option<Vec<u8>>,
     work_items: Option<Vec<u8>>,
     events: Option<Vec<u8>>,
+    shards: Vec<WorkEventLogRecord>,
     journal: Option<Vec<u8>>,
 }
 
@@ -15208,6 +15210,10 @@ fn session_bound_board_work_bytes(
         current: session_bound_board_optional_bytes(&fixture.current_path),
         work_items: session_bound_board_optional_bytes(&fixture.work_items_path),
         events: session_bound_board_optional_bytes(&fixture.events_path),
+        shards: read_workspace_work_event_shard_records_from_dir(&gwt_repo_local_work_events_dir(
+            &fixture.work_event_root,
+        ))
+        .expect("read canonical Work event shard bytes"),
         journal: session_bound_board_optional_bytes(&fixture.journal_path),
     }
 }
@@ -15332,6 +15338,7 @@ fn session_bound_board_seed_fixture(temp: &Path) -> SessionBoundBoardFixture {
     .expect("seed Board Work targets");
 
     SessionBoundBoardFixture {
+        work_event_root: project_root.join(target_branch.replace('/', "-")),
         project_root,
         current_path,
         work_items_path,
@@ -15434,7 +15441,7 @@ fn session_bound_board_apply_entry(
     transact_workspace_state_at(
         &fixture.current_path,
         &fixture.work_items_path,
-        &fixture.events_path,
+        &gwt_repo_local_work_events_dir(&fixture.work_event_root),
         &fixture.project_root,
         |projection, work_items, _| {
             let Some(event) =
@@ -15567,6 +15574,66 @@ fn session_bound_board_valid_origin_updates_target_work_only() {
         .expect("target Work item");
     assert!(!current.board_refs.contains(&entry.id));
     assert!(target.board_refs.contains(&entry.id));
+
+    let reflected = session_bound_board_work_bytes(&fixture);
+    session_bound_board_apply_entry(&fixture, &entry).expect("identical Board refresh");
+    assert!(
+        session_bound_board_work_bytes(&fixture) == reflected,
+        "the same Board revision must not append another immutable shard or rewrite Work state"
+    );
+
+    // Remote edits can retain their timestamp, so identity or time alone is
+    // insufficient to distinguish a refresh from a changed Board payload.
+    let mut edited = entry.clone();
+    edited.body = "Edited Board milestone".to_string();
+    session_bound_board_apply_entry(&fixture, &edited).expect("same-time Board edit");
+    let edited_bytes = session_bound_board_work_bytes(&fixture);
+    assert_eq!(edited_bytes.shards.len(), reflected.shards.len() + 1);
+    let edited_items = load_workspace_work_items_from_path(&fixture.work_items_path)
+        .expect("load edited Work items")
+        .expect("Work items exist");
+    assert_eq!(
+        edited_items
+            .work_items
+            .iter()
+            .find(|item| item.id == SESSION_BOUND_BOARD_TARGET_WORK_ID)
+            .unwrap()
+            .summary
+            .as_deref(),
+        Some(edited.body.as_str())
+    );
+    session_bound_board_apply_entry(&fixture, &edited).expect("edited Board refresh");
+    assert!(session_bound_board_work_bytes(&fixture) == edited_bytes);
+
+    edited.updated_at += chrono::Duration::hours(1);
+    session_bound_board_apply_entry(&fixture, &edited).expect("newer Board revision");
+    let newer = session_bound_board_work_bytes(&fixture);
+    assert_eq!(newer.shards.len(), edited_bytes.shards.len() + 1);
+    session_bound_board_apply_entry(&fixture, &edited).expect("newer Board refresh");
+    assert!(session_bound_board_work_bytes(&fixture) == newer);
+
+    let pause = WorkEvent::new(
+        WorkEventKind::Pause,
+        SESSION_BOUND_BOARD_TARGET_WORK_ID,
+        edited.updated_at + chrono::Duration::hours(1),
+    );
+    record_workspace_work_events_paths(&fixture.work_items_path, &fixture.events_path, vec![pause])
+        .expect("later explicit Work pause");
+    assert!(
+        load_workspace_work_items_from_path(&fixture.work_items_path)
+            .unwrap()
+            .unwrap()
+            .work_items
+            .iter()
+            .any(|item| item.id == SESSION_BOUND_BOARD_TARGET_WORK_ID
+                && item.status_category == WorkspaceStatusCategory::Idle)
+    );
+    let paused = session_bound_board_work_bytes(&fixture);
+    session_bound_board_apply_entry(&fixture, &edited).expect("old Board after pause");
+    assert!(
+        session_bound_board_work_bytes(&fixture) == paused,
+        "an older Board revision must not reactivate later Paused Work"
+    );
 }
 
 #[test]

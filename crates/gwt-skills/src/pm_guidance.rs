@@ -249,12 +249,24 @@ Milestone-only, category-only and other-Goal references do not add members.
 The same row order, repeats, missingness and null/[] semantics apply; keep `unobserved_issues`
 and the enclosing Monitor provenance. These observations do not prove Goal achievement,
 metric attainment, critical path or readiness, and authorize no priority or launch changes.
+Each Goal's `dependency_impacts` filters the global direct inverse to its existing roadmap member dependents.
+Keep external blockers, numeric order and distinct direct dependents; omit other dependents and empty blocker rows.
+The same exact unique nonempty Goal-ID membership applies, including invalid explicit links as reference facts.
+Duplicate or blank Goal IDs resolve no members. Absent Monitor yields null; no supplied member blocker edges yields [].
+Degraded or aborted facts keep enclosing Monitor provenance and limits. This inverse proves neither Goal achievement,
+metric attainment, transitive delay nor critical path, and grants no priority, readiness or launch authority.
 Each roadmap item's `dependency_observations` selects only that row's directly saved Issues.
 Empty or duplicate IDs and invalid traces keep independent membership; never expand it through
 a Goal, milestone or another row. Preserve the supplied row order, repeats and typed missingness.
 Absent Monitor yields null even for empty membership; supplied snapshots without matching rows
 yield []. Keep `unobserved_issues` and the enclosing Monitor source, scan time and coverage limits.
 This join does not establish a complete graph, critical path, readiness, priority or health.
+Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents.
+Keep external/shared blockers, numeric order and distinct direct dependents; omit other dependents and empty blocker rows.
+Duplicate/blank row IDs and invalid links keep independent membership; never expand through a Goal, milestone or another row.
+Absent Monitor yields null even for empty membership; no supplied member blocker edges yields [].
+Degraded or aborted facts retain enclosing Monitor provenance and limits. This inverse does not establish a complete graph,
+transitive delay, critical path or health, and grants no priority, readiness or launch authority.
 
 `claim_blocks` reports only BlockedByClaim inbox rows in supplied order, including repeats.
 `remaining_seconds_at_scan` uses the valid RFC3339 claim expiration minus the supplied scan time,
@@ -4541,8 +4553,10 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",
             "Each milestone's `dependency_impacts` filters the global direct inverse to its effective member dependents",
+            "Each Goal's `dependency_impacts` filters the global direct inverse to its existing roadmap member dependents",
             "Each Goal's `dependency_observations` selects only its existing roadmap member Issues",
             "Each roadmap item's `dependency_observations` selects only that row's directly saved Issues",
+            "Each roadmap item's `dependency_impacts` filters the global direct inverse to that row's direct member dependents",
             "Each `policy.roadmap_items` row observes only its own directly saved Issues",
             "authored health and confidence are not verified evidence",
             "`observed_issue_states` and `unobserved_issues`",

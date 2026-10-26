@@ -1,4 +1,5 @@
 import { createUiStateStore } from "./ui-state-store.js";
+import { createLaunchOperationId } from "./launch-pending-controller.js";
 
 const unknownActivity = () => ({ snapshot: null, agents: [], byIssue: {}, count: null, issueCount: 0, pmCount: 0 });
 
@@ -37,6 +38,88 @@ export function createAgentScheduleModel(projectKey) {
   }
   return { model, applyAgentScheduleSnapshot, applyAgentScheduleError, beginAgentScheduleRequest,
     clearAgentSchedule: () => { pendingMutationRevision = null; model.update(empty); } };
+}
+
+const switchStages = ["requested", "checkpointing", "checkpoint_verified", "stopping_current", "launching_next", "completed", "cancelled", "failed", "unknown"];
+const switchTerminal = stage => ["completed", "cancelled", "failed"].includes(stage);
+
+export function createAgentSwitchModel(projectKey) {
+  const model = createUiStateStore({ snapshot: null, intents: [], pending: null, error: null, disconnected: false, notice: null });
+  const currentOperations = new Map();
+  let pendingRead = null;
+  function beginAgentSwitchRequest(action) {
+    const state = model.read();
+    if (action?.kind === "read") {
+      action.request_id = createLaunchOperationId("switch-read");
+      pendingRead = { request_id: action.request_id, operation_id: state.pending?.operation_id, disconnected: state.disconnected };
+      return true;
+    }
+    if (state.pending || state.disconnected) return false;
+    if (action?.kind === "request") {
+      if (!action.operation_id || !action.member_id || !Number.isSafeInteger(action.expected_roster_revision) ||
+          !Number.isSafeInteger(action.target_issue_number) || action.target_issue_number < 1 ||
+          state.intents.some(intent => intent.member_id === action.member_id && !switchTerminal(intent.stage))) return false;
+      currentOperations.set(action.member_id, action.operation_id);
+    } else if (action?.kind === "cancel") {
+      const intent = state.intents.find(intent => intent.operation_id === action.operation_id);
+      if (!intent || !["requested", "checkpointing", "checkpoint_verified"].includes(intent.stage)) return false;
+    } else return false;
+    pendingRead = null;
+    model.update(current => ({ ...current, pending: action, error: null, notice: null }));
+    return true;
+  }
+  function applyAgentSwitchSnapshot(snapshot) {
+    if (!snapshot || snapshot.project_key !== projectKey || !Array.isArray(snapshot.intents)) return;
+    model.update(state => {
+      // Only a read issued for this Unknown operation can establish absence.
+      const matchingRead = pendingRead?.request_id === snapshot.request_id && !!snapshot.request_id;
+      const absent = matchingRead && pendingRead.disconnected && state.disconnected && state.pending &&
+        pendingRead.operation_id === state.pending.operation_id && !snapshot.intents.some(intent => intent.operation_id === state.pending.operation_id);
+      if (matchingRead) pendingRead = null;
+      const absentMember = absent ? state.pending.member_id ?? state.intents.find(intent => intent.operation_id === state.pending.operation_id)?.member_id : null;
+      if (absentMember && currentOperations.get(absentMember) === state.pending.operation_id) currentOperations.delete(absentMember);
+      // A request is acknowledged only by its own operation, never an older read.
+      const byMember = {};
+      for (const intent of snapshot.intents) {
+        if (!intent.operation_id || !intent.member_id || !switchStages.includes(intent.stage)) continue;
+        const expected = currentOperations.get(intent.member_id);
+        if (expected && expected !== intent.operation_id) {
+          const previous = state.intents.find(value => value.member_id === intent.member_id);
+          if (state.pending?.operation_id === expected || !previous || !switchTerminal(previous.stage) ||
+              !(Date.parse(intent.created_at) > Date.parse(previous.created_at))) continue;
+        }
+        const candidate = byMember[intent.member_id];
+        if (!candidate || Date.parse(intent.created_at) > Date.parse(candidate.created_at) ||
+            (!candidate.created_at && switchTerminal(candidate.stage) && !switchTerminal(intent.stage))) byMember[intent.member_id] = intent;
+      }
+      const intents = state.intents.filter(intent => !absent || intent.operation_id !== state.pending.operation_id);
+      for (const intent of Object.values(byMember)) {
+        const index = intents.findIndex(current => current.member_id === intent.member_id), previous = intents[index];
+        if (previous?.operation_id === intent.operation_id && (switchTerminal(previous.stage) ||
+            previous.stage === "unknown" && intent.stage !== "unknown" && !switchTerminal(intent.stage) ||
+            previous.stage !== "unknown" && intent.stage !== "unknown" && switchStages.indexOf(intent.stage) < switchStages.indexOf(previous.stage))) continue;
+        currentOperations.set(intent.member_id, intent.operation_id);
+        if (index < 0) intents.push(intent); else intents[index] = intent;
+      }
+      const receipt = intents.find(intent => intent.operation_id === state.pending?.operation_id);
+      const acknowledged = receipt && (state.pending.kind === "request" || switchTerminal(receipt.stage) || ["stopping_current", "launching_next"].includes(receipt.stage));
+      return { snapshot, intents, pending: acknowledged || absent ? null : state.pending, error: null,
+        disconnected: !absent && state.pending && !acknowledged ? state.disconnected : false,
+        notice: absent ? { member_id: absentMember, message: "No saved request was observed. Request again to recheck the current member." } : state.notice };
+    });
+  }
+  function applyAgentSwitchError(event) {
+    if (event?.project_key !== projectKey) return;
+    model.update(state => {
+      if (state.pending && event.operation_id !== state.pending.operation_id ||
+          !state.pending && event.operation_id && !state.intents.some(intent => intent.operation_id === event.operation_id)) return state;
+      return { ...state, pending: null, error: event.message };
+    });
+  }
+  function clearAgentSwitch() {
+    model.update(state => ({ ...state, disconnected: true, error: null }));
+  }
+  return { model, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch };
 }
 
 export function createAgentRosterModel(projectKey) {

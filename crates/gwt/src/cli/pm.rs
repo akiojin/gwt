@@ -1098,6 +1098,10 @@ mod tests {
         }
         let roadmap = &status["policy"]["roadmap_items"][0];
         assert_eq!(
+            roadmap.get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
             roadmap.get("dependency_observations"),
             Some(&serde_json::Value::Null)
         );
@@ -1107,6 +1111,10 @@ mod tests {
         assert_eq!(
             status["policy"]["goals"][0]["issues"],
             serde_json::json!([7, 9])
+        );
+        assert_eq!(
+            status["policy"]["goals"][0].get("dependency_impacts"),
+            Some(&serde_json::Value::Null)
         );
         assert_eq!(
             status["policy"]["goals"][0].get("dependency_observations"),

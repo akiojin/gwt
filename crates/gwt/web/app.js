@@ -1,6 +1,6 @@
 import { createCloseProjectController } from "/close-project-confirm-modal.js";
 import { createUiStateStore } from "/ui-state-store.js";
-import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, selectWorksTelemetry } from "/agent-activity-model.js";
+import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleModel, createAgentSwitchModel, selectWorksTelemetry } from "/agent-activity-model.js";
       import { Terminal } from "/assets/xterm/xterm.mjs";
       import { FitAddon } from "/assets/xterm/addon-fit.mjs";
       // SPEC-3064 Phase 3 (E7): the migration-modal / project-clone-modal /
@@ -429,6 +429,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
+      const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
       const worksTelemetryModel = createUiStateStore({ sessions: [] });
       const sessionUsageModel = createUiStateStore([]);
       let routeProjectMissing = false;
@@ -910,6 +911,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
+        // A switch is valid only on this live Host connection. Never replay
+        // an unacknowledged request or cancellation after a Host restart.
+        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+          if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
+          try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
+        }
         if (socket && socket.readyState === WebSocket.OPEN
           && socketProjectKey === activeProjectKey()) {
           socket.send(JSON.stringify(message));
@@ -1163,7 +1170,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -2487,9 +2494,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-2356 — Living Telemetry counters in the Operator Status Strip.
-      // Aggregates `data-agent-state` across all open windows and pushes the
-      // counts into the bottom strip. We also expose agent count to the
-      // sidebar layer for the "Quick" section's hint.
+      // Live state uses the host census enriched by the window catalog;
+      // MISSION tracks completion across the project's agent panes.
       function operatorTelemetryRenderKey(counts) {
         const parts = [];
         appendRenderKeyPart(parts, "running");
@@ -2611,53 +2617,34 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           agents: 0,
           windows: allProjectWindowIds().length,
         };
-        for (const [windowId, el] of windowMap.entries()) {
-          const state = el?.dataset?.agentState;
-          if (!state) continue;
-          // SPEC-2356 follow-up: only count live agent panes. Other workspace
-          // windows (Board / Workspace / Logs / Branches / etc.) carry
-          // data-agent-state for overlay/animation purposes but must not
-          // inflate the Sidebar Layers Agents row or Status Strip cells.
-          const windowData = workspaceWindowById(windowId);
-          if (!windowData || !presetSupportsWaitingStatus(windowData.preset)) continue;
-          if (state in counts) counts[state] += 1;
-          if (state === "running" && windowData.placement?.kind === "issue_preview") {
-            counts.running_inline += 1;
-          }
+        // The same host census supplies Agents and Works membership. Catalog
+        // state enriches that proof; a historical Work never creates an agent.
+        const activity = agentActivityModel.read();
+        const catalog = windowCatalogModel.read().catalog;
+        const windows = (catalog.appState.tabs || []).filter(tab => !activity.snapshot?.project_key
+          || tab.project_key === activity.snapshot.project_key).flatMap(tab => tab.workspace?.windows || []);
+        // MISSION tracks completion of project panes after their children exit.
+        for (const data of windows) {
+          if (!presetSupportsWaitingStatus(data.preset)) continue;
           counts.agents += 1;
+          if (mapAgentTelemetryState(catalog.runtimeStates[data.id] ?? data.status) === "done") counts.done += 1;
         }
-        if (activeWorkProjection) {
-          const activeWorks = activeWorkItemsFromProjection();
-          if (activeWorks.length > 0) {
-            counts.branches = Math.max(Number(counts.branches || 0), activeWorks.length);
-            // Pane transitions are the live authority. Work activity may arrive
-            // later and must not turn an idle or waiting pane back into running.
-            if (counts.agents === 0) {
-              const activeAgents = activeWorks.reduce(
-                (total, work) => total + Number(work.active_agents || 0),
-                0,
-              );
-              const blockedAgents = activeWorks.reduce(
-                (total, work) => total + Number(work.blocked_agents || 0),
-                0,
-              );
-              const totalAgents = activeWorks.reduce(
-                (total, work) => total + (Array.isArray(work.agents) ? work.agents.length : 0),
-                0,
-              );
-              counts.running = Math.max(counts.running, activeAgents || activeWorks.length);
-              counts.agents = Math.max(counts.agents, totalAgents || activeAgents + blockedAgents);
-            }
-          } else if (counts.agents === 0) {
-            const category = activeWorkProjection.status_category || "unknown";
-            const activeAgents = Number(activeWorkProjection.active_agents || 0);
-            const blockedAgents = Number(activeWorkProjection.blocked_agents || 0);
-            if (category === "active") counts.running = Math.max(counts.running, activeAgents || 1);
-            if (category === "idle" && activeAgents > 0) counts.idle = Math.max(counts.idle, activeAgents);
-            if (category === "done") counts.done = Math.max(counts.done, 1);
-            counts.agents = Math.max(counts.agents, activeAgents + blockedAgents);
-          }
+        let unknown = activity.count === null;
+        for (const agent of activity.agents) {
+          const data = windows.find(data => data.id === agent.window_id && data.session_id === agent.session_id);
+          if (!data || !presetSupportsWaitingStatus(data.preset)) { unknown = true; continue; }
+          const state = { starting: "running", running: "running", waiting: "waiting",
+            idle: "idle", ready: "idle", error: "error", interrupted: "error" }[catalog.runtimeStates[data.id] ?? data.status];
+          if (state) counts[state] += 1;
+          else unknown = true;
+          if (state === "running" && data.placement?.kind === "issue_preview") counts.running_inline += 1;
         }
+        if (unknown) {
+          for (const state of ["running", "waiting", "idle", "error"]) counts[state] = "—";
+          counts.running_inline = 0;
+        }
+        const activeWorks = activeWorkItemsFromProjection();
+        if (activeWorks.length > 0) counts.branches = activeWorks.length;
         applyOperatorTelemetryCounts(counts);
       }
 
@@ -3621,6 +3608,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // / *_error; the timeout re-enables the UI when no reply ever arrives.
       const launchPending = createLaunchPendingController({
         onChange: () => {
+          agentsSurface?.sync();
           try {
             workspaceOverviewSurface.renderWindows(true);
           } catch {
@@ -3941,9 +3929,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         launchPending,
       });
 
-      const workspaceResumeOutcomeModel = createUiStateStore(null);
-      workspaceResumeOutcomeModel.subscribe(outcome => outcome, outcome => {
-        if (outcome) handleWorkspaceResumeAgentOutcome(outcome);
+      const workspaceResumeModel = createUiStateStore(null);
+      workspaceResumeModel.subscribe(event => event, event => {
+        if (!event) return;
+        if (event.kind === "workspace_resumable_agents") workspaceResumePicker.handleAgentsList(event);
+        else handleWorkspaceResumeAgentOutcome(event);
       });
 
       function handleWorkspaceResumeAgentOutcome(event) {
@@ -5102,10 +5092,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       const branchEntriesViewModel = createUiStateStore(null);
-      function renderBranchEntries(completion) {
-        if (!completion) return;
-        const { windowId } = completion;
+      function renderBranchEntries(event) {
+        if (!event) return;
+        const windowId = event.id;
         const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(windowId);
+        // Ingest only the store-owned snapshot. Stale loads must not redraw
+        // branches or advance the Status Strip count.
+        // FR-065/FR-067: inventory phases keep the last verified cleanup
+        // badges instead of flashing "Safety unknown".
+        const { applied } = applyBranchEntriesEvent(state, event);
+        if (!applied) return;
+        syncBranchSelectionState(state);
         frontendUnits.branchesFileTreeSurface.renderBranches(windowId);
         // Read the post-ingest state and retain the guarded Status Strip path.
         const branchesCount = Array.isArray(state.entries) ? state.entries.length : 0;
@@ -5205,6 +5202,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "agent_roster":
             applyAgentRosterSnapshot(event.roster);
             break;
+          case "agent_switch":
+            applyAgentSwitchSnapshot(event.snapshot);
+            break;
+          case "agent_switch_error":
+            applyAgentSwitchError(event);
+            break;
           case "agent_schedule":
             applyAgentScheduleSnapshot(event.schedule);
             break;
@@ -5291,19 +5294,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             handleProjectIndexSearchError(event);
             break;
           case "branch_entries": {
-            const state = frontendUnits.branchesFileTreeSurface.ensureBranchListState(
-              event.id,
-            );
-            // FR-065/FR-067: ingest via the shared state helper so a stale
-            // (older load_id) event is dropped and inventory phases keep the
-            // last verified cleanup badges instead of flashing "Safety unknown".
-            // Single trailing break (no early break) so the SPEC-2356 telemetry
-            // contract test can extract this whole case body.
-            const { applied } = applyBranchEntriesEvent(state, event);
-            if (applied) {
-              syncBranchSelectionState(state);
-              branchEntriesViewModel.update(() => ({ windowId: event.id }));
-            }
+            branchEntriesViewModel.update(() => ({ ...event }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup progress/result state
@@ -5399,7 +5390,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           // SPEC-2359 US-42 — Resume Picker dispatcher slots.
           case "workspace_resumable_agents":
-            workspaceResumePicker.handleAgentsList(event);
+            workspaceResumeModel.update(() => ({ ...event }));
             break;
           // SPEC-2359 US-83 — eligible remote branches render as "Start work on
           // a branch" rows in the Workspace list.
@@ -5411,7 +5402,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             break;
           case "workspace_resume_agent_error":
           case "workspace_resume_agent_started":
-            workspaceResumeOutcomeModel.update(() => ({ ...event }));
+            workspaceResumeModel.update(() => ({ ...event }));
             break;
           case "launch_wizard_state":
             // SPEC-3064 Phase 3 (E5): guard defer + wizard state mutation
@@ -5541,6 +5532,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
         agentActivityModel.dispose();
+        switchModel.dispose();
         launchWizardVisibilityModel.dispose();
       }, { once: true });
 
@@ -5754,9 +5746,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       rosterModel.subscribe(state => state.revision, () => {
         if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
       });
-      agentActivityModel.subscribe(state => state.agents.map(agent => `${agent.session_id}:${agent.runtime_incarnation}`).join("|"), () => {
-        updateWorksTelemetry(); requestAgentRoster();
+      agentActivityModel.subscribe(state => `${state.count}|${state.agents.map(agent => `${agent.session_id}:${agent.runtime_incarnation}`).join("|")}`, () => {
+        recomputeOperatorTelemetry(); updateWorksTelemetry(); requestAgentRoster();
       });
+      windowCatalogModel.subscribe(state => state.catalog, () => recomputeOperatorTelemetry());
       activeWorkProjectionModel.subscribe(state => state, () => updateWorksTelemetry());
       function requestAgentRoster(action = { kind: "read" }) {
         send({ kind: "agent_roster", action, expected_revision: action.kind === "read" ? null : rosterModel.read().revision });
@@ -5768,6 +5761,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }
         if (beginAgentScheduleRequest(action)) send({ kind: "agent_schedule", action });
       }
+      function requestAgentSwitch(action = { kind: "read" }) {
+        if (beginAgentSwitchRequest(action) && send({ kind: "agent_switch", action }) !== "sent" && action.kind !== "read") clearAgentSwitch();
+      }
       function setRosterHost(host, previewHost = null) {
         const changed = rosterHost !== host;
         rosterHost = host;
@@ -5775,7 +5771,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const targetHost = host || document.querySelector(".surface-area");
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
-        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); }
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5784,11 +5780,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, activityModel: agentActivityModel, windowCatalogModel,
+      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel,
         onAddMember: () => requestAgentRoster({ kind: "add" }),
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
+        onSwitch: requestAgentSwitch,
+        onOpenSavedWork: () => openSurface("works"),
+        onContinueSavedWork: (workId) => continueWorkDispatcher.dispatch(workId),
+        isContinuePending: (workId) => launchPending.isPending(`continue:${workId}`),
         onReassign: requestAgentSchedule,
-        onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); },
+        onRefreshSchedule: () => { requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); },
         onOpenWork: openAssignedWork,
       });
       agentsSurface.element.hidden = true;

@@ -5,6 +5,7 @@ import vm from "node:vm";
 import { projectUrlPath, routeWebSocketUrl } from "../frontend-route.js";
 import { createPmWindowModel } from "../pm-chat.js";
 import { createUiStateStore } from "../ui-state-store.js";
+import { createAgentSwitchModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../app.js", import.meta.url), "utf8");
 function functionSource(name) {
@@ -497,4 +498,25 @@ test("offline acknowledgement is ephemeral and never replays against a fresh con
   context.connectSocket();
   sockets.at(-1).open();
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+});
+
+
+test("switch mutations never queue or replay, and a closed-socket race retains an unknown operation", () => {
+  const { context, sockets } = fixture({ routeProjectKey: projectA.project_key });
+  const switching = createAgentSwitchModel(projectA.project_key);
+  Object.assign(context, switching);
+  vm.runInContext(functionSource("requestAgentSwitch"), context);
+  context.connectSocket(); sockets[1].open(); sockets[1].close();
+  const action = { kind: "request", operation_id: "operation-one", member_id: "member", expected_roster_revision: 3, target_issue_number: 42 };
+  context.requestAgentSwitch(action);
+  assert.equal(context.pendingMessages.length, 0, "an offline switch must not execute on the next Host");
+  assert.deepEqual(switching.model.read().pending, action);
+  assert.equal(switching.model.read().disconnected, true);
+  assert.equal(context.send({ kind: "agent_switch", action: { kind: "cancel", operation_id: action.operation_id } }), "unavailable");
+  assert.equal(context.pendingMessages.length, 0);
+  context.connectSocket(); sockets.at(-1).open();
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  sockets.at(-1).send = () => { throw new Error("connection closed during send"); };
+  assert.doesNotThrow(() => assert.equal(context.send({ kind: "agent_switch", action }), "unavailable"));
+  assert.equal(context.pendingMessages.length, 0);
 });

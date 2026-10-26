@@ -1383,6 +1383,13 @@ export function createKnowledgeKanbanSurface({
           explainIssueControl(queue, `Issues waiting in the launch queue. ${queue.title}`.trim());
         }
         const status = issueMonitorModel.read().status;
+        const setupGuidance = element.querySelector('[data-role="monitor-setup-guidance"]');
+        if (setupGuidance) {
+          setupGuidance.hidden = !(status.enabled === false && status.active_count === 0
+            && ["default", "last_settings"].includes(status.launch_profile_source));
+          setupGuidance.textContent = setupGuidance.hidden ? ""
+            : "Agent not started: no saved Agent settings. Save Agent settings, then select Start.";
+        }
         const capacity = bar.querySelector('[data-metric="capacity"]');
         if (capacity) capacity.textContent = `${status.active_count || 0} of ${maxActive}`;
         const backlog = bar.querySelector('[data-metric="backlog"]');
@@ -5333,6 +5340,7 @@ export function createKnowledgeKanbanSurface({
                     <button class="wizard-button is-compact" data-action="refresh-knowledge" aria-label="Refresh cached work items" title="Refresh cached work items">↻ Refresh</button>
                   </div>
                 </div>
+                <p class="issue-queue-rule" data-role="monitor-setup-guidance" role="status" hidden></p>
                 <div class="knowledge-split workspace-split issue-list-shell">
                   <div class="knowledge-list-pane">
                     <div class="knowledge-list" role="list" aria-label="Cached work items"></div>
@@ -5616,84 +5624,11 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_search_results": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (!state) {
-              break;
-            }
-            const activeIntent = state.inFlightSearchIntent;
-            if (!activeIntent || event.request_id !== activeIntent.requestId) {
-              break;
-            }
-            state.inFlightSearchIntent = null;
-            state.searchInFlight = false;
-            state.inFlightSearchRequestId = 0;
-            const responseMatchesIntent =
-              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
-              String(event.query || "").trim() === activeIntent.query &&
-              knowledgeSearchIntentIsCurrent(state, activeIntent);
-            if (!responseMatchesIntent) {
-              dispatchLatestKnowledgeSearchIntent(event.id, state);
-              break;
-            }
-            state.queuedSearchIntent = null;
-            state.queuedSearchQuery = "";
-
-            state.entries = event.entries || [];
-            const selectionIsCurrent =
-              activeIntent.selectionGeneration === state.selectionGeneration;
-            if (selectionIsCurrent && state.selectionGeneration === 0) {
-              state.selectedNumber = event.selected_number ?? null;
-            }
-            state.emptyMessage = event.empty_message || "";
-            state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.error = "";
-            state.searching = false;
-            const directive = event.semantic_retry;
-            const transientDirective =
-              isSilentSemanticKind(activeIntent.kind) &&
-              isKnowledgeSemanticRetryDirective(directive);
-            if (transientDirective) {
-              state.semanticRetryTyped = true;
-              scheduleKnowledgeSemanticRetry(
-                event.id,
-                activeIntent.kind,
-                state,
-              );
-            } else if (isSilentSemanticKind(activeIntent.kind)) {
-              invalidateKnowledgeSemanticRetry(state);
-            }
-            if (selectionIsCurrent && state.selectionGeneration === 0) {
-              state.detail = null;
-            }
-            knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, searchReceipt: event }));
             break;
           }
           case "knowledge_detail": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (
-              !state ||
-              normalizeKnowledgeKind(event.knowledge_kind) !==
-                normalizeKnowledgeKind(state.kind)
-            ) {
-              break;
-            }
-            if (!knowledgeDetailRequestMatches(state, event)) {
-              break;
-            }
-            const previousNumber = state.selectedNumber;
-            const matchesLoadRequest =
-              !event.request_id || event.request_id === state.loadRequestId;
-            state.detail = event.detail ? { ...event.detail,
-              sections: (event.detail.sections || []).map(section => ({ ...section,
-                content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
-            state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
-            if (matchesLoadRequest) {
-              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
-            }
-            state.detailLoading = false;
-            knowledgeCompletionViewModel.update(() => ({
-              windowId: event.id, previousNumber, detailCompletion: true,
-            }));
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, detailReceipt: event }));
             break;
           }
           // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
@@ -5746,84 +5681,7 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_error": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (!state) {
-              break;
-            }
-            const isSearchError =
-              typeof event.request_id === "number" && typeof event.query === "string";
-            if (isSearchError) {
-              const activeIntent = state.inFlightSearchIntent;
-              if (!activeIntent || event.request_id !== activeIntent.requestId) {
-                break;
-              }
-              state.inFlightSearchIntent = null;
-              state.searchInFlight = false;
-              state.inFlightSearchRequestId = 0;
-              const responseMatchesIntent =
-                normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
-                event.query.trim() === activeIntent.query &&
-                knowledgeSearchIntentIsCurrent(state, activeIntent);
-              if (!responseMatchesIntent) {
-                dispatchLatestKnowledgeSearchIntent(event.id, state);
-                break;
-              }
-              state.queuedSearchIntent = null;
-              state.queuedSearchQuery = "";
-              state.searching = false;
-              invalidateKnowledgeSemanticRetry(state);
-              if (
-                isSilentSemanticKind(activeIntent.kind) &&
-                event.error_domain !== "non_semantic"
-              ) {
-                // Legacy/untyped semantic failures are deliberately silent
-                // and never start the typed indefinite retry ladder.
-                knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "status" }));
-              } else {
-                state.error = event.message;
-                knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
-              }
-              break;
-            }
-
-            if (
-              normalizeKnowledgeKind(event.knowledge_kind) !==
-                normalizeKnowledgeKind(state.kind)
-            ) {
-              break;
-            }
-            const matchesLoadRequest = event.request_id === state.loadRequestId;
-            const matchesDetailRequest =
-              event.request_id === state.detailRequestId &&
-              state.detailRequestSelectionGeneration === state.selectionGeneration &&
-              state.detailRequestNumber === state.selectedNumber;
-            const matchesInitialIdless =
-              !event.request_id && state.selectionGeneration === 0;
-            if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
-              break;
-            }
-            if (
-              matchesLoadRequest &&
-              state.loadSelectionGeneration !== state.selectionGeneration
-            ) {
-              finishKnowledgeLoad(state, event.id, event.knowledge_kind);
-              break;
-            }
-            const startedQueuedRefresh = matchesLoadRequest
-              ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
-              : false;
-            if (matchesLoadRequest) {
-              state.error = startedQueuedRefresh ? "" : event.message;
-            } else {
-              state.error = event.message;
-            }
-            state.searching = false;
-            state.detailLoading = false;
-            if (matchesLoadRequest) {
-              knowledgeCompletionViewModel.update(() => ({ windowId: event.id }));
-            } else {
-              knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorCompletion: "detail" }));
-            }
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, errorReceipt: event }));
             break;
           }
           default:
@@ -5879,7 +5737,7 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailCompletion, errorCompletion, terminalPreview }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailReceipt, errorReceipt, terminalPreview, searchReceipt }) => {
         if (terminalPreview) {
           const text = terminalPreviewText.get(windowId);
           for (const element of windowMap.values()) {
@@ -5893,12 +5751,151 @@ export function createKnowledgeKanbanSurface({
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
-        if (errorCompletion) {
-          renderKnowledgeStatusOnly(windowId, state);
-          if (errorCompletion === "detail") renderKnowledgeDetailOnly(windowId, state);
+        if (errorReceipt) {
+          const event = errorReceipt;
+          const isSearchError =
+            typeof event.request_id === "number" && typeof event.query === "string";
+          if (isSearchError) {
+            const activeIntent = state.inFlightSearchIntent;
+            if (!activeIntent || event.request_id !== activeIntent.requestId) {
+              return;
+            }
+            state.inFlightSearchIntent = null;
+            state.searchInFlight = false;
+            state.inFlightSearchRequestId = 0;
+            const responseMatchesIntent =
+              normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+              event.query.trim() === activeIntent.query &&
+              knowledgeSearchIntentIsCurrent(state, activeIntent);
+            if (!responseMatchesIntent) {
+              dispatchLatestKnowledgeSearchIntent(event.id, state);
+              return;
+            }
+            state.queuedSearchIntent = null;
+            state.queuedSearchQuery = "";
+            state.searching = false;
+            invalidateKnowledgeSemanticRetry(state);
+            if (
+              isSilentSemanticKind(activeIntent.kind) &&
+              event.error_domain !== "non_semantic"
+            ) {
+              // Legacy/untyped semantic failures are deliberately silent
+              // and never start the typed indefinite retry ladder.
+              renderKnowledgeStatusOnly(windowId, state);
+            } else {
+              state.error = event.message;
+              renderKnowledgeBridge(windowId);
+            }
+            return;
+          }
+
+          if (
+            normalizeKnowledgeKind(event.knowledge_kind) !==
+              normalizeKnowledgeKind(state.kind)
+          ) {
+            return;
+          }
+          const matchesLoadRequest = event.request_id === state.loadRequestId;
+          const matchesDetailRequest =
+            event.request_id === state.detailRequestId &&
+            state.detailRequestSelectionGeneration === state.selectionGeneration &&
+            state.detailRequestNumber === state.selectedNumber;
+          const matchesInitialIdless =
+            !event.request_id && state.selectionGeneration === 0;
+          if (!matchesLoadRequest && !matchesDetailRequest && !matchesInitialIdless) {
+            return;
+          }
+          if (
+            matchesLoadRequest &&
+            state.loadSelectionGeneration !== state.selectionGeneration
+          ) {
+            finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+            return;
+          }
+          const startedQueuedRefresh = matchesLoadRequest
+            ? finishKnowledgeLoad(state, event.id, event.knowledge_kind)
+            : false;
+          if (matchesLoadRequest) {
+            state.error = startedQueuedRefresh ? "" : event.message;
+          } else {
+            state.error = event.message;
+          }
+          state.searching = false;
+          state.detailLoading = false;
+          if (matchesLoadRequest) {
+            renderKnowledgeBridge(windowId);
+          } else {
+            renderKnowledgeStatusOnly(windowId, state);
+            renderKnowledgeDetailOnly(windowId, state);
+          }
           return;
         }
-        if (detailCompletion) {
+        if (detailReceipt) {
+          const event = detailReceipt;
+          if (normalizeKnowledgeKind(event.knowledge_kind) !== normalizeKnowledgeKind(state.kind) ||
+              !knowledgeDetailRequestMatches(state, event)) return;
+          previousNumber = state.selectedNumber;
+          const matchesLoadRequest =
+            !event.request_id || event.request_id === state.loadRequestId;
+          state.detail = event.detail ? { ...event.detail,
+            sections: (event.detail.sections || []).map(section => ({ ...section,
+              content: { type: "markdown", body: section.body || "", body_html: section.body_html || "" } })) } : null;
+          state.selectedNumber = event.detail?.number ?? state.selectedNumber ?? null;
+          if (matchesLoadRequest) {
+            finishKnowledgeLoad(state, event.id, event.knowledge_kind);
+          }
+          state.detailLoading = false;
+        }
+        if (searchReceipt) {
+          const event = searchReceipt;
+          const activeIntent = state.inFlightSearchIntent;
+          if (!activeIntent || event.request_id !== activeIntent.requestId) {
+            return;
+          }
+          state.inFlightSearchIntent = null;
+          state.searchInFlight = false;
+          state.inFlightSearchRequestId = 0;
+          const responseMatchesIntent =
+            normalizeKnowledgeKind(event.knowledge_kind) === activeIntent.kind &&
+            String(event.query || "").trim() === activeIntent.query &&
+            knowledgeSearchIntentIsCurrent(state, activeIntent);
+          if (!responseMatchesIntent) {
+            dispatchLatestKnowledgeSearchIntent(event.id, state);
+            return;
+          }
+          state.queuedSearchIntent = null;
+          state.queuedSearchQuery = "";
+
+          // Phase ACKs and optimistic moves replace slots in the local list.
+          state.entries = (event.entries || []).slice();
+          const selectionIsCurrent =
+            activeIntent.selectionGeneration === state.selectionGeneration;
+          if (selectionIsCurrent && state.selectionGeneration === 0) {
+            state.selectedNumber = event.selected_number ?? null;
+          }
+          state.emptyMessage = event.empty_message || "";
+          state.refreshEnabled = Boolean(event.refresh_enabled);
+          state.error = "";
+          state.searching = false;
+          const directive = event.semantic_retry;
+          const transientDirective =
+            isSilentSemanticKind(activeIntent.kind) &&
+            isKnowledgeSemanticRetryDirective(directive);
+          if (transientDirective) {
+            state.semanticRetryTyped = true;
+            scheduleKnowledgeSemanticRetry(
+              event.id,
+              activeIntent.kind,
+              state,
+            );
+          } else if (isSilentSemanticKind(activeIntent.kind)) {
+            invalidateKnowledgeSemanticRetry(state);
+          }
+          if (selectionIsCurrent && state.selectionGeneration === 0) {
+            state.detail = null;
+          }
+        }
+        if (detailReceipt) {
           renderKnowledgeSelection(windowId, state, previousNumber);
           // SPEC-2017 US-9 — refresh the Drawer body when the detail
           // is for the entry the Drawer is currently showing. This

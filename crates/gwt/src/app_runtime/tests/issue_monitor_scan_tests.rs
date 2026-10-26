@@ -916,6 +916,7 @@ fn scheduled_scan_probes_no_candidate_without_a_launch_profile() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -975,6 +976,7 @@ fn scheduled_scan_discards_claim_proposals_when_the_completion_probe_expires() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("an expired probe must not fail the commit");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1054,6 +1056,7 @@ fn scheduled_scan_keeps_fail_open_for_an_ordinary_probe_error() {
         &issue_client_factory,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1122,6 +1125,7 @@ fn scheduled_scan_commits_after_the_read_phase_exhausts_its_budget() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::ZERO,
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("an exhausted read phase must not fail the commit");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1270,6 +1274,7 @@ fn scheduled_scan_returns_while_generation_recovery_is_running() {
                 &super::super::default_issue_client_factory(),
                 Duration::from_secs(60),
                 Duration::from_secs(30),
+                &HashSet::new(),
             );
             completed_tx.send(outcome).expect("report scan completed");
         });
@@ -1357,6 +1362,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_in_background() {
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan runs");
     super::super::wait_scan_generation_reaper(&prefs_path);
@@ -1432,6 +1438,7 @@ fn scheduled_scan_reclaims_a_defunct_generation_even_when_a_live_daemon_owns_the
         &super::super::default_issue_client_factory(),
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(30),
+        &HashSet::new(),
     )
     .expect("scan runs");
     super::super::wait_scan_generation_reaper(&prefs_path);

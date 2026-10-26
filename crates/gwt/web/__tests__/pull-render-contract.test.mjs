@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseHTML } from "linkedom";
 import { scanModule, assertBaseline, checkRepository } from "../../../../scripts/check-pull-render.mjs";
+import { createUiStateStore } from "../ui-state-store.js";
+import { applyBranchEntriesEvent } from "../branch-list-state.js";
 const keys = findings => findings.map(finding => finding.key);
 const receiverKeys = findings => [...new Set(findings.map(finding => JSON.stringify([finding.file, finding.root, finding.context])))];
 
@@ -178,16 +180,18 @@ test("Remote branch receiver commits shared state and rejects bypass rendering",
   }
 });
 
-test("Session resume outcome receivers commit shared state and reject bypass rendering", () => {
+test("Session resume receivers commit shared state and reject bypass rendering", () => {
   const file = 'crates/gwt/web/app.js';
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, file).filter(finding =>
-    finding.root === 'receive' && /^\/workspace_resume_agent_(error|started)(\||\/|$)/.test(finding.context));
+    finding.root === 'receive' && /^\/(workspace_resumable_agents|workspace_resume_agent_(error|started))(\||\/|$)/.test(finding.context));
   assert.deepEqual(findings(app), []);
   const start = app.indexOf('function receive(event)');
   assert.ok(start > 0);
-  for (const kind of ['workspace_resume_agent_error', 'workspace_resume_agent_started']) {
-    for (const bypass of ['document.body.textContent = event.message;', 'handleWorkspaceResumeAgentOutcome(event);']) {
+  for (const kind of ['workspace_resumable_agents', 'workspace_resume_agent_error', 'workspace_resume_agent_started']) {
+    const handler = kind === 'workspace_resumable_agents'
+      ? 'workspaceResumePicker.handleAgentsList(event);' : 'handleWorkspaceResumeAgentOutcome(event);';
+    for (const bypass of ['document.body.textContent = event.message;', handler]) {
       const mutated = app.slice(0, start) + app.slice(start)
         .replace(`case "${kind}":`, `case "${kind}": ${bypass}`);
       assert.notEqual(mutated, app);
@@ -561,6 +565,39 @@ test("model updates, subscriptions, and uncalled local handlers are legal", () =
   assert.deepEqual(findings, []);
 });
 
+test("rewritten shared models fail closed per lexical binding", () => {
+  const inspect = (mutation, call = "model") => scanModule(`
+    import { createUiStateStore } from "./ui-state-store.js";
+    let model = createUiStateStore(null);
+    const stable = createUiStateStore(null);
+    ${mutation}
+    function receive(event) { ${call}.update(event); }`, "entry.js");
+  assert.deepEqual(inspect(""), []);
+  assert.deepEqual(inspect("function unrelated(model) { model.update = external; }"), []);
+  assert.deepEqual(inspect("model.update = external;", "stable"), []);
+  for (const mutation of ["model = external;", "model.update = external;"]) {
+    assert.ok(inspect(mutation).some(finding =>
+      finding.kind === "unresolved-call" && finding.path === "receive"), mutation);
+  }
+});
+
+test("lexical loop headers shadow shared models only within the loop", () => {
+  for (const header of ["for (const model of values)", "for (let model in values)",
+    "for (let model = value; model; model = null)"]) {
+    const findings = scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+      const model = createUiStateStore(null);
+      ${header} {
+        function receive(event) { model.update(event); }
+      }
+      function applyIssueMonitorStatus(event) { model.update(event); }`, "entry.js");
+    assert.deepEqual(findings.map(finding => [finding.root, finding.kind]),
+      [["receive", "unresolved-call"]], header);
+  }
+  assert.deepEqual(scanModule(`import { createUiStateStore } from "./ui-state-store.js";
+    for (var model = createUiStateStore(null); false;) {}
+    function receive(event) { model.update(event); }`, "entry.js"), []);
+});
+
 test("factory return aliases resolve model handlers without trusting controller.update", () => {
   const module = `import { createUiStateStore } from "./ui-state-store.js";
     export function createSurface() {
@@ -644,7 +681,7 @@ test("direct named imports follow exported function bodies for one module hop", 
   assert.ok(scanModule(entry, "entry.js").some(finding => finding.kind === "unresolved-call"));
 });
 
-test("real Board and Branch data imports reject DOM mutations in their helpers", () => {
+test("Board receiver and Branch subscriber data imports reject DOM mutations in their helpers", () => {
   for (const [sourceName, dependencyName, exportedName, marker, context] of [
     ["board-logs-surface", "board-surface", "boardEntryMentionsSelf", "export function boardEntryMentionsSelf(entry, selfKeys = []) {", "/board_entries"],
     ["app", "branch-list-state", "applyBranchEntriesEvent", "export function applyBranchEntriesEvent(state, event) {", "/branch_entries"],
@@ -654,7 +691,8 @@ test("real Board and Branch data imports reject DOM mutations in their helpers",
     const file = `crates/gwt/web/${dependencyName}.js`;
     const inspect = module => scanModule(source, `crates/gwt/web/${sourceName}.js`, {
       modules: new Map([[file, module]]),
-    }).filter(finding => finding.context === context
+      rootName: sourceName === 'app' ? 'renderBranchEntries' : undefined,
+    }).filter(finding => finding.context === (sourceName === 'app' ? '' : context)
       && (finding.file === file || source.split("\n")[finding.line - 1].includes(exportedName)));
     assert.deepEqual(inspect(dependency), []);
     const mutated = dependency.replace(marker, `${marker} document.body.textContent = "bypass";`);
@@ -1094,20 +1132,9 @@ test("Knowledge search completions commit shared state and reject direct renderi
   const local = text => searches(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => searches(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Existing directive validation, window lookup and injected search sends
-  // are unresolved data calls; retain their exact base fingerprints.
-  const dataCalls = [
-    '0a22d6c58763360e17b5f67308c83a29a1872c995ba84906a5bd93fa3dc8147c',
-    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
-    '4641b75eb58eadb1809225500910f9e1dffc0deb7bf23ef7a60db35583e00869',
-    '4f169a3e6d482e1b3be66cb97e3fbe4a83372a8c57a214f23589a97e0a9e9e10',
-    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-  ].sort();
+  // The full receipt crosses the immutable store before synchronous ingestion.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && !finding.path.includes('>renderKnowledgeBridge')));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   const bypass = source.replace('case "knowledge_search_results": {',
     'case "knowledge_search_results": { renderKnowledgeBridge(event.id);');
@@ -1298,20 +1325,9 @@ test("Knowledge detail completions commit shared state and reject direct renderi
   const local = text => details(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => details(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Existing queued-load and recovery calls remain synchronous data paths.
-  const dataCalls = [
-    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
-    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
-    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
-    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
-    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
-  ].sort();
+  // The full receipt crosses the immutable store before synchronous ingestion.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call'
-      && !finding.path.includes('>renderKnowledgeSelection')));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   const bypass = source.replace('case "knowledge_detail": {',
     'case "knowledge_detail": { renderKnowledgeSelection(event.id, state, null);');
@@ -1360,23 +1376,10 @@ test("Knowledge error completions commit shared state and reject direct renderin
   const local = text => errors(scanModule(text, file, { rootName: 'applyKnowledgeReceiveEvent' }));
   const delegated = (text, surface = source) => errors(scanModule(text, appFile,
     { modules: new Map([[file, surface]]) }));
-  // Search dispatch and load recovery stay synchronous, including the
-  // recovery timer's model update; only direct receiver rendering moves.
-  const dataCalls = [
-    '1bb0199f3f8d4906ac261fa60a7b5c8987792483f3db3aadf17fbf817a53633e',
-    '261fd7c0d342dceadd0b31f2a8a378d94931317136dbf0d81476a4a297ca60cc',
-    '3516ef223cef1920e30a07cc4d52d098fd4c5a3e7f46009de42ad57d71b9d4fb',
-    '65619e0aedcd07ea813b7dd2c68378085ca4c829984a55161327257ba7c60538',
-    '6ad96199041ea003085dd7e856e183186addbe0a07cd46f77d22f5b9b1b7caa2',
-    '9e0235901d9bc48ebac76130fa1d183aa556384c3bb9ced47050ff3a4a468cbc',
-    'ce9fcc7eff97ee66c82eac96226c749e27a2d82e37273e20fbf1e1f0d0bcf9a2',
-    'd4afb030bed61b50208e2034d2b27b2079bf9eef1fa95987f5e4e7918e09cb3e',
-    'fe23170b2ab6412aa0ad5a446a7d336280d17ead462807d23a004c59d3547edc',
-  ].sort();
   const directRender = finding => /(?:^|>)applyKnowledgeReceiveEvent>renderKnowledge(?:Bridge|StatusOnly)(?:>|$)/.test(finding.path);
+  // The full error receipt enters the store before synchronous recovery.
   for (const findings of [local(source), delegated(app)]) {
-    assert.ok(findings.every(finding => finding.kind === 'unresolved-call' && !directRender(finding)));
-    assert.deepEqual([...new Set(findings.map(finding => finding.hash))].sort(), dataCalls);
+    assert.deepEqual(findings, []);
   }
   for (const call of ['renderKnowledgeBridge(event.id);', 'document.body.textContent = event.message;']) {
     const bypass = source.replace('case "knowledge_error": {', `case "knowledge_error": { ${call}`);
@@ -1398,18 +1401,41 @@ test("Branch entry receivers commit shared state and reject direct rendering", (
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   const findings = source => scanModule(source, file).filter(finding =>
     finding.root === 'receive' && finding.context === '/branch_entries');
-  // The existing state lookup, pure ingest and selection normalization stay synchronous.
-  const dataCalls = [
-    '06cc29f0a75de93d059de5c527a04967d87070031924e5869c4b23a4091837d3',
-    'aa6152497be4307a6487effac25ca2b1f6c60c783b33a9fa9e44790765b56278',
-    'ab5d1ad7bc29d19bedd30294402bc6d9e9bc3f639854ea775759b01c741de37d',
-  ];
-  assert.ok(findings(app).every(finding => finding.kind === 'unresolved-call'));
-  assert.deepEqual(findings(app).map(finding => finding.hash).sort(), dataCalls);
+  assert.deepEqual(findings(app), []);
   for (const bypass of ['document.body.textContent = event.id;',
     'frontendUnits.branchesFileTreeSurface.renderBranches(event.id);']) {
     const mutated = app.replace('case "branch_entries": {', `case "branch_entries": { ${bypass}`);
     assert.notEqual(mutated, app);
-    assert.ok(findings(mutated).some(finding => !dataCalls.includes(finding.hash)));
+    assert.ok(findings(mutated).length > 0);
   }
+});
+
+test("Branch receipts isolate entries and cleanup before synchronous ingestion", () => {
+  const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+  const model = app.slice(app.indexOf('const branchEntriesViewModel ='),
+    app.indexOf('\n\n', app.indexOf('branchEntriesViewModel.subscribe(')));
+  const arm = app.match(/case "branch_entries": \{[\s\S]*?\n          \}/)[0];
+  const states = new Map(), counts = [];
+  const frontendUnits = { branchesFileTreeSurface: {
+    ensureBranchListState(id) {
+      if (!states.has(id)) states.set(id, { entries: [] });
+      return states.get(id);
+    },
+    renderBranches() {},
+  } };
+  const receive = new Function('createUiStateStore', 'applyBranchEntriesEvent', 'frontendUnits',
+    'syncBranchSelectionState', 'applyOperatorTelemetryCounts', `${model}\nreturn event => { switch(event.kind) { ${arm} } };`)(
+    createUiStateStore, applyBranchEntriesEvent, frontendUnits, () => {}, value => counts.push(value.branches));
+  const event = { kind: 'branch_entries', id: 'branches', load_id: 2, phase: 'hydrated',
+    entries: [{ name: 'work/accepted', cleanup_ready: true, cleanup: { availability: 'safe' } }] };
+  receive(event);
+  event.entries[0].name = 'changed';
+  event.entries[0].cleanup.availability = 'blocked';
+  const state = states.get('branches');
+  assert.equal(state.entries[0].name, 'work/accepted');
+  assert.equal(state.lastHydratedByName.get('work/accepted').availability, 'safe');
+  receive({ ...event, load_id: 1, entries: [] });
+  assert.equal(state.entries.length, 1);
+  receive({ ...event, load_id: 3, entries: [] });
+  assert.deepEqual(counts, [1, 0]);
 });

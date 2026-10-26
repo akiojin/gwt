@@ -426,6 +426,9 @@ pub enum FrontendEvent {
     AgentSchedule {
         action: crate::issue_monitor::AgentScheduleAction,
     },
+    AgentSwitch {
+        action: crate::issue_monitor::AgentSwitchAction,
+    },
     StartupAutoResumeReady {},
     /// Initial workspace has had a browser rendering opportunity (#3808).
     StartupFirstFrame {
@@ -2160,6 +2163,15 @@ pub enum BackendEvent {
         project_key: String,
         message: String,
     },
+    AgentSwitch {
+        snapshot: crate::issue_monitor::AgentSwitchSnapshot,
+    },
+    AgentSwitchError {
+        project_key: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operation_id: Option<String>,
+    },
     /// Provider usage snapshot: account-level windows + per-session usage +
     /// daily/weekly consumption (SPEC-2970 FR-010). Reuses the gwt-core domain
     /// types directly.
@@ -3127,6 +3139,16 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
         BackendEventBackpressurePolicy::FailOpenError,
     ),
     BackendEventPolicy::new(
+        "agent_switch",
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::ClientScopedSnapshot,
+    ),
+    BackendEventPolicy::new(
+        "agent_switch_error",
+        BackendEventDeliveryClass::Error,
+        BackendEventBackpressurePolicy::FailOpenError,
+    ),
+    BackendEventPolicy::new(
         "provider_usage",
         BackendEventDeliveryClass::IdempotentLatest,
         BackendEventBackpressurePolicy::LatestWins,
@@ -3647,6 +3669,8 @@ impl BackendEvent {
             BackendEvent::AgentRosterError { .. } => "agent_roster_error",
             BackendEvent::AgentSchedule { .. } => "agent_schedule",
             BackendEvent::AgentScheduleError { .. } => "agent_schedule_error",
+            BackendEvent::AgentSwitch { .. } => "agent_switch",
+            BackendEvent::AgentSwitchError { .. } => "agent_switch_error",
             BackendEvent::ProviderUsage { .. } => "provider_usage",
             BackendEvent::RuntimeHealth { .. } => "runtime_health",
             BackendEvent::TerminalOutput { .. } => "terminal_output",
@@ -4201,6 +4225,70 @@ mod tests {
                 .get("loop_interval_secs_decimal")
                 .and_then(Value::as_str),
             Some("18446744073709551615")
+        );
+    }
+
+    #[test]
+    fn agent_switch_actions_require_typed_project_bound_requests() {
+        let request = serde_json::json!({"kind":"request", "operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "member_id":"member", "expected_roster_revision":3, "target_issue_number":42});
+        for action in [
+            serde_json::json!({"kind":"read"}),
+            request.clone(),
+            serde_json::json!({"kind":"cancel", "operation_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}),
+        ] {
+            let _: FrontendEvent =
+                serde_json::from_value(serde_json::json!({"kind":"agent_switch", "action":action}))
+                    .expect("typed switch action");
+        }
+        for field in [
+            "operation_id",
+            "member_id",
+            "expected_roster_revision",
+            "target_issue_number",
+        ] {
+            let mut incomplete = request.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<FrontendEvent>(
+                serde_json::json!({"kind":"agent_switch", "action":incomplete})
+            )
+            .is_err());
+        }
+        let mut forged = request;
+        forged["session_id"] = serde_json::json!("another-session");
+        assert!(serde_json::from_value::<FrontendEvent>(
+            serde_json::json!({"kind":"agent_switch", "action":forged})
+        )
+        .is_err());
+        let snapshot = backend_event_policy("agent_switch").expect("switch snapshot policy");
+        assert_eq!(snapshot.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            snapshot.backpressure,
+            BackendEventBackpressurePolicy::ClientScopedSnapshot
+        );
+        assert_eq!(
+            backend_event_policy("agent_switch_error").unwrap().delivery,
+            BackendEventDeliveryClass::Error
+        );
+        let event = BackendEvent::AgentSwitch {
+            snapshot: crate::issue_monitor::AgentSwitchSnapshot {
+                project_key: "project".into(),
+                intents: vec![],
+                request_id: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            serde_json::json!({"kind":"agent_switch", "snapshot":{"project_key":"project", "intents":[]}})
+        );
+        assert_eq!(event.delivery_policy(), snapshot);
+        let error = BackendEvent::AgentSwitchError {
+            project_key: "project".into(),
+            message: "refused".into(),
+            operation_id: Some("operation".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["operation_id"],
+            "operation"
         );
     }
 

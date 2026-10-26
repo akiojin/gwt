@@ -42,6 +42,7 @@ test.beforeEach(async ({ page }, testInfo) => {
             app_version: "playwright",
             tabs: [{
               id: "tab-1", title: "Interrupted fixture",
+              project_key: location.pathname.split("/").filter(Boolean).at(-1),
               project_root: "/fixture", kind: "git",
               workspace: {
                 viewport: { x: 0, y: 0, zoom: 1 },
