@@ -916,9 +916,21 @@ test.describe("Issue Bridge load recovery", () => {
       "aria-description", /Monitor agent capacity: 1\/2/,
     );
 
-    await issueSurface
-      .locator('[data-issue-number="3273"] [data-action="launch-now"]')
-      .click();
+    const launchNow = issueSurface.locator('[data-issue-number="3273"] [data-action="launch-now"]');
+    await expect(launchNow).toHaveAccessibleName("Launch now Issue #3273");
+    const monitorStatus = issueSurface.locator(".knowledge-monitor-pill");
+    const capacity = issueSurface.locator('[data-metric="capacity"]');
+    await expect(monitorStatus).toHaveText("Stopped");
+    await expect(capacity).toHaveText("1 of 2");
+    const launchCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
+    await launchNow.click();
+    const launchControls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+      .filter(message => /^(open_issue_monitor|set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), launchCursor);
+    expect(launchControls, "Launch now targets one issue without opening or starting Monitor").toEqual([
+      { kind: "issue_monitor_launch_now", issue_number: 3273, linked_issue_kind: "spec" },
+    ]);
+    await expect(monitorStatus).toHaveText("Stopped");
+    await expect(capacity).toHaveText("1 of 2");
     // SPEC #3885 AC-5: queue reordering lives in the row's overflow menu.
     const menu3095 = issueSurface.locator('[data-issue-number="3095"] .knowledge-row-menu');
     await menu3095.locator("summary").click();
