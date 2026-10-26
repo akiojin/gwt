@@ -4516,6 +4516,23 @@ impl AppRuntime {
         {
             return None;
         }
+        // Unknown and changed membership supersede cached proof, while a
+        // timestamp-only refresh must not invalidate a long-running Work build.
+        let superseded = self.tab(tab_id).is_some_and(|tab| {
+            self.active_work_projection_refresh
+                .borrow()
+                .projects
+                .get(&tab.project_root)
+                .is_some_and(|project| {
+                    lock_recover(&project.local_activity_refresh)
+                        .latest
+                        .as_ref()
+                        .is_some_and(|latest| latest.agents != activity.agents)
+                })
+        });
+        if superseded {
+            return None;
+        }
         if let Some(agents) = activity.agents.as_mut() {
             let candidates = self.local_agent_activity_candidates(tab_id);
             agents.retain(|agent| {
@@ -6512,6 +6529,71 @@ mod bounded_cache_merge_tests {
             .borrow_mut()
             .insert("tab-1".into(), payload.clone());
         (runtime, context, view, payload)
+    }
+
+    #[test]
+    fn local_agent_activity_replay_preserves_unknown_without_requiring_a_new_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, context, mut view, _) = retired_activity_fixture(temp.path());
+        runtime.blocking_tasks = super::super::BlockingTaskSpawner::queued().0;
+        let mut known = view.local_agent_activity.take().unwrap();
+        known.agents = Some(Vec::new());
+        view.local_agent_activity = Some(known.clone());
+        let payload: Arc<str> = Arc::from(
+            serde_json::to_string(&BackendEvent::ActiveWorkProjection {
+                projection: Box::new(view.clone()),
+            })
+            .unwrap(),
+        );
+        let state = runtime.project_state_for_tab("tab-1").unwrap();
+        state
+            .active_work_projection_cache
+            .borrow_mut()
+            .insert("tab-1".into(), view);
+        state
+            .active_work_projection_payload_cache
+            .borrow_mut()
+            .insert("tab-1".into(), payload.clone());
+        let refresh = runtime
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .entry(context.project_root)
+            .or_default()
+            .local_activity_refresh
+            .clone();
+        let unknown = gwt::LocalAgentActivityView {
+            agents: None,
+            ..known.clone()
+        };
+        lock_recover(&refresh).latest = Some(unknown.clone());
+
+        assert!(
+            runtime
+                .retain_current_local_agent_activity("tab-1", Some(known.clone()))
+                .is_none(),
+            "a cached measurement cannot replace Unknown, including a timestamp tie"
+        );
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(unknown.clone())),
+            Some(unknown)
+        );
+        assert!(
+            !runtime.prepared_active_work_dispatch_is_current("tab-1", &payload),
+            "a reconnect cannot replay the earlier measured census"
+        );
+
+        let newer = gwt::LocalAgentActivityView {
+            observed_at: "2026-10-24T00:00:01Z".into(),
+            ..known.clone()
+        };
+        lock_recover(&refresh).latest = Some(newer);
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(known.clone())),
+            Some(known),
+            "unchanged membership stays usable without redating its measurement"
+        );
     }
 
     #[test]

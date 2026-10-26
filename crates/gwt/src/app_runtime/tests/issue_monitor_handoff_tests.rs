@@ -322,8 +322,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     fixture
         .runtime
         .handle_launch_complete_and_drain(fresh_window.clone(), Ok(completion));
-    let (spawner, _) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
     let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
     ready.continuation_readiness_nonce = Some(readiness_nonce);
     ready.project_root = Some(fixture.project_root.display().to_string());
@@ -364,6 +362,110 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .unwrap(),
         gwt_terminal::PaneStatus::Running
     ));
+    let runtime = &fixture.runtime.runtimes[&fresh_window];
+    let child_pid = runtime.pty.process_id().expect("live PTY child");
+    assert_ne!(child_pid, std::process::id());
+    let incarnation = runtime.incarnation;
+
+    // Keep the launch's queued scheduler: replacing it would strand its
+    // independent observer and leave only a vacuous, empty-candidate test.
+    drain_queued_blocking_tasks(&tasks);
+    let (context, activity) = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { context, events } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => {
+                        Some((context.clone(), activity.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("launch schedules an independent local census dispatch");
+    assert_eq!(
+        fixture.runtime.project_key_for_tab(&context.tab_id),
+        Some(&context.project_key)
+    );
+    assert_eq!(activity.project_key, context.project_key.to_string());
+    let agents = activity.agents.expect("current launch can be observed");
+    assert_eq!(agents.len(), 1, "the real successor must be nonempty");
+    let agent = &agents[0];
+    assert_eq!(agent.window_id, fresh_window);
+    assert_eq!(agent.session_id, session_id);
+    assert_eq!(agent.runtime_incarnation, incarnation);
+    assert_eq!(agent.issue_number, Some(3165));
+    assert!(!agent.is_pm);
+
+    fixture.runtime.agent_roster_events(
+        &context,
+        &"operator".into(),
+        gwt::agent_names::AgentRosterAction::Read,
+        None,
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let roster = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::AgentRoster { roster } => Some(roster.clone()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("roster reply for the live successor");
+    assert!(roster.error.is_none(), "{:?}", roster.error);
+    assert_eq!(roster.project_key, activity.project_key);
+    let member = roster
+        .members
+        .iter()
+        .find(|member| {
+            member
+                .member
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.session_id.as_deref())
+                == Some(session_id.as_str())
+        })
+        .expect("observed Session binds a roster member");
+    assert!(member.member.enabled);
+    assert_eq!(
+        candidate.agent_member_id.as_deref(),
+        Some(member.member.agent_member_id.as_str())
+    );
+    let catalog_window = fixture
+        .runtime
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(move |window| (tab, window))
+        })
+        .find(|(tab, window)| combined_window_id(&tab.id, &window.id) == fresh_window)
+        .map(|(_, window)| window)
+        .expect("observed window remains in the catalog");
+    assert_eq!(
+        catalog_window.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        catalog_window.agent_name.as_deref(),
+        Some(member.member.name.as_str())
+    );
     settle_test_pane_child(&fixture.runtime, &fresh_window);
 }
 

@@ -6,11 +6,11 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
-  test.skip(process.platform === "win32", "fixture requires POSIX executables");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
   test("T20b pending switch preserves current and cancels without replay after restart", async ({ page }, info) => {
+    test.skip(process.platform === "win32", "switch actor fixture requires POSIX executables");
     const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -238,7 +238,10 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  test("T20a UI reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
+  test("T20a UI reassigned schedule survives GUI restart and force requeue with live Busy and Works", async ({ page }, info) => {
+    // Setup, GUI restart and two bounded launches reached proof collection at
+    // 242s on Windows. Budget their aggregate plus cleanup; retain phase limits.
+    test.setTimeout(420_000);
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -379,6 +382,41 @@ test.describe("Issue queue real backend launch", () => {
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
       const session = () => readFile(join(fixture.home, ".gwt", "sessions", `${launch.gwt_session_id}.toml`), "utf8");
       const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+      const receivedActivity = (after = 0) => current.evaluate(after => {
+        let latest: any;
+        for (const entry of (window as any).__gwtPlaywrightMessages ?? []) {
+          if (entry.sequence <= after) continue;
+          // Only the independent observer's standalone event proves this
+          // scheduler path; a Work projection could mask an empty observer.
+          const next = entry.payload.kind === "local_agent_activity" ? entry.payload.activity : undefined;
+          if (next && (!latest || Date.parse(next.observed_at) >= Date.parse(latest.observed_at))) latest = next;
+        }
+        return latest;
+      }, after);
+      const assertObservedWork = async (sessionId: string, memberId: string, after = 0, previousIncarnation?: number) => {
+        await expect.poll(async () => (await receivedActivity(after))?.agents?.some((agent: any) =>
+          agent.session_id === sessionId && !agent.is_pm && agent.runtime_incarnation !== previousIncarnation),
+        { timeout: 60_000, message: "the real independent observer sees the launched child" }).toBe(true);
+        const activity = await receivedActivity(after);
+        const agent = activity.agents.find((entry: any) => entry.session_id === sessionId);
+        expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
+        expect(agent.runtime_incarnation).toBeGreaterThan(0);
+        expect(agent.runtime_incarnation).not.toBe(previousIncarnation);
+        const actual = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+        expect(actual.error).toBeFalsy();
+        expect(actual.members.find((member: any) => member.agent_member_id === memberId)?.assignment)
+          .toMatchObject({ session_id: sessionId, issue_number: fixture.issueNumber });
+        await openMemberPlans(memberId);
+        const main = current.getByRole("region", { name: "Main pane", exact: true });
+        await expect(main.locator(".roster-capacity-note")).toContainText("Busy 1 / Team");
+        await expect(main.locator(`.roster-row[data-member-id="${memberId}"] .roster-current`)).toContainText("In Works");
+        await current.locator('.op-rail__surface[data-surface="works"]').click();
+        await expect(main).toHaveAttribute("data-surface", "works");
+        if (await main.locator(".works-full:not([hidden])").isVisible())
+          await main.locator('.works-full [data-action="back"]').click();
+        await expect(main.locator(`.work-row[data-window-id="${agent.window_id}"]`)).toBeVisible();
+        return { activity, agent, memberId };
+      };
       await expect.poll(async () => field(await session(), "agent_session_id"),
         { timeout: 60_000, message: "authentic Session receives the provider SessionStart identity" }).toBe(launch.provider_session_id);
       const record = await session();
@@ -386,10 +424,53 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
       expect(field(record, "agent_name")).toBe(target.name);
       expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
+      const firstObservation = await assertObservedWork(launch.gwt_session_id!, target.agent_member_id);
       fixture.auditHooks(launch.cwd);
+
+      // Stop only the owned provider, then recover through the real authenticated
+      // Monitor path. No incoming census or roster frame is manufactured here.
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
+      await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => {
+        try { process.kill(launch.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000, message: "the predecessor provider really exited" }).toBe(true);
+      // Provider exit precedes the Host's PTY exit event and durable failure.
+      // Observe the guard's state before the single force-requeue write.
+      await expect.poll(async () => {
+        const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+        const ownsIssue = (entry: any) => entry.issue_number === fixture.issueNumber;
+        return !prefs.launched_issues?.some(ownsIssue)
+          && !prefs.pending_launch_deliveries?.some(ownsIssue)
+          && prefs.failed_issues?.some((entry: any) => ownsIssue(entry)
+            && entry.window_id === firstObservation.agent.window_id);
+      }, { timeout: 60_000, message: "the Host records the exact predecessor exit and releases its launch" }).toBe(true);
+      const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      const requeued = fixture.fixtureOperation("issue.monitor.requeue", {
+        number: fixture.issueNumber, reason: "Issue #6362 real observer force-requeue regression", force: true,
+      });
+      expect(requeued.ok, JSON.stringify(requeued)).toBe(true);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
+        { timeout: 30_000, message: "Monitor enable is durable before the separate launch_now operation" }).toBe(true);
+      const immediate = fixture.fixtureOperation("issue.monitor.launch_now", { number: fixture.issueNumber });
+      expect(immediate.ok, JSON.stringify(immediate)).toBe(true);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
+      const successor = (await fixture.launches())[1];
+      expect(successor.gwt_session_id).toBeTruthy();
+      expect(() => process.kill(successor.pid, 0)).not.toThrow();
+      const successorSession = () => readFile(join(fixture.home, ".gwt", "sessions", `${successor.gwt_session_id}.toml`), "utf8");
+      await expect.poll(async () => field(await successorSession(), "agent_session_id"), { timeout: 60_000 })
+        .toBe(successor.provider_session_id);
+      const successorMember = field(await successorSession(), "agent_member_id");
+      expect(successorMember).toBeTruthy();
+      const successorObservation = await assertObservedWork(successor.gwt_session_id!, successorMember!, after,
+        firstObservation.agent.runtime_incarnation);
+      fixture.auditHooks(successor.cwd);
       await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
-        target: { agent_member_id: target.agent_member_id, name: target.name }, launch }, null, 2), contentType: "application/json" });
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation,
+        requeued, immediate, successor, successorObservation }, null, 2), contentType: "application/json" });
       expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
     } finally {
       try { await current.close(); } finally { await fixture.stop(); }
