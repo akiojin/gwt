@@ -754,19 +754,18 @@ fn issue_monitor_resume_handoff(
     .map_err(|error| format!("failed to read the autonomous handoff answer: {error}"))
 }
 
-/// Issue #6096: the prefs-derived inputs a prepared launch consumed (profile
-/// selection/tier and autonomous handoff). Rechecking these, instead of the
+type IssueMonitorLaunchSelection = (
+    gwt::LaunchWizardPreviousProfiles,
+    Option<u8>,
+    Option<String>,
+);
+
+/// Issue #6096: the prefs-derived inputs a prepared launch consumed (profile,
+/// member selection/tier and autonomous handoff). Rechecking these, instead of the
 /// whole prefs file, lets a busy project's unrelated rewrites keep the launch.
 #[derive(Debug, Clone)]
 struct IssueMonitorLaunchSourceFacts {
-    selection: Result<
-        Option<(
-            gwt::LaunchWizardPreviousProfiles,
-            Option<u8>,
-            Option<String>,
-        )>,
-        String,
-    >,
+    selection: Result<Option<IssueMonitorLaunchSelection>, String>,
     handoff: IssueMonitorResumeHandoff,
     /// Issue #6299: the host Codex preflight this delivery already ran. It is
     /// not a prefs-derived input, so it is reused, never compared.

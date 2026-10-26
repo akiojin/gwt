@@ -4553,8 +4553,10 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut seeded = gwt::IssueMonitorPrefs::default();
-    seeded.max_active_agents = 2;
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 2,
+        ..Default::default()
+    };
     seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
