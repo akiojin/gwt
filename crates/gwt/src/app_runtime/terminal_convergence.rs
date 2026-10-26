@@ -24,6 +24,7 @@
 //! closed window never respawns at startup or Open Project.
 
 use super::*;
+use gwt::cli::execution_state::ExecutionControlRecord;
 use std::time::Duration;
 
 /// Facts read from the exact Worktree's execution diagnosis.
@@ -63,6 +64,27 @@ impl ExecutionTerminalFacts {
                 && diagnosis.missing_verification.as_deref()
                     == Some(gwt::cli::execution_state::REVOKED_LAUNCH_MISSING_VERIFICATION),
         }
+    }
+
+    fn matches_completed_session(
+        &self,
+        session: &gwt_agent::Session,
+        read_record: impl FnOnce(&Path) -> std::io::Result<Option<ExecutionControlRecord>>,
+    ) -> bool {
+        // Only Completed uses this identity fence. Other diagnoses already
+        // loaded and validated the record and cannot close through this path.
+        if self.status != gwt::cli::execution_state::ExecutionDiagnosisState::Completed {
+            return false;
+        }
+        read_record(&session.worktree_path)
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                gwt::cli::execution_state::integrity_ok(&record)
+                    && record.primary_session_id == session.id
+                    && Some(record.owner_number) == self.owner_number
+                    && record.status == gwt::cli::execution_state::ExecutionControlStatus::Completed
+            })
     }
 }
 
@@ -528,15 +550,8 @@ fn read_terminal_window_facts_with_monitor(
             Some(session),
         ),
     );
-    execution.session_matches_execution = gwt::cli::execution_state::load(&session.worktree_path)
-        .ok()
-        .flatten()
-        .is_some_and(|record| {
-            gwt::cli::execution_state::integrity_ok(&record)
-                && record.primary_session_id == session.id
-                && Some(record.owner_number) == execution.owner_number
-                && record.status == gwt::cli::execution_state::ExecutionControlStatus::Completed
-        });
+    execution.session_matches_execution =
+        execution.matches_completed_session(session, gwt::cli::execution_state::load);
     let execution = Some(execution);
     let monitor =
         monitor.map(|monitor| MonitorTerminalFacts::from_monitor(monitor, issue_number, window_id));
@@ -1021,6 +1036,33 @@ impl AppRuntime {
 mod tests {
     use super::*;
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    #[test]
+    fn non_completed_diagnoses_skip_the_additional_identity_read() {
+        let session = gwt_agent::Session::new(
+            Path::new("unused"),
+            "work/issue-42",
+            gwt_agent::AgentId::Codex,
+        );
+        for status in [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ] {
+            let mut execution = active_execution(42);
+            execution.status = status;
+            let mut reads = 0;
+            assert!(!execution.matches_completed_session(&session, |_| {
+                reads += 1;
+                Ok(None)
+            }));
+            assert_eq!(
+                reads, 0,
+                "{status:?} never uses the Completed identity fence"
+            );
+        }
+    }
 
     #[test]
     fn observer_reads_each_monitor_path_once_per_tick_including_failures() {
