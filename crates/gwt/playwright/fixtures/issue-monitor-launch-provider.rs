@@ -55,6 +55,45 @@ fn rest_read(path: &str, issues: &serde_json::Value) -> Option<serde_json::Value
     }
 }
 
+fn graphql_read(args: &[String], issues: &serde_json::Value) -> Option<serde_json::Value> {
+    let field = |key: &str| {
+        args.windows(2)
+            .filter(|pair| ["-f", "--raw-field", "-F", "--field"].contains(&pair[0].as_str()))
+            .find_map(|pair| pair[1].strip_prefix(key))
+    };
+    let query = field("query=")?;
+    if !query.trim_start().starts_with("query(")
+        || query
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .any(|word| word == "mutation")
+        || !query.contains("timelineItems(")
+        || field("owner=") != Some("fixture")
+        || field("repo=") != Some("launch-perf")
+    {
+        return None;
+    }
+    let mut repository = serde_json::Map::new();
+    for issue in issues.as_array()? {
+        let number = issue["number"].as_u64()?;
+        let alias = format!("i{number}");
+        if query.contains(&format!("{alias}: issue(number: {number})")) {
+            repository.insert(
+                alias,
+                serde_json::json!({
+                    "timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}
+                }),
+            );
+        }
+    }
+    if repository.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({"data":{
+        "repository":repository,
+        "rateLimit":{"cost":1,"remaining":5000,"resetAt":"2099-01-01T00:00:00Z","nodeCount":0}
+    }}))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exe = std::env::current_exe().unwrap();
@@ -113,7 +152,12 @@ fn main() {
                     .iter()
                     .any(|a| ["--method", "-X"].contains(&a.as_str())) =>
             {
-                let Some(result) = args.get(1).and_then(|path| rest_read(path, &issues)) else {
+                let result = if args.get(1).map(String::as_str) == Some("graphql") {
+                    graphql_read(&args, &issues)
+                } else {
+                    args.get(1).and_then(|path| rest_read(path, &issues))
+                };
+                let Some(result) = result else {
                     eprintln!("unsupported offline gh read endpoint");
                     std::process::exit(64);
                 };
@@ -132,6 +176,11 @@ fn main() {
     }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("codex-cli 0.116.0");
+        return;
+    }
+    // The configuration preflight runs before a provider Session exists.
+    if args.windows(2).any(|pair| pair == ["features", "list"]) {
+        println!("shell_tool\tstable\ttrue");
         return;
     }
     let session = std::env::var("GWT_SESSION_ID").unwrap();
@@ -229,11 +278,13 @@ fn main() {
     }
     let journal_drained = drained();
     // Hook output may contain launch-scoped credentials; retain success only.
+    let hook_pending = home.join(format!("hook-{session}.tmp"));
     std::fs::write(
-        home.join(format!("hook-{session}.json")),
+        &hook_pending,
         serde_json::json!({"success":journal_drained,"cli_success":cli_success,"journal_drained":journal_drained}).to_string(),
     )
     .unwrap();
+    std::fs::rename(hook_pending, home.join(format!("hook-{session}.json"))).unwrap();
     println!("FIXTURE_SESSION_START_COMPLETE {session}");
     loop {
         std::thread::sleep(Duration::from_secs(1));

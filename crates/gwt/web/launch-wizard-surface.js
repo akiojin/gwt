@@ -15,7 +15,6 @@
 // deps:
 // - createNode(tag, className, textContent): shared DOM helper owned by
 //   app.js (also used by Board / settings surfaces).
-// - closeModal(): closes the Add Window preset modal before the wizard
 //   takes over the screen.
 // - sendWizardAction(action): wizard action transport (owned by app.js so
 //   the frontendUnits registry stays there).
@@ -47,7 +46,6 @@ function launchWizardStartMethodIntent(methodKind) {
 
 export function createLaunchWizardSurface({
   createNode,
-  closeModal,
   sendWizardAction,
   requestWorkAdvisory,
 }) {
@@ -294,6 +292,7 @@ export function createLaunchWizardSurface({
           const block = createNode("section", "launch-agent-set");
           block.classList.toggle("is-open", isOpen);
           block.dataset.agentId = set.agent_id || "";
+          block.dataset.agentMemberId = set.agent_member_id || "";
           block.setAttribute("aria-label", name);
           const header = createNode("div", "launch-agent-set__header");
           const heading = createNode("div", "launch-agent-set__heading");
@@ -375,7 +374,7 @@ export function createLaunchWizardSurface({
         const note = createNode(
           "div",
           "launch-note launch-agent-sets__order",
-          `Sets launch in this order; the first one starts the next launch. After saving: ${pool.resulting_summary}`,
+          `The first member in the list fixes the launch tool. Only selected members using that tool are tried in order. If none is available, new launches wait; tools never switch automatically. After saving: ${pool.resulting_summary}`,
         );
         note.setAttribute("role", "note");
         parent.appendChild(note);
@@ -1161,7 +1160,6 @@ export function createLaunchWizardSurface({
         }
 
         syncWizardDraftState();
-        closeModal();
         // Issue #3192 — this derivation runs BEFORE the opening/openError
         // early returns below, so it is reached for generic branch / agent
         // pending states where `launchWizard` is null
@@ -1784,17 +1782,22 @@ export function createLaunchWizardSurface({
               }),
           );
           if (launchWizard.show_agent_settings) {
-            appendChoiceOrSelectField(
-              grid,
-              "Agent",
-              launchWizard.agent_options || [],
-              launchWizard.selected_agent_id,
-              (value) =>
-                sendWizardAction({
-                  kind: "set_agent",
-                  agent_id: value,
-                }),
-            );
+            if (launchWizard.issue_monitor_pool) {
+              const members = [...(launchWizard.agent_member_options || [])];
+              const selected = launchWizard.selected_agent_member_id || "";
+              if (!members.some(member => member.value === selected)) members.push({ value: selected,
+                label: selected ? `${selected} · Unavailable member` : "Select a registered member…" });
+              const memberField = appendSelectField(grid, "Agent", members, selected,
+                value => sendWizardAction({ kind: "set_agent_member", agent_member_id: value }));
+              const explanation = members.find(member => member.value === selected)?.description;
+              if (explanation) memberField.appendChild(createNode("div", "launch-field-help", explanation));
+              const tool = createLaunchField("Tool");
+              tool.appendChild(createNode("div", "launch-note", launchWizard.selected_agent_id || "Unavailable tool"));
+              grid.appendChild(tool);
+            } else {
+              appendChoiceOrSelectField(grid, "Agent", launchWizard.agent_options || [], launchWizard.selected_agent_id,
+                value => sendWizardAction({ kind: "set_agent", agent_id: value }));
+            }
             if (launchWizard.selected_agent_id === "grok") {
               appendTextField(
                 grid,

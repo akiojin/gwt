@@ -2889,6 +2889,11 @@ fn try_apply_issue_monitor_control(
             {
                 return None;
             }
+            if crate::agent_names::validate_registered_profiles(&monitor.prefs(), &profiles)
+                .is_err()
+            {
+                return None;
+            }
             let mut candidate = monitor.clone();
             // Same revocation as the GUI save: proposals prepared against the
             // previous pool must not commit under the new one.
@@ -10758,6 +10763,7 @@ exit 0
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: "claude".to_string(),
             model: Some("sonnet".to_string()),
             reasoning: None,
@@ -14955,6 +14961,7 @@ exit 0
 
         let saved = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
@@ -15072,6 +15079,7 @@ exit 0
         let seed = crate::IssueMonitorPrefs {
             enabled: true,
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 ..sample_issue_monitor_profile()
             }),
@@ -21179,11 +21187,12 @@ exit 1
             crate::IssueMonitorConfig::default(),
             crate::IssueMonitorPrefs {
                 autonomous_mode: true,
-                max_active_agents: 4,
+                max_active_agents: 5,
                 max_active_agents_mode: crate::issue_monitor::IssueMonitorMaxActiveMode::Manual,
                 queued_launch_session_strategies: std::collections::BTreeMap::from([
                     (42, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                     (45, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
+                    (46, crate::IssueMonitorLaunchSessionStrategy::FreshRequired),
                 ]),
                 ..Default::default()
             },
@@ -21191,7 +21200,7 @@ exit 1
         monitor.set_source_repository(Some(("akiojin", "gwt")));
         let now = chrono::Utc::now().to_rfc3339();
         let mut candidates = Vec::new();
-        for number in [42, 43, 44, 45] {
+        for number in [42, 43, 44, 45, 46] {
             let mut issue = sample_issue_monitor_issue(number);
             issue.author_login = Some("akiojin".into());
             issue.labels.push("gwt-spec".into());
@@ -21207,14 +21216,20 @@ exit 1
                 &format!("effect-{number}"),
                 &now
             ));
-            if number != 45 {
+            if number < 45 {
                 issue.readiness = crate::IssueMonitorReadiness::NotReady;
             }
-            if number != 42 {
+            if (43..=45).contains(&number) {
                 issue.body = Some("<!-- gwt-feedback:receipt -->".into());
+            }
+            if number == 46 {
+                issue.body = Some("Blocked-by: #47".into());
             }
             candidates.push(issue);
         }
+        let mut blocker = sample_issue_monitor_issue(47);
+        blocker.author_login = Some("akiojin".into());
+        candidates.push(blocker);
         let mut scanned = monitor.clone();
         crate::scan_issue_monitor_candidates_with_provenance(
             &mut scanned,
@@ -21223,6 +21238,11 @@ exit 1
             temp.path(),
             &now,
         );
+        let unprobed = scanned.clone();
+        scanned.observe_dependency_completions(&std::collections::BTreeMap::from([(
+            47,
+            scanned.dependency_observation(47, Some(false)).unwrap(),
+        )]));
         // Ownership can change after the scan reads its candidates.
         assert!(monitor.claim_launch_delivery(
             43,
@@ -21236,12 +21256,44 @@ exit 1
         let latest = monitor.prefs();
         let mut observer = scanned.clone();
         observer.rebase_gui_observer_prefs(&latest);
+        // The dependency proof can be sealed without changing launch ownership.
         assert_eq!(
-            observer.prefs().pending_launch_deliveries,
-            latest.pending_launch_deliveries,
+            observer.prefs().pending_launch_deliveries.len(),
+            latest.pending_launch_deliveries.len()
+        );
+        assert_eq!(
+            observer.prefs().pending_launch_deliveries[..4],
+            latest.pending_launch_deliveries[..4],
             "an old GUI candidate cannot cancel a newer claim"
         );
+        assert_eq!(
+            observer.pending_launch_delivery_id(46).as_deref(),
+            Some("launch:effect-46")
+        );
         assert!(observer.pending_effects().is_empty());
+        for (index, completed) in [None, Some(Some(true)), Some(None)].into_iter().enumerate() {
+            let mut pending = unprobed.clone();
+            if let Some(completed) = completed {
+                pending.observe_dependency_completions(&std::collections::BTreeMap::from([(
+                    47,
+                    pending.dependency_observation(47, completed).unwrap(),
+                )]));
+            }
+            let path = temp.path().join(format!("dependency-{index}.json"));
+            crate::save_issue_monitor_prefs(&path, &latest).unwrap();
+            let mut driver = monitor.clone();
+            assert!(super::commit_issue_monitor_scan_if_current(
+                temp.path(),
+                &path,
+                &mut driver,
+                pending,
+                monitor.effect_authority_epoch()
+            ));
+            assert_eq!(
+                driver.pending_launch_delivery_id(46).as_deref(),
+                Some("launch:effect-46")
+            );
+        }
         let mut cached = monitor.clone();
         crate::scan_issue_monitor_candidates_with_provenance(
             &mut cached,
@@ -21250,6 +21302,10 @@ exit 1
             temp.path(),
             &now,
         );
+        cached.observe_dependency_completions(&std::collections::BTreeMap::from([(
+            47,
+            cached.dependency_observation(47, Some(false)).unwrap(),
+        )]));
         let cache_path = temp.path().join("cached-monitor.json");
         crate::save_issue_monitor_prefs(&cache_path, &latest).unwrap();
         let mut cached_driver = monitor.clone();
@@ -21262,10 +21318,107 @@ exit 1
             epoch
         ));
         assert_eq!(
-            cached_driver.prefs().pending_launch_deliveries,
-            latest.pending_launch_deliveries
+            cached_driver.prefs().pending_launch_deliveries.len(),
+            latest.pending_launch_deliveries.len()
+        );
+        assert_eq!(
+            cached_driver.prefs().pending_launch_deliveries[..4],
+            latest.pending_launch_deliveries[..4]
+        );
+        assert_eq!(
+            cached_driver.pending_launch_delivery_id(46).as_deref(),
+            Some("launch:effect-46")
         );
         assert!(cached_driver.pending_effects().is_empty());
+        let held = cached_driver.prefs();
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        let status = cached_driver.agent_status_at(&now);
+        let waiting = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(waiting.readiness, crate::IssueMonitorReadiness::NotReady);
+        assert!(waiting
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("plan/tasks")));
+        assert_eq!(
+            cached_driver.prefs().pending_launch_deliveries,
+            held.pending_launch_deliveries
+        );
+        let mut ready = candidates[0].clone();
+        ready.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        cached_driver.record_candidate(ready);
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert!(cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        // Readiness can change again after claim but before the pane exists.
+        cached_driver.record_candidate(candidates[0].clone());
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| true
+        ));
+        // An exact existing pane can still be adopted and replay its ACK.
+        let mut existing = monitor.clone();
+        existing.record_candidate(candidates[0].clone());
+        existing.complete_active_launch(42, "tab-1::agent-42");
+        assert!(existing.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(existing.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            "tab-1::agent-42"
+        ));
+        assert!(existing
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert_eq!(cached_driver.attempt_count(42), 1);
+        assert_eq!(
+            cached_driver
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == 42)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         crate::save_issue_monitor_prefs(&prefs_path, &latest).unwrap();
         assert!(super::commit_issue_monitor_scan_if_current(
             temp.path(),
@@ -21276,6 +21429,20 @@ exit 1
         ));
 
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(
+            monitor.pending_launch_delivery_id(46),
+            None,
+            "a confirmed dependency blocker must free the unowned slot before timeout"
+        );
+        assert!(!monitor.active_issue_numbers().contains(&46));
+        let view = monitor.inbox_view_at(&now);
+        let blocked = view.iter().find(|item| item.issue.number == 46).unwrap();
+        assert_eq!(blocked.state, crate::MonitorInboxState::BlockedByDependency);
+        assert!(blocked.exclusion_reason.as_deref().unwrap().contains("#47"));
+        assert_eq!(persisted.pending_effects.iter().filter(|effect| matches!(
+            &effect.payload, crate::IssueMonitorEffectPayload::ReleaseClaim { issue_number: 46, claim_id, owner }
+                if claim_id == "claim-46" && owner == "owner"
+        )).count(), 1);
         assert_eq!(
             monitor.pending_launch_delivery_id(45),
             None,
@@ -21337,6 +21504,31 @@ exit 1
         }
         assert_eq!(monitor.effect_authority_epoch(), epoch);
         observer.rebase_gui_observer_prefs(&persisted);
+        assert!(!observer.active_issue_numbers().contains(&46));
+        assert!(!observer.claim_launch_delivery(
+            46,
+            "launch:effect-46",
+            "late-gui",
+            46,
+            "tab-1::agent-46",
+            |_| false
+        ));
+        assert!(!observer.apply_confirmed_claim(
+            46,
+            "blocked-claim",
+            "owner",
+            "blocked-effect",
+            &now
+        ));
+        assert_eq!(
+            observer
+                .inbox_view_at(&now)
+                .iter()
+                .find(|item| item.issue.number == 46)
+                .unwrap()
+                .state,
+            crate::MonitorInboxState::BlockedByDependency
+        );
         assert!(!observer.active_issue_numbers().contains(&45));
         assert_eq!(
             observer.inbox_item(45).unwrap().state,
@@ -21366,6 +21558,27 @@ exit 1
         ));
         let mut restored = test_monitor_with_prefs(crate::IssueMonitorConfig::default(), persisted);
         restored.set_source_repository(Some(("akiojin", "gwt")));
+        let mut unblocked = candidates[4].clone();
+        unblocked.body = None;
+        restored.record_candidate(unblocked);
+        assert!(restored.apply_confirmed_claim(
+            46,
+            "unblocked-claim",
+            "owner",
+            "unblocked-effect",
+            &now
+        ));
+        assert_eq!(restored.attempt_count(46), 1);
+        assert_eq!(
+            restored
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|d| d.issue_number == 46)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         restored.record_candidate(candidates[3].clone());
         assert_eq!(restored.pending_launch_delivery_id(45), None);
         assert!(!restored.apply_confirmed_claim(
@@ -24010,6 +24223,7 @@ exit 1
         // The GUI wrote a launch_profile + custom tuning straight to disk.
         let on_disk = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "claude".to_string(),
                 model: None,
                 reasoning: None,

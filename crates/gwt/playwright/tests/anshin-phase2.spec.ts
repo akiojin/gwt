@@ -19,7 +19,7 @@ const errors = new WeakMap<Page, string[]>();
 //     agent has converged (done === agents > 0). Driven by emitting
 //     `window_state` transitions that map to telemetry `active` vs `done`.
 //   - FR-045: a window's `dynamic_title_detail` surfaces as the Fleet Minimap
-//     cell tooltip (`title` = "Title · detail") and as a `.window-list-activity`
+//     cell tooltip (`title` = "Title · detail")
 //     line inside the Window Switcher row.
 //
 // Runtime-state -> telemetry mapping used to seed `done` vs `active`
@@ -75,26 +75,7 @@ test.describe("Anshin Phase 2 activity surfacing + mission convergence", () => {
     await expect(missionCell).toHaveClass(/op-status-strip__cell--complete/);
   });
 
-  test("FR-045: dynamic_title_detail surfaces in the switcher row", async ({
-    page,
-  }) => {
-    if (!liveUrl) await installEmbeddedRoutes(page);
-    await installPhase2Backend(page);
-    await page.goto(liveUrl || APP_URL);
 
-    // (b) Window Switcher row: opening the popover surfaces the live activity
-    // detail as a .window-list-activity line in the agent's row.
-    await page.locator("#window-list-button").click();
-    const panel = page.locator("#window-list-panel");
-    await expect(panel).toBeVisible();
-    const row = panel
-      .locator(".window-list-row", { hasText: "Cedar — Refactor auth" })
-      .first();
-    await expect(row).toBeVisible();
-    await expect(row.locator(".window-list-activity")).toHaveText(
-      "editing src/auth/login.rs",
-    );
-  });
 });
 
 // Deterministic backend: a single project tab with three canvas agent panes.

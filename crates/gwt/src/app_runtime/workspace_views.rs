@@ -4141,7 +4141,7 @@ fn agent_roster_view(
                 .collect();
             gwt::AgentRosterMemberView {
                 member: member.clone(),
-                provider: latest.map(|session| session.agent_id.command().to_string()),
+                provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
                 history: assigned
                     .iter()

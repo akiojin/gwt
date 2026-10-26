@@ -223,11 +223,6 @@ test.describe("Surface rail", () => {
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator('.op-rail__surface[data-surface="works"]').click();
     await expect(main.locator(".work-row")).toHaveCount(4);
-    await page.locator("#window-list-button").click();
-    await page.locator(".window-list-row").filter({ has: page.locator(".window-list-title", { hasText: "start-work-shell" }) }).click();
-    await expect(main.locator('[data-id="start-work-shell"] .xterm')).toBeVisible();
-    await main.locator('[data-id="start-work-shell"] .xterm-helper-textarea').press("s");
-    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
     await openPm();
     await page.locator("#op-pm-settings-button").click();
     await page.reload();
@@ -509,8 +504,30 @@ test.describe("Surface rail", () => {
     });
     await page.locator('.op-rail__surface[data-surface="settings"]').click();
     const settings = page.locator('.workspace-window[data-preset="settings"]');
+    const railPopup = page.locator("#rail-control-explanation");
+    const systemTab = settings.getByRole("tab", { name: "System", exact: true });
+    await page.locator('.op-rail__surface[data-surface="works"]').hover();
+    await expect(railPopup).toBeVisible();
+    const popupBounds = await railPopup.boundingBox(), tabBounds = await systemTab.boundingBox();
+    expect(popupBounds && tabBounds).toBeTruthy();
+    const left = Math.max(popupBounds!.x, tabBounds!.x), right = Math.min(popupBounds!.x + popupBounds!.width, tabBounds!.x + tabBounds!.width);
+    const top = Math.max(popupBounds!.y, tabBounds!.y), bottom = Math.min(popupBounds!.y + popupBounds!.height, tabBounds!.y + tabBounds!.height);
+    expect(right - left).toBeGreaterThan(0); expect(bottom - top).toBeGreaterThan(0);
+    const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    await page.mouse.move(point.x, point.y);
+    await expect(railPopup).toBeVisible();
+    // This is an ordinary native click at a point inside both existing UI
+    // rectangles; the explanation must not consume the underlying tab action.
+    await systemTab.click({ position: { x: point.x - tabBounds!.x, y: point.y - tabBounds!.y } });
+    await expect(systemTab).toHaveAttribute("aria-selected", "true");
+    await expect(railPopup).toBeHidden();
     await settings.getByRole("tab", { name: "Issues", exact: true }).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
+    await page.locator('.op-rail__surface[data-surface="agents"]').hover();
+    await expect(railPopup).toBeVisible();
+    await issues.locator(".knowledge-monitor-pill").focus();
+    await expect(railPopup).toBeHidden();
+    await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
     await issues.getByRole("button", {name:"Issues settings",exact:true}).click();
     await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
     await clearMessages(page);
@@ -560,9 +577,38 @@ test.describe("Surface rail", () => {
     await expect(page.locator('.work-row')).toHaveCount(3);
     await expect(page.locator('.agents-grid, .agents-tabs')).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
-    await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.reload();
+    const works = page.locator('.op-rail__surface[data-surface="works"]');
+    const agents = page.locator('.op-rail__surface[data-surface="agents"]');
+    const explanation = page.locator("#rail-control-explanation");
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const tip = await explanation.boundingBox(), railBox = await page.locator(".op-rail").boundingBox();
+    expect(tip && railBox).toBeTruthy();
+    expect(tip!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
+    await page.mouse.move(tip!.x + tip!.width / 2, tip!.y + tip!.height / 2);
+    await expect(explanation).toBeVisible();
+    await page.mouse.move(1439, 899);
+    await expect(explanation).toBeHidden();
+    await agents.click();
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible(); expect(errors).toEqual([]);
+    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 400, height: 700 });
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const narrowTip = await explanation.boundingBox(), narrowRail = await page.locator(".op-rail").boundingBox();
+    expect(narrowTip && narrowRail).toBeTruthy();
+    expect(narrowTip!.y).toBeGreaterThanOrEqual(narrowRail!.y + narrowRail!.height);
+    expect(narrowTip!.x + narrowTip!.width).toBeLessThanOrEqual(392);
+    await page.mouse.move(narrowTip!.x + narrowTip!.width / 2, narrowTip!.y + narrowTip!.height / 2);
+    await expect(explanation).toBeVisible();
+    await page.mouse.move(399, 699);
+    await works.focus();
+    await expect(works).toHaveAttribute("aria-describedby", "rail-control-explanation");
+    await expect(explanation).toBeVisible();
+    await agents.click();
+    await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
   });
 
   test("Work previous and next retain direct input without terminal tabs", async ({ page }) => {
@@ -635,7 +681,7 @@ test.describe("Surface rail", () => {
 
   test("selects Issues / Works / Agents / Board / Settings and folds to a top strip when narrow", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -648,7 +694,7 @@ test.describe("Surface rail", () => {
     await page.goto(surfaceAppUrl);
 
     const rail = page.locator("#op-rail");
-    const surfaces = rail.locator(".op-rail__surface");
+    const surfaces = rail.locator(".op-rail__surface[data-surface]");
     const entry = (surface: string) => rail.locator(`[data-surface='${surface}']`);
 
     await expect(windowById(page, "board-window")).toBeVisible({ timeout: 10_000 });
@@ -674,6 +720,18 @@ test.describe("Surface rail", () => {
     await expect(pressedSurfaces(page)).resolves.toEqual(["board"]);
     const railWidth = await rail.evaluate((element) => element.getBoundingClientRect().width);
     expect(railWidth).toBe(64);
+    // Move from another rail entry so a fresh headed context cannot reuse
+    // an unchanged OS pointer position before Chromium receives hover state.
+    await entry("works").hover();
+    await entry("pm").hover();
+    const pmGear = page.locator("#op-pm-settings-button");
+    const railBounds = await rail.boundingBox();
+    const gearBounds = await pmGear.boundingBox();
+    expect(gearBounds!.x + gearBounds!.width + 2).toBeLessThanOrEqual(railBounds!.x + railBounds!.width);
+    await pmGear.focus();
+    await expect(pmGear).toHaveCSS("opacity", "1");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Escape");
     // The pressed entry carries a 2px accent edge, not only a color change.
     await expect(entry("board")).toHaveCSS("border-left-width", "2px");
     const accent = await entry("board").evaluate(
@@ -727,6 +785,36 @@ test.describe("Surface rail", () => {
     }
     await expect(entry("issues")).toHaveAttribute("title", /⌘G/);
 
+    // The retired picker/list/kill-switch do not leave hidden controls behind.
+    await expect(page.locator('#window-list-button, #window-list-panel, #op-rail-window-count, #add-button, #preset-modal, .op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
+    for (const preset of ["logs", "index", "profile"]) {
+      const tool = rail.locator(`[data-cmd="open-${preset}"]`);
+      await clearMessages(page);
+      await tool.click();
+      const opened = page.locator(`.workspace-window[data-preset="${preset}"]`);
+      await expect(opened).toBeVisible();
+      expect(await createdPresets(page)).toEqual([preset]);
+      await tool.click();
+      expect(await createdPresets(page)).toEqual([preset]);
+    }
+    await page.screenshot({ path: testInfo.outputPath("sidebar-direct-surfaces.png") });
+    await page.setViewportSize({ width: 1440, height: 400 });
+    await expect(rail).toHaveCSS("overflow-y", "auto");
+    expect(await rail.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+    await rail.locator("#op-palette-button").scrollIntoViewIfNeeded();
+    await rail.locator("#op-palette-button").hover();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await expect(page.locator("#rail-control-explanation")).toContainText("Command palette");
+    await rail.locator("#op-palette-button").focus();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await rail.locator("#op-palette-button").click();
+    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
+    await page.locator("#op-palette-input").fill("Stop All");
+    await expect(page.locator("#op-palette-list")).toContainText("Stop All Running Agents");
+    await page.keyboard.press("Escape");
+    await entry("issues").click();
+    await page.screenshot({ path: testInfo.outputPath("sidebar-short-scroll.png") });
+
     // At 860px and below the rail is a strip across the top of the surfaces.
     await page.setViewportSize({ width: 800, height: 900 });
     await expect
@@ -744,6 +832,12 @@ test.describe("Surface rail", () => {
     );
     expect(new Set(surfaceTops).size).toBe(1);
 
+    await page.setViewportSize({ width: 400, height: 900 });
+    for (const preset of ["logs", "index", "profile"]) {
+      await expect(rail.locator(`[data-cmd="open-${preset}"]`)).toBeInViewport({ ratio: 1 });
+    }
+
+    await page.screenshot({ path: testInfo.outputPath("sidebar-400.png") });
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });

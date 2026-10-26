@@ -252,7 +252,7 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
     );
     assert!(
         !index_html().contains("data-preset=\"issue_monitor\""),
-        "Add Window must expose only the canonical Issue entrypoint"
+        "the retired issue_monitor preset must not be exposed"
     );
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     assert!(
@@ -1308,16 +1308,7 @@ fn embedded_web_window_state_visualization_uses_runtime_state_without_canvas_geo
         runtime_js.contains("export function windowRuntimeLabel(status)"),
         "expected the extracted module to expose a dedicated runtime label helper",
     );
-    // The Window List preserves runtime labels while ignoring saved canvas
-    // geometry, including legacy states loaded after a restart or update.
     let shell_js = project_shell_surface_js();
-    assert!(
-            !shell_js.contains("windowGeometryLabel")
-                && !shell_js.contains("window-list-geometry")
-                && shell_js.contains("const runtimeState = runtimeStateForWindow(entry);")
-                && shell_js.contains("const runtimeLabel = windowRuntimeLabel(runtimeState);"),
-            "expected fixed surface window list rendering to display runtime labels without canvas geometry",
-        );
     assert!(
         !js.contains("function windowStateLabel(windowData)")
             && !shell_js.contains("function windowStateLabel(windowData)"),
@@ -1348,10 +1339,9 @@ fn embedded_web_agent_color_styles_define_palette_and_accent_surfaces() {
         "expected embedded html to map serialized AgentColor values to the shared CSS variable",
     );
     assert!(
-            html.contains(".workspace-window[data-agent-color]::before")
-                && html.contains(".window-list-row[data-agent-color]::before"),
-            "expected embedded html to expose agent-color accent bars for workspace windows and the window list",
-        );
+        html.contains(".workspace-window[data-agent-color]::before"),
+        "expected embedded html to expose agent-color accent bars for workspace windows",
+    );
     assert!(
         html.contains(".agent-dot"),
         "expected embedded html to style the shared agent color dot surface",
@@ -1366,10 +1356,6 @@ fn embedded_web_agent_color_is_bound_for_windows_wizard_and_board() {
         html.contains("if (windowData.agent_color)")
             && html.contains("element.dataset.agentColor = windowData.agent_color"),
         "expected embedded bundle to bind workspace window colors from windowData.agent_color",
-    );
-    assert!(
-        html.contains("row.dataset.agentColor = entry.agent_color"),
-        "expected embedded bundle to bind window list rows from entry.agent_color",
     );
     assert!(
         html.contains("card.dataset.agentColor = entry.agent_color"),
@@ -1456,8 +1442,8 @@ fn embedded_web_window_role_badges_identify_every_window_surface() {
     let js = app_js();
 
     assert!(
-        html.contains(".window-role-badge") && html.contains(".window-list-role"),
-        "expected role badge styling for titlebars and the window list",
+        html.contains(".window-role-badge"),
+        "expected role badge styling for titlebars",
     );
     assert!(
         js.contains("function presetRoleLabel(preset)"),
@@ -1527,12 +1513,8 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
         "app.js must put data-worktree-form and the titlebar worktree badge on workspace windows"
     );
     assert!(
-        shell_js.contains("window-list-worktree"),
-        "window list rows must render worktree form"
-    );
-    assert!(
         styles.contains(".window-worktree-badge"),
-        "titlebar/list worktree badge styling must ship in embedded CSS"
+        "titlebar worktree badge styling must ship in embedded CSS"
     );
     let consumer_wiring = format!("{js}\n{shell_js}");
     for legacy in [
@@ -1559,7 +1541,7 @@ fn embedded_web_window_worktree_form_module_is_registered_and_wired() {
 }
 
 #[test]
-fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
+fn embedded_web_apply_status_keeps_catalog_and_badges_in_sync() {
     let js = app_js();
     let apply_status_source = js
         .split("function applyStatus(windowId, status, detail)")
@@ -1580,30 +1562,9 @@ fn embedded_web_apply_status_keeps_window_list_and_badges_in_sync() {
         "expected embedded js to keep one source-state map, normalize display consumers, and expose raw focus state",
     );
     assert!(
-            apply_status.is_match(apply_status_source)
-                && !apply_status_source.contains("renderWindowList();"),
+            apply_status.is_match(apply_status_source),
             "expected applyStatus to publish shared catalog state before an unmounted return and update mounted badges",
         );
-}
-
-#[test]
-fn embedded_web_window_list_selection_navigates_to_window() {
-    // SPEC-3064 Phase 3 (E7): the Window List dropdown renderer moved from
-    // app.js to the project shell surface; the selection contract is pinned
-    // against the extracted module.
-    //
-    // The selected catalog entry is routed to the fixed surface layout.
-    let js = project_shell_surface_js();
-
-    assert!(
-        js.contains("frameWindow(entry.id);"),
-        "expected window list selection to navigate to the chosen window",
-    );
-    assert!(
-        !js.contains("send({ kind: \"restore_window\", id: entry.id });")
-            && !js.contains("focusWindowRemotely(entry.id, { center: true });"),
-        "expected window list selection to avoid the maximize/restore + center handshake",
-    );
 }
 
 #[test]
@@ -1718,7 +1679,7 @@ fn embedded_web_workspace_state_announces_startup_auto_resume_ready_after_render
     let mut remaining = subscription;
     for step in [
         "projectError = \"\";",
-        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);",
+        "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);",
         "projectPageMetadata.setProjectName(activeProjectTab()?.title);",
         "updatePmLauncher(activeWorkspace());",
         "resolvePendingWindowFrames();",
@@ -1781,15 +1742,14 @@ fn embedded_web_workspace_state_renders_active_workspace_through_app_state_helpe
         "expected workspace rendering fallback helper in embedded html",
     );
     assert!(
-        html.contains("function renderAppState(nextState)"),
+        html.contains("function renderAppState(nextState, incomingRuntimeStatus = false)"),
         "expected app state rendering to live in a named helper",
     );
     assert!(
             html.contains("const tab = activeProjectTab();")
                 && html.contains("renderProjectOnboarding(tab);")
-                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());")
-                && html.contains("renderWindowList();"),
-            "expected app state rendering to drive onboarding, workspace, and window list updates from the active tab",
+                && html.contains("renderWorkspace(tab?.workspace || emptyWorkspace());"),
+            "expected app state rendering to drive onboarding and workspace updates from the active tab",
         );
     assert!(
         html.contains("function renderWorkspace(workspace)"),
@@ -2171,8 +2131,8 @@ fn embedded_web_index_window_exposes_project_index_search_contract() {
     let html = frontend_bundle_source();
 
     assert!(
-        html.contains("data-preset=\"index\""),
-        "expected Add Window modal to expose an Index preset",
+        html.contains("data-cmd=\"open-index\""),
+        "expected sidebar to expose the Index command",
     );
     assert!(
         html.contains("search_project_index"),
@@ -2762,29 +2722,26 @@ fn embedded_web_logs_surface_uses_cache_backed_contract() {
 }
 
 #[test]
-fn embedded_web_add_window_modal_hides_direct_terminal_presets() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="shell""#)
-            && !html.contains(r#"data-preset="claude""#)
-            && !html.contains(r#"data-preset="codex""#),
-        "expected Add window modal to hide Shell/Claude/Codex direct terminal presets",
-    );
-    assert!(
-            !html.contains(r#"data-preset="branches""#),
-            "expected Add window modal to not have a standalone Branches preset — branch browsing is part of the Work surface",
+fn embedded_web_sidebar_replaces_retired_window_navigation() {
+    let html = index_html();
+    for id in [
+        "preset-modal",
+        "add-button",
+        "window-list-button",
+        "window-list-panel",
+        "op-rail-window-count",
+    ] {
+        assert!(
+            !html.contains(&format!("id=\"{id}\"")),
+            "retired navigation {id} must be absent"
         );
-}
-
-#[test]
-fn embedded_web_add_window_modal_omits_the_retired_improvement_inbox() {
-    let html = frontend_bundle_source();
-
-    assert!(
-        !html.contains(r#"data-preset="improvement""#),
-        "the retired Improvement Inbox preset must not appear in the Add window modal",
-    );
+    }
+    for command in ["open-logs", "open-index", "open-profile"] {
+        assert!(
+            html.contains(&format!("data-cmd=\"{command}\"")),
+            "sidebar must expose {command}"
+        );
+    }
 }
 
 #[test]
@@ -3141,7 +3098,7 @@ fn embedded_web_frontend_units_receive_and_bootstrap_through_named_surfaces() {
         workspace_event.is_match(html)
             && html.contains("const workspaceStateModel = createUiStateStore(null);")
             && html.contains(
-                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);"
+                "frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);"
             ),
         "expected workspace_state events to flow through the project workspace shell unit",
     );
@@ -3691,13 +3648,6 @@ fn embedded_web_host_window_resize_fans_out_terminal_fit() {
         "expected attachHostResizeReflow to route fit requests through the shared \
              terminal fit scheduler while preserving fitTerminal semantics; body: {body}",
     );
-    // SPEC-2008 camera-focus: maximize was removed, so the host-resize
-    // beforeFan no longer re-syncs maximized windows. It now refreshes the
-    // window list (rail/overview) so the new viewport size is reflected.
-    assert!(
-        body.contains("renderWindowList()"),
-        "expected attachHostResizeReflow.beforeFan to refresh the window list, body: {body}",
-    );
 }
 
 /// SPEC-2008 FR-051 Phase 24: `canRefreshTerminalViewport` must reject
@@ -4039,7 +3989,9 @@ fn embedded_web_issue_monitor_candidate_pool_contract() {
         "issue_monitor_profiles_set",
         "Add candidate",
         "prefer_for",
-        "next candidate when a provider rejects a launch due to a rate limit",
+        "agent_member_id",
+        "Only selected members using that tool are tried in order",
+        "tools never switch automatically",
     ] {
         assert!(
             surface.contains(contract),

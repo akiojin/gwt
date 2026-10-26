@@ -286,6 +286,25 @@ test.describe("Issue queue real backend launch", () => {
         expected_revision: initial.revision }, "agent_roster")).roster;
       expect(roster.error).toBeFalsy();
       expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      // Registration and launch eligibility are separate: explicitly select
+      // both fixed-tool people while retaining the legacy profile's tuning.
+      const preferences = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      const baseProfile = preferences.launch_profiles[0];
+      expect(baseProfile.agent_id).toBe("codex");
+      expect(baseProfile.agent_member_id).toBe(initial.members[0].agent_member_id);
+      const selectedProfiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
+        expect(member.agent_id).toBe("codex");
+        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
+      });
+      const beforeProfiles = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(current, { kind: "issue_monitor_profiles_set", request_id: 477727, profiles: selectedProfiles });
+      const profileReply = await current.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477727
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeProfiles).then(handle => handle.jsonValue());
+      expect(profileReply.kind, profileReply.message).toBe("issue_monitor_profiles");
+      expect(profileReply.profiles).toEqual(selectedProfiles);
+      expect(JSON.parse((await fixture.monitorPreferencesBytes()).toString()).launch_profiles).toEqual(selectedProfiles);
       const queued = await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] },
         "issue_monitor_queue_result");
       expect(queued.error).toBeNull();
@@ -468,9 +487,12 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
       const launch = (await fixture.launches())[0];
       const activity = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .filter((item: any) => item.payload.projection?.local_agent_activity)
-        .at(-1)?.payload.projection.local_agent_activity);
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2] && snapshot.host_id
+          && Number.isFinite(Date.parse(snapshot.observed_at)))
+        .sort((left: any, right: any) => Date.parse(left.observed_at) - Date.parse(right.observed_at)).at(-1));
       await expect(metric).toHaveText("Active 1 · 1 issue · PM 0", { timeout: 60_000 });
+      await expect.poll(async () => (await activity())?.agents?.some((agent: any) => agent.session_id === launch.gwt_session_id)).toBe(true);
       const live = await activity();
       const agent = live.agents.find((agent: any) => agent.session_id === launch.gwt_session_id);
       expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
@@ -506,9 +528,9 @@ test.describe("Issue queue real backend launch", () => {
     } finally {
       try {
         const observations = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-          .filter(({ payload }: any) => payload.projection || payload.kind === "terminal_status")
+          .filter(({ payload }: any) => payload.projection || ["terminal_status", "local_agent_activity"].includes(payload.kind))
           .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind,
-            activity: payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
+            activity: payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
         await info.attach("local-live-wire", { body: JSON.stringify({ observations, errors }, null, 2), contentType: "application/json" });
       } finally {
         // Close the client before its server so cleanup cannot trigger reconnect errors.

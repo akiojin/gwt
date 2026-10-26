@@ -12064,7 +12064,7 @@ fn settle_locked(
                 | ExecutionSettlement::CompletedWithEvidence { .. }
                 | ExecutionSettlement::NoAction { .. }
         ) {
-            complete_matching_build_lifecycle(worktree, &record)?;
+            complete_matching_build_lifecycle(worktree, &record);
         }
         return Ok(SettleResult::AlreadySettled(record));
     }
@@ -12125,7 +12125,7 @@ fn settle_locked(
         // settled projection is returned from the transition itself.
         record
     };
-    complete_matching_build_lifecycle(worktree, &record)?;
+    complete_matching_build_lifecycle(worktree, &record);
     Ok(SettleResult::Settled(record))
 }
 
@@ -12133,12 +12133,9 @@ fn settle_locked(
 /// is terminal, a separate build.complete cannot rely on its live binding.
 /// Run after the durable transition, and on completion retries, so cleanup I/O
 /// failures never reopen or discard an execution that already completed.
-fn complete_matching_build_lifecycle(
-    worktree: &Path,
-    record: &ExecutionControlRecord,
-) -> io::Result<()> {
+fn complete_matching_build_lifecycle(worktree: &Path, record: &ExecutionControlRecord) {
     if record.status != ExecutionControlStatus::Completed {
-        return Ok(());
+        return;
     }
     if let Err(error) =
         crate::cli::verification_record::close_completed_work_event_obligation_locked(
@@ -12147,18 +12144,25 @@ fn complete_matching_build_lifecycle(
     {
         tracing::warn!(%error, "completed execution retains failed Work receipt cleanup for audit");
     }
-    let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
-    else {
-        return Ok(());
+    let mut state = match gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME) {
+        Ok(Some(state)) => state,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, "completed execution retains unreadable build bookkeeping for audit");
+            return;
+        }
     };
     if state.active
         && state.owner_spec == Some(record.owner_number)
         && state.session_id == record.primary_session_id
     {
         state.active = false;
-        gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)?;
+        if let Err(error) =
+            gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)
+        {
+            tracing::warn!(%error, "completed execution retains failed build bookkeeping cleanup for audit");
+        }
     }
-    Ok(())
 }
 
 /// Complete an active execution only when the exact plan/run snapshot is
@@ -34077,38 +34081,152 @@ exit 1
         }
 
         #[test]
-        fn complete_op_reports_build_cleanup_io_error_and_can_retry() {
+        fn complete_op_warns_on_build_cleanup_io_error_and_can_retry() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let dir = tempfile::tempdir().unwrap();
-            save(dir.path(), &active_record("sess-op")).unwrap();
-            save_build_state(dir.path(), "sess-op", Some(3248), true);
-            save_covering_evidence(dir.path(), "sess-op", false);
-            let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
-            let backup = path.with_extension("backup");
-            fs::rename(&path, &backup).unwrap();
-            fs::create_dir(&path).unwrap();
+            for read_failure in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                save(dir.path(), &active_record("sess-op")).unwrap();
+                save_build_state(dir.path(), "sess-op", Some(3248), true);
+                save_covering_evidence(dir.path(), "sess-op", false);
+                let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+                let backup = path.with_extension("backup");
+                let original_bytes = fs::read(&path).unwrap();
+                let permissions = fs::metadata(&path).unwrap().permissions();
+                if read_failure {
+                    fs::rename(&path, &backup).unwrap();
+                    fs::create_dir(&path).unwrap();
+                } else {
+                    let mut readonly = permissions.clone();
+                    readonly.set_readonly(true);
+                    fs::set_permissions(&path, readonly).unwrap();
+                    assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+                }
+                let complete_build = |spec| {
+                    let mut env = TestEnv::new(dir.path().to_path_buf());
+                    run_collect(
+                        &mut env,
+                        CliCommand::Build(crate::cli::SkillStateAction::Complete {
+                            spec,
+                            pr: None,
+                        }),
+                    )
+                };
+                if read_failure {
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "Active execution stays protected"
+                    );
+                }
 
-            assert!(
-                run_cmd(dir.path(), ExecutionCommand::Complete).is_err(),
-                "cleanup I/O errors must not be reported as successful completion"
-            );
-            let completed = load(dir.path()).unwrap().unwrap();
-            assert_eq!(completed.status, ExecutionControlStatus::Completed);
-            fs::remove_dir(&path).unwrap();
-            fs::rename(&backup, &path).unwrap();
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete)
+                    .expect("Completed build bookkeeping failures must only warn");
+                assert_eq!(code, 0, "{out}");
+                let completed = load(dir.path()).unwrap().unwrap();
+                assert_eq!(completed.status, ExecutionControlStatus::Completed);
+                let completed_bytes = record_contents(dir.path()).unwrap();
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                let output = crate::cli::hook::event_dispatcher::handle_with_input(
+                    "Stop",
+                    "{}",
+                    dir.path(),
+                    Some("sess-op"),
+                )
+                .unwrap();
+                let crate::cli::hook::HookOutput::SystemMessage(message) = output else {
+                    panic!("Stop must warn without blocking completed work: {output:?}");
+                };
+                assert!(
+                    message.contains("build") || message.contains("gwt-build-spec"),
+                    "{message}"
+                );
+                assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                if read_failure {
+                    assert!(
+                        complete_build(999).is_err(),
+                        "another owner stays protected"
+                    );
+                    {
+                        let _foreign =
+                            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                        assert!(
+                            complete_build(3248).is_err(),
+                            "another Session stays protected"
+                        );
+                    }
+                    let original = completed_bytes.as_deref().unwrap();
+                    let tampered = original.replace(&completed.content_hash, "tampered");
+                    fs::write(state_path(dir.path()), &tampered).unwrap();
+                    assert!(!integrity_ok(&load(dir.path()).unwrap().unwrap()));
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "invalid integrity stays protected"
+                    );
+                    assert_eq!(
+                        record_contents(dir.path()).unwrap().as_deref(),
+                        Some(tampered.as_str())
+                    );
+                    fs::write(state_path(dir.path()), original).unwrap();
+                    for _ in 0..2 {
+                        let (code, out) = complete_build(3248).expect(
+                            "completed build replay must only warn on unreadable bookkeeping",
+                        );
+                        assert_eq!(code, 0, "{out}");
+                        assert!(out.contains("warning"), "{out}");
+                        assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                        assert!(path.is_dir());
+                        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                        assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+                    }
+                    crate::cli::action_obligation::mark_from_prompt(
+                        dir.path(),
+                        "sess-op",
+                        "Issue #1 にコメントを追加して",
+                    )
+                    .unwrap();
+                    let (code, out) = complete_build(3248).unwrap();
+                    assert_eq!(code, 2, "new prompt obligations stay protected: {out}");
+                    assert!(out.contains("open action obligations"), "{out}");
+                    assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                    crate::cli::action_obligation::settle_kinds_best_effort(
+                        dir.path(),
+                        "sess-op",
+                        &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+                        "issue.comment fixture",
+                    );
+                    assert!(path.is_dir());
+                    assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                    assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+                    fs::remove_dir(&path).unwrap();
+                    fs::rename(&backup, &path).unwrap();
+                } else {
+                    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+                    assert!(
+                        gwt_core::skill_state::load(dir.path(), "build-spec")
+                            .unwrap()
+                            .unwrap()
+                            .active
+                    );
+                    fs::set_permissions(&path, permissions).unwrap();
+                }
 
-            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
-            assert_eq!(code, 0, "{out}");
-            assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
-            assert!(
-                !gwt_core::skill_state::load(dir.path(), "build-spec")
-                    .unwrap()
-                    .unwrap()
-                    .active
-            );
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
+                assert!(
+                    !gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+            }
         }
 
         #[test]

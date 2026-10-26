@@ -10,10 +10,13 @@ use gwt_core::coordination::{
 /// A freshness failure is diagnostic, never a reason to reset/stash or to hide
 /// an otherwise usable checkout from its agent.
 pub(super) fn refresh_and_record(repo: &Path, branch: &str, worktree: &Path) {
-    let body = match inspect_and_refresh(repo, branch, worktree) {
-        Ok(body) => body,
-        Err(error) => format!(
-            "起動時の base 確認: branch={branch} base=origin/develop\n確認失敗: {error}\n鮮度は保証できません。担当が確認してください。"
+    let (body, board_root) = match inspect_and_refresh(repo, branch, worktree) {
+        Ok(body) => (body, worktree),
+        Err(error) => (
+            format!(
+                "起動時の base 確認: branch={branch} base=origin/develop\n確認失敗: {error}\n鮮度は保証できません。担当が確認してください。"
+            ),
+            repo,
         ),
     };
     tracing::info!(branch, worktree = %worktree.display(), report = %body, "launch base freshness");
@@ -21,7 +24,9 @@ pub(super) fn refresh_and_record(repo: &Path, branch: &str, worktree: &Path) {
     draft.origin.branch = branch.to_string();
     draft.mentions = vec![BoardMention::new(BoardMentionTargetKind::Branch, branch)];
     if let Ok(entry) = draft.finalize() {
-        if let Err(error) = gwt::board_provider::post_entry_outcome(repo, entry) {
+        // The validated working tree is already known. Passing its common
+        // directory makes Board repeatedly ask Git for a nonexistent toplevel.
+        if let Err(error) = gwt::board_provider::post_entry_outcome(board_root, entry) {
             tracing::warn!(%error, branch, "launch base freshness Board delivery failed; see launch log");
         }
     }
@@ -54,9 +59,23 @@ fn inspect_and_refresh(repo: &Path, branch: &str, worktree: &Path) -> Result<Str
             "preset working directory belongs to another repository; unchanged".to_string(),
         );
     }
-    let root = git_text(worktree, &["rev-parse", "--show-toplevel"])?;
-    let actual_branch = git_text(worktree, &["symbolic-ref", "--short", "HEAD"])?;
-    if actual_branch != branch || !super::same_worktree_path(Path::new(&root), worktree) {
+    // Each Git startup can cost seconds under host load. Read independent
+    // metadata together, retaining Git's own repository/branch validation.
+    let identity = git_text(
+        worktree,
+        &[
+            "rev-parse",
+            "--show-toplevel",
+            "--symbolic-full-name",
+            "HEAD",
+        ],
+    )?;
+    let (root, actual_ref) = identity
+        .split_once('\n')
+        .ok_or("git did not return the worktree root and branch")?;
+    if actual_ref != format!("refs/heads/{branch}")
+        || !super::same_worktree_path(Path::new(root), worktree)
+    {
         return Err(
             "preset working directory does not match the requested worktree/branch; unchanged"
                 .to_string(),
@@ -64,10 +83,19 @@ fn inspect_and_refresh(repo: &Path, branch: &str, worktree: &Path) -> Result<Str
     }
     let manager = gwt_git::WorktreeManager::new(repo);
     manager.fetch_origin().map_err(|error| error.to_string())?;
-    let before = git_text(worktree, &["rev-parse", "HEAD"])?;
-    let base = git_text(worktree, &["rev-parse", "origin/develop^{commit}"])?;
-    let divergence =
-        gwt_git::git_divergence(worktree, &before, &base).map_err(|error| error.to_string())?;
+    let refs = git_text(worktree, &["rev-parse", "HEAD", "origin/develop^{commit}"])?;
+    let (before, base) = refs
+        .split_once('\n')
+        .ok_or("git did not return both launch refs")?;
+    let divergence = if before == base {
+        gwt_git::DivergenceInfo {
+            ahead: 0,
+            behind: 0,
+        }
+    } else {
+        gwt_git::git_divergence(worktree, before, base).map_err(|error| error.to_string())?
+    };
+    let mut after = before.to_string();
     let decision = if divergence.ahead > 0 {
         "unique_commits: 固有 commit を保全しました".to_string()
     } else if divergence.behind == 0 {
@@ -84,21 +112,24 @@ fn inspect_and_refresh(repo: &Path, branch: &str, worktree: &Path) -> Result<Str
         // refuses collisions with untracked shards without removing them.
         // `merge` normally permits overwriting ignored files. An agent may
         // have put work there before the base began tracking that path.
-        match git_output(
+        let decision = match git_output(
             worktree,
             &[
                 "merge",
                 "--ff-only",
                 "--no-overwrite-ignore",
                 "--quiet",
-                &base,
+                base,
             ],
         ) {
             Ok(_) => "fast-forward: 観測した base へ更新しました".to_string(),
             Err(error) => format!("fast_forward_failed: {error}"),
-        }
+        };
+        // Only our merge can change HEAD under the branch materialization lock.
+        // Preserve the actual post-attempt observation even when merge fails.
+        after = git_text(worktree, &["rev-parse", "HEAD"])?;
+        decision
     };
-    let after = git_text(worktree, &["rev-parse", "HEAD"])?;
     Ok(format!(
         "起動時の base 確認: branch={branch} base=origin/develop ahead={} behind={}\nhead_before={before}\nhead_after={after}\nbase_sha={base}\n判断: {decision}",
         divergence.ahead, divergence.behind,
@@ -141,6 +172,7 @@ fn is_event_shard(path: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::refresh_and_record;
     use std::{
         collections::HashMap,
         fs,
@@ -208,6 +240,42 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn unchanged_base_freshness_and_board_delivery_use_only_three_git_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let source = init_launch_test_repo(temp.path());
+        let repo = temp.path().join("origin.git");
+        run_git(
+            &repo,
+            &["remote", "add", "origin", source.to_str().unwrap()],
+        );
+        run_git(&repo, &["fetch", "origin"]);
+        let worktree = temp.path().join("issue");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                BRANCH,
+                worktree.to_str().unwrap(),
+                "origin/develop",
+            ],
+        );
+
+        let before = gwt_core::process::thread_git_spawn_count();
+        refresh_and_record(&repo, BRANCH, &worktree);
+        let observations = gwt_core::process::thread_git_spawn_count() - before;
+
+        let evidence = report(&worktree);
+        assert!(evidence.contains("ahead=0 behind=0"), "{evidence}");
+        assert_eq!(
+            observations, 3,
+            "validate root/branch, fetch, and read both refs once; Board uses the known worktree"
+        );
     }
 
     #[test]
@@ -299,7 +367,7 @@ mod tests {
         let foreign = temp.path().join("foreign");
         fs::create_dir_all(&primary).unwrap();
         fs::create_dir_all(&foreign).unwrap();
-        let (repo, _) = stale_worktree(&primary);
+        let (repo, primary_worktree) = stale_worktree(&primary);
         let (_, other_worktree) = stale_worktree(&foreign);
         let before = head(&other_worktree);
         launch(&repo, Some(other_worktree.clone()));
@@ -308,6 +376,7 @@ mod tests {
             before,
             "preset cwd must belong to the requested repository"
         );
+        assert!(report(&primary_worktree).contains("another repository"));
     }
 
     #[test]

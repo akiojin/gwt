@@ -720,6 +720,9 @@ pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<Frontend
         } => FrontendUserActionLog::new("set_issue_monitor_tier", "issue_monitor")
             .target(issue_number.to_string())
             .mode(tier.to_string()),
+        FrontendEvent::OpenIssueMonitor => {
+            FrontendUserActionLog::new("open_issue_monitor", "issue_monitor")
+        }
         FrontendEvent::ListIssueMonitor => {
             FrontendUserActionLog::new("list_issue_monitor", "issue_monitor")
         }

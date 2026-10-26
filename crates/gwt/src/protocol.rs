@@ -974,6 +974,9 @@ pub enum FrontendEvent {
         tier: u8,
         expected_config_token: String,
     },
+    /// Audit-only notice for client-side Open Monitor navigation.
+    /// It does not control monitoring or create/focus a backend window.
+    OpenIssueMonitor,
     ListIssueMonitor,
     QuickRegisterIssue {
         title: String,
@@ -3085,8 +3088,8 @@ pub const BACKEND_EVENT_POLICIES: &[BackendEventPolicy] = &[
     ),
     BackendEventPolicy::new(
         "local_agent_activity",
-        BackendEventDeliveryClass::IdempotentLatest,
-        BackendEventBackpressurePolicy::LatestWins,
+        BackendEventDeliveryClass::Snapshot,
+        BackendEventBackpressurePolicy::PreserveOrder,
     ),
     BackendEventPolicy::new(
         "active_work_projection",
@@ -4824,14 +4827,23 @@ mod tests {
         );
         assert!(workspace_state.coalesces_on_frontend());
 
-        for kind in ["active_work_projection", "local_agent_activity"] {
-            let policy = backend_event_policy(kind).expect("projection policy");
-            assert_eq!(policy.delivery, BackendEventDeliveryClass::IdempotentLatest);
-            assert_eq!(
-                policy.backpressure,
-                BackendEventBackpressurePolicy::LatestWins
-            );
-        }
+        let projection = backend_event_policy("active_work_projection").expect("projection policy");
+        assert_eq!(
+            projection.delivery,
+            BackendEventDeliveryClass::IdempotentLatest
+        );
+        assert_eq!(
+            projection.backpressure,
+            BackendEventBackpressurePolicy::LatestWins
+        );
+
+        let activity = backend_event_policy("local_agent_activity").expect("local activity policy");
+        assert_eq!(activity.delivery, BackendEventDeliveryClass::Snapshot);
+        assert_eq!(
+            activity.backpressure,
+            BackendEventBackpressurePolicy::PreserveOrder
+        );
+        assert!(!activity.coalesces_on_frontend());
 
         let runtime_health = backend_event_policy("runtime_health").expect("runtime_health policy");
         assert_eq!(

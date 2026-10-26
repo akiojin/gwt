@@ -26,9 +26,9 @@ export const DEFAULT_MAX_STREAMED_BEFORE_STATE = 32;
 // Snapshot kinds that must preserve multiplicity and their position relative
 // to coalesced state. They are not latency-sensitive streams: moving them
 // ahead of workspace_state can make project-scoped snapshots fail their
-// active-project fence. Empty since Issue #3164 retired the Improvement Inbox
-// events; callers can still opt a kind in through `orderedStateKinds`.
-const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set([]));
+// active-project fence. Census observations must all reach the model's
+// observed_at authority: an older cache replay can arrive after fresh proof.
+const DEFAULT_ORDERED_STATE_KINDS = Object.freeze(new Set(["local_agent_activity"]));
 
 // Idempotent kinds where only the latest occurrence carries information. Any
 // kind not in this set preserves original order and every occurrence.
@@ -38,7 +38,6 @@ export const DEFAULT_COALESCE_KINDS = Object.freeze(
     "workspace_state",
     "active_work_projection",
     "active_work_projection_patch",
-    "local_agent_activity",
     "window_list",
     "provider_usage",
     "runtime_health",

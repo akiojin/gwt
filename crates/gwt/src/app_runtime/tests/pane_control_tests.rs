@@ -1,5 +1,89 @@
 use super::*;
 
+#[test]
+fn dropping_window_runtime_reclaims_worker_owned_pty_without_the_pane_lock() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    super::super::pty_io::initialize_process_window_close_finalizer().unwrap();
+    let temp = tempdir().unwrap();
+    let (command, args) = if cfg!(windows) {
+        ("cmd", vec!["/d", "/s", "/c", "exit /b 0"])
+    } else {
+        ("/bin/cat", vec![])
+    };
+    // No frontend answers ConPTY's startup query: even this exit command
+    // remains alive until its owning runtime explicitly tears it down.
+    let pane = Arc::new(Mutex::new(
+        Pane::new(
+            "drop-runtime".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            HashMap::new(),
+            Some(temp.path().to_owned()),
+        )
+        .unwrap(),
+    ));
+    let pty = pane.lock().unwrap().shared_pty();
+    let _cleanup = TestPaneGuard {
+        pty: pty.clone(),
+        reader: None,
+    };
+    let (exit_tx, exit_rx) = mpsc::channel();
+    let output_tx = exit_tx.clone();
+    let mut runtime = WindowRuntime::new(1, pane.clone());
+    runtime.output_thread = Some(gwt::pane_runtime::spawn_output_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |event| {
+            if matches!(event, gwt::pane_runtime::PaneRuntimeEvent::Status { .. }) {
+                let _ = output_tx.send("output");
+            }
+        },
+    ));
+    runtime.status_thread = Some(gwt::pane_runtime::spawn_status_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |_| {
+            let _ = exit_tx.send("status");
+        },
+    ));
+    let pane_lock = pane.lock().unwrap();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let dropper = thread::spawn(move || {
+        drop(runtime);
+        let _ = dropped_tx.send(());
+    });
+    // test-hygiene: allow-wall-clock-deadline Bound a regressed pane mutex wait; the channel establishes Drop completion.
+    let dropped_without_pane_lock = dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    drop(pane_lock);
+    dropper.join().unwrap();
+    assert!(
+        dropped_without_pane_lock,
+        "runtime Drop must dispatch cleanup without taking the pane lock"
+    );
+    let mut exited = [
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual OS child exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must stop its owned child"),
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual PTY reader exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must release its PTY reader"),
+    ];
+    exited.sort_unstable();
+    assert_eq!(exited, ["output", "status"]);
+    assert!(
+        pty.try_wait().unwrap().is_some(),
+        "owned child must be reaped before verification ends"
+    );
+}
+
 fn issue_3713_read_board(project: &Path, session: &str) {
     let _session =
         gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);

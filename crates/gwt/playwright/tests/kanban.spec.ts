@@ -29,6 +29,7 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
     await settings.getByRole("tab", { name: "System", exact: true }).click();
     await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
       .toHaveAttribute("aria-selected", "false");
+    const auditCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
     if (activation === "click") await monitor.click();
     else await monitor.press(activation);
     await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
@@ -36,6 +37,11 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
     await expect(settings).toHaveCount(1);
     await expect(page.locator(".surface-knowledge")).toBeVisible();
     await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+    const audit = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+      .filter(message => message.kind === "open_issue_monitor"), auditCursor);
+    expect(audit, `${activation} records exactly one navigation audit`).toEqual([
+      { kind: "open_issue_monitor" },
+    ]);
   }
   const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
     .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), messageCursor);
@@ -64,6 +70,9 @@ test("Issue #3165: Start explains missing settings and waits for confirmed enabl
   const surface = page.locator(".surface-knowledge");
   const guidance = surface.locator('[data-role="monitor-setup-guidance"]');
   const start = surface.getByRole("button", { name: "Start", exact: true });
+  // Observe the bootstrap status before injecting scenario status, so a late
+  // initial saved-profile reply cannot overwrite the missing-settings state.
+  await expect(surface.locator('[data-metric="capacity"]')).toHaveText("1 of 2");
   await expect(guidance).toBeHidden();
   const status = { enabled: false, state: "disabled", active_count: 0, queue_len: 3, max_active_agents: 2 };
   for (const source of ["default", "last_settings"]) {
@@ -154,6 +163,25 @@ test.describe("Issue Bridge load recovery", () => {
     const theme = info.project.name.includes("light") ? "light" : "dark";
     const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
     if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().errorReceipt;
+            if (receipt) window.__knowledgeErrorReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
     await installIssueBridgeBackend(page, { theme });
     await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
     await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
@@ -186,6 +214,12 @@ test.describe("Issue Bridge load recovery", () => {
         error_domain: "non_semantic", message: "Cache search failed" });
     });
     await expect(page.getByRole("button", { name: /^Issue load failed/ })).toBeVisible();
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeErrorReceipt;
+      return receipt && { frozen: Object.isFrozen(receipt), kind: receipt.kind,
+        message: receipt.message, query: receipt.query, errorDomain: receipt.error_domain };
+    })).toEqual({ frozen: true, kind: "knowledge_error", message: "Cache search failed",
+      query: "Issue", errorDomain: "non_semantic" });
     await expect(search).toBeFocused();
     await page.evaluate(() => {
       const request = window.__knowledgeLoadMessages.find(message => message.kind === "load_knowledge_bridge");
@@ -505,11 +539,35 @@ test.describe("Issue Bridge load recovery", () => {
 
   test("renders cached issues as an Issue list instead of lifecycle Kanban", async ({
     page,
-  }) => {
-    await installEmbeddedRoutes(page);
-    await installIssueBridgeBackend(page);
-
-    await page.goto(APP_URL);
+  }, info) => {
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const base = process.env.GWT_PLAYWRIGHT_BASE_URL;
+    if (!base) await installEmbeddedRoutes(page);
+    await page.route("**/ui-state-store.js", async route => {
+      const response = base ? await route.fetch() : undefined;
+      const source = response ? await response.text()
+        : readFileSync("crates/gwt/web/ui-state-store.js", "utf8");
+      const anchor = "export function createUiStateStore(";
+      expect(source).toContain(anchor);
+      const body = source.replace(anchor, "function originalCreateUiStateStore(") + `
+        export function createUiStateStore(...args) {
+          const store = originalCreateUiStateStore(...args);
+          const update = store.update;
+          store.update = reduce => {
+            update(reduce);
+            const receipt = store.read().entriesReceipt;
+            if (receipt) window.__knowledgeEntriesReceipt = receipt;
+          };
+          return store;
+        }`;
+      await route.fulfill({ response, contentType: "text/javascript", body });
+    });
+    await installIssueBridgeBackend(page, { theme });
+    await page.goto(base ? new URL("/p/0123456789abcdef", base).href : APP_URL);
+    await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
 
     await expect(page.locator(".surface-knowledge .knowledge-list")).toBeVisible();
     await expect(page.locator(".surface-knowledge .knowledge-list")).toHaveAttribute(
@@ -536,6 +594,45 @@ test.describe("Issue Bridge load recovery", () => {
     ).toBeVisible();
     await expect(page.getByText("Design-required work item shares Issue list")).toBeVisible();
     await expect(page.getByText("(plain)")).toHaveCount(0);
+    expect(await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      return receipt && [Object.isFrozen(receipt), Object.isFrozen(receipt.entries),
+        Object.isFrozen(receipt.entries[0]), Object.isFrozen(receipt.entries[0].labels)];
+    })).toEqual([true, true, true, true]);
+    const surface = page.locator(".surface-knowledge");
+    const row = surface.locator('[data-issue-number="3096"]');
+    await row.click();
+    const pane = surface.locator(".knowledge-detail-pane");
+    await expect(pane).toContainText("Issue Bridge detail body");
+    const search = surface.locator(".knowledge-search");
+    await search.focus();
+    await row.evaluate(element => element.setAttribute("data-list-retained", "true"));
+    await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      window.__issueBridgeFixtureSocket.emit({ ...receipt, selected_number: 3273 });
+    });
+    await expect(row).toHaveAttribute("data-list-retained", "true");
+    await expect(row).toHaveClass(/selected/);
+    await expect(pane).toContainText("Issue Bridge detail body");
+    await expect(search).toBeFocused();
+    await page.evaluate(() => {
+      const receipt = (window as any).__knowledgeEntriesReceipt;
+      window.__issueBridgeFixtureSocket.emit({ ...receipt, request_id: -1, entries: [
+        { number: 3096, title: "Stale list must be rejected", state: "open", labels: ["bug"] },
+      ] });
+      // FIFO marker also exercises mutable local slots after a frozen list receipt.
+      window.__issueBridgeFixtureSocket.emit({ kind: "knowledge_bridge_phase_updated", id: receipt.id,
+        issue_number: 3096, result: { kind: "ok", fresh_entry: {
+          number: 3096, title: "List survived stale response", state: "open", labels: ["bug"],
+          is_spec: false, monitor_state: "needs_human",
+        } } });
+    });
+    await expect(row.locator(".knowledge-row-title")).toHaveText("List survived stale response");
+    await expect(surface.locator(".knowledge-row")).toHaveCount(5);
+    await expect(row).toHaveClass(/selected/);
+    await expect(search).toBeFocused();
+    expect(errors, "zero console/page errors").toEqual([]);
+    await page.screenshot({ path: info.outputPath("knowledge-list-receipt.png") });
   });
 
   // SPEC #4499 AC-1 / AC-18: the open/closed/all filter is gone; the Done column
