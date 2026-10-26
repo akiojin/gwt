@@ -12621,6 +12621,7 @@ impl AppRuntime {
             | FrontendEvent::AgentRoster { .. }
             | FrontendEvent::AgentSchedule { .. }
             | FrontendEvent::AgentSwitch { .. }
+            | FrontendEvent::OpenIssueMonitor
             | FrontendEvent::ListIssueMonitor
             | FrontendEvent::IssueMonitorLaunchNow { .. }
             | FrontendEvent::IssueMonitorQueuePush { .. }
@@ -13820,6 +13821,7 @@ impl AppRuntime {
                     &expected_config_token,
                 )
             }
+            FrontendEvent::OpenIssueMonitor => Vec::new(),
             FrontendEvent::ListIssueMonitor => self.list_issue_monitor_events_with_reader(
                 context,
                 &client_id,

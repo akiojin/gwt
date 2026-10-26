@@ -29,6 +29,7 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
     await settings.getByRole("tab", { name: "System", exact: true }).click();
     await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
       .toHaveAttribute("aria-selected", "false");
+    const auditCursor = await page.evaluate(() => window.__knowledgeLoadMessages.length);
     if (activation === "click") await monitor.click();
     else await monitor.press(activation);
     await expect(settings.getByRole("tab", { name: "Issues", exact: true }))
@@ -36,6 +37,11 @@ test("Issue #3165: Open Monitor is pointer and keyboard navigation only", async 
     await expect(settings).toHaveCount(1);
     await expect(page.locator(".surface-knowledge")).toBeVisible();
     await expect(monitor).toHaveAccessibleName("Open Monitor: Off");
+    const audit = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
+      .filter(message => message.kind === "open_issue_monitor"), auditCursor);
+    expect(audit, `${activation} records exactly one navigation audit`).toEqual([
+      { kind: "open_issue_monitor" },
+    ]);
   }
   const controls = await page.evaluate(cursor => window.__knowledgeLoadMessages.slice(cursor)
     .filter(message => /^(set_issue_monitor_|issue_monitor_|reorder_issue_monitor_)/.test(message.kind)), messageCursor);
