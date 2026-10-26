@@ -6977,12 +6977,25 @@ fn monitor_relaunch_fixture_with_settlement(
             gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         ),
     };
+    let body = match linked_issue_kind {
+        LinkedIssueKind::Spec => concat!(
+            "<!-- gwt-spec id=3165 version=1 -->\n",
+            "<!-- sections:\nspec=body\nplan=body\ntasks=body\n-->\n",
+            "<!-- artifact:spec BEGIN -->\nMonitor relaunch fixture\n",
+            "<!-- artifact:spec END -->\n",
+            "<!-- artifact:plan BEGIN -->\nResume monitored work\n",
+            "<!-- artifact:plan END -->\n",
+            "<!-- artifact:tasks BEGIN -->\n- [ ] T-001: Finish monitored work\n",
+            "<!-- artifact:tasks END -->\n",
+        ),
+        LinkedIssueKind::Issue => "Monitor relaunch fixture",
+    };
     Cache::new(issue_cache_root(&repo))
         .write_snapshot(&sample_issue_snapshot(
             3165,
             title,
             labels,
-            "Monitor relaunch fixture",
+            body,
             "2026-08-13T00:00:00Z",
         ))
         .expect("seed monitored owner authority");
