@@ -32,8 +32,9 @@ try {
     }
     # Compare the browser's raw/snapshot replay with the checkout backend parser.
     $probeDeps = (Resolve-Path 'target/debug/deps').Path
-    $vt100Lib = (Get-ChildItem -LiteralPath $probeDeps -Filter 'libvt100*.rlib' | Select-Object -First 1).FullName
-    $serdeJsonLib = (Get-ChildItem -LiteralPath $probeDeps -Filter 'libserde_json*.rlib' | Select-Object -First 1).FullName
+    $vt100Lib = (Get-ChildItem -LiteralPath $probeDeps -Filter 'libvt100*.rlib' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    $serdeJsonLib = (Get-ChildItem -LiteralPath $probeDeps -Filter 'libserde_json*.rlib' | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+    if (!$vt100Lib -or !$serdeJsonLib) { throw "vt100 or serde_json rlib missing in $probeDeps; build this checkout first." }
     & rustc --edition 2021 scripts/diagnostics/issue-6420-parser-probe.rs --extern "vt100=$vt100Lib" --extern "serde_json=$serdeJsonLib" -L "dependency=$probeDeps" -o target/issue-6420-parser-probe.exe
     if ($LASTEXITCODE -ne 0) { throw 'Backend terminal fixture compilation failed.' }
     & ./target/issue-6420-parser-probe.exe | Set-Content -Encoding utf8NoBOM target/issue-6420-parser-fixture.json
