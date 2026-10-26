@@ -1227,6 +1227,10 @@ pub enum FrontendEvent {
         /// policy. `None` leaves the persisted policy unchanged.
         #[serde(default)]
         agent_resource: Option<AgentResourceSettings>,
+        /// Issue #4777: parsed terminal excerpt size in Works. Omission keeps
+        /// the saved value; only integer values from 3 to 10 are accepted.
+        #[serde(default)]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -2850,6 +2854,8 @@ pub enum BackendEvent {
         /// SPEC #1921 Phase 86 (#3813): authoritative agent resource policy.
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_resource: Option<AgentResourceSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2918,6 +2924,8 @@ pub enum BackendEvent {
         /// back so every open Settings window reconciles to the same values.
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_resource: Option<AgentResourceSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is

@@ -155,14 +155,14 @@
 .work-tail {
   position: relative;
   min-width: 0;
-  height: calc(3 * 1.55em + var(--space-4));
+  height: calc(var(--works-preview-lines, 3) * 1.55em + var(--space-4));
   padding: var(--space-2);
   background: var(--color-status-strip-bg);
   color: var(--color-status-strip-fg);
   font-family: var(--font-mono);
   font-size: var(--type-xs);
   line-height: 1.55;
-  overflow: hidden;
+  overflow: auto;
 }
 /* Surface-level native hosts stay measurable even while the list is hidden
    by a full terminal. Parsed text feeds list/Issue mirrors after the existing
@@ -178,7 +178,7 @@
 }
 .work-runtime-cache > .works-terminal { width: 100%; height: 100%; }
 .work-tail .terminal-text-preview,
-.work-tail pre { margin: 0; padding: 0; color: inherit; background: transparent; font: inherit; line-height: inherit; white-space: pre; overflow: hidden; }
+.work-tail pre { margin: 0; padding: 0; color: inherit; background: transparent; font: inherit; line-height: inherit; white-space: pre; overflow: visible; }
 .work-side { display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
 .work-side small { font-size: var(--type-xs); }
 .work-spark { display: block; width: 140px; height: 34px; max-width: 100%; color: var(--color-state-active); }
@@ -299,7 +299,7 @@
   .work-tail { grid-column: 1; grid-row: auto; }
   .work-side { grid-column: 1; grid-row: auto; flex-direction: row; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
   .work-side svg { flex: 0 1 120px; }
-  .work-side small { flex-basis: calc(100% - 140px); }
+  .work-side small { flex-basis: 100%; }
   .work-stats { flex-direction: column; }
   .roster-row { grid-template-columns: 40px minmax(0, 1fr); }
   .roster-state { grid-column: 2; justify-self: start; }

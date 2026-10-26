@@ -336,6 +336,87 @@ test.describe("Works and Agents approved baseline", () => {
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
   });
 
+  test("saved Works output lines preserve raw text, readonly mirrors and native controls", async ({ page }, info) => {
+    // Keep each source line short enough for the narrow split terminal grid;
+    // the preview intentionally preserves parsed visual wraps, not source rows.
+    const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
+    const output = async () => page.evaluate(text => (window as any).__worksAgentsFixture.output("agent-one", `\u001b[2J\u001b[H${text}\r\n`), lines.join("\r\n"));
+    const tail = () => page.locator('.works-surface:not(.works-surface--preview) .work-row[data-window-id="agent-one"] .terminal-text-preview');
+    const expectLines = async (count: number, mirror = false) => {
+      const surfaces = page.locator(mirror ? ".works-surface" : ".works-surface:not(.works-surface--preview)");
+      await expect(surfaces).toHaveCount(mirror ? 2 : 1);
+      for (const surface of await surfaces.all()) {
+        await expect(surface).toHaveCSS("--works-preview-lines", String(count));
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .terminal-text-preview'))
+          .toHaveText(lines.slice(-count).join("\n"), { useInnerText: false });
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .terminal-text-preview x')).toHaveCount(0);
+        await expect(surface.locator(".work-row")).toHaveCount(3);
+        await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(surface.locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .work-stats [data-stat]')).toHaveCount(8);
+      }
+    };
+    await output(); await expectLines(3);
+    await works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm').evaluate(node => {
+      (window as any).__worksLineTerminal = node;
+    });
+    await openRail(page, "settings");
+    const input = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
+    await expect(input).toHaveValue("3");
+    for (const count of [5, 10]) {
+      await input.fill(String(count)); await input.press("Tab");
+      await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
+      await openRail(page, "works"); await expectLines(count);
+      expect(await works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm')
+        .evaluate(node => node === (window as any).__worksLineTerminal)).toBe(true);
+      await openRail(page, "settings");
+    }
+    await page.screenshot({ path: info.outputPath("settings-works-output-lines.png") });
+    const saves = (await sent(page)).filter(message => message.kind === "update_system_settings").length;
+    await input.fill("2"); await input.press("Tab");
+    await expect(page.locator('[data-role="system-settings-status"]')).toContainText("whole number from 3 to 10");
+    expect((await sent(page)).filter(message => message.kind === "update_system_settings")).toHaveLength(saves);
+    await openRail(page, "works"); await expectLines(10);
+    await tail().click();
+    await tail().evaluate(node => {
+      const range = document.createRange(); range.selectNodeContents(node);
+      const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    });
+    await tail().hover(); await page.mouse.wheel(200, 0);
+    await expect(full(page)).toBeHidden();
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("works");
+    await expectLines(10, true);
+    await page.setViewportSize({ width: 400, height: 1000 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await expectLines(10, true);
+    const graphLabels = await page.locator(".works-surface .work-side small").evaluateAll(nodes => nodes.map(node => {
+      const style = getComputedStyle(node);
+      return { height: node.getBoundingClientRect().height, line: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5 };
+    }));
+    for (const label of graphLabels) expect(label.height, "graph explanation remains readable in each narrow split pane").toBeLessThanOrEqual(label.line * 4);
+    for (const surface of await page.locator(".works-surface").all()) {
+      await surface.locator('.work-row[data-window-id="agent-one"]').scrollIntoViewIfNeeded();
+    }
+    await page.screenshot({ path: info.outputPath("works-output-lines-split-400.png") });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.reload(); await openRail(page, "works"); await output(); await expectLines(10);
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal" }).click();
+    await expect(full(page)).toBeVisible();
+    const nativeInput = full(page).locator(".xterm-helper-textarea");
+    await nativeInput.press("Escape"); await nativeInput.press("q");
+    await expect.poll(async () => (await sent(page)).filter(message => message.kind === "terminal_input" && message.id === "agent-one").map(message => message.data))
+      .toEqual(expect.arrayContaining(["\u001b", "q"]));
+    await full(page).getByRole("button", { name: "Previous work" }).click();
+    await expect(full(page).locator(".works-full-name .window-role-badge")).toHaveText("PM");
+    await full(page).getByRole("button", { name: "Next work" }).click();
+    await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await expectLines(10);
+    await page.screenshot({ path: info.outputPath("works-output-lines-10.png") });
+  });
+
   test("Team/Past, revision readback, idle-safe links and 400px layouts retain the approved roster", async ({ page }, info) => {
     await openRail(page, "agents");
     await expect(roster(page).getByRole("tab", { name: "Team", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -502,6 +583,8 @@ async function installWorksAgentsBackend(page: Page) {
       { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
       { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
     ];
+    // Fixture-only backing storage models backend persistence across page reload.
+    let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
     let revision = 3, activityRevision = 0;
     let agents: any[] = [
       { window_id: "agent-two", session_id: "s-two", runtime_incarnation: 2, issue_number: 4001, is_pm: false },
@@ -545,6 +628,18 @@ async function installWorksAgentsBackend(page: Page) {
       }
       send(raw: string) {
         const message = JSON.parse(raw); sentMessages.push(message);
+        if (message.kind === "create_window" && message.preset === "settings" && !windows.some(data => data.preset === "settings")) {
+          windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
+          this.emit(workspace());
+        }
+        if (message.kind === "get_system_settings") this.emit({ kind: "system_settings", language: "auto", works_preview_lines: worksPreviewLines });
+        if (message.kind === "update_system_settings") {
+          if (Number.isInteger(message.works_preview_lines) && message.works_preview_lines >= 3 && message.works_preview_lines <= 10) {
+            worksPreviewLines = message.works_preview_lines;
+            sessionStorage.setItem("fixture:works-preview-lines", String(worksPreviewLines));
+            this.emit({ kind: "system_settings_updated", language: message.language, works_preview_lines: worksPreviewLines });
+          } else this.emit({ kind: "system_settings_error", message: "Invalid fixture Works output lines" });
+        }
         if (message.kind === "list_supported_agents") this.emit({ kind: "supported_agent_list", agents: [
           { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
         ] });

@@ -1302,6 +1302,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
+        else if (socketProjectKey) send({ kind: "get_system_settings" });
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -4370,6 +4371,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         setSettingsStatus,
         supportedAgentsModel,
         customAgentsModel,
+        systemSettingsModel,
       } = createSettingsSurface({
         send,
         createNode,
@@ -5481,6 +5483,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        systemSettingsModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,

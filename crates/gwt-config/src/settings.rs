@@ -142,6 +142,8 @@ pub struct Settings {
     /// App-wide automatic gwt update preference. None is an unmigrated
     /// installation; an explicit false must never import legacy project ON.
     pub auto_apply_updates: Option<bool>,
+    /// Number of parsed terminal lines shown in Works. None uses three.
+    pub works_preview_lines: Option<u32>,
     /// Branches that cannot be deleted.
     pub protected_branches: Vec<String>,
     /// Default base branch for new worktrees.
@@ -188,6 +190,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             auto_apply_updates: None,
+            works_preview_lines: None,
             protected_branches: vec![
                 "main".to_string(),
                 "master".to_string(),
