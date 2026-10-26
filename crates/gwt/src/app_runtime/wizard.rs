@@ -759,7 +759,14 @@ fn issue_monitor_resume_handoff(
 /// whole prefs file, lets a busy project's unrelated rewrites keep the launch.
 #[derive(Debug, Clone)]
 struct IssueMonitorLaunchSourceFacts {
-    selection: Result<Option<(gwt::LaunchWizardPreviousProfiles, Option<u8>)>, String>,
+    selection: Result<
+        Option<(
+            gwt::LaunchWizardPreviousProfiles,
+            Option<u8>,
+            Option<String>,
+        )>,
+        String,
+    >,
     handoff: IssueMonitorResumeHandoff,
     /// Issue #6299: the host Codex preflight this delivery already ran. It is
     /// not a prefs-derived input, so it is reused, never compared.
@@ -827,7 +834,15 @@ impl IssueMonitorLaunchSourceFacts {
                         profile_config_path,
                         &mut codex_preflight,
                     )
-                    .map(|choice| choice.map(|choice| (choice.profiles, choice.tier)))
+                    .map(|choice| {
+                        choice.map(|choice| {
+                            (
+                                choice.profiles,
+                                choice.tier,
+                                choice.selected_agent_member_id,
+                            )
+                        })
+                    })
                 }
             });
         Self {
@@ -3353,6 +3368,19 @@ impl AppRuntime {
         )
     }
 
+    fn initialize_issue_monitor_settings_roster(
+        &self,
+        project_root: &Path,
+    ) -> Result<gwt::agent_names::AgentRoster, String> {
+        gwt::mutate_issue_monitor_prefs_recovering(
+            &gwt::issue_monitor_prefs_path_for_repo_path(project_root),
+            &gwt::IssueMonitorPrefs::recovery_default(),
+            |_| (),
+        )
+        .map_err(|error| error.to_string())?;
+        gwt::agent_names::read_project_roster(project_root, &self.sessions_dir)
+    }
+
     fn open_issue_monitor_configure_wizard_events_for_project(
         &mut self,
         client_id: &str,
@@ -3382,35 +3410,82 @@ impl AppRuntime {
         ) {
             return events;
         }
-        if let Err(message) =
-            gwt::agent_names::read_project_roster(project_root, &self.sessions_dir)
-        {
-            return vec![OutboundEvent::reply(
-                client_id,
-                BackendEvent::IssueMonitorToast {
-                    notification_transition: None,
-                    notification_transition_id: None,
-                    level: "error".into(),
-                    message,
-                    issue_number: Some(issue_number),
-                },
-            )
-            .with_error_project_root(project_root)];
-        }
+        let roster = match self.initialize_issue_monitor_settings_roster(project_root) {
+            Ok(roster) => roster,
+            Err(message) => {
+                return vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
+                        notification_transition_id: None,
+                        level: "error".into(),
+                        message,
+                        issue_number: Some(issue_number),
+                    },
+                )
+                .with_error_project_root(project_root)];
+            }
+        };
         let pool = self.issue_monitor_saved_pool(project_root);
+        let previous_profiles = self.issue_monitor_saved_head_profiles(project_root);
+        let saved_agent_id = previous_profiles.preferred_agent_id().map(str::to_string);
+        let opened = self
+            .launch_wizard_for(&context)
+            .expect("opened settings wizard");
+        let mut wizard = LaunchWizardState::open_knowledge_launch_with_previous_profiles(
+            opened.wizard.context.clone(),
+            opened
+                .wizard
+                .base_branch_name
+                .clone()
+                .expect("Issue Monitor base branch"),
+            self.launch_wizard_cache.agent_options(),
+            Vec::new(),
+            previous_profiles,
+        );
+        wizard.initial_prompt = opened.wizard.initial_prompt.clone();
+        wizard.use_profile_launch_preferences();
+        Self::apply_agent_configuration_state(&mut wizard);
+        wizard.mark_runtime_context_unresolved();
+        wizard.apply(gwt::LaunchWizardAction::UseStartMethod {
+            method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
+        });
+        // Match global Agent Settings: an unavailable saved tool must not
+        // silently become the manual launch chooser's first detected tool.
+        if let Some(saved_agent_id) = saved_agent_id {
+            wizard.agent_id = saved_agent_id;
+        }
+        let mut profiles = pool.clone();
+        if profiles.is_empty() {
+            if let Some(member) = roster.members.iter().find(|member| member.enabled) {
+                if let Some(tool) = member.agent_id.as_ref() {
+                    wizard.apply(gwt::LaunchWizardAction::SetAgent {
+                        agent_id: tool.clone(),
+                    });
+                    wizard.agent_id = tool.clone();
+                    if let Some(mut profile) = wizard
+                        .preview_launch_profile()
+                        .or_else(|| new_agent_settings_profile(&[], tool))
+                    {
+                        profile.agent_member_id = Some(member.agent_member_id.clone());
+                        profiles.push(profile);
+                    }
+                }
+            }
+        }
+        let sets = (!profiles.is_empty()).then(|| IssueMonitorAgentSettingsSets {
+            profiles,
+            active: 0,
+            opened_as: wizard.preview_launch_profile(),
+        });
         if let Some(session) = self.launch_wizard_for_mut(&context) {
-            session.wizard.use_profile_launch_preferences();
+            session.wizard = wizard;
             session.issue_monitor_profile_save = Some(IssueMonitorProfileSaveContext {
                 client_id: client_id.to_string(),
                 issue_number: Some(issue_number),
                 pool,
-                sets: None,
+                sets,
             });
-            session
-                .wizard
-                .apply(gwt::LaunchWizardAction::UseStartMethod {
-                    method: gwt::LaunchWizardStartMethodKind::ConfigureAndStart,
-                });
         }
         events
             .into_iter()
@@ -3484,9 +3559,7 @@ impl AppRuntime {
         // The launch choice skips held providers, and pre-filling from it made
         // a hold look like the saved agent had changed — and saving the form
         // unchanged wrote the fallback over the head.
-        if let Err(message) =
-            gwt::agent_names::read_project_roster(&project_root, &self.sessions_dir)
-        {
+        if let Err(message) = self.initialize_issue_monitor_settings_roster(&project_root) {
             return vec![OutboundEvent::reply(
                 client_id,
                 BackendEvent::IssueMonitorToast {
@@ -4110,9 +4183,15 @@ impl AppRuntime {
             record_issue_monitor_worker_phase("monitor_claim", &mut phase_started);
             let handoff = issue_monitor_resume_handoff(&request.project_root, issue_number);
             let mut codex_preflight = IssueMonitorCodexPreflightMemo::default();
-            let choice = gwt::agent_names::read_project_roster(&request.project_root, &sessions_dir)
-                .and_then(|_| issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut codex_preflight));
-            let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier))).map_err(Clone::clone);
+            // A durable answer returns to its exact Session. It does not
+            // register a new person or allocate a name before that routing.
+            let roster_ready = if handoff.as_ref().is_ok_and(Option::is_some) {
+                Ok(())
+            } else {
+                gwt::agent_names::read_project_roster(&request.project_root, &sessions_dir).map(|_| ())
+            };
+            let choice = roster_ready.and_then(|_| issue_monitor_preparation_choice(&cache, &provider_usage, &request, &profile_config_path, &mut codex_preflight));
+            let selection = choice.as_ref().map(|choice| choice.as_ref().map(|choice| (choice.profiles.clone(), choice.tier, choice.selected_agent_member_id.clone()))).map_err(Clone::clone);
             let reusable_facts = match reusable {
                 Some(IssueMonitorLaunchPreparation::Launch(facts))
                     if request.launch_session_strategy == gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
