@@ -51,6 +51,7 @@ pub mod machine_agent_settings;
 pub mod managed_assets;
 pub mod memory_pressure;
 pub mod migration;
+pub mod mobile_connection;
 pub mod monitor_duplicate_runtime;
 pub mod native_app;
 pub mod native_notification_permission;
