@@ -1605,11 +1605,8 @@ pub fn collect_unlanded_work_branches(
         }) {
             continue;
         }
-        let Ok(divergence) =
-            crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
-        else {
-            continue;
-        };
+        let divergence = crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
+            .map_err(|error| error.to_string())?;
         probes.push(UnlandedBranchProbe {
             has_non_gwt_changes: branch_has_non_gwt_changes(
                 repo_path,
@@ -1660,7 +1657,7 @@ pub fn fetch_pr_inventory_tracked(
         options,
         run_gh_command,
     )?;
-    track_pr_inventory(&mut read, repo_path, history_path, now, options);
+    track_pr_inventory(&mut read, repo_path, history_path, now, options)?;
     Ok(read)
 }
 
@@ -1670,23 +1667,23 @@ fn track_pr_inventory(
     history_path: &Path,
     now: DateTime<Utc>,
     options: &PrInventoryOptions,
-) {
+) -> Result<()> {
     // Issue #5735: neither lifecycle progress nor absence of an open PR can
     // be inferred from a snapshot GitHub would not let us refresh.
     if read.source == "stale-cache" {
-        return;
+        return Ok(());
     }
     // Issue #4074 FR-005: the stocktake is local git, so it costs no GitHub
-    // budget. A git failure degrades the inventory to empty rather than
-    // failing the whole read.
+    // budget. Required reads must succeed before reporting a complete stocktake
+    // or advancing history; a local failure is not an observed empty inventory.
     let open_pr_head_refs: Vec<String> = read
         .items
         .iter()
         .map(|item| item.head_ref_name.clone())
         .collect();
-    read.unlanded_branches = collect_unlanded_work_branches(repo_path, UNLANDED_BRANCH_BASE_REF)
-        .map(|probes| classify_unlanded_branches(probes, &open_pr_head_refs))
-        .unwrap_or_default();
+    let probes = collect_unlanded_work_branches(repo_path, UNLANDED_BRANCH_BASE_REF)
+        .map_err(GwtError::Git)?;
+    read.unlanded_branches = classify_unlanded_branches(probes, &open_pr_head_refs);
     let mut history = PrInventoryHistory::load(history_path);
     history.observe(&mut read.items, now, options);
     if let Err(error) = history.save(history_path) {
@@ -1698,6 +1695,7 @@ fn track_pr_inventory(
             history_path.display()
         );
     }
+    Ok(())
 }
 
 /// The cache-first, budget-aware read behind `pr.list`.
@@ -8106,7 +8104,8 @@ mod tests {
         // must not count as another observation or measure branch absence.
         let history_path = tmp.path().join(PR_INVENTORY_HISTORY_FILE);
         std::fs::write(&history_path, b"preserve the previous observation").unwrap();
-        track_pr_inventory(&mut read, tmp.path(), &history_path, exhausted_at, &options);
+        track_pr_inventory(&mut read, tmp.path(), &history_path, exhausted_at, &options)
+            .expect("stale inventory does not require a local stocktake");
         assert_eq!(
             std::fs::read(&history_path).unwrap(),
             b"preserve the previous observation"
