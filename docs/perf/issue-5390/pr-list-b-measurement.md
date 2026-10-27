@@ -198,3 +198,39 @@ Independent review of all four changed source files, including the explicit
 intake synchronization, found zero remaining blocking findings. Required
 same-HEAD verification, scoped CI coverage and merged/base inclusion remain
 separate gates reported in the delivery PR and canonical owner sections.
+
+## Early-exit stdin repair
+
+The e4046d54a coverage run40490459273 passed both previous fixture failures,
+but its actual CLI compatibility test failed at English `no-stdin`: Null
+instead of true, with no singleton Git calls. The CI log does not record the
+underlying IO error. Reading the shared stdin helper found that an early-exit
+child could close stdin first, making `write_all` return BrokenPipe before
+its exit129 and diagnostic were collected. Small batches prevent a full-pipe
+deadlock but do not prevent this race.
+
+A real-Git helper test with finite input larger than pipe capacity directly
+reproduced the lost diagnostic, then passed after the narrow root repair.
+Only BrokenPipe followed by a failed child returns the captured output;
+a successful early exit still returns the write error. Other error paths and
+all caller status checks remain. No capability probe, duplicate wrapper,
+fixture stdin draining, new timeout or public API is added. Production blob
+callers still reject failed status before parsing; Console record structure
+is unchanged and failed-child stderr can be forwarded normally.
+
+`pr-list-b-green-early-exit.json` keeps this RED/GREEN, the failed CI provenance,
+five source hashes and a fresh native executable on the same frozen input.
+Every branch field/count remains equal across all 85 candidates and four
+conditions. The common pre-commit HEAD is provenance, not delivery evidence.
+
+| Case | Baseline seconds | Early-exit-source seconds | Git calls |
+| --- | ---: | ---: | ---: |
+| default-warm | 163.994 | 11.843 | 256 → 23 |
+| default-cold | 127.575 | 10.666 | 256 → 23 |
+| include-empty-cold | 133.535 | 10.465 | 256 → 23 |
+| include-empty-warm | 135.021 | 9.659 | 256 → 23 |
+
+All prior limits remain: finite isolated measurements do not prove a PM20s
+SLA, original installed180s root cause, API/merge-reconciliation remedy,
+installed rollout or parent fleet/CPU/RSS acceptance. Final same-HEAD checks,
+scoped CI coverage and merged/base inclusion are separate delivery evidence.
