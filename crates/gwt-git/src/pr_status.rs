@@ -1574,17 +1574,39 @@ pub fn parse_unlanded_branch_refs(stdout: &str) -> Vec<(String, Option<DateTime<
 /// Read tracked remote delivery branches that are not merged into `base_ref`
 /// and count how far each is ahead.
 ///
-/// `git for-each-ref --no-merged` narrows the set in one local command so the
-/// per-branch `rev-list` stays bounded by the residue, not by branch count.
+/// Read the ref snapshot once, then share history walks and merge projections
+/// across small batches. A warm PR cache must not restart three Git processes
+/// for every residual branch (Issue #5390).
 pub fn collect_unlanded_work_branches(
     repo_path: &Path,
     base_ref: &str,
 ) -> std::result::Result<Vec<UnlandedBranchProbe>, String> {
+    let mut base: Vec<String> = Vec::new();
+    for object_type in ["commit", "tree"] {
+        // Resolve the tree from the captured commit OID, never re-read a
+        // moving integration ref between the history and source comparisons.
+        let reference = base.first().map(String::as_str).unwrap_or(base_ref);
+        let revision = format!("{reference}^{{{object_type}}}");
+        let output = gwt_core::process::run_git_logged(
+            &["rev-parse", "--verify", &revision],
+            Some(repo_path),
+        )
+        .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        let oid = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+        let oid = oid.trim();
+        if !inventory_git_oid(oid) {
+            return Err("invalid PR stocktake base snapshot".to_string());
+        }
+        base.push(oid.to_string());
+    }
     let mut args = vec![
         "for-each-ref",
-        "--format=%(refname:short)%09%(committerdate:iso-strict)",
+        "--format=%(refname)%09%(committerdate:iso-strict)%09%(objectname)",
         "--no-merged",
-        base_ref,
+        &base[0],
     ];
     args.extend_from_slice(UNLANDED_DELIVERY_REFS);
     let output = gwt_core::process::run_git_logged(&args, Some(repo_path))
@@ -1593,33 +1615,253 @@ pub fn collect_unlanded_work_branches(
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let mut probes = Vec::new();
-    for (branch, last_commit_at) in
-        parse_unlanded_branch_refs(&String::from_utf8_lossy(&output.stdout))
-    {
+    let mut heads = Vec::new();
+    let refs = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    for line in refs.lines() {
+        let fields: Vec<_> = line.split('\t').collect();
+        if fields.len() != 3 || !inventory_git_oid(fields[2]) {
+            return Err("invalid PR stocktake ref snapshot".to_string());
+        }
         // Plain Git ref patterns also include descendants; only entries ending
         // in '/' declare a prefix in our delivery inventory.
-        let remote_ref = format!("refs/remotes/origin/{branch}");
+        let remote_ref = fields[0];
         if !UNLANDED_DELIVERY_REFS.iter().any(|reference| {
             remote_ref == *reference
                 || (reference.ends_with('/') && remote_ref.starts_with(reference))
         }) {
             continue;
         }
-        let divergence = crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
-            .map_err(|error| error.to_string())?;
+        let branch = remote_ref
+            .strip_prefix("refs/remotes/origin/")
+            .ok_or_else(|| "invalid PR stocktake remote ref".to_string())?;
+        heads.push(fields[2].to_string());
         probes.push(UnlandedBranchProbe {
-            has_non_gwt_changes: branch_has_non_gwt_changes(
-                repo_path,
-                base_ref,
-                &format!("origin/{branch}"),
-            )
-            .ok(),
-            branch,
-            ahead: divergence.ahead,
-            last_commit_at,
+            has_non_gwt_changes: None,
+            branch: branch.to_string(),
+            ahead: 0,
+            last_commit_at: DateTime::parse_from_rfc3339(fields[1])
+                .ok()
+                .map(|date| date.with_timezone(&Utc)),
         });
     }
+    // At most 1950 bytes of stdin even with SHA256 OID pairs. The existing
+    // process helper writes stdin before draining stdout, so keep it below the
+    // Windows pipe buffer even when Git produces a large conflict/diff report.
+    for (batch, heads) in heads.chunks(15).enumerate() {
+        let ahead = unlanded_ahead_batch(repo_path, &base[0], heads)?;
+        let source = unlanded_source_batch(repo_path, &base[0], &base[1], heads);
+        for (offset, (ahead, source)) in ahead.into_iter().zip(source).enumerate() {
+            let probe = &mut probes[batch * 15 + offset];
+            probe.ahead = ahead;
+            probe.has_non_gwt_changes = source;
+        }
+    }
     Ok(probes)
+}
+
+fn inventory_git_oid(oid: &str) -> bool {
+    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn unlanded_ahead_batch(
+    repo: &Path,
+    base: &str,
+    heads: &[String],
+) -> std::result::Result<Vec<usize>, String> {
+    let input = format!("^{base}\n{}\n", heads.join("\n"));
+    let output = gwt_core::process::run_git_logged_with_stdin(
+        &["rev-list", "--parents", "--stdin"],
+        Some(repo),
+        input.as_bytes(),
+    )
+    .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let graph = String::from_utf8(output.stdout).map_err(|error| error.to_string())?;
+    let mut parents = std::collections::HashMap::new();
+    for line in graph.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.is_empty() || !fields.iter().all(|oid| inventory_git_oid(oid)) {
+            return Err("invalid PR stocktake history graph".to_string());
+        }
+        if parents.insert(fields[0], fields[1..].to_vec()).is_some() {
+            return Err("duplicate PR stocktake history node".to_string());
+        }
+    }
+    heads
+        .iter()
+        .map(|head| {
+            if !parents.contains_key(head.as_str()) {
+                return Err("PR stocktake history omitted a candidate head".to_string());
+            }
+            let mut seen = std::collections::HashSet::new();
+            let mut pending = vec![head.as_str()];
+            while let Some(oid) = pending.pop() {
+                if let Some(ancestors) = parents.get(oid) {
+                    if seen.insert(oid) {
+                        pending.extend(ancestors.iter().copied());
+                    }
+                }
+            }
+            Ok(seen.len())
+        })
+        .collect()
+}
+
+fn unlanded_source_batch(
+    repo: &Path,
+    base: &str,
+    base_tree: &str,
+    heads: &[String],
+) -> Vec<Option<bool>> {
+    let unknown = || vec![None; heads.len()];
+    let input: String = heads
+        .iter()
+        .map(|head| format!("{base} {head}\n"))
+        .collect();
+    let Ok(merge) = gwt_core::process::run_git_logged_with_stdin(
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--stdin",
+            "--name-only",
+            "--no-messages",
+            "-z",
+        ],
+        Some(repo),
+        input.as_bytes(),
+    ) else {
+        return unknown();
+    };
+    // --write-tree predates --stdin by one Git release. Keep the established
+    // singleton contract on Git 2.38 without hiding ordinary projection errors.
+    let stderr = String::from_utf8_lossy(&merge.stderr);
+    if merge.status.code() == Some(129)
+        && stderr.contains("unknown option")
+        && stderr.contains("stdin")
+    {
+        return heads
+            .iter()
+            .map(|head| branch_has_non_gwt_changes(repo, base, head).ok())
+            .collect();
+    }
+    if !merge.status.success() {
+        return unknown();
+    }
+    let Some(projections) = parse_inventory_merge_batch(&merge.stdout, heads.len()) else {
+        return unknown();
+    };
+    let input: String = projections
+        .iter()
+        .map(|(tree, _)| format!("{base_tree} {tree}\n"))
+        .collect();
+    let mut values: Vec<_> = projections
+        .iter()
+        .map(|(_, conflict)| conflict.then_some(true))
+        .collect();
+    let Ok(diff) = gwt_core::process::run_git_logged_with_stdin(
+        &[
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--",
+            ":(top,glob)**",
+            ":(top,exclude,glob).gwt/**",
+        ],
+        Some(repo),
+        input.as_bytes(),
+    ) else {
+        return values;
+    };
+    if diff.status.success() {
+        if let Some(changed) = parse_inventory_diff_batch(&diff.stdout, base_tree, &projections) {
+            for (value, changed) in values.iter_mut().zip(changed) {
+                *value = Some(value.unwrap_or(false) || changed);
+            }
+        }
+    }
+    values
+}
+
+fn parse_inventory_merge_batch(raw: &[u8], count: usize) -> Option<Vec<(String, bool)>> {
+    let mut fields = raw.split(|byte| *byte == 0);
+    let mut projections = Vec::with_capacity(count);
+    for _ in 0..count {
+        // The stdin record status is 0=conflicted, 1=clean, independently of
+        // the process exit status, which is zero for either completed result.
+        let conflicted = match fields.next()? {
+            b"0" => true,
+            b"1" => false,
+            _ => return None,
+        };
+        let tree = std::str::from_utf8(fields.next()?).ok()?;
+        if !inventory_git_oid(tree) {
+            return None;
+        }
+        let mut paths = 0;
+        let mut source_conflict = false;
+        loop {
+            let path = fields.next()?;
+            if path.is_empty() {
+                break;
+            }
+            if !conflicted {
+                return None;
+            }
+            paths += 1;
+            source_conflict |= path != b".gwt" && !path.starts_with(b".gwt/");
+        }
+        if conflicted && paths == 0 {
+            return None;
+        }
+        projections.push((tree.to_string(), source_conflict));
+    }
+    (fields.next() == Some(b"".as_slice()) && fields.next().is_none()).then_some(projections)
+}
+
+fn parse_inventory_diff_batch(
+    mut raw: &[u8],
+    base_tree: &str,
+    projections: &[(String, bool)],
+) -> Option<Vec<bool>> {
+    let mut changed = Vec::with_capacity(projections.len());
+    for (tree, _) in projections {
+        let header = format!("{base_tree} {tree}\n");
+        raw = raw.strip_prefix(header.as_bytes())?;
+        let mut has_source = false;
+        while raw.starts_with(b":") {
+            // --raw -z --no-renames produces one metadata field and one path.
+            // Consume paths as bytes so filenames cannot impersonate headers.
+            let end = raw.iter().position(|byte| *byte == 0)?;
+            let metadata = std::str::from_utf8(&raw[..end]).ok()?;
+            let fields: Vec<_> = metadata.split(' ').collect();
+            let mode = |value: &str| {
+                value.len() == 6 && value.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
+            };
+            if fields.len() != 5
+                || !mode(fields[0].strip_prefix(':')?)
+                || !mode(fields[1])
+                || !inventory_git_oid(fields[2])
+                || !inventory_git_oid(fields[3])
+                || !matches!(fields[4], "A" | "B" | "D" | "M" | "T" | "U" | "X")
+            {
+                return None;
+            }
+            raw = &raw[end + 1..];
+            let end = raw.iter().position(|byte| *byte == 0)?;
+            if end == 0 {
+                return None;
+            }
+            raw = &raw[end + 1..];
+            has_source = true;
+        }
+        changed.push(has_source);
+    }
+    raw.is_empty().then_some(changed)
 }
 
 /// Budget/TTL-aware observation without advancing the resident PM's history.
@@ -6608,6 +6850,48 @@ mod tests {
     }
 
     // ---- Issue #4074 FR-005 / AC-4: unlanded branch stocktake ----
+
+    #[test]
+    fn inventory_batch_parsers_require_complete_records() {
+        let tree = "1".repeat(40);
+        let clean = format!("1\0{tree}\0\0");
+        assert_eq!(
+            parse_inventory_merge_batch(clean.as_bytes(), 1),
+            Some(vec![(tree.clone(), false)])
+        );
+        assert!(parse_inventory_merge_batch(&clean.as_bytes()[..clean.len() - 1], 1).is_none());
+        assert!(parse_inventory_merge_batch(format!("{clean}\0").as_bytes(), 1).is_none());
+        assert!(parse_inventory_merge_batch(format!("0\0{tree}\0\0").as_bytes(), 1).is_none());
+        let conflicts = format!("0\0{tree}\0.gwt/state\0\00\0{tree}\0source.txt\0\0");
+        assert_eq!(
+            parse_inventory_merge_batch(conflicts.as_bytes(), 2),
+            Some(vec![(tree.clone(), false), (tree.clone(), true)])
+        );
+        let projections = vec![(tree.clone(), false)];
+        let header = format!("{tree} {tree}\n");
+        assert_eq!(
+            parse_inventory_diff_batch(header.as_bytes(), &tree, &projections),
+            Some(vec![false])
+        );
+        assert!(parse_inventory_diff_batch(
+            format!("{header}:truncated\0path").as_bytes(),
+            &tree,
+            &projections
+        )
+        .is_none());
+        assert!(parse_inventory_diff_batch(
+            format!("{header}:garbage\0source.txt\0").as_bytes(),
+            &tree,
+            &projections
+        )
+        .is_none());
+        assert!(parse_inventory_diff_batch(
+            format!("{header}extra").as_bytes(),
+            &tree,
+            &projections
+        )
+        .is_none());
+    }
 
     fn unlanded_probe(branch: &str, ahead: usize, last_commit_at: &str) -> UnlandedBranchProbe {
         UnlandedBranchProbe {
