@@ -297,7 +297,7 @@ fn restore_closed_diagnostic_keeps_placeholder_without_spawning() {
         &repo,
         &[("agent-closed".into(), "session-closed".into())],
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-closed"));
     save_restore_fixture_session(
         &runtime.sessions_dir,
         "session-closed",
@@ -692,7 +692,7 @@ fn startup_restore_refuses_and_keeps_the_placeholder_when_work_facts_are_unreada
     fs::create_dir_all(&repo).expect("create repo");
     let placeholders = vec![("agent-1".to_string(), "session-unreadable".to_string())];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     save_restore_fixture_session(
         &runtime.sessions_dir,
         "session-unreadable",
@@ -766,7 +766,7 @@ fn startup_restore_limits_a_large_history_to_unterminated_windows() {
     }
     assert!(placeholders.len() >= 200);
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for index in 0..TERMINAL {
         save_restore_fixture_session(
             &runtime.sessions_dir,
@@ -1004,7 +1004,7 @@ fn startup_restore_does_not_resurrect_a_row_stopped_through_the_monitor() {
         ("agent-live".to_string(), "session-live".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for (session_id, worktree, issue) in [
         ("session-stopped", "wt-stopped", 4286u64),
         ("session-live", "wt-live", 4288),
@@ -1096,7 +1096,7 @@ fn startup_restore_refuses_a_monitor_held_row_and_keeps_the_placeholder() {
         ("agent-live".to_string(), "session-live".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     for (session_id, worktree, issue) in [
         ("session-held", "wt-held", 4286u64),
         ("session-parked", "wt-parked", 4287),
@@ -1195,7 +1195,7 @@ fn startup_restore_refuses_completed_and_monitor_revoked_generations() {
         ("agent-active".to_string(), "session-active".to_string()),
     ];
     let tab = restore_fixture_tab("tab-1", &repo, &placeholders);
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let owner_of = |number: u64| gwt::cli::execution_state::ExecutionOwnerKey {
         kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
         number,
@@ -1701,7 +1701,7 @@ fn restore_admits_only_resumable_open_work_windows_at_history_scale() {
         migration_pending: false,
         main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
+    let runtime = sample_runtime(temp.path(), vec![tab], Some("tab-scale"));
     for (session_id, native_id, linked_issue) in &fixtures {
         // Each live Work owns its own worktree. Reopened AC-6 intentionally
         // refuses multiple conversations that target the same worktree.

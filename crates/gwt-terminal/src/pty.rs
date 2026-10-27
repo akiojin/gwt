@@ -1117,13 +1117,19 @@ impl PtyHandle {
         let Some(master) = master.as_ref() else {
             return Ok(());
         };
-        let resize_started = Instant::now();
-        let outcome = master.resize(PtySize {
+        let size = PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
-        });
+        };
+        // ConPTY repaints even for an unchanged grid. Query the actual master
+        // so external size changes are repaired and query errors still resize.
+        if master.get_size().is_ok_and(|current| current == size) {
+            return Ok(());
+        }
+        let resize_started = Instant::now();
+        let outcome = master.resize(size);
         let resize_elapsed_ms =
             u64::try_from(resize_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let total_elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -2475,7 +2481,43 @@ mod tests {
     fn test_resize() {
         let _pty_guard = lock_pty_test();
         let handle = PtyHandle::spawn(sleep_config("1")).expect("spawn failed");
-        handle.resize(120, 48).expect("resize should succeed");
+        let events = capture_input_traces(|| {
+            handle.resize(80, 24).expect("initial size should succeed");
+            handle.resize(120, 48).expect("resize should succeed");
+            handle.resize(120, 48).expect("same size should succeed");
+            // A change through the shared native master must still be repaired.
+            handle
+                .master
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .resize(PtySize {
+                    cols: 90,
+                    rows: 30,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            handle.resize(120, 48).expect("restore actual master size");
+        });
+        let actual = handle
+            .master
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .get_size()
+            .unwrap();
+        assert_eq!((actual.cols, actual.rows), (120, 48));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.target == "gwt::resize::pty")
+                .count(),
+            2,
+            "only changed native sizes should trigger a resize and ConPTY repaint"
+        );
     }
 
     #[test]

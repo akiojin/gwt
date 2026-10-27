@@ -1236,6 +1236,10 @@ impl AppRuntime {
         let Some(window_id) = window_id else {
             return events;
         };
+        if event.source_event.as_deref() == Some("UserPromptSubmit") {
+            // An exact owner ACK can release retained input without a status edge.
+            self.flush_pending_pm_wake(&window_id);
+        }
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };

@@ -502,8 +502,12 @@ pub(crate) enum OwnerMessage {
         result: Result<bool, String>,
     },
     PmWakeWritten {
+        operation_id: String,
         reply: oneshot::Sender<OwnerReply>,
         result: Result<super::pm_delivery::PmWakeWrite, String>,
+    },
+    PmWakeAcknowledged {
+        result: Result<(), String>,
     },
     Pane(PaneRuntimeEvent),
     Transport(TransportEvent),
@@ -1679,9 +1683,20 @@ impl OwnerState {
                         result.map(|unsent| json!({"ok":true,"has_unsent_user_input":unsent})),
                     );
                 }
-                OwnerMessage::PmWakeWritten { reply, result } => {
+                OwnerMessage::PmWakeWritten {
+                    operation_id,
+                    reply,
+                    result,
+                } => {
                     self.input_jobs -= 1;
+                    self.pm_wake_permits.finish(&operation_id);
                     let _ = reply.send(result.map(|status| json!({"status":status})));
+                }
+                OwnerMessage::PmWakeAcknowledged { result } => {
+                    self.input_jobs -= 1;
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "owner PM wake acknowledgement is unconfirmed");
+                    }
                 }
                 OwnerMessage::Pane(event) => self.pane_event(event),
                 OwnerMessage::Transport(event) => self.handle_transport_event(event),
@@ -2309,25 +2324,48 @@ impl OwnerState {
                     .cloned()
                     .ok_or("PM wake has no current physical writer")?;
                 drop(writers);
+                let session = runtime
+                    .agent
+                    .as_ref()
+                    .map(|agent| agent.active.session_id.clone());
+                let pane = runtime.pane.clone();
+                let output_seq = pane.lock().map_err(|error| error.to_string())?.output_seq();
                 let permit =
                     self.pm_wake_permits
                         .start(&delivery.operation_id, &id, incarnation)?;
-                Ok::<_, String>((entry, permit))
+                Ok::<_, String>((entry, permit, session, pane, output_seq))
             })();
             match captured {
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }
-                Ok((entry, permit)) => {
+                Ok((entry, permit, session, pane, output_seq)) => {
                     self.input_jobs += 1;
                     let writers = self.pty_writers.clone();
                     let root = self.root.clone();
+                    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
                     let sender = self.sender.clone();
                     spawn_owner_worker(move || {
                         let result = super::pm_delivery::deliver_pm_wake(
-                            &root, &id, &entry, &writers, &delivery, &permit,
+                            &root,
+                            &id,
+                            &entry,
+                            &writers,
+                            &delivery,
+                            &permit,
+                            (
+                                &sessions_dir,
+                                session.as_deref(),
+                                incarnation,
+                                &pane,
+                                output_seq,
+                            ),
                         );
-                        let _ = sender.send(OwnerMessage::PmWakeWritten { reply, result });
+                        let _ = sender.send(OwnerMessage::PmWakeWritten {
+                            operation_id: delivery.operation_id,
+                            reply,
+                            result,
+                        });
                     });
                 }
             }
@@ -7095,6 +7133,28 @@ impl OwnerState {
         };
         if self.stopping || self.closing.contains_key(&id) {
             return;
+        }
+        if event.source_event.as_deref() == Some("UserPromptSubmit") {
+            let captured = self.runtimes.get(&id).and_then(|runtime| {
+                let session = runtime.agent.as_ref()?.active.session_id.clone();
+                let entry = self.pty_writers.read().ok()?.get(&id).cloned()?;
+                (Arc::ptr_eq(&entry.current, &runtime.current)
+                    && Arc::ptr_eq(&entry.handle, &runtime.pty))
+                .then_some((session, entry))
+            });
+            if let Some((session, entry)) = captured {
+                self.input_jobs += 1;
+                let root = self.root.clone();
+                let sender = self.sender.clone();
+                let window_id = id.clone();
+                spawn_owner_worker(move || {
+                    let result = super::pm_delivery::release_acknowledged_wake(
+                        &root, &window_id, &session, &entry, None,
+                    )
+                    .map(|_| ());
+                    let _ = sender.send(OwnerMessage::PmWakeAcknowledged { result });
+                });
+            }
         }
         if session_start {
             self.begin_readiness(&id, readiness_nonce, false, None);

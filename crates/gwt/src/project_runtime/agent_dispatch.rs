@@ -31,6 +31,9 @@ pub struct PmDeliveryReplayGuard {
     pub target_session_id: String,
     pub ordinary_revision: u64,
     pub transaction_revision: u64,
+    // A wake retains ordinary input until its exact provider turn ACK. Partial
+    // body writes permit readback only; a complete body permits CR-only retry.
+    pub retained_input: Option<(gwt_terminal::pty::PtyInputReservation, bool)>,
 }
 
 pub type PtyWriterRegistry = Arc<RwLock<HashMap<String, Arc<PtyWriterEntry>>>>;
@@ -379,7 +382,7 @@ const PM_DELIVERY_MAX_BODY_BYTES: usize = 16 * 1024;
 /// deadline, and the reply still has to reach the origin socket before the
 /// server's acceptance deadline — spending the budget down to the last
 /// millisecond would turn a clean `unverified` answer back into a timeout.
-const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
+pub(crate) const PM_DELIVERY_TERMINAL_MARGIN: Duration = Duration::from_millis(500);
 
 /// How often the durable receipt is re-read while waiting for the target's
 /// acknowledgement.
@@ -388,7 +391,7 @@ const PM_DELIVERY_ACK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// A physical write does not prove that the target started a turn. In the
 /// original idle-pane failure the body stayed in the composer after submit
 /// was dropped. Keep the operation identity; never stage its body again.
-const PM_DELIVERY_UNCONFIRMED_REASON: &str =
+pub(crate) const PM_DELIVERY_UNCONFIRMED_REASON: &str =
     "PM pane delivery was not acknowledged; the prompt may still be unsent. Recheck the same \
      operation_id with the same target and text, never a new operation. Submit-only recovery \
      requires the original fully written body and unchanged target input";
@@ -409,7 +412,7 @@ const PM_DELIVERY_LOST_REASON: &str =
 /// acknowledgement landed, with most of the operation's budget still unspent.
 /// So the wait runs to the deadline and returns early only once the operation
 /// is durably terminal.
-fn await_pm_delivery_status(
+pub(crate) fn await_pm_delivery_status(
     receipt_path: &Path,
     operation_id: &str,
     poll_deadline: Instant,
@@ -877,6 +880,7 @@ pub fn authenticated_pm_pane_send_input_events(
                         target_session_id: delivery_target_session_id,
                         ordinary_revision,
                         transaction_revision: reservation.transaction_revision(),
+                        retained_input: None,
                     });
             }
             outcome

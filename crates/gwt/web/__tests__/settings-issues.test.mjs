@@ -620,6 +620,7 @@ test("Candidates follow the shared roster before version metadata and retain dir
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
     document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor);
   const surface = factory({ send: message => sent.push(message), rosterModel,
+    scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
     focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {}, renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) { host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>'; },
@@ -664,6 +665,19 @@ test("Candidates follow the shared roster before version metadata and retain dir
   assert.equal(labels.value, "unfinished labels");
   assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
   assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
+  const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
+  const beforeProfileAck = rosterReads().length;
+  const ack = { project_root: "/A", request_id: 701, profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices };
+  surface.applyIssueMonitorProfiles(ack);
+  surface.applyIssueMonitorProfiles({ ...ack, request_id: undefined });
+  assert.equal(rosterReads().length, beforeProfileAck, "profile receivers only commit state, including same-frame readback");
+  flush();
+  assert.deepEqual(rosterReads().slice(beforeProfileAck), [{ kind: "agent_roster", action: { kind: "read" }, expected_revision: null }]);
+  surface.applyIssueMonitorProfiles(ack); flush();
+  assert.equal(rosterReads().length, beforeProfileAck + 1, "a replayed ACK cannot refresh the same save twice");
+  surface.applyIssueMonitorProfiles({ ...ack, project_root: "/B", request_id: 702 });
+  surface.applyIssueMonitorProfilesError({ project_root: "/A", request_id: 703, message: "save rejected" }); flush();
+  assert.equal(rosterReads().length, beforeProfileAck + 1, "unrelated roots and failed writes cannot request a roster read");
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {

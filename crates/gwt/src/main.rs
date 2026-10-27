@@ -73,9 +73,9 @@ pub(crate) use app_runtime::{
 pub(crate) use app_runtime::{
     ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
     AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-    IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectNavigationPayload,
-    ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
-    ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
+    IssueLaunchWizardPrepared, OutboundEvent, ProjectNavigationPayload, ProjectNavigationPrepared,
+    ProjectOpenTarget, ProjectTabRuntime, ScheduledIssueMonitorScanOutcome, WindowAddress,
+    WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
 pub(crate) use docker_launch::detect_wizard_docker_context_and_status;
@@ -92,7 +92,7 @@ pub(crate) use docker_launch::{
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
-    AgentSelfCloseCapabilityTicket, AgentSelfCloseResponder, AgentSessionPrincipal,
+    AgentSelfCloseCapabilityTicket, AgentSelfCloseResponder,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
 #[cfg(test)]

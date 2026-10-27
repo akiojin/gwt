@@ -2883,7 +2883,19 @@ pub(crate) fn prepare_owner_agent_admission(
                 .and_then(|session| session.agent_name)
         });
         let name = match inherited {
-            Some(name) => name,
+            Some(name) => {
+                if !is_pm {
+                    crate::agent_names::ensure_available_initial(&name, input.known_names)?;
+                }
+                let mut known = input.known_names.clone();
+                known.insert(name.clone());
+                crate::agent_names::remember(
+                    &gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
+                        .join("agent-names.jsonl"),
+                    &known,
+                )?;
+                name
+            }
             None => {
                 let language = gwt_config::Settings::load()
                     .map(|settings| settings.ai.effective_language())
@@ -3052,6 +3064,30 @@ pub struct ExecutionTerminalFacts {
 }
 
 impl ExecutionTerminalFacts {
+    pub fn matches_completed_session(
+        &self,
+        session: &gwt_agent::Session,
+        read_record: impl FnOnce(
+            &Path,
+        ) -> std::io::Result<
+            Option<crate::cli::execution_state::ExecutionControlRecord>,
+        >,
+    ) -> bool {
+        if self.status != crate::cli::execution_state::ExecutionDiagnosisState::Completed {
+            return false;
+        }
+        read_record(&session.worktree_path)
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                crate::cli::execution_state::integrity_ok(&record)
+                    && record.primary_session_id == session.id
+                    && Some(record.owner_number) == self.owner_number
+                    && record.status
+                        == crate::cli::execution_state::ExecutionControlStatus::Completed
+            })
+    }
+
     pub fn from_diagnosis(
         diagnosis: &crate::cli::execution_state::ExecutionDiagnosisSnapshot,
     ) -> Self {
@@ -3484,15 +3520,8 @@ pub fn read_terminal_window_facts_with_monitor(
             Some(session),
         ),
     );
-    execution.session_matches_execution = crate::cli::execution_state::load(&session.worktree_path)
-        .ok()
-        .flatten()
-        .is_some_and(|record| {
-            crate::cli::execution_state::integrity_ok(&record)
-                && record.primary_session_id == session.id
-                && Some(record.owner_number) == execution.owner_number
-                && record.status == crate::cli::execution_state::ExecutionControlStatus::Completed
-        });
+    execution.session_matches_execution =
+        execution.matches_completed_session(session, crate::cli::execution_state::load);
     let execution = Some(execution);
     let monitor =
         monitor.map(|monitor| MonitorTerminalFacts::from_monitor(monitor, issue_number, window_id));

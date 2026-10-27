@@ -43,11 +43,6 @@ impl std::fmt::Debug for IssueMonitorLaunchDeliveryAcknowledged {
     }
 }
 
-#[cfg(test)]
-pub(super) fn monitor_startup_failure_detail(issue: u64, screen: Option<&str>) -> String {
-    gwt::project_runtime::monitor::monitor_startup_failure_detail(issue, screen)
-}
-
 impl AppRuntime {
     pub(crate) fn invalidate_launch_delivery_ack(&mut self, window_id: &str) {
         self.pending_launch_delivery_acks.remove(window_id);

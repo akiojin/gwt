@@ -15,7 +15,9 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
-  assignment: { session_id: string | null; issue_number: number | null } | null };
+  assignment: { session_id: string | null; issue_number: number | null } | null;
+  saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
+  history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
@@ -156,6 +158,320 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(fixture.restart()).rejects.toThrow("fixture evidence failure");
       expect(cleanups).toHaveLength(2);
       expect(cleanups.every(cleanup => cleanup.pid > 0 && cleanup.ps_status === 1)).toBe(true);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
+  test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    const name = surface.getByRole("textbox", { name: "Name for new member", exact: true });
+    const register = surface.locator('.roster-capacity [data-action="add"]');
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      await expect(register).toBeDisabled();
+      await name.fill(` ${before.members[0].name.toLowerCase()} `);
+      await expect(name).toHaveAttribute("aria-invalid", "true");
+      await expect(register).toBeDisabled();
+      await name.fill("  Maple contributor  ");
+      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const sequence = await cursor(page);
+      await register.click();
+      const added = await rosterAfter(page, sequence, before.revision);
+      expect(added.error).toBeNull();
+      expect(added.members).toHaveLength(before.members.length + 1);
+      let member = added.members.find(member => member.name === "Maple contributor")!;
+      expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(member.agent_id).toBe("codex");
+      expect(member.assignment).toBeNull();
+      await expect(name).toHaveValue("");
+      // A stale writer must not replace the registered identity or this draft.
+      await name.fill("Retry contributor");
+      const staleSequence = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
+        action: { kind: "add", agent_id: "codex", name: "Retry contributor" } });
+      const rejected: AgentRoster = await page.waitForFunction(after =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+          && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("changed"))?.payload.roster,
+      staleSequence).then(handle => handle.jsonValue());
+      expect(rejected.error).toContain("changed");
+      expect(rejected.revision).toBe(added.revision);
+      expect(rejected.members).toEqual(added.members);
+      await expect(name).toHaveValue("Retry contributor");
+      const retrySequence = await cursor(page);
+      await register.click();
+      const retried = await rosterAfter(page, retrySequence, added.revision);
+      expect(retried.error).toBeNull();
+      expect(retried.members.find(member => member.name === "Retry contributor")?.agent_member_id).toBeTruthy();
+      await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+      const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
+      const renameSequence = await cursor(page);
+      await displayName.fill("  Maple renamed  ");
+      const renamed = await rosterAfter(page, renameSequence, retried.revision);
+      expect(renamed.error).toBeNull();
+      const updated = renamed.members.find(value => value.agent_member_id === member.agent_member_id)!;
+      expect(updated).toEqual({ ...member, name: "Maple renamed" });
+      member = updated;
+      await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
+      await expect(displayName).toHaveValue("Maple renamed");
+      await displayName.fill(" Retry contributor ");
+      await expect(displayName).toHaveAttribute("aria-invalid", "true");
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      await expect(displayName).toHaveValue(" Retry contributor ");
+      await displayName.fill("Maple renamed");
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await expect.poll(() => surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await displayName.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: info.outputPath(`named-registration-${theme}.png`) });
+      await page.reload();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const restored = await readRoster(page);
+      expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
+        .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
+      expect(errors, "actual registration/rename/reload/restart console and page errors").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
+  test("saved manual settings and recorded assignment facts stay separate through rename, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const window = await liveCodexWindow(page, launch.gwt_session_id);
+      const record = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const memberId = tomlString(record, "agent_member_id")!;
+      const facts = { name: tomlString(record, "agent_name"), provider: "codex", model: tomlString(record, "model") };
+      expect(memberId).toBeTruthy(); expect(facts.name).toBeTruthy();
+      const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await readRoster(page);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      const savedCandidate = { agent_id: "codex", agent_member_id: memberId, model: "gpt-6-sol", reasoning: "medium", runtime_target: "Host", skip_permissions: false };
+      expect(savedCandidate.model).not.toBe(facts.model);
+      const beforeSave = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477752, profiles: [savedCandidate] });
+      const savedReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477752
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeSave).then(handle => handle.jsonValue());
+      expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
+      expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
+      const assertSaved = async () => {
+        const roster = await readRoster(page);
+        expect(roster.members.find(value => value.agent_member_id === memberId)?.saved_manual_profile).toMatchObject(savedCandidate);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
+        await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
+      };
+      await assertSaved();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
+      await expect(settings).toBeVisible();
+      await page.getByRole("button", { name: "Split view", exact: true }).click();
+      await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
+      await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
+      const beforeInlineSave = await cursor(page);
+      await settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`).selectOption("high");
+      const inlineReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && Number.isInteger(entry.payload.request_id)
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeInlineSave).then(handle => handle.jsonValue());
+      expect(inlineReply.kind, inlineReply.message).toBe("issue_monitor_profiles");
+      expect(inlineReply.profiles).toContainEqual(expect.objectContaining({ ...savedCandidate, reasoning: "high" }));
+      // No manual read, host change or reload can mask a missing ACK invalidation.
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
+      savedCandidate.reasoning = "high";
+      await page.getByRole("button", { name: "Close split", exact: true }).click();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const afterSaveRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      expect(tomlString(afterSaveRecord, "model")).toBe(facts.model);
+      expect(tomlString(afterSaveRecord, "reasoning_level")).toBe(tomlString(record, "reasoning_level"));
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertSaved(); await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`saved-current-native-${theme}.png`) });
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, launch.gwt_session_id), "status"),
+        { timeout: 60_000 }).toBe("Stopped");
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      const member = before.members.find(value => value.agent_member_id === memberId)!;
+      expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const sequence = await cursor(page);
+      await surface.getByRole("textbox", { name: "Display name", exact: true }).fill("Current renamed member");
+      const renamed = await rosterAfter(page, sequence, before.revision);
+      expect(renamed.error).toBeNull();
+      expect(renamed.members.find(value => value.agent_member_id === memberId)?.history).toEqual(member.history);
+      expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(beforeRename);
+      const assertHistory = async () => {
+        await assertSaved();
+        const roster = await readRoster(page);
+        const saved = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect(saved.name).toBe("Current renamed member");
+        expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-history-config")).toContainText([expected]);
+      };
+      await assertHistory();
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-history-config").first().scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`recorded-history-native-${theme}.png`) });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
+    } finally { await fixture.stop(); }
+  });
+
+  test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {
+    const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ bin }) {
+        const path = join(bin, "codex");
+        const provider = await readFile(path, "utf8");
+        const command = "  if (line.trim() === 'GWT_FIXTURE_EXIT')";
+        expect(provider).toContain(command);
+        await writeFile(path, provider.replace(command, `  if (line.trim() === 'GWT_FIXTURE_LINES') {
+    process.stdout.write('\\u001b[2J\\u001b[H');
+    for (const text of ${JSON.stringify(lines)}) console.log(text);
+    return;
+  }
+` + command));
+      },
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".works-surface:not(.works-surface--preview)");
+    const config = join(fixture.home, ".gwt", "config.toml");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "3");
+      await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      const setting = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
+      await expect(setting).toHaveValue("3");
+      await setting.fill("10"); await setting.press("Tab");
+      await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await page.screenshot({ path: info.outputPath("settings-native-works-output-lines.png") });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const session = launch.gwt_session_id!;
+      expect(session).toBeTruthy();
+      const checkOutput = async (stage: string, observedSession = session) => {
+        const window = await liveCodexWindow(page, observedSession);
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await surface.locator(".works-full").isVisible()) await surface.locator('[data-action="back"]').click();
+        const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
+        await expect(row).toBeVisible({ timeout: 60_000 });
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_LINES\r" });
+        await expect(row.locator(".terminal-text-preview")).toHaveText(lines.slice(-10).join("\n"), { useInnerText: false });
+        await expect(row.locator(".terminal-text-preview x")).toHaveCount(0);
+        await expect(surface).toHaveCSS("--works-preview-lines", "10");
+        await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(row.locator(".work-stats [data-stat]")).toHaveCount(8);
+        await row.locator(".work-tail").click(); await expect(surface.locator(".works-full")).toBeHidden();
+        await row.getByRole("button", { name: "Open terminal" }).click();
+        await expect(surface.locator(".works-full .xterm-helper-textarea")).toBeVisible();
+        await surface.locator('[data-action="back"]').click();
+        await page.screenshot({ path: info.outputPath(`works-output-lines-native-${stage}.png`) });
+      };
+      await checkOutput("saved");
+      // Remove only this fixture's non-agent Settings host. A restored host
+      // would fetch System settings on its own and mask Works-only bootstrap.
+      const beforeClose = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "list_windows" });
+      const windowList = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || [])
+        .findLast((entry: any) => entry.sequence > after && entry.payload.kind === "window_list")?.payload.windows,
+      beforeClose).then(handle => handle.jsonValue());
+      const settingsHost = windowList.filter((window: any) => window.preset === "settings");
+      expect(settingsHost).toHaveLength(1);
+      expect(settingsHost[0].session_id ?? null).toBeNull();
+      expect(settingsHost[0].agent_id ?? null).toBeNull();
+      expect(settingsHost[0].is_pm ?? false).toBe(false);
+      const currentWindow = await liveCodexWindow(page, session);
+      const launchesBeforeClose = (await fixture.launches()).length;
+      const closeCursor = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: settingsHost[0].id });
+      await page.waitForFunction(({ after, id }) => ((window as any).__gwtPlaywrightMessages || []).some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "workspace_state"
+        && !entry.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).some((window: any) => window.id === id)),
+      { after: closeCursor, id: settingsHost[0].id });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      expect((await liveCodexWindow(page, session)).id).toBe(currentWindow.id);
+      expect((await fixture.launches()).length).toBe(launchesBeforeClose);
+      await page.reload();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await checkOutput("reload");
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      const oldPid = fixture.ownedPid;
+      const restarted = await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(oldPid);
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
+      const resumed = (await fixture.launches())[1];
+      expect(resumed.gwt_session_id).toBeTruthy();
+      expect(resumed.gwt_session_id).not.toBe(session);
+      expect(resumed.resume_session_id).toBe(launch.provider_session_id);
+      expect(resumed.provider_session_id).toBe(launch.provider_session_id);
+      await checkOutput("restart", resumed.gwt_session_id!);
+      const restoredRecord = await sessionRecord(fixture.home, resumed.gwt_session_id!);
+      expect(tomlString(restoredRecord, "agent_session_id")).toBe(launch.provider_session_id);
+      expect(tomlString(restoredRecord, "restore_source_session_id")).toBe(session);
+      expect(tomlString(restoredRecord, "launch_origin")).toBe("automatic_restore");
+      await info.attach("works-output-lines-restore-continuity", { body: JSON.stringify({
+        source_session: session, restored_session: resumed.gwt_session_id,
+        native_conversation: resumed.provider_session_id, settings_host_restored: false,
+      }), contentType: "application/json" });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath("works-output-lines-native-400.png") });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "real settings/terminal/restart console and page errors").toEqual([]);
     } finally {
       await fixture.stop();
     }
@@ -496,6 +812,7 @@ for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON
       await page.getByRole("button", { name: "Agents", exact: true }).click();
       const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
       await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();
       const added = await rosterAfter(page, beforeAdd, initialRoster.revision);

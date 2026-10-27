@@ -14,13 +14,15 @@ import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLo
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 const ROOT = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
-const GWTD = process.env.GWT_PLAYWRIGHT_GWTD ?? join(ROOT, "target/debug/gwtd");
+const GWTD = process.env.GWT_PLAYWRIGHT_GWTD ?? join(ROOT, `target/debug/gwtd${process.platform === "win32" ? ".exe" : ""}`);
+const SHELL = process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh";
+const SHELL_ARGS = process.platform === "win32" ? ["/d", "/q"] : ["-i"];
 const ISSUE = 473501;
 type Project = { root: string; key: string; endpoint: any; endpointFile: string; birth: string; owner: any; intentionallyKilled: boolean };
 type Pane = { id: string; gui_id: string; incarnation: number; session_id: string; child_pid: number };
 type Fixture = { a: Project; b: Project; pa: Pane; pb: Pane; pages: Page[]; errors: string[]; theme: string };
 
-test.skip(!BASE || !HOME || process.platform === "win32", "requires a POSIX browser-check checkout and fresh HOME");
+test.skip(!BASE || !HOME, "requires a browser-check checkout and fresh HOME");
 test.use({ headless: false, viewport: { width: 1440, height: 960 } });
 test.setTimeout(240_000);
 
@@ -31,7 +33,7 @@ function isolatedEnv() {
 }
 
 async function cli(project: string, operation: string, params: Record<string, unknown> = {}) {
-  const child = spawn(GWTD, [], { cwd: project, env: isolatedEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(GWTD, [], { cwd: project, env: isolatedEnv(), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   let output = "", error = "";
   child.stdout.on("data", data => { output += data; });
   child.stderr.on("data", data => { error += data; });
@@ -48,8 +50,24 @@ async function cli(project: string, operation: string, params: Record<string, un
 }
 
 function processBirth(pid: number) {
-  try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim(); }
+  if (!Number.isInteger(pid) || pid <= 0) return "";
+  try {
+    return process.platform === "win32"
+      ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+      { encoding: "utf8", windowsHide: true }).trim()
+      : execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  }
   catch { return ""; }
+}
+
+function processParent(pid: number) {
+  expect(Number.isInteger(pid) && pid > 0, "real physical child PID").toBe(true);
+  return process.platform === "win32"
+    ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').ParentProcessId`],
+    { encoding: "utf8", windowsHide: true }).trim()
+    : execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim();
 }
 
 async function command(project: Project, command: Record<string, unknown>, timeout = 15_000) {
@@ -86,7 +104,7 @@ async function prepareProject(page: Page, directory: string, label: string, memb
     // Stable fixture members still pass through the real owner's reservation.
     // Random catalog initials make independent fixture projects collide.
     agent_roster: { schema_version: 1, revision: 1, members: [{
-      agent_member_id: `fixture-${label}-${randomUUID()}`, name: memberName,
+      agent_member_id: `fixture-${label}-${randomUUID()}`, agent_id: "supervisor-isolation-fixture", name: memberName,
       enabled: true, created_at: new Date().toISOString(), origin_session_id: null,
       last_issue_number: null, last_spec_number: null, assignment: null,
     }] } }));
@@ -123,7 +141,7 @@ async function prepareProject(page: Page, directory: string, label: string, memb
 // execution binding, registry row, capability and physical child itself.
 function launchConfig(project: Project) {
   return {
-    agent_id: { type: "Custom", value: "supervisor-isolation-fixture" }, command: "/bin/sh", args: ["-i"],
+    agent_id: { type: "Custom", value: "supervisor-isolation-fixture" }, command: SHELL, args: SHELL_ARGS,
     pending_initial_prompt: null, env_vars: { TERM: "xterm-256color" }, codex_auth_root: null, remove_env: [],
     working_dir: project.root, branch: "work/isolation", base_branch: "main", display_name: "Supervisor isolation fixture", color: "gray",
     model: null, tool_version: null, reasoning_level: null, session_mode: "Normal", resume_session_id: null,
@@ -135,7 +153,7 @@ function launchConfig(project: Project) {
       entrypoint: "project supervisor isolation fixture", launch_route: "manual", requested_skip_permissions: true,
       skip_forced: true, effective_skip_permissions: true, interactive_request_ignored: false,
       reason: "The local shell fixture has no permission prompts.", recovery_action: "",
-      provider_mapping: { provider: "custom:supervisor-isolation-fixture", supported: true, args: ["-i"], env_overlay: [] },
+      provider_mapping: { provider: "custom:supervisor-isolation-fixture", supported: true, args: SHELL_ARGS, env_overlay: [] },
       decided_at: new Date().toISOString() },
   };
 }
@@ -149,8 +167,7 @@ async function launch(project: Project): Promise<Pane> {
   expect(pane.incarnation).toBeGreaterThan(0);
   const session = await readFile(join(HOME, ".gwt/sessions", `${pane.session_id}.toml`), "utf8");
   expect(session, "a producing Session must exist; absent bindings cannot pass AC-3").toMatch(/\[execution_binding(?:\.|\])/);
-  expect(execFileSync("ps", ["-o", "ppid=", "-p", String(pane.child_pid)], { encoding: "utf8" }).trim())
-    .toBe(String(project.endpoint.pid));
+  expect(processParent(pane.child_pid)).toBe(String(project.endpoint.pid));
   await assertLiveSession(project, pane);
   return pane;
 }
@@ -183,7 +200,7 @@ async function echo(page: Page, project: Project, pane: Pane, label: string) {
   const token = `GWT_ISOLATION_${label}_${randomUUID().replaceAll("-", "")}`;
   const started = Date.now();
   // Split the marker so the PTY's echoed input cannot satisfy the assertion.
-  await input(page, pane, `printf 'GWT_%s\\n' '${token.slice(4)}'\r`);
+  await input(page, pane, `node -e "console.log('GWT_'+'${token.slice(4)}')"\r`);
   await expect.poll(async () => (await command(project, { type: "snapshot", id: pane.id, incarnation: pane.incarnation })).screen,
     { timeout: 10_000, intervals: [100] }).toContain(token);
   // The echo is read through the checkout GUI's actual projection as well.
@@ -212,7 +229,7 @@ async function echo(page: Page, project: Project, pane: Pane, label: string) {
 
 async function fixture(page: Page, info: TestInfo): Promise<Fixture> {
   expect(await realpath(HOME)).not.toBe(await realpath(homedir()));
-  expect(resolve(GWTD)).toBe(join(ROOT, "target/debug/gwtd"));
+  expect(resolve(GWTD)).toBe(join(ROOT, `target/debug/gwtd${process.platform === "win32" ? ".exe" : ""}`));
   const directory = await realpath(await mkdtemp(join(HOME, "supervisor-isolation-")));
   const projects: Project[] = [];
   const pages = [page];
@@ -336,6 +353,11 @@ async function recordHealthTransitions(page: Page, projectKey: string, hub = fal
   }, { projectKey, hub });
 }
 
+async function floodCounter(project: Project, pane: Pane) {
+  const snapshot = await command(project, { type: "snapshot", id: pane.id, incarnation: pane.incarnation });
+  return Math.max(-1, ...[...snapshot.screen.matchAll(/GWT_A_FLOOD_(\d+)/g)].map(match => Number(match[1])));
+}
+
 test("A output saturation and exact owner kill preserve B Session, pane and Hub", async ({ page }, info) => {
   await withLiveGwtBackendLock(BASE, info, async () => {
     const f = await fixture(page, info);
@@ -347,11 +369,16 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
       // Bounded-duration real PTY output. The subprocess stops on its own even
       // when a test assertion fails; no unbounded producer survives teardown.
       await input(aPage, f.pa, `node -e "let n=0;const end=Date.now()+60000;function burst(){if(Date.now()>=end)return;const ok=process.stdout.write('\\x1b[HGWT_A_FLOOD_'+n+++' '+'x'.repeat(1024));if(ok)setImmediate(burst);else process.stdout.once('drain',burst)}burst()"\r`);
-      await expect.poll(async () => (await command(f.a, { type: "snapshot", id: f.pa.id, incarnation: f.pa.incarnation })).screen,
-        { timeout: 15_000 }).toMatch(/GWT_A_FLOOD_\d+/);
+      let initialFlood = -1;
+      await expect.poll(async () => {
+        initialFlood = await floodCounter(f.a, f.pa);
+        return initialFlood;
+      }, { timeout: 15_000 }).toBeGreaterThanOrEqual(0);
       const loaded = [await echo(bPage, f.b, f.pb, "LOAD1"), await echo(bPage, f.b, f.pb, "LOAD2"), await echo(bPage, f.b, f.pb, "LOAD3")];
       expect(Math.max(...loaded), "B response stays within baseline plus the existing 500ms UI dispatch budget")
         .toBeLessThanOrEqual(Math.max(...baseline) + 500);
+      const loadedFlood = await floodCounter(f.a, f.pa);
+      expect(loadedFlood, "A's actual output advances while B responds").toBeGreaterThan(initialFlood);
       expect(await assertLiveSession(f.b, f.pb)).toEqual(before);
       const prefsPath = join(HOME, ".gwt/projects", f.b.key, "project-state/issue-monitor.json");
       const beforeScan = JSON.parse(await readFile(prefsPath, "utf8")).last_scan_at;
@@ -372,8 +399,11 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
         ? "completed own lookup failure; worker progress only"
         : "completed scan";
       info.annotations.push({ type: "monitor-scan-evidence", description: scanScope });
-      const flood = await command(f.a, { type: "snapshot", id: f.pa.id, incarnation: f.pa.incarnation });
-      expect(flood.screen).toMatch(/GWT_A_FLOOD_\d+/);
+      let completedFlood = -1;
+      await expect.poll(async () => {
+        completedFlood = await floodCounter(f.a, f.pa);
+        return completedFlood;
+      }, { timeout: 10_000 }).toBeGreaterThan(loadedFlood);
       // A is intentionally saturated. Its already authenticated owner identity
       // remains tied to this unchanged private endpoint and exact OS birth;
       // requiring another A RPC would test A responsiveness rather than B isolation.
@@ -399,6 +429,7 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
       expect(f.errors, "zero console/page errors across A, B and Hub").toEqual([]);
       await info.attach(`owner-isolation-${f.theme}`, { body: Buffer.from(JSON.stringify({ baseline_ms: baseline,
         saturated_ms: loaded, b_session: before, a_pid: f.a.endpoint.pid, b_pid: f.b.endpoint.pid,
+        a_flood: { initial: initialFlood, after_b_response: loadedFlood, after_monitor: completedFlood },
         monitor: { scope: scanScope, before: beforeScan, completed: completedScan.last_scan_at,
           failure: completedScan.last_scan_error ?? completedScan.last_error ?? null } })), contentType: "application/json" });
       await info.attach(`hub-after-owner-failure-${f.theme}`, { body: await hub.screenshot(), contentType: "image/png" });

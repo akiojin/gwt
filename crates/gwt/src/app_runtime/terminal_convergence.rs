@@ -506,6 +506,33 @@ mod tests {
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
 
     #[test]
+    fn non_completed_diagnoses_skip_the_additional_identity_read() {
+        let session = gwt_agent::Session::new(
+            Path::new("unused"),
+            "work/issue-42",
+            gwt_agent::AgentId::Codex,
+        );
+        for status in [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ] {
+            let mut execution = active_execution(42);
+            execution.status = status;
+            let mut reads = 0;
+            assert!(!execution.matches_completed_session(&session, |_| {
+                reads += 1;
+                Ok(None)
+            }));
+            assert_eq!(
+                reads, 0,
+                "{status:?} never uses the Completed identity fence"
+            );
+        }
+    }
+
+    #[test]
     fn observer_reads_each_monitor_path_once_per_tick_including_failures() {
         let temp = tempfile::tempdir().expect("tempdir");
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());

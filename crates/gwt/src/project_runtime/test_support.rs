@@ -778,7 +778,7 @@ pub fn run_pty_start_gate_helper() {
     #[cfg(not(unix))]
     {
         let exit_code = outcome.expect("run test PTY start gate");
-        assert_eq!(exit_code, 0, "released PTY target failed");
+        std::process::exit(exit_code.clamp(0, 255));
     }
 }
 

@@ -2133,6 +2133,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         gwt_core::paths::gwt_config_path(),
     )
     .expect("canonical owner profile");
+    #[cfg(not(windows))]
     let runner = temp
         .path()
         .join("fixture-runner-bin")

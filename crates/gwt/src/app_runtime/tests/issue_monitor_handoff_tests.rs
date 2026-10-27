@@ -80,33 +80,100 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         "{}",
         String::from_utf8_lossy(&cli.stdout)
     );
-    let (spawner, close_tasks) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
-    let closed = fixture.runtime.handle_agent_frontend_event(
-        "operator".into(),
-        AgentSessionPrincipal::for_test(&fixture.project_root, "operator-session").unwrap(),
+    let owner = project_owner_fixture(&mut fixture.runtime, &window_id);
+    let source = owner_runtime_probe(&fixture.runtime, &window_id);
+    let mut owner_layout = fixture
+        .runtime
+        .tab("tab-1")
+        .unwrap()
+        .workspace
+        .persisted()
+        .clone();
+    let row = owner_layout
+        .windows
+        .iter_mut()
+        .find(|row| row.id == raw_id)
+        .unwrap();
+    row.id = source.id.split_once("::").unwrap().1.into();
+    // The retained historical Session is already stopped; this physical
+    // inspection shell has no Session authority of its own.
+    row.session_id = None;
+    owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::UpdateLayout {
+            layout: owner_layout,
+        },
+    ))
+    .unwrap();
+    seed_owner_fixture_roster(&fixture.project_root, 8);
+    configure_owner_fixture_tools(&fixture.project_root, &["codex", "pane-contract-fixture"]);
+    let mut operator_config = pane_control_tests::control_launch_config(&fixture.project_root, 42);
+    operator_config.linked_issue_number = None;
+    operator_config.explicit_follow_up = false;
+    let operator = pane_control_tests::control_owner_launch(&owner, "operator", operator_config);
+    let client = owner_fixture_block_on(owner.agent_client("operator")).unwrap();
+    let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let close_hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        operator.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::PeerCloseAccepted,
+        move || {
+            accepted_tx.send(()).unwrap();
+            gwt_core::test_support::recv_event(&resume_rx, "operator close acceptance released");
+        },
+    );
+    let mut owner_events = owner.subscribe();
+    client.enqueue(
+        operator.grant.as_ref().unwrap().clone(),
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
+            id: source.id.clone(),
             request_id: None,
             responder: None,
         },
     );
-    assert!(!closed
+    gwt_core::test_support::recv_event(&accepted_rx, "actual operator close accepted");
+    assert!(!client
+        .drain()
+        .unwrap()
+        .events
         .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-    drain_queued_blocking_tasks(&close_tasks);
-    assert!(fixture.recorded_events.lock().unwrap().iter().any(|event| {
-        match recorded_project_payload(event) {
-            UserEvent::Dispatch(events) => events.iter().any(|event| {
-                event.target == DispatchTarget::Client("operator".into())
-                    && matches!(&event.event,
-                        BackendEvent::PaneCloseResult { window_id: closed, ok: true, reason: None, .. }
-                            if closed == &window_id)
-            }),
-            _ => false,
-        }
-    }));
+        .any(|event| event["kind"] == "pane_close_result"));
+    resume_tx.send(()).unwrap();
+    owner_fixture_block_on(owner.settled_self_closes()).unwrap();
+    drop(close_hook);
+    let closed = client.drain().unwrap();
+    assert_eq!(closed.close, None);
+    assert!(closed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result"
+            && event["window_id"] == source.id
+            && event["ok"] == true
+            && event["reason"].is_null()));
+    assert!(source.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
+    let context = fixture.runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let state = fixture.runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    for event in std::iter::from_fn(|| owner_events.try_recv().ok()) {
+        fixture
+            .runtime
+            .handle_project_owner_event(&context, 1, &identity, event);
+    }
     assert!(!fixture.runtime.runtimes.contains_key(&window_id));
+    pane_control_tests::control_close(&owner, &operator);
+    assert!(operator.pty.try_wait().unwrap().is_some());
+    fixture
+        .runtime
+        .test_project_owners
+        .remove(&fixture.project_root);
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("drained source owner")
+            .shutdown(),
+    );
 
     // Reuse the production authenticated bridge. Its scan ACK and the Host
     // materializer are driven separately while sharing the real persisted prefs.
@@ -254,6 +321,11 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         &fixture.project_root,
         &now,
     );
+    // Match the daemon's scan admission step: the real operator launch above
+    // initialized native members, so this queued claim needs their exact plan.
+    monitor
+        .synchronize_agent_issue_schedule(&fixture.project_root)
+        .unwrap();
     let client = FakeIssueClient::new();
     client.seed(sample_issue_snapshot(
         3165,
@@ -268,7 +340,10 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .iter()
             .map(|request| request.issue_number)
             .collect::<Vec<_>>(),
-        vec![3165]
+        vec![3165],
+        "claim exclusion={:?}, status={:?}",
+        monitor.agent_schedule_launch_exclusion(3165),
+        monitor.agent_status(),
     );
     let delivery_id = monitor
         .pending_launch_delivery_id(3165)
@@ -285,6 +360,8 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
         gwt::IssueMonitorLaunchSessionStrategy::FreshRequired
     );
     gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).unwrap();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    fixture.runtime.blocking_tasks = spawner;
     fixture.delivery_id = Some(delivery_id);
     let (owner, fresh_window, pane, _) =
         materialize_monitor_relaunch_at_owner(&mut fixture, strategy);
@@ -324,7 +401,118 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .unwrap(),
         gwt_terminal::PaneStatus::Running
     ));
+    let runtime = &fixture.runtime.runtimes[&fresh_window];
+    let child_pid = pane.pty.process_id().expect("live PTY child");
+    assert_ne!(child_pid, std::process::id());
+    let incarnation = runtime.incarnation;
+    assert_eq!(incarnation, pane.incarnation);
+    assert_eq!(runtime.child_pid, Some(child_pid));
+
+    // Keep the launch's queued scheduler: replacing it would strand its
+    // independent observer and leave only a vacuous, empty-candidate test.
+    drain_queued_blocking_tasks(&tasks);
+    let (context, activity) = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { context, events } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => {
+                        Some((context.clone(), activity.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("launch schedules an independent local census dispatch");
+    assert_eq!(
+        fixture.runtime.project_key_for_tab(&context.tab_id),
+        Some(&context.project_key)
+    );
+    assert_eq!(activity.project_key, context.project_key.to_string());
+    let agents = activity.agents.expect("current launch can be observed");
+    assert_eq!(agents.len(), 1, "the real successor must be nonempty");
+    let agent = &agents[0];
+    assert_eq!(agent.window_id, fresh_window);
+    assert_eq!(agent.session_id, session_id);
+    assert_eq!(agent.runtime_incarnation, incarnation);
+    assert_eq!(agent.issue_number, Some(3165));
+    assert!(!agent.is_pm);
+
+    fixture.runtime.agent_roster_events(
+        &context,
+        &"operator".into(),
+        gwt::agent_names::AgentRosterAction::Read,
+        None,
+        Some("read-successor".into()),
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let roster = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::AgentRoster { roster, request_id } => {
+                        assert_eq!(request_id.as_deref(), Some("read-successor"));
+                        Some(roster.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("roster reply for the live successor");
+    assert!(roster.error.is_none(), "{:?}", roster.error);
+    assert_eq!(roster.project_key, activity.project_key);
+    let member = roster
+        .members
+        .iter()
+        .find(|member| {
+            member
+                .member
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.session_id.as_deref())
+                == Some(session_id.as_str())
+        })
+        .expect("observed Session binds a roster member");
+    assert!(member.member.enabled);
+    assert_eq!(
+        candidate.agent_member_id.as_deref(),
+        Some(member.member.agent_member_id.as_str())
+    );
+    let catalog_window = fixture
+        .runtime
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(move |window| (tab, window))
+        })
+        .find(|(tab, window)| combined_window_id(&tab.id, &window.id) == fresh_window)
+        .map(|(_, window)| window)
+        .expect("observed window remains in the catalog");
+    assert_eq!(
+        catalog_window.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        catalog_window.agent_name.as_deref(),
+        Some(member.member.name.as_str())
+    );
     close_test_owner_runtime(&mut fixture.runtime, &fresh_window);
+    assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
 #[test]

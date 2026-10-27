@@ -109,7 +109,6 @@ fn issue_4359_board_decision_notifies_mentioned_idle_session_once_with_shared_re
         let temp = tempdir().expect("tempdir");
         let _home = ScopedGwtHome::set(temp.path());
         let (repo, mut runtime, owner, probe) = board_notice_owner_fixture(&temp, agent_id);
-        let target = "tab-1::other-window";
         let target_session = probe.session.as_ref().unwrap().id.clone();
         let canonical_target = probe.id.clone();
         assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok());

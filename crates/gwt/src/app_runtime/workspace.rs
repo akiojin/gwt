@@ -9,7 +9,7 @@
 //!   [`retain_live_workspace_agents`],
 //!   [`workspace_projection_for_current_resume`])
 //! - derives Active Work resume / cleanup state
-//!   ([`workspace_projection_owner_title`],
+//!   ([`gwt::project_runtime::installation::workspace_projection_owner_title`],
 //!   [`workspace_cleanup_candidate_for_projection`])
 //! - reexports shared project-runtime launch projection and Work event writers
 //!   ([`save_workspace_launch_projection`])
@@ -35,8 +35,6 @@ use super::{
     BranchEntriesPhase, OutboundEvent, ResumeBranchIndex, UserEvent, WindowPreset,
     WORKSPACE_CLEANUP_EVENT_ID, WORKSPACE_OVERVIEW_JOURNAL_LIMIT,
 };
-
-pub(super) use gwt::project_runtime::installation::workspace_projection_owner_title;
 
 pub(super) fn merge_active_sessions_into_projection<'a>(
     projection: &mut gwt_core::workspace_projection::WorkspaceProjection,
@@ -84,8 +82,6 @@ pub(super) fn retain_live_workspace_agents(
         updated_at,
     );
 }
-
-pub(super) use gwt::project_runtime::workspace::save_shell_work_projection;
 
 pub(super) fn workspace_projection_for_current_resume(
     mut projection: gwt_core::workspace_projection::WorkspaceProjection,

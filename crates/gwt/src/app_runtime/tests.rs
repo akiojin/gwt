@@ -51,7 +51,7 @@ use gwt_github::{
     ApiError, Cache, CommentId, CommentSnapshot, FakeIssueClient, FetchResult, IssueClient,
     IssueNumber, IssueSnapshot, IssueState, SpecListFilter, SpecSummary, UpdatedAt,
 };
-use gwt_terminal::{Pane, PaneStatus, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
+use gwt_terminal::{Pane, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT};
 use tracing::{field::Visit, Event, Level, Subscriber};
 use tracing_subscriber::{layer::Context, prelude::*, Layer};
 
@@ -1158,7 +1158,7 @@ fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
     runtime_hook_state_for_event(status, "Stop", session_id)
 }
 
-fn runtime_hook_state_for_event(
+pub(super) fn runtime_hook_state_for_event(
     status: &str,
     source_event: &str,
     session_id: &str,
@@ -4481,7 +4481,7 @@ fn projection_only_continue_prepared_spec_recovery_case(divergent_candidate_bran
     let case_name = "projection-only-prepared-spec-recovery";
     let operation_id = "projection-prepared-spec-recovery-operation";
     let runtime_root = temp.path().join(format!("{case_name}-runtime"));
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         case_name,
         ProjectionOnlyContinueFixture {
@@ -5295,6 +5295,7 @@ fn continue_work_heal_session_start_events(
         gwt_core::paths::gwt_config_path(),
     )
     .expect("canonical owner profile");
+    #[cfg(not(windows))]
     let runner = temp_root.join("fixture-runner-bin").join(if cfg!(windows) {
         "codex.cmd"
     } else {
@@ -8423,7 +8424,15 @@ fn start_monitor_relaunch_owner(
     let canonical_profile = gwt_core::paths::gwt_config_path();
     fs::create_dir_all(canonical_profile.parent().unwrap()).unwrap();
     fs::copy(profile, &canonical_profile).unwrap();
-    seed_owner_fixture_roster(&fixture.project_root, 8);
+    if gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap()
+    .agent_roster
+    .is_none()
+    {
+        seed_owner_fixture_roster(&fixture.project_root, 8);
+    }
     gwt::machine_agent_settings::set(
         Some(8),
         gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
@@ -9356,6 +9365,7 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    name: None,
                     agent_id: Some(tool.into()),
                 },
                 None,
@@ -10608,7 +10618,41 @@ fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
         for event in completed {
             match runtime.accept_project_completion(event) {
                 Some(UserEvent::PmWakeDeliveryComplete(delivery)) => {
-                    runtime.pm_wake_delivery_complete(delivery)
+                    if matches!(
+                        delivery.result,
+                        Ok(gwt::project_runtime::pm_delivery::PmWakeWrite::Unconfirmed)
+                    ) {
+                        // This fixture drains input instead of running a provider. Supply
+                        // the exact issued body and Session to the ordinary hook ACK path.
+                        let prompt = delivery.decision.delivery_prompt();
+                        let receipts = gwt::pm_registry::load_pm_delivery_receipts(
+                            &gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(
+                                &delivery.context.project_root,
+                            ),
+                        )
+                        .unwrap();
+                        if let Some(receipt) = receipts.last() {
+                            let body = prompt.trim_end_matches('\r');
+                            if gwt::pm_registry::pm_delivery_prompt_sha256(body)
+                                == receipt.body_sha256
+                            {
+                                let _session = gwt_core::test_support::ScopedEnvVar::set(
+                                    "GWT_SESSION_ID",
+                                    &receipt.target_session_id,
+                                );
+                                let input = serde_json::json!({"prompt": format!(
+                                    "{body} [gwt-delivery:{}:{}]", receipt.operation_id, receipt.body_sha256,
+                                )}).to_string();
+                                gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                                    &delivery.context.project_root,
+                                    &input,
+                                );
+                            }
+                        }
+                    }
+                    let window_id = delivery.decision.window_id.clone();
+                    runtime.pm_wake_delivery_complete(delivery);
+                    runtime.flush_pending_pm_wake(&window_id);
                 }
                 Some(UserEvent::RemoteRuntimeCommandComplete(completion)) => {
                     runtime.handle_remote_runtime_command_complete(*completion);
@@ -10753,23 +10797,6 @@ fn seed_quiet_standing_supervision(repo: &Path) {
 pub(super) struct TestPaneGuard {
     pty: Arc<gwt_terminal::PtyHandle>,
     reader: Option<thread::JoinHandle<()>>,
-}
-
-impl TestPaneGuard {
-    fn new(pane: &Pane) -> Self {
-        let pty = pane.shared_pty();
-        let mut reader = pane.reader().expect("test PTY reader");
-        let reader = thread::spawn(move || {
-            let mut buffer = [0u8; 4096];
-            while std::io::Read::read(&mut reader, &mut buffer).is_ok_and(|n| n > 0) {}
-        });
-        #[cfg(windows)]
-        pty.write_input(b"\x1b[1;1R").expect("ConPTY cursor reply");
-        Self {
-            pty,
-            reader: Some(reader),
-        }
-    }
 }
 
 impl Drop for TestPaneGuard {

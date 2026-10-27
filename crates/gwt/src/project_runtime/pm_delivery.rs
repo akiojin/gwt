@@ -7,6 +7,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::pm_registry::{self, PmLaunchProfile, PmRegistration};
@@ -24,6 +26,7 @@ pub struct PmWakeInput {
 #[serde(rename_all = "snake_case")]
 pub enum PmWakeWrite {
     Injected,
+    Unconfirmed,
     Deferred,
     Queued,
     Discarded,
@@ -166,6 +169,12 @@ struct PmWakePermit {
     started: bool,
 }
 impl PmWakePermits {
+    pub(crate) fn finish(&mut self, operation: &str) {
+        if let Some(permit) = self.0.get_mut(operation) {
+            permit.started = false;
+        }
+    }
+
     pub(crate) fn cancel(
         &mut self,
         operation: &str,
@@ -214,6 +223,79 @@ impl PmWakePermits {
     }
 }
 
+/// A current unfinished turn is busy even when its output and tool set are quiet.
+pub fn pm_wake_runtime_is_busy(path: &Path, incarnation: u64) -> bool {
+    let Ok(state) = gwt_agent::SessionRuntimeState::load(path) else {
+        return false;
+    };
+    if state.runtime_incarnation.is_none() {
+        return false;
+    }
+    if state.runtime_incarnation != Some(incarnation) {
+        return true;
+    }
+    state.status != gwt_agent::AgentStatus::Idle
+        || (state.source_event.as_deref() == Some("Stop")
+            && state
+                .last_completed_hook_event_at
+                .is_none_or(|at| at < state.updated_at))
+}
+
+pub(crate) fn release_acknowledged_wake(
+    root: &Path,
+    id: &str,
+    session: &str,
+    entry: &super::agent_dispatch::PtyWriterEntry,
+    operation: Option<&str>,
+) -> Result<bool, String> {
+    if !entry.current.load(Ordering::Acquire) {
+        return Ok(false);
+    }
+    let operation_id = entry
+        .pm_delivery_replay
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .filter(|guard| {
+            guard.retained_input.is_some()
+                && guard.target_session_id == session
+                && operation.is_none_or(|operation| guard.operation_id == operation)
+        })
+        .map(|guard| guard.operation_id.clone());
+    let Some(operation_id) = operation_id else {
+        return Ok(false);
+    };
+    let verified = pm_registry::pm_delivery_receipt_for_operation(
+        &pm_registry::pm_delivery_receipts_path_for_repo_path(root),
+        &operation_id,
+    )
+    .map_err(|error| error.to_string())?
+    .is_some_and(|receipt| {
+        receipt.target_session_id == session
+            && receipt.target_window_id == id
+            && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+    });
+    if !verified {
+        return Ok(false);
+    }
+    let released = {
+        let mut guard = entry
+            .pm_delivery_replay
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if guard.as_ref().is_some_and(|guard| {
+            guard.operation_id == operation_id && guard.target_session_id == session
+        }) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    // Reservation drop can acquire the physical writer; release outside the mutex.
+    drop(released);
+    Ok(true)
+}
+
 /// Resolve current escalation subjects and commit the protected prompt in the
 /// same project owner that holds its exact physical writer.
 pub(crate) fn deliver_pm_wake(
@@ -223,20 +305,319 @@ pub(crate) fn deliver_pm_wake(
     writers: &super::agent_dispatch::PtyWriterRegistry,
     delivery: &PmWakeInput,
     permit: &Arc<AtomicBool>,
+    runtime: (
+        &Path,
+        Option<&str>,
+        u64,
+        &std::sync::Mutex<gwt_terminal::Pane>,
+        u64,
+    ),
 ) -> Result<PmWakeWrite, String> {
+    use super::agent_dispatch::{
+        await_pm_delivery_status, drive_verified_pane_submit, PmDeliveryReplayGuard,
+        PM_DELIVERY_TERMINAL_MARGIN, PM_DELIVERY_UNCONFIRMED_REASON,
+    };
+    let (sessions_dir, target_session, incarnation, pane, output_seq) = runtime;
+    let operation_deadline = Instant::now() + Duration::from_secs(2);
+    let _operation_budget = (!delivery.idle)
+        .then(|| gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline));
+    let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
+    if let Some(session) = target_session {
+        if release_acknowledged_wake(root, id, session, entry, Some(&delivery.operation_id))? {
+            return Ok(PmWakeWrite::Injected);
+        }
+        if pm_registry::pm_delivery_receipt_for_operation(
+            &pm_registry::pm_delivery_receipts_path_for_repo_path(root),
+            &delivery.operation_id,
+        )
+        .map_err(|error| error.to_string())?
+        .is_some_and(|receipt| {
+            receipt.target_session_id == session
+                && receipt.target_window_id == id
+                && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+        }) {
+            return Ok(PmWakeWrite::Injected);
+        }
+    }
+    let owns_input = entry
+        .pm_delivery_replay
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .is_some_and(|guard| {
+            guard.operation_id == delivery.operation_id && guard.retained_input.is_some()
+        });
     pm_registry::with_active_pm_loop(&pm_registry::pm_prefs_path_for_repo_path(root), || {
         let loop_state =
             pm_registry::load_pm_loop_state(&pm_registry::pm_loop_state_path_for_repo_path(root))
                 .map_err(|error| error.to_string())?;
-        if loop_state.last_wake_id != delivery.wake_id {
+        if loop_state.last_wake_id != delivery.wake_id && !owns_input {
             return Ok(PmWakeWrite::Discarded);
         }
-        if !permit.load(Ordering::Acquire) || entry.handle.has_unsent_user_input() {
+        if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
+        {
             return Ok(PmWakeWrite::Deferred);
         }
         let prompt = pm_wake_delivery_prompt(root, &delivery.prompt, delivery.idle);
-        if !permit.load(Ordering::Acquire) || entry.handle.has_unsent_user_input() {
+        if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
+        {
             return Ok(PmWakeWrite::Deferred);
+        }
+        if !delivery.idle {
+            let Some(target_session) = target_session else {
+                return Ok(PmWakeWrite::Discarded);
+            };
+            let operation_id = delivery
+                .wake_id
+                .as_deref()
+                .ok_or("PM wake has no operation id")?;
+            if operation_id != delivery.operation_id {
+                return Err("PM wake operation id does not match its wake".into());
+            }
+            let runtime_path = gwt_agent::runtime_state_path(sessions_dir, target_session);
+            let busy = || pm_wake_runtime_is_busy(&runtime_path, incarnation);
+            let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(root);
+            let existing =
+                pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                    .map_err(|error| error.to_string())?;
+            if existing.as_ref().is_some_and(|receipt| {
+                receipt.target_session_id == target_session
+                    && receipt.target_window_id == id
+                    && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+            }) {
+                return Ok(PmWakeWrite::Injected);
+            }
+            if busy() {
+                return Ok(PmWakeWrite::Deferred);
+            }
+            let mut replay = if existing.is_some() {
+                let mut guard = entry
+                    .pm_delivery_replay
+                    .lock()
+                    .map_err(|error| error.to_string())?;
+                if guard.as_ref().is_some_and(|guard| {
+                    guard.operation_id == operation_id
+                        && guard
+                            .retained_input
+                            .as_ref()
+                            .is_some_and(|(_, complete)| !complete)
+                }) {
+                    return Ok(PmWakeWrite::Unconfirmed);
+                }
+                if guard.as_ref().is_some_and(|guard| {
+                    guard.operation_id == operation_id && guard.target_session_id == target_session
+                }) {
+                    guard.take()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if existing.is_some() && replay.is_none() {
+                return Ok(
+                    if existing.as_ref().is_some_and(|receipt| {
+                        matches!(
+                            receipt.status,
+                            pm_registry::PmDeliveryReceiptStatus::Refused
+                                | pm_registry::PmDeliveryReceiptStatus::Lost
+                        )
+                    }) {
+                        PmWakeWrite::Discarded
+                    } else {
+                        PmWakeWrite::Unconfirmed
+                    },
+                );
+            }
+            let ordinary_revision = replay
+                .as_ref()
+                .map(|guard| guard.ordinary_revision)
+                .or_else(|| entry.handle.ordinary_input_revision())
+                .ok_or("PM wake input revision unavailable")?;
+            let retained = replay
+                .as_mut()
+                .and_then(|guard| guard.retained_input.take());
+            let continuing = retained.is_some();
+            if !continuing
+                && (entry.handle.has_unsent_user_input()
+                    || entry.handle.ordinary_input_revision() != Some(ordinary_revision))
+            {
+                return Ok(PmWakeWrite::Discarded);
+            }
+            let reservation = match retained {
+                Some((reservation, _)) => reservation,
+                None => Arc::clone(&entry.handle)
+                    .reserve_input_transaction()
+                    .map_err(|error| error.to_string())?,
+            };
+            if !continuing
+                && replay.as_ref().is_some_and(|guard| {
+                    reservation.previous_transaction_revision() != guard.transaction_revision
+                })
+            {
+                return Ok(PmWakeWrite::Discarded);
+            }
+            let (prompt, body_sha256) = if let Some(receipt) = existing {
+                if receipt.target_session_id != target_session || receipt.target_window_id != id {
+                    return Ok(PmWakeWrite::Discarded);
+                }
+                ("\r".to_string(), receipt.body_sha256)
+            } else {
+                if pane.lock().map_err(|error| error.to_string())?.output_seq() != output_seq {
+                    return Ok(PmWakeWrite::Deferred);
+                }
+                let body = prompt.trim_end_matches('\r');
+                let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+                let prepared = pm_registry::PmDeliveryReceipt {
+                    operation_id: operation_id.to_string(),
+                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                    status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                    principal_session_id: format!("gwt-wake:{operation_id}"),
+                    target_window_id: id.to_string(),
+                    target_session_id: target_session.to_string(),
+                    body_sha256: body_sha256.clone(),
+                    reason: None,
+                };
+                if !matches!(
+                    pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared)
+                        .map_err(|error| error.to_string())?,
+                    pm_registry::PmDeliveryPrepareOutcome::Prepared
+                ) {
+                    return Ok(PmWakeWrite::Unconfirmed);
+                }
+                (
+                    format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"),
+                    body_sha256,
+                )
+            };
+            let mut body_written = false;
+            let mut body_attempted = false;
+            let result = drive_verified_pane_submit(
+                &prompt,
+                reservation.bracketed_paste_enabled(),
+                2,
+                |bytes| {
+                    if busy() || !permit.load(Ordering::Acquire) {
+                        return Err("PM wake held by newer turn activity".into());
+                    }
+                    let current = writers.read().map_err(|error| error.to_string())?;
+                    if !current
+                        .get(id)
+                        .is_some_and(|writer| Arc::ptr_eq(writer, entry))
+                    {
+                        return Err("PM wake target generation changed".into());
+                    }
+                    reservation
+                        .write_input_authorized(bytes, |commit| {
+                            let fail = |details: &str| gwt_terminal::TerminalError::PtyIoError {
+                                details: details.into(),
+                            };
+                            if Instant::now() >= deadline {
+                                return Err(fail(
+                                    "PM wake deadline expired before physical commit",
+                                ));
+                            }
+                            let current_pm = pm_registry::load_pm_prefs(
+                                &pm_registry::pm_prefs_path_for_repo_path(root),
+                            )
+                            .map_err(|error| fail(&error.to_string()))?
+                            .registration;
+                            if busy() || !permit.load(Ordering::Acquire) {
+                                return Err(fail(
+                                    "PM wake held by newer activity at physical commit",
+                                ));
+                            }
+                            if Instant::now() >= deadline
+                                || current_pm.as_ref().is_none_or(|registration| {
+                                    registration.session_id != target_session
+                                })
+                            {
+                                return Err(fail("registered PM changed before physical commit"));
+                            }
+                            let mut mark_attempted = || body_attempted |= bytes != b"\r";
+                            if body_written || continuing {
+                                commit(&mut mark_attempted)
+                            } else {
+                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
+                                    commit(&mut mark_attempted)
+                                })
+                            }
+                        })
+                        .map_err(|error| error.to_string())?;
+                    body_written |= bytes != b"\r";
+                    Ok(())
+                },
+                |settle| {
+                    thread::sleep(settle.min(deadline.saturating_duration_since(Instant::now())))
+                },
+                || {
+                    pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                        .map(|receipt| {
+                            receipt.is_some_and(|receipt| {
+                                receipt.target_session_id == target_session
+                                    && receipt.body_sha256 == body_sha256
+                                    && receipt.status
+                                        == pm_registry::PmDeliveryReceiptStatus::Verified
+                            })
+                        })
+                        .map_err(|error| error.to_string())
+                },
+            );
+            let status = await_pm_delivery_status(&receipt_path, operation_id, deadline);
+            if status
+                .as_ref()
+                .is_ok_and(|status| *status == pm_registry::PmDeliveryReceiptStatus::Verified)
+            {
+                return Ok(PmWakeWrite::Injected);
+            }
+            if body_attempted || continuing {
+                let guard = PmDeliveryReplayGuard {
+                    operation_id: operation_id.to_string(),
+                    target_session_id: target_session.to_string(),
+                    ordinary_revision,
+                    transaction_revision: reservation.transaction_revision(),
+                    retained_input: Some((reservation, body_written || continuing)),
+                };
+                let previous = entry
+                    .pm_delivery_replay
+                    .lock()
+                    .map_err(|error| error.to_string())?
+                    .replace(guard);
+                drop(previous);
+                // Close the ACK/guard-publication race: an exact hook that saw
+                // no retained guard has already committed its durable receipt.
+                if release_acknowledged_wake(root, id, target_session, entry, Some(operation_id))? {
+                    return Ok(PmWakeWrite::Injected);
+                }
+            }
+            status?;
+            let reason = result
+                .err()
+                .unwrap_or_else(|| PM_DELIVERY_UNCONFIRMED_REASON.to_string());
+            let reason = if body_attempted && !body_written {
+                format!("PM wake body write was incomplete; recovery is readback-only: {reason}")
+            } else {
+                reason
+            };
+            pm_registry::finish_pm_delivery_receipt(
+                &receipt_path,
+                operation_id,
+                target_session,
+                &body_sha256,
+                if body_attempted || replay.is_some() {
+                    pm_registry::PmDeliveryReceiptStatus::Unconfirmed
+                } else {
+                    pm_registry::PmDeliveryReceiptStatus::Refused
+                },
+                Some(&reason),
+            )
+            .map_err(|error| error.to_string())?;
+            tracing::warn!(operation_id, %reason, "PM wake has no exact turn acknowledgement");
+            return Ok(if body_attempted || replay.is_some() {
+                PmWakeWrite::Unconfirmed
+            } else {
+                PmWakeWrite::Discarded
+            });
         }
         // Reuse the canonical paste/reservation/submit implementation and its
         // actual-commit current-generation fence; no GUI physical writer exists.

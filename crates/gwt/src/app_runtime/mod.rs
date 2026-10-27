@@ -11231,12 +11231,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
@@ -11494,7 +11496,10 @@ impl AppRuntime {
             FrontendEvent::AgentRoster {
                 action,
                 expected_revision,
-            } => self.agent_roster_events(context, &client_id, action, expected_revision),
+                request_id,
+            } => {
+                self.agent_roster_events(context, &client_id, action, expected_revision, request_id)
+            }
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
             }
@@ -12425,12 +12430,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {

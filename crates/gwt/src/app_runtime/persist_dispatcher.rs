@@ -591,7 +591,6 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
-        let workspace_path = gwt::persistence::workspace_state_path(temp.path());
         let _owner = layout_owner(temp.path());
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
         let (write_started_tx, write_started_rx) = mpsc::sync_channel(1);
