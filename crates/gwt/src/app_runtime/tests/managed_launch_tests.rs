@@ -3471,55 +3471,36 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let mut persisted = empty_workspace_state();
-    persisted.windows.push(sample_window(
-        "agent-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    ));
-    persisted.windows.push(sample_window(
-        "shell-1",
-        WindowPreset::Shell,
-        WindowProcessStatus::Running,
-    ));
-    persisted.next_z_index = 3;
-    let agent_tab = ProjectTabRuntime {
-        id: "tab-1".to_string(),
-        title: "Repo".to_string(),
-        project_root: temp.path().join("repo"),
-        kind: ProjectKind::Git,
-        workspace: WindowRegistry::from_persisted(persisted),
-        migration_pending: false,
-        main_worktree_root_cache: std::sync::Arc::new(std::sync::OnceLock::new()),
+    let (owner, agent, mut runtime, mut events) =
+        managed_exit_fixture(temp.path(), 1, "unexpected fatal: config parse error");
+    let owner = Arc::new(owner);
+    runtime
+        .test_project_owners
+        .insert(runtime.tabs[0].project_root.clone(), Arc::clone(&owner));
+    let shell = runtime.tabs[0].workspace.add_window(WindowPreset::Shell);
+    runtime.register_window("tab-1", &shell.id);
+    let shell_window_id = combined_window_id("tab-1", &shell.id);
+    let (command, args) = if cfg!(windows) {
+        ("powershell".into(), vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "$null = [Console]::ReadLine(); [Console]::WriteLine('command not found: frobnicate'); exit 1".into(),
+        ])
+    } else {
+        ("/bin/sh".into(), vec![
+            "-c".into(),
+            "stty -echo; IFS= read -r line; printf '%s\\n' 'command not found: frobnicate'; exit 1".into(),
+        ])
     };
-    let mut runtime = sample_runtime(temp.path(), vec![agent_tab], Some("tab-1"));
-    let agent_window_id = combined_window_id("tab-1", "agent-1");
-    let shell_window_id = combined_window_id("tab-1", "shell-1");
-    insert_test_pane_runtime(&mut runtime, &agent_window_id);
-    insert_test_pane_runtime(&mut runtime, &shell_window_id);
-    owner_runtime_probe(&runtime, &agent_window_id)
-        .pane
-        .lock()
-        .expect("agent pane")
-        .process_bytes(b"unexpected fatal: config parse error\r\n");
-    owner_runtime_probe(&runtime, &shell_window_id)
-        .pane
-        .lock()
-        .expect("shell pane")
-        .process_bytes(b"command not found: frobnicate\r\n");
-
-    let _ = runtime.handle_runtime_status_with_exit_confirmation(
-        agent_window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("Process exited with status 1".to_string()),
-        true,
+    insert_test_pane_runtime_with_command(&mut runtime, &shell_window_id, command, args, 80, 24);
+    let shell = owner_runtime_probe(&runtime, &shell_window_id);
+    let agent_window_id = combined_window_id("tab-1", "exit-agent");
+    finish_managed_exit(&owner, &agent, &mut runtime, &mut events);
+    assert!(
+        shell.pty.try_wait().unwrap().is_none(),
+        "the Agent exit must leave the Shell control alive"
     );
-    let _ = runtime.handle_runtime_status_with_exit_confirmation(
-        shell_window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("Process exited with status 1".to_string()),
-        true,
-    );
+    finish_managed_exit(&owner, &shell, &mut runtime, &mut events);
 
     let agent_detail = runtime
         .window_details
