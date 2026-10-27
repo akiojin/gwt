@@ -4734,6 +4734,9 @@ mod tests {
     /// failing only the selected Git command while forwarding all other reads.
     #[test]
     fn pr_list_tracked_local_failures_are_errors_and_recover() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         with_fake_gh_capture("success", |repo, gh_calls| {
             use std::fs;
 
