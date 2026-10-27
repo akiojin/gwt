@@ -1937,8 +1937,37 @@ fn issue5596_native_answer_source(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if pane.pending_fresh_execution.is_some() {
-        authenticate_monitor_owner_readiness(&owner, &pane);
+    if let Some(pending) = &pane.pending_fresh_execution {
+        // SessionStart already submitted authenticated readiness. An extra HTTP
+        // resend can capture Prepared just before the same bearer becomes Active.
+        let ready = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Hang guard for the original authenticated owner finalization, not a guessed process delay.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let current = owner.probe(&pane.id, pane.incarnation).await.unwrap();
+                    if current.pending_fresh_execution.is_none() {
+                        break current;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("the original SessionStart must commit exact owner readiness")
+        });
+        let grant = ready.grant.as_ref().unwrap();
+        assert!(ready.issuer.grant_is_current(grant));
+        assert!(ready.has_capability_bearer(pane.grant.as_ref().unwrap()));
+        assert_eq!(
+            grant.principal().active_execution_binding(),
+            Some(&pending.binding)
+        );
+        assert!(
+            gwt::project_runtime::continuation::fresh_execution_commit_readback_matches(
+                &pending.worktree_path,
+                pending.owner,
+                &pending.session_identity,
+            )
+        );
     }
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
         .unwrap();
