@@ -3465,17 +3465,33 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (owner, probe, mut runtime, mut observed) =
         managed_exit_fixture(temp.path(), 0, "provider finished", false);
-    let window_id = combined_window_id("tab-1", "exit-agent");
+    let raw_id = probe.id.split_once("::").unwrap().1;
+    let window_id = combined_window_id("tab-1", raw_id);
+    let mut finalizers = owner.subscribe();
+    assert!(runtime.tabs[0].workspace.window(raw_id).is_some());
     assert_eq!(runtime.runtimes[&window_id].incarnation, probe.incarnation);
+    assert_eq!(
+        runtime.active_agent_sessions[&window_id].session_id,
+        probe.session.as_ref().unwrap().id,
+    );
     let events = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
 
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!runtime.window_lookup.contains_key(&window_id));
-    assert!(runtime.tabs[0].workspace.window("exit-agent").is_none());
+    assert!(runtime.tabs[0].workspace.window(raw_id).is_none());
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.runtimes.contains_key(&window_id));
+    assert_eq!(
+        std::iter::from_fn(|| finalizers.try_recv().ok())
+            .filter(|event| matches!(event,
+                gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None }
+                    if id == &probe.id && *incarnation == probe.incarnation))
+            .count(),
+        1,
+        "the exact current exit completes one detached owner finalizer"
+    );
     assert!(
         probe.pty.try_wait().expect("probe reaped child").is_some(),
         "the owner finalizer reaps the exact exited generation"
