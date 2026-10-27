@@ -254,7 +254,7 @@ impl Poller {
             self.claude_account(&config, now, force).await,
         ];
         let consumption = self.consumption(&config, &accounts, now, force);
-        let sessions = collect_sessions_at(&config, &mut self.transcripts, now);
+        let sessions = collect_sessions(&config, &mut self.transcripts);
         self.transcripts.end_poll();
         UsageSnapshot {
             accounts,
@@ -499,19 +499,27 @@ fn is_active_status(status: AgentStatus) -> bool {
     )
 }
 
-#[cfg(test)]
 fn collect_sessions(config: &UsageConfig, cache: &mut UsageCache) -> Vec<SessionUsage> {
-    collect_sessions_at(config, cache, Utc::now())
+    collect_sessions_with_clock(config, cache, Utc::now)
 }
 
 /// Read only conversations referenced by the gwt ledger. Historical rows keep
 /// their Session/member identity for Today; only the current active conversation
 /// participates in the existing per-agent table. Missing or ambiguous evidence
 /// stays NoData instead of silently becoming a measured zero.
+#[cfg(test)]
 fn collect_sessions_at(
     config: &UsageConfig,
     cache: &mut UsageCache,
     now: DateTime<Utc>,
+) -> Vec<SessionUsage> {
+    collect_sessions_with_clock(config, cache, || now)
+}
+
+fn collect_sessions_with_clock(
+    config: &UsageConfig,
+    cache: &mut UsageCache,
+    clock: impl FnOnce() -> DateTime<Utc>,
 ) -> Vec<SessionUsage> {
     #[derive(PartialEq, Eq)]
     enum ConversationOwner {
@@ -634,7 +642,7 @@ fn collect_sessions_at(
                 continue;
             }
         }
-        let usage = if ambiguous || agent_sid.is_empty() {
+        let usage_home = if ambiguous || agent_sid.is_empty() {
             None
         } else {
             match provider {
@@ -643,12 +651,15 @@ fn collect_sessions_at(
                     .as_ref()
                     .map(|root| &root.path)
                     .or(codex_home.as_ref())
-                    .and_then(|home| cache.codex_session_at(home, &agent_sid, now)),
-                UsageProvider::ClaudeCode => claude_home
-                    .as_ref()
-                    .and_then(|home| cache.claude_session_at(home, &agent_sid, now)),
+                    .cloned(),
+                UsageProvider::ClaudeCode => claude_home.clone(),
             }
         };
+        let usage = usage_home.as_deref().and_then(|home| match provider {
+            UsageProvider::Codex => cache.codex_session(home, &agent_sid),
+            UsageProvider::ClaudeCode => cache.claude_session(home, &agent_sid),
+        });
+        let telemetry_home = usage.as_ref().and(usage_home);
         let mut usage = usage.unwrap_or_else(|| match provider {
             UsageProvider::Codex => codex::parse_codex_session(&agent_sid, ""),
             UsageProvider::ClaudeCode => claude::parse_claude_transcript(&agent_sid, ""),
@@ -667,9 +678,19 @@ fn collect_sessions_at(
             && (session.agent_session_id.as_deref() == Some(agent_sid.as_str())
                 || agent_sid.is_empty());
         usage.eligible = session.backend_id.is_none();
-        out.push(usage);
+        out.push((usage, telemetry_home));
     }
-    out
+    // Every transcript is frozen before one common clock, including across a
+    // minute rollover. Projection must not reread a provider file after this.
+    let observed = clock();
+    out.into_iter()
+        .map(|(mut usage, home)| {
+            if let Some(home) = home {
+                cache.project_session_telemetry_at(&home, &mut usage, observed);
+            }
+            usage
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -679,6 +700,110 @@ mod performance_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collect_sessions_freezes_reads_before_one_observation_clock() {
+        use std::io::Write;
+
+        let _env = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let codex_home = home.path().join("codex");
+        let claude_home = home.path().join("claude");
+        let _codex = gwt_core::test_support::ScopedEnvVar::set("CODEX_HOME", &codex_home);
+        let _claude = gwt_core::test_support::ScopedEnvVar::set("CLAUDE_CONFIG_DIR", &claude_home);
+        let observed = DateTime::parse_from_rfc3339("2026-10-28T00:30:01Z")
+            .unwrap()
+            .to_utc();
+        let event = |provider, at: DateTime<Utc>| {
+            let value = match provider {
+                UsageProvider::Codex => serde_json::json!({"timestamp": at, "payload": {
+                "type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": at.timestamp(), "output_tokens": 2},
+                    "last_token_usage": {"input_tokens": 10, "cached_input_tokens": 0, "output_tokens": 2}
+                }}}),
+                UsageProvider::ClaudeCode => {
+                    serde_json::json!({"timestamp": at, "type": "assistant",
+                    "message": {"usage": {"input_tokens": 10, "output_tokens": 2,
+                        "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}})
+                }
+            };
+            value.to_string() + "\n"
+        };
+        let paths = [
+            (
+                UsageProvider::Codex,
+                AgentId::Codex,
+                codex_home.join("sessions/rollout-clock-codex.jsonl"),
+            ),
+            (
+                UsageProvider::ClaudeCode,
+                AgentId::ClaudeCode,
+                claude_home.join("projects/project/clock-claude.jsonl"),
+            ),
+        ];
+        for (provider, agent, path) in &paths {
+            let sid = if *provider == UsageProvider::Codex {
+                "clock-codex"
+            } else {
+                "clock-claude"
+            };
+            let mut session = gwt_agent::Session::new(home.path(), "work/clock", agent.clone());
+            session.agent_session_id = Some(sid.to_owned());
+            session.agent_member_id = Some(sid.to_owned());
+            session.status = AgentStatus::Running;
+            session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                path,
+                event(*provider, observed - chrono::Duration::seconds(1)),
+            )
+            .unwrap();
+        }
+        let config = UsageConfig {
+            codex_enabled: true,
+            claude_account_enabled: false,
+        };
+        let mut cache = UsageCache::default();
+        let rows = collect_sessions_with_clock(&config, &mut cache, || {
+            // This append occurs after observation ends and belongs to the next poll.
+            for (provider, _, path) in &paths {
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+                    .write_all(event(*provider, observed + chrono::Duration::minutes(1)).as_bytes())
+                    .unwrap();
+            }
+            observed
+        });
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let telemetry = row.telemetry.unwrap();
+            assert_eq!(telemetry.quality, "measured");
+            assert_eq!(telemetry.today_tokens, Some(12));
+            assert_eq!(
+                telemetry.minute_buckets.last().unwrap().started_at,
+                observed - chrono::Duration::seconds(1)
+            );
+            assert_eq!(telemetry.minute_buckets.last().unwrap().tokens, Some(12));
+        }
+        // An event beyond the real observation end remains untrusted, then becomes measured.
+        let future = collect_sessions_at(&config, &mut cache, observed);
+        assert!(future
+            .iter()
+            .all(|row| row.telemetry.as_ref().unwrap().quality == "partial"));
+        let next = collect_sessions_at(
+            &config,
+            &mut cache,
+            observed + chrono::Duration::seconds(61),
+        );
+        assert!(next
+            .iter()
+            .all(|row| row.telemetry.as_ref().unwrap().today_tokens == Some(24)));
+    }
 
     #[test]
     fn collect_sessions_preserves_history_and_refuses_ambiguous_conversations() {
