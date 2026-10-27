@@ -331,6 +331,7 @@ impl AppRuntime {
     /// `seq` is the pane stream position the reader thread observed right
     /// after parsing `data` (Issue #4095); it lets a client queue drop this
     /// chunk when a snapshot taken at or past that position is queued first.
+    #[cfg(test)]
     pub(crate) fn handle_runtime_output_event(
         &mut self,
         id: String,
@@ -809,6 +810,7 @@ impl AppRuntime {
         self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_runtime_status_event(
         &mut self,
         id: String,
@@ -833,6 +835,7 @@ impl AppRuntime {
         events
     }
 
+    #[cfg(test)]
     fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
         self.runtimes
             .get(id)

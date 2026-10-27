@@ -2771,12 +2771,8 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
         let work_before = tracked_workspace_work_store_snapshot(&repo);
 
-        let retained = continue_work_domain_failure(
-            &runtime,
-            "client-retry-dangling",
-            &(operation_id.to_string()),
-            &(work_id.to_string()),
-        );
+        let retained =
+            continue_work_domain_failure(&runtime, "client-retry-dangling", operation_id, work_id);
 
         assert_eq!(
             retained.outcome,

@@ -10654,14 +10654,13 @@ mod tests {
             None,
         );
         let (mut runtime, result) = loop {
-            match receiver
+            if let OwnerMessage::Closed {
+                runtime, result, ..
+            } = receiver
                 .recv_timeout(std::time::Duration::from_secs(10)) // test-hygiene: allow-wall-clock-deadline Bounds the actual rollback worker completion before inspecting exact teardown.
                 .unwrap()
             {
-                OwnerMessage::Closed {
-                    runtime, result, ..
-                } => break (runtime, result),
-                _ => {}
+                break (runtime, result);
             }
         };
         let _ = crate::session_finalizer::kill_and_reap(&runtime.pty, "pane");

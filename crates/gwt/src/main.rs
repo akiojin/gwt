@@ -2047,6 +2047,7 @@ enum UserEvent {
     ProviderUsageSnapshot {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
     },
+    #[cfg(test)]
     RuntimeOutput {
         id: String,
         incarnation: u64,
@@ -2068,6 +2069,7 @@ enum UserEvent {
         data: Vec<u8>,
         preview_text: Option<String>,
     },
+    #[cfg(test)]
     RuntimeStatus {
         id: String,
         incarnation: u64,
@@ -2276,6 +2278,7 @@ enum UserEvent {
         project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
+    #[cfg(test)]
     LaunchProgress {
         window_id: String,
         message: String,
@@ -2289,6 +2292,7 @@ enum UserEvent {
     },
     /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
     /// should be appended to the launching agent window's terminal.
+    #[cfg(test)]
     LaunchTerminalOutput {
         window_id: String,
         data: Vec<u8>,
@@ -10925,10 +10929,11 @@ fn main() -> std::io::Result<()> {
 
                 }
             }
-            Event::UserEvent(UserEvent::AgentFrontend { client_id, grant: _, request: _ }) => {
+            Event::UserEvent(UserEvent::AgentFrontend { client_id, grant, request }) => {
                 // This host listener has no producing capability issuer. A
                 // stale GUI grant must never reach the project owner's writers.
                 apply_agent_frontend_dispatch_outcome(&clients, &client_id, AgentFrontendDispatchOutcome::StaleCapability);
+                drop((grant, request));
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 // Issue #3366 — gated on an open Logs window; see
@@ -10941,6 +10946,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeOutput {
                 id,
                 incarnation,
@@ -10982,6 +10988,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_output(id, data, preview_text);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeStatus {
                 id,
                 incarnation,
@@ -11348,6 +11355,7 @@ fn main() -> std::io::Result<()> {
                     );
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11366,6 +11374,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11442,7 +11451,8 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             #[cfg(test)]
-            Event::UserEvent(UserEvent::LaunchComplete { .. }) => {
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, .. }) => {
+                drop((window_id, window_generation));
                 unreachable!("pure launch preparation fixture has no native GUI event loop")
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(acknowledged)) => {

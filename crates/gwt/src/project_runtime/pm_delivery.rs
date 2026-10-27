@@ -952,12 +952,15 @@ mod tests {
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let root = temp.path().join("project");
         std::fs::create_dir_all(&root).unwrap();
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&root)
-            .status()
-            .unwrap()
-            .success());
+        assert!(
+            gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new("git"))
+                .unwrap()
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

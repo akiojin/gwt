@@ -3558,11 +3558,17 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
         held.status,
     );
     let mut runtime = sample_runtime(temp.path(), vec![empty_tab, sibling], Some("tab-1"));
+    // Keep one canonical active-tab context and a read-only legacy alias.
+    // HashMap iteration must not choose which alias owns the fixture state.
+    runtime.project_states = super::initial_project_states(&HashMap::from([(
+        "tab-1".to_string(),
+        runtime.project_tab_incarnations["tab-1"].clone(),
+    )]));
     runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     // Both layout aliases share the one current project owner context.
     let context = runtime
-        .project_state_for_tab("tab-1")
+        .project_state_for_tab("tab-2")
         .unwrap()
         .context
         .clone();
@@ -7967,7 +7973,11 @@ fn relay_approval_owner_events(
     source: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
 ) -> Vec<OutboundEvent> {
     let address = runtime.window_lookup[window_id].clone();
-    let context = runtime.project_context(&address.tab_id).unwrap();
+    let context = runtime
+        .project_state_for_tab(&address.tab_id)
+        .unwrap()
+        .context
+        .clone();
     let identity = runtime.runtimes[window_id].owner_identity.clone();
     let mut events = Vec::new();
     while let Ok(event) = source.try_recv() {
