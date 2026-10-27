@@ -3552,6 +3552,7 @@ fn worktree_binding_hash(worktree: &Path) -> String {
 #[cfg(test)]
 std::thread_local! {
     static GENERATION_LEDGER_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GENERATION_SNAPSHOT_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn validate_generation_ledger(
@@ -3585,6 +3586,8 @@ fn validate_generation_ledger(
     }
 
     let mut generation_ids = std::collections::HashSet::new();
+    let mut effective_projections =
+        std::collections::HashMap::with_capacity(ledger.generations.len());
     for (index, generation) in ledger.generations.iter().enumerate() {
         if !generation_ids.insert(generation.identity.generation_id.as_str()) {
             return Err(invalid_generation_data(
@@ -3609,6 +3612,8 @@ fn validate_generation_ledger(
                 "execution generation failed integrity validation",
             ));
         }
+        #[cfg(test)]
+        GENERATION_SNAPSHOT_DECODE_COUNT.with(|count| count.set(count.get() + 1));
         let snapshot =
             serde_json::from_str::<ExecutionControlRecord>(&generation.execution_control_json)
                 .map(hydrate_recovery_envelopes)
@@ -3656,6 +3661,7 @@ fn validate_generation_ledger(
                 ));
             }
         }
+        effective_projections.insert(generation.identity.generation_id.as_str(), snapshot);
     }
 
     let mut previous_attempt_hash = "";
@@ -3987,17 +3993,6 @@ fn validate_generation_ledger(
                 generation.identity.generation_id.as_str(),
                 generation.status,
             )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut effective_projections = ledger
-        .generations
-        .iter()
-        .map(|generation| {
-            let projection =
-                serde_json::from_str::<ExecutionControlRecord>(&generation.execution_control_json)
-                    .map(hydrate_recovery_envelopes)
-                    .expect("generation snapshots were validated above");
-            (generation.identity.generation_id.as_str(), projection)
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut projection_events = ledger
@@ -29800,11 +29795,17 @@ exit 1
             assert_projection_has_no_protected_recovery(&active);
 
             GENERATION_LEDGER_VALIDATION_COUNT.with(|count| count.set(0));
+            GENERATION_SNAPSHOT_DECODE_COUNT.with(|count| count.set(0));
             let blocked = diagnose_for_projection(blocked_repo.path(), Some("projection-blocked"));
             assert_eq!(
                 GENERATION_LEDGER_VALIDATION_COUNT.with(std::cell::Cell::get),
                 2,
                 "each strict load validates once; diagnosis must not revalidate its loaded ledger"
+            );
+            assert_eq!(
+                GENERATION_SNAPSHOT_DECODE_COUNT.with(std::cell::Cell::get),
+                2,
+                "each strict validation must decode its generation snapshot only once"
             );
             assert_eq!(blocked.ecr_status, ExecutionDiagnosisState::Blocked);
             assert_eq!(blocked.binding_state, ExecutionBindingState::Terminal);
