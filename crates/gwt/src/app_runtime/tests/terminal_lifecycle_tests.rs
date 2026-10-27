@@ -2882,11 +2882,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
-    owner_runtime_probe(&runtime, &shell_id)
-        .pane
-        .lock()
-        .expect("pane lock")
-        .process_bytes(b"hello-repair");
+    process_test_owner_output(&mut runtime, &shell_id, b"hello-repair");
 
     let events = runtime.client_pane_snapshot_repair_events(
         "client-9",
@@ -2911,6 +2907,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
         }
         other => panic!("expected TerminalSnapshot, got {other:?}"),
     }
+    close_test_owner_runtime(&mut runtime, &shell_id);
 }
 
 // Issue #4095 AC-1 / AC-2: a snapshot serialized while the PTY reader is ahead
@@ -3654,8 +3651,16 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
     let old = runtime.runtimes[&id].incarnation;
+    let predecessor = owner_runtime_probe(&runtime, &id);
     runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
-    runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
+    // Reuse the public id only after the exact physical predecessor drains.
+    close_test_owner_runtime(&mut runtime, &id);
+    assert!(predecessor.pty.try_wait().unwrap().is_some());
+    insert_test_pane_runtime(&mut runtime, &id);
+    let successor = owner_runtime_probe(&runtime, &id);
+    assert_ne!(successor.incarnation, old);
+    assert!(!Arc::ptr_eq(&predecessor.pty, &successor.pty));
+    assert!(successor.pty.try_wait().unwrap().is_none());
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
     let current = runtime.runtimes[&id].incarnation;
@@ -3681,6 +3686,7 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     assert!(events.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalPreview { text, .. } if text == "final output")));
     assert!(runtime.next_runtime_output_deadline().is_none());
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3697,11 +3703,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
-    owner_runtime_probe(&runtime, &id)
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    process_test_owner_output(&mut runtime, &id, b"old\r\n  indented\r\n\r\nlast\r\n");
     let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
@@ -3713,6 +3715,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
         assert_eq!(preview["id"], id);
         assert_eq!(preview["text"], "  indented\n\nlast");
     }
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
