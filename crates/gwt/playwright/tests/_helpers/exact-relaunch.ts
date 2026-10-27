@@ -61,6 +61,7 @@ export type ExactRelaunchInvocation = {
  */
 export type ExactRelaunchSetup = {
   freshNativeIds?: boolean;
+  terminalConvergence?: boolean;
   switching?: { sourceIssueNumber: number; positive: boolean };
   prepare?: (context: { home: string; bin: string; project: string; env: NodeJS.ProcessEnv }) => Promise<void>;
   monitorPreferences?: Record<string, unknown>;
@@ -227,6 +228,80 @@ const checkpoint = async line => {
 };
 ` : "";
 
+  const terminalActor = setup.terminalConvergence ? String.raw`
+const terminalOperation = (operation, params = {}) => {
+  const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
+    cwd:process.cwd(),env:process.env,encoding:'utf8',timeout:60000,windowsHide:true,
+    input:JSON.stringify({schema_version:1,operation,params}),
+  });
+  const envelope = JSON.parse(result.stdout || '{}');
+  if (result.status !== 0 || !envelope.ok) throw new Error(operation + ': ' + result.stdout + result.stderr);
+  return envelope;
+};
+const terminalHook = (event, prompt) => {
+  const hooks = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.codex/hooks.json'), 'utf8'));
+  const input = JSON.stringify({session_id:native,hook_event_name:event,cwd:process.cwd(),
+    transcript_path:rollout,prompt,stop_hook_active:false});
+  for (const group of hooks.hooks?.[event] ?? []) for (const hook of group.hooks ?? []) {
+    if (hook.type !== 'command') continue;
+    const windows = process.platform === 'win32';
+    const result = require('node:child_process').spawnSync(windows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh',
+      windows ? ['/d','/s','/c',hook.command] : ['-c',hook.command],
+      {input,encoding:'utf8',timeout:60000,windowsHide:true,windowsVerbatimArguments:windows});
+    if (result.status !== 0 || /"decision"\s*:\s*"block"/.test(result.stdout || ''))
+      throw new Error(event + ' refused: ' + result.stdout + result.stderr);
+  }
+};
+const prepareTerminalWarning = () => {
+  terminalHook('UserPromptSubmit', 'Prepare the closed owner terminal convergence fixture');
+  const cp = require('node:child_process');
+  const git = (...args) => {
+    const result = cp.spawnSync('git', args, {cwd:process.cwd(),env:process.env,encoding:'utf8',windowsHide:true});
+    if (result.status !== 0) throw new Error('fixture git failed: ' + result.stderr);
+    return result.stdout.trim();
+  };
+  terminalOperation('pane.name');
+  terminalOperation('workspace.update', {purpose:'Closed owner convergence fixture'});
+  const branch = git('branch', '--show-current');
+  // The remote is this fixture's private bare repository. Preserve its source;
+  // point only this branch's bookkeeping readback at an absent remote ref.
+  git('config', 'branch.' + branch + '.remote', 'origin');
+  git('config', 'branch.' + branch + '.merge', 'refs/heads/terminal-warning-missing');
+  terminalOperation('workspace.update', {status:'done',summary:'Delivered owner has zero source changes'});
+  fs.writeFileSync(path.join(process.env.HOME, 'terminal-warning-prepared-' + process.env.GWT_SESSION_ID + '.json'), '{}');
+};
+const completeTerminalWarning = () => {
+  terminalOperation('execution.no_action', {reason:'The private integration base already contains this owner source'});
+  const diagnosis = JSON.parse(terminalOperation('execution.status').output);
+  const hash = terminalOperation('issue.monitor.status').project_store.hash;
+  let normalized = fs.realpathSync(process.cwd()).replaceAll('\\', '/').replace(/\/$/, '');
+  if (process.platform === 'win32') normalized = normalized.toLowerCase();
+  const crypto = require('node:crypto');
+  const key = crypto.createHash('sha256').update(normalized).digest('hex').slice(0,16);
+  const trusted = path.join(process.env.HOME, '.gwt/projects', hash, 'trusted', key);
+  const paths = ['execution-control.json', 'work-event-settlement.json', 'execution-no-action.json']
+    .map(name => path.join(trusted, name));
+  const shards = path.join(process.cwd(), '.gwt/work/events');
+  for (const bucket of fs.readdirSync(shards)) {
+    if (!/^[0-9a-f]{2}$/.test(bucket)) continue;
+    for (const name of fs.readdirSync(path.join(shards, bucket)))
+      if (/^[0-9a-f]{64}\.jsonl$/.test(name)) paths.push(path.join(shards, bucket, name));
+  }
+  // Stop canonically refreshes the receipt. Only the later observer close is
+  // required to preserve these files, so capture its baseline after Stop.
+  terminalHook('Stop');
+  const hashes = Object.fromEntries(paths.map(file =>
+    [file, crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')]));
+  fs.writeFileSync(path.join(process.env.HOME, 'terminal-warning-' + process.env.GWT_SESSION_ID + '.json'),
+    JSON.stringify({diagnosis,hashes}));
+  console.log('GWT_FIXTURE_TERMINAL_WARNING_READY');
+};
+const terminalActorFailure = error => {
+  fs.writeFileSync(path.join(process.env.HOME, 'terminal-warning-failed-' + process.env.GWT_SESSION_ID + '.json'),
+    JSON.stringify({error:error.message}));
+  console.error('GWT_FIXTURE_TERMINAL_WARNING_FAILED ' + error.message);
+};
+` : "";
   // The fake provider owns only native conversation metadata. In particular,
   // its native conversation UUID is independent from GWT_SESSION_ID.
   const provider = `#!${process.execPath}
@@ -279,10 +354,13 @@ try {
   }
 } catch (error) { console.error('GWT_FAKE_PROVIDER_HOOK_ERROR ' + error.message); }
 ${switchActor}
+${terminalActor}
 console.log('GWT_FAKE_PROVIDER_READY ' + native);
 readline.createInterface({input:process.stdin}).on('line', line => {
   ${setup.switching ? "if (line.includes('GWT checkpoint request ')) { checkpoint(line).catch(error=>actorEvent('actor_failed',{message:error.message})); return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_EXIT') process.exit(0);
+  ${setup.terminalConvergence ? "if (line.trim() === 'GWT_FIXTURE_PREPARE_TERMINAL_WARNING') { try { prepareTerminalWarning(); } catch (error) { terminalActorFailure(error); } return; }" : ""}
+  ${setup.terminalConvergence ? "if (line.trim() === 'GWT_FIXTURE_TERMINAL_WARNING') { try { completeTerminalWarning(); } catch (error) { terminalActorFailure(error); } return; }" : ""}
   if (line.trim() === 'GWT_FIXTURE_DONE') {
     const result = require('node:child_process').spawnSync(process.env.GWT_BIN_PATH, [], {
       cwd:process.cwd(), env:process.env, encoding:'utf8', timeout:30000, windowsHide:true,
