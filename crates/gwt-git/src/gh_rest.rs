@@ -20,7 +20,7 @@ use serde_json::Value;
 
 /// Bound unchanged Monitor inventories to one live read per four 30s scans.
 /// Queue-labelled Issue pages and authoritative per-resource reads bypass it.
-const LIST_CACHE_TTL_SECS: i64 = 120;
+pub(crate) const LIST_CACHE_TTL_SECS: i64 = 120;
 
 #[derive(Serialize, Deserialize)]
 struct CachedListResponse {

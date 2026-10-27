@@ -3462,12 +3462,21 @@ pub(crate) fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOut
 
 /// Reuse only Monitor list reads; callers of per-PR evidence stay live.
 pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    run_cached_list_command_with_observed_at(repo_path, args).map(|(_, output)| output)
+}
+
+/// Keep the original acquisition time when a Monitor list page is reused.
+pub(crate) fn run_cached_list_command_with_observed_at(
+    repo_path: &Path,
+    args: &[&str],
+) -> Result<(DateTime<Utc>, GhCliOutput)> {
     let cache_dir =
         gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("rest-list-pages");
-    let stdout = crate::gh_rest::cached_list_response_with(
+    let (observed_at, stdout) = crate::gh_rest::cached_list_response_at_with(
         &cache_dir,
         &args.join(" "),
         chrono::Utc::now(),
+        crate::gh_rest::LIST_CACHE_TTL_SECS,
         || {
             let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
             if output.success {
@@ -3478,11 +3487,14 @@ pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result
         },
     )
     .map_err(GwtError::Git)?;
-    Ok(GhCliOutput {
-        success: true,
-        stdout,
-        stderr: String::new(),
-    })
+    Ok((
+        observed_at,
+        GhCliOutput {
+            success: true,
+            stdout,
+            stderr: String::new(),
+        },
+    ))
 }
 
 fn run_gh_command_with<F>(repo_path: &Path, args: &[&str], mut spawn_gh: F) -> Result<GhCliOutput>
