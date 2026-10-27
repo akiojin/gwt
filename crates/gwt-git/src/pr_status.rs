@@ -1399,6 +1399,9 @@ const UNLANDED_DELIVERY_REFS: &[&str] = &[
     "refs/remotes/origin/pm/resident",
 ];
 
+/// At most 1950 stdin bytes per merge/diff batch with SHA256 OID pairs.
+const UNLANDED_BATCH_SIZE: usize = 15;
+
 /// One remote delivery branch carrying commits the base does not have
 /// (Issue #4074 FR-005), before the open-PR filter is applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1647,11 +1650,13 @@ pub fn collect_unlanded_work_branches(
     // At most 1950 bytes of stdin even with SHA256 OID pairs. The existing
     // process helper writes stdin before draining stdout, so keep it below the
     // Windows pipe buffer even when Git produces a large conflict/diff report.
-    for (batch, heads) in heads.chunks(15).enumerate() {
+    for (heads, probes) in heads
+        .chunks(UNLANDED_BATCH_SIZE)
+        .zip(probes.chunks_mut(UNLANDED_BATCH_SIZE))
+    {
         let ahead = unlanded_ahead_batch(repo_path, &base[0], heads)?;
         let source = unlanded_source_batch(repo_path, &base[0], &base[1], heads);
-        for (offset, (ahead, source)) in ahead.into_iter().zip(source).enumerate() {
-            let probe = &mut probes[batch * 15 + offset];
+        for (probe, (ahead, source)) in probes.iter_mut().zip(ahead.into_iter().zip(source)) {
             probe.ahead = ahead;
             probe.has_non_gwt_changes = source;
         }
@@ -1737,10 +1742,8 @@ fn unlanded_source_batch(
     // --write-tree predates --stdin by one Git release. Keep the established
     // singleton contract on Git 2.38 without hiding ordinary projection errors.
     let stderr = String::from_utf8_lossy(&merge.stderr);
-    if merge.status.code() == Some(129)
-        && stderr.contains("unknown option")
-        && stderr.contains("stdin")
-    {
+    // parse-options translates the diagnostic prose, but retains the option.
+    if merge.status.code() == Some(129) && stderr.contains("stdin") {
         return heads
             .iter()
             .map(|head| branch_has_non_gwt_changes(repo, base, head).ok())

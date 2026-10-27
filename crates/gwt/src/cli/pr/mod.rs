@@ -4780,8 +4780,12 @@ fn main() -> ExitCode {
         eprintln!("injected local inventory {fail} failure");
         return ExitCode::from(1);
     }
-    if fail == "no-stdin" && args.iter().any(|a| a == "merge-tree") && args.iter().any(|a| a == "--stdin") {
-        eprintln!("error: unknown option `stdin'");
+    if matches!(fail.as_str(), "no-stdin" | "no-stdin-localized") && args.iter().any(|a| a == "merge-tree") && args.iter().any(|a| a == "--stdin") {
+        if fail == "no-stdin-localized" {
+            eprintln!("Fehler: unbekannte Option `stdin'");
+        } else {
+            eprintln!("error: unknown option `stdin'");
+        }
         return ExitCode::from(129);
     }
     let mut command = Command::new(REAL_GIT);
@@ -4863,14 +4867,16 @@ fn main() -> ExitCode {
                 serde_json::from_str(unknown["output"].as_str().unwrap()).unwrap();
             assert_eq!(unknown["unlanded_branch_count"], 1);
             assert!(unknown["unlanded_branches"][0]["has_non_gwt_changes"].is_null());
-            let (code, compatible) = observe("no-stdin", serde_json::json!({"include":[]}));
-            assert_eq!(code, 0, "{compatible}");
-            let compatible: serde_json::Value =
-                serde_json::from_str(compatible["output"].as_str().unwrap()).unwrap();
-            assert_eq!(
-                compatible["unlanded_branches"][0]["has_non_gwt_changes"],
-                true
-            );
+            for stage in ["no-stdin", "no-stdin-localized"] {
+                let (code, compatible) = observe(stage, serde_json::json!({"include":[]}));
+                assert_eq!(code, 0, "{compatible}");
+                let compatible: serde_json::Value =
+                    serde_json::from_str(compatible["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    compatible["unlanded_branches"][0]["has_non_gwt_changes"], true,
+                    "{stage}"
+                );
+            }
             // Only a complete successful enumeration may render an empty stocktake.
             fs::remove_file(repo.join(".git/refs/remotes/origin/work/issue-5390")).unwrap();
             let (code, empty) = observe("", serde_json::json!({"include":[]}));

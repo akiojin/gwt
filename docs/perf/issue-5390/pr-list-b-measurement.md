@@ -152,3 +152,49 @@ User Verification Result: n/a (autonomous)
 
 Agent Visual Check: n/a (no UI surface; CLI collector only, singleton runtime
 source classifier and frontend unchanged)
+
+## Review and CI fixture repair
+
+The original diagnosis, first GREEN and failed CI at d99585f1 remain above and
+in their original JSON files. `pr-list-b-green-review.json` records the final
+review-source hashes, a freshly built native executable and the same frozen
+input across all four cases. Its common pre-commit HEAD is provenance only;
+final producing-commit verification and CI are separate delivery evidence.
+
+| Case | Baseline seconds | Review-source seconds | Git calls |
+| --- | ---: | ---: | ---: |
+| default-warm | 163.994 | 13.569 | 256 → 23 |
+| default-cold | 127.575 | 11.892 | 256 → 23 |
+| include-empty-cold | 133.535 | 11.879 | 256 → 23 |
+| include-empty-warm | 135.021 | 10.359 | 256 → 23 |
+
+Every one of the 85 branch rows, its classification and count matches the
+baseline in every case. The stocktake spans six batches. These finite
+measurements retain the previous limits and establish no PM20-second SLA.
+
+The Git2.38 unsupported-option fallback now accepts translated diagnostic
+wording while retaining exit129 and the literal `stdin` option. The existing
+actual-entry fixture first failed for German wording and then passed. One
+private batch-size constant and chunk zip remove repeated indexing. The
+original eight-candidate fanout regression remains in place.
+
+Coverage run40480351357 failed two existing fixtures before aggregation:
+shard4 hit the 200ms synchronous operation deadline during cold warm-up,
+and shard6 refolded a retained owned Start into a supposedly ownerless Work.
+Coverage for that head was unmeasured, not below a measured threshold.
+Only those test fixtures change: a scoped existing clock seam separates CPU
+measurement from materialization/scheduler wall time while real transport
+timeouts, CPU250ms and all assertions remain; ownerless state is seeded
+consistently in aggregate/events and the first immutable root source.
+
+Ordinary canonical intake immediately before the original full-history
+comparison deterministically reproduces the old owner discrepancy and passes
+after fixture repair. The first backup restoration preserved an older mtime,
+so Cargo reused the RED executable; that failed attempt remains disclosed and
+excluded from GREEN evidence. Updating mtime and actually rebuilding produced
+the passing result. No production hook/Monitor or UI code changes.
+
+Independent review of all four changed source files, including the explicit
+intake synchronization, found zero remaining blocking findings. Required
+same-HEAD verification, scoped CI coverage and merged/base inclusion remain
+separate gates reported in the delivery PR and canonical owner sections.
