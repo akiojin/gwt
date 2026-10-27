@@ -81,11 +81,19 @@
 .works-active,
 .roster-active { margin-inline-start: auto; font-size: var(--type-xs); }
 .works-today { line-height: 1.8; }
+.works-availability {
+  display: block;
+  color: var(--color-text-muted);
+  font-family: var(--font-body);
+  font-size: var(--type-xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
 .works-fleet {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2) var(--space-4);
   border: 1px solid var(--color-border);
   padding: var(--space-2) var(--space-3);
   color: var(--color-text-muted);
@@ -93,6 +101,7 @@
 .works-fleet b { display: block; color: var(--color-text); font-size: var(--type-lg); }
 .works-fleet small { display: block; font-size: var(--type-xs); }
 .works-fleet svg { display: block; width: 100%; height: 56px; overflow: visible; color: var(--color-state-active); }
+.works-fleet .works-availability { grid-column: 1 / -1; }
 .works-list { border: 1px solid var(--color-border); }
 .work-row {
   display: grid;

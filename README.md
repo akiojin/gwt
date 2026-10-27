@@ -1807,6 +1807,10 @@ Works shows session-attributed input, cache and output usage, a thirty-minute ac
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
+Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
+unknown totals stay **—**, while measured zero stays **0**. Cost remains unavailable because
+per-session USD is not supported; Landed PRs remains unavailable until complete daily merge
+data is connected.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.
