@@ -1815,10 +1815,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         );
       }
 
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
         windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (splitSurfaces?.show(surface)) {
+          // Late initial windows must not override an explicit surface choice.
+          initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
           pendingPmFrame = false;
@@ -5670,8 +5674,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
-      let initialSurfaceTabId = null;
-      let initialSurfaceSelected = false;
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {

@@ -17,6 +17,7 @@ type AgentWindow = { id: string; session_id: string; status: string; agent_id: s
 type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
   assignment: { session_id: string | null; issue_number: number | null } | null;
   saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
+  saved_manual_revision?: string | null;
   history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 
@@ -250,7 +251,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     const fixture = await startExactRelaunchFixture(info);
     const errors = capture(page);
     const theme = info.project.name.includes("light") ? "light" : "dark";
-    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
     const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
     try {
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
@@ -277,15 +280,30 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       beforeSave).then(handle => handle.jsonValue());
       expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
       expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
+      let savedRevision: string | undefined;
+      const revisionInput = surface.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
       const assertSaved = async () => {
         const roster = await readRoster(page);
-        expect(roster.members.find(value => value.agent_member_id === memberId)?.saved_manual_profile).toMatchObject(savedCandidate);
+        const member = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect(member.saved_manual_profile).toMatchObject(savedCandidate);
+        expect(member.saved_manual_revision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
+        savedRevision ??= member.saved_manual_revision!;
+        expect(member.saved_manual_revision).toBe(savedRevision);
         await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
         await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
         await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
         await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
+        await expect(revisionInput).toHaveValue(savedRevision!);
+        await expect(revisionInput).toHaveAttribute("readonly", "");
+        expect(await revisionInput.evaluate((node: HTMLInputElement) => node.readOnly)).toBe(true);
       };
       await assertSaved();
+      await revisionInput.focus();
+      await page.keyboard.press("End");
+      expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
+      await readRoster(page);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect(revisionInput).toBeFocused();
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
       const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
@@ -295,7 +313,10 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
       await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
       const beforeInlineSave = await cursor(page);
-      await settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`).selectOption("high");
+      const reasoning = settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`);
+      await reasoning.focus();
+      await expect(reasoning).toBeFocused();
+      await reasoning.selectOption("high");
       const inlineReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
         entry.sequence > after && Number.isInteger(entry.payload.request_id)
         && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
@@ -304,6 +325,9 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       expect(inlineReply.profiles).toContainEqual(expect.objectContaining({ ...savedCandidate, reasoning: "high" }));
       // No manual read, host change or reload can mask a missing ACK invalidation.
       await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
+      await expect(revisionInput).not.toHaveValue(savedRevision!);
+      savedRevision = await revisionInput.inputValue();
+      expect(savedRevision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
       await expect(surface.locator(".roster-current-config")).toHaveText(expected);
       expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
       savedCandidate.reasoning = "high";
@@ -345,6 +369,7 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await assertHistory();
       await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
       await assertHistory();
+      await page.goto("about:blank");
       const restarted = await fixture.restart();
       await gotoLiveGwt(page, restarted, { enableTestBridge: true });
       await page.locator('.op-rail__surface[data-surface="agents"]').click();
@@ -353,6 +378,18 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
       await surface.locator(".roster-history-config").first().scrollIntoViewIfNeeded();
       expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
       await page.screenshot({ path: info.outputPath(`recorded-history-native-${theme}.png`) });
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      await page.getByRole("button", { name: "Split view", exact: true }).click();
+      await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
+      const preview = page.locator(".agents-surface--preview");
+      const previewRevision = preview.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
+      await expect(previewRevision).toHaveValue(savedRevision!);
+      await expect(previewRevision).toBeDisabled();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.getByRole("button", { name: "Close split", exact: true }).click();
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      await expect(revisionInput).toHaveValue(savedRevision!);
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
     } finally { await fixture.stop(); }

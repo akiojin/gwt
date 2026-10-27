@@ -245,21 +245,26 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     const current = liveWork(member), key = member ? JSON.stringify([member.member_id,
       current?.window_id, current?.session_id, current?.runtime_incarnation]) : null;
     if (renderedDetail?.key !== key) renderedDetail = null;
-    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions;
+    let currentWork = renderedDetail?.currentWork, actions = renderedDetail?.actions, saved = renderedDetail?.saved;
     // Refresh presentation around unchanged native controls without detaching
     // their keyboard targets. A different member/runtime retires those controls.
-    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions) child.remove();
+    for (const child of [...panel.childNodes]) if (child !== head && child !== plans && child !== currentWork && child !== actions && child !== saved) child.remove();
     if (!member) { panel.textContent = "No enabled members. Add a member to begin."; return; }
     if (plans.parentElement !== panel) panel.insertBefore(plans, actions || null);
     if (head.parentElement !== panel) panel.prepend(head);
-    panel.insertBefore(stats(member), currentWork || plans);
-    const saved = document.createElement("section"); saved.className = "roster-history roster-saved-settings";
-    saved.innerHTML = "<h4>Saved manual candidate</h4><p class=\"roster-description\"></p><p class=\"roster-description\">Automatic launches use tier settings. Current work uses its own recorded launch settings.</p>";
+    panel.insertBefore(stats(member), saved || currentWork || plans);
+    if (!saved) {
+      saved = document.createElement("section"); saved.className = "roster-history roster-saved-settings";
+      saved.innerHTML = `<h4>Saved manual candidate</h4><p class="roster-description"></p><label class="settings-field roster-saved-revision">Saved manual candidate revision<input class="settings-input" type="text" readonly aria-label="Saved manual candidate revision"></label><p class="roster-description">Automatic launches use tier settings. Current work uses its own recorded launch settings.</p>`;
+      saved.querySelector("input").title = "Content identity of saved manual settings. Same settings have the same revision; this is not chronological order.";
+    }
+    const revision = saved.querySelector("input"), revisionValue = member.saved_manual_revision || "—";
+    if (revision.value !== revisionValue) revision.value = revisionValue;
     const profile = member.saved_manual_profile;
     saved.querySelector("p").textContent = profile
       ? `Tool: ${profile.agent_id || "—"} · Model: ${profile.model || "—"} · Reasoning: ${profile.reasoning || "—"} · Runtime: ${profile.runtime_target || "—"}${profile.runtime_target === "Docker" && profile.docker_service ? ` (${profile.docker_service})` : ""} · Permissions: ${profile.skip_permissions === true ? "Skip prompts" : profile.skip_permissions === false ? "Ask" : "—"}`
       : "Unavailable";
-    panel.insertBefore(saved, currentWork || plans);
+    if (saved.parentElement !== panel) panel.insertBefore(saved, currentWork || plans);
     const history = document.createElement("section"); history.className = "roster-history"; history.innerHTML = "<h4>Assignment history</h4><ol></ol>";
     const ol = history.querySelector("ol");
     if (current) {
@@ -295,7 +300,7 @@ export function createAgentsSurface({ document, rosterModel, activityModel, wind
     }
     actions.querySelector('[data-action="rest"]').disabled = !member.enabled || rosterModel.read().members.filter(member => member.enabled).length <= 1;
     panel.insertBefore(history, actions);
-    renderedDetail = { key, currentWork, actions };
+    renderedDetail = { key, currentWork, actions, saved };
   }
   function memberNameField(member) {
     let field = nameFields.get(member.member_id);

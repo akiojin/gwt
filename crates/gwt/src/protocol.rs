@@ -2049,6 +2049,9 @@ pub struct AgentRosterMemberView {
     /// Saved manual candidate input, distinct from Auto tiers and Session facts.
     #[serde(default)]
     pub saved_manual_profile: Option<crate::IssueMonitorLaunchProfile>,
+    /// Content identity of saved manual tuning, not a chronological/CAS counter.
+    #[serde(default)]
+    pub saved_manual_revision: Option<String>,
     pub history: Vec<AgentAssignmentHistoryView>,
     pub issue_count: Option<usize>,
     pub landed_count: Option<usize>,
