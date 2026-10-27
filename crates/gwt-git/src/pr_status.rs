@@ -1390,7 +1390,7 @@ pub struct PrInventoryRead {
     pub unlanded_branches: Vec<UnlandedBranch>,
 }
 
-/// The base every tracked delivery branch is expected to land on.
+/// The preferred integration base for tracked delivery branches.
 pub const UNLANDED_BRANCH_BASE_REF: &str = "origin/develop";
 
 /// Remote refs included in the unlanded delivery inventory (Issue #5053).
@@ -1605,11 +1605,8 @@ pub fn collect_unlanded_work_branches(
         }) {
             continue;
         }
-        let Ok(divergence) =
-            crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
-        else {
-            continue;
-        };
+        let divergence = crate::git_divergence(repo_path, &format!("origin/{branch}"), base_ref)
+            .map_err(|error| error.to_string())?;
         probes.push(UnlandedBranchProbe {
             has_non_gwt_changes: branch_has_non_gwt_changes(
                 repo_path,
@@ -1660,8 +1657,45 @@ pub fn fetch_pr_inventory_tracked(
         options,
         run_gh_command,
     )?;
-    track_pr_inventory(&mut read, repo_path, history_path, now, options);
+    track_pr_inventory(&mut read, repo_path, history_path, now, options)?;
     Ok(read)
+}
+
+fn unlanded_branch_base(repo_path: &Path) -> Result<String> {
+    let worktrees = crate::WorktreeManager::new(repo_path);
+    if worktrees.remote_branch_exists(UNLANDED_BRANCH_BASE_REF)? {
+        return Ok(UNLANDED_BRANCH_BASE_REF.to_string());
+    }
+    let default = gwt_core::process::run_git_logged(
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        Some(repo_path),
+    )?;
+    match default.status.code() {
+        Some(0) => {
+            let reference = String::from_utf8_lossy(&default.stdout).trim().to_string();
+            if worktrees.remote_branch_exists(&reference)? {
+                return Ok(reference);
+            }
+            return Err(GwtError::Git(format!(
+                "PR inventory default tracking ref is unavailable: {reference}"
+            )));
+        }
+        Some(1) => {}
+        _ => {
+            return Err(GwtError::Git(format!(
+                "symbolic-ref origin/HEAD: {}",
+                String::from_utf8_lossy(&default.stderr).trim()
+            )))
+        }
+    }
+    for reference in ["origin/main", "origin/master"] {
+        if worktrees.remote_branch_exists(reference)? {
+            return Ok(reference.to_string());
+        }
+    }
+    Err(GwtError::Git(
+        "PR inventory has no available remote integration base".to_string(),
+    ))
 }
 
 fn track_pr_inventory(
@@ -1670,23 +1704,23 @@ fn track_pr_inventory(
     history_path: &Path,
     now: DateTime<Utc>,
     options: &PrInventoryOptions,
-) {
+) -> Result<()> {
     // Issue #5735: neither lifecycle progress nor absence of an open PR can
     // be inferred from a snapshot GitHub would not let us refresh.
     if read.source == "stale-cache" {
-        return;
+        return Ok(());
     }
     // Issue #4074 FR-005: the stocktake is local git, so it costs no GitHub
-    // budget. A git failure degrades the inventory to empty rather than
-    // failing the whole read.
+    // budget. Required reads must succeed before reporting a complete stocktake
+    // or advancing history; a local failure is not an observed empty inventory.
     let open_pr_head_refs: Vec<String> = read
         .items
         .iter()
         .map(|item| item.head_ref_name.clone())
         .collect();
-    read.unlanded_branches = collect_unlanded_work_branches(repo_path, UNLANDED_BRANCH_BASE_REF)
-        .map(|probes| classify_unlanded_branches(probes, &open_pr_head_refs))
-        .unwrap_or_default();
+    let base_ref = unlanded_branch_base(repo_path)?;
+    let probes = collect_unlanded_work_branches(repo_path, &base_ref).map_err(GwtError::Git)?;
+    read.unlanded_branches = classify_unlanded_branches(probes, &open_pr_head_refs);
     let mut history = PrInventoryHistory::load(history_path);
     history.observe(&mut read.items, now, options);
     if let Err(error) = history.save(history_path) {
@@ -1698,6 +1732,7 @@ fn track_pr_inventory(
             history_path.display()
         );
     }
+    Ok(())
 }
 
 /// The cache-first, budget-aware read behind `pr.list`.
@@ -6607,6 +6642,99 @@ mod tests {
     }
 
     #[test]
+    fn tracked_inventory_selects_local_integration_base() {
+        let tmp = init_merge_projection_repo();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(tmp.path().join("home"));
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        std::fs::write(tmp.path().join("source.txt"), "feature\n").unwrap();
+        git(tmp.path(), &["commit", "-am", "source work"]);
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/work/issue-5390", "HEAD"],
+        );
+        let cache_path = tmp.path().join(PR_INVENTORY_CACHE_FILE);
+        PrInventoryCache {
+            fetched_at: Some(Utc::now()),
+            ..Default::default()
+        }
+        .save(&cache_path)
+        .unwrap();
+        let history_path = tmp.path().join(PR_INVENTORY_HISTORY_FILE);
+        let options = PrInventoryOptions {
+            cache_ttl_secs: u64::MAX,
+            ..Default::default()
+        };
+        let read = || fetch_pr_inventory_tracked(tmp.path(), &history_path, &cache_path, &options);
+
+        let main = read().expect("main-only project remains observable without a default hint");
+        assert_eq!(main.source, "cache");
+        assert_eq!(main.github_calls, 0);
+        assert_eq!(main.unlanded_branches.len(), 1);
+        assert_eq!(main.unlanded_branches[0].ahead, 1);
+
+        // The advertised default precedes main; develop precedes both.
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/stable", "HEAD~1"],
+        );
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(
+            tmp.path(),
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/stable",
+            ],
+        );
+        assert_eq!(
+            read()
+                .expect("local remote default")
+                .unlanded_branches
+                .len(),
+            1
+        );
+        git(
+            tmp.path(),
+            &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+        );
+        assert!(read()
+            .expect("develop remains preferred")
+            .unlanded_branches
+            .is_empty());
+
+        git(
+            tmp.path(),
+            &["update-ref", "-d", "refs/remotes/origin/develop"],
+        );
+        git(
+            tmp.path(),
+            &["update-ref", "-d", "refs/remotes/origin/stable"],
+        );
+        assert!(
+            read().is_err(),
+            "a dangling explicit default is not an empty stocktake"
+        );
+        git(
+            tmp.path(),
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
+        git(
+            tmp.path(),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        assert!(
+            read().is_err(),
+            "no remote base must not fall back to local HEAD"
+        );
+    }
+
+    #[test]
     fn unlanded_inventory_collects_pm_resident_and_work_branches() {
         let tmp = init_merge_projection_repo();
         git(
@@ -8106,7 +8234,8 @@ mod tests {
         // must not count as another observation or measure branch absence.
         let history_path = tmp.path().join(PR_INVENTORY_HISTORY_FILE);
         std::fs::write(&history_path, b"preserve the previous observation").unwrap();
-        track_pr_inventory(&mut read, tmp.path(), &history_path, exhausted_at, &options);
+        track_pr_inventory(&mut read, tmp.path(), &history_path, exhausted_at, &options)
+            .expect("stale inventory does not require a local stocktake");
         assert_eq!(
             std::fs::read(&history_path).unwrap(),
             b"preserve the previous observation"

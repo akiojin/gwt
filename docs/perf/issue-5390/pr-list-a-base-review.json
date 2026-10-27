@@ -1,0 +1,31 @@
+{
+  "red": {
+    "command": "cargo test -p gwt-git --lib tracked_inventory_selects_local_integration_base -- --nocapture",
+    "exit_code": 101,
+    "test_binary_sha256": "8a1c08686cfefa2d2934713d4adbe67bf66be95903a10266537ae75df65c1d04",
+    "source_head": "fa899d1c1f7cc5375821e6a38e374ad9078adc93",
+    "failure": "main-only project remains observable without a default hint: Git(fatal: malformed object name origin/develop)",
+    "source_sha256": "38425e4ca5a9abb985db428872a5cb62bdee31d5633b21d0d766c8c2d7520d25"
+  },
+  "schema_version": 1,
+  "slice": "A",
+  "scope": "existing local integration-base compatibility; no network/new API/remote mutation; final source hashes include uncommitted review repair at the recorded source_head",
+  "green": {
+    "exit_code": 0,
+    "source_head": "fa899d1c1f7cc5375821e6a38e374ad9078adc93",
+    "source_sha256": "eed9e3356c9d5ccb4e24ee997ce055968e289479302b3a50525487986e708f51",
+    "test_binary_sha256": "51e5234308f6674967b575641f3a4e783e6b81f0a121aa201e203da68d101e8e",
+    "note": "This measured GREEN preceded only the documentation-only preferred-base constant wording update. Final compatibility observations and canonical verification bind the later final source."
+  },
+  "owner_issue": 5390,
+  "scenarios": [
+    "main-only remote base with no HEAD hint remains observable from fresh cache, with zero GitHub calls",
+    "explicit local origin/HEAD -> stable precedes conventional origin/main",
+    "origin/develop remains preferred over explicit remote default",
+    "dangling explicit default returns Err",
+    "no available remote integration base returns Err rather than local HEAD or empty inventory"
+  ],
+  "red_log": "   Compiling gwt-git v9.145.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt-git)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.35s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt_git-0b656073acf34a9a.exe)\r\n\r\nrunning 1 test\r\n\r\nthread 'pr_status::tests::tracked_inventory_selects_local_integration_base' (6408) panicked at crates\\gwt-git\\src\\pr_status.rs:6635:27:\r\nmain-only project remains observable without a default hint: Git(\"fatal: malformed object name origin/develop\")\r\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\r\ntest pr_status::tests::tracked_inventory_selects_local_integration_base ... FAILED\r\n\r\nfailures:\r\n\r\nfailures:\r\n    pr_status::tests::tracked_inventory_selects_local_integration_base\r\n\r\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 410 filtered out; finished in 0.70s\r\n\r\nerror: test failed, to rerun pass `-p gwt-git --lib`\r\n",
+  "review_thread": "PRRT_kwDOPLof2M6wh-B8",
+  "green_log": "   Compiling gwt-git v9.145.0 (E:\\gwt\\work\\issue-5390\\crates\\gwt-git)\r\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.29s\r\n     Running unittests src\\lib.rs (target\\debug\\deps\\gwt_git-0b656073acf34a9a.exe)\r\n\r\nrunning 1 test\r\ntest pr_status::tests::tracked_inventory_selects_local_integration_base ... ok\r\n\r\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 410 filtered out; finished in 2.88s\r\n\r\n"
+}
