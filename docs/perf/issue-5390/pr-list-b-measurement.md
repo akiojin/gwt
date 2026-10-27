@@ -238,24 +238,27 @@ scoped CI coverage and merged/base inclusion are separate delivery evidence.
 ## Fatal merge isolation
 
 Review PRRT_kwDOPLof2M6wpiMj exposed a second per-head compatibility gap.
-Real Git2.51.2 returned0 for a healthy bookkeeping head alone, but fatal128
-for either order of a mixed unrelated/healthy batch, with empty or partial
+Real Git 2.51.2 returned status 0 for a healthy bookkeeping head alone, but
+fatal status 128 for either order of a mixed unrelated/healthy batch, with empty or partial
 stdout. Treating that whole batch as unknown changed the healthy branch's
-classification. The original singleton independently preserves healthyfalse
+classification. The original singleton independently keeps the healthy head's
+classification as false
 and leaves the unrelated head unknown.
 
 The existing bookkeeping test retains its original standalone assertions,
 then adds just one unrelated root. That final test first fails with healthy
-None versus Some(false), then passes with a narrow fatal128 fallback to the
-existing singleton. Ordinaryexit1/IO/malformed output still stays unknown;
-explicit129+stdin old-Git compatibility remains. This adds no timed retry,
+None versus Some(false), then passes with a narrow fatal 128 fallback to the
+existing singleton. Ordinary exit 1, I/O errors and malformed output stay unknown;
+explicit exit 129 with the stdin option retains compatibility with older Git.
+This adds no timed retry,
 scheduler, capability probe, new policy/API or runtime change. Partial fatal
 stdout is not trusted. Independent source review found no blocking issue.
 
 `pr-list-b-green-isolation.json` preserves this RED/GREEN/probe, five final
-source hashes and a fresh native4 comparison on the same frozen input. All
+source hashes and a fresh comparison of four native runs on the same frozen
+input. All
 85 branch rows match every baseline field and count, and successful stocktake
-still uses23Git calls.
+still uses 23 Git calls.
 
 | Case | Baseline seconds | Isolation-source seconds | Git calls |
 | --- | ---: | ---: | ---: |
