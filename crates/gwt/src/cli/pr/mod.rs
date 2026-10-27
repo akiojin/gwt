@@ -2903,8 +2903,8 @@ mod tests {
     }
 
     /// Issue #4850 AC-1/AC-2/AC-3: with `works.lock` held by someone else,
-    /// `pr.edit` still returns `ok` for the committed GitHub update within the
-    /// bound, carries a warning that names the holder and the skipped
+    /// `pr.edit` still returns `ok` for the committed GitHub update when the
+    /// metadata deadline expires, carries a warning naming the holder and skipped
     /// recording, and records nothing; with the lock free it records the PR
     /// metadata exactly as before.
     #[test]
@@ -2944,17 +2944,37 @@ mod tests {
         };
         assert_eq!(recorded_pr_number(&works_path), None);
 
-        // Another process is holding the Work items lock (a Monitor scan, a
-        // PM refresh). The deadline is shortened so the test does not wait
-        // the production ten seconds.
-        PR_METADATA_RECORD_DEADLINE_OVERRIDE
-            .with(|cell| cell.set(Some(std::time::Duration::from_millis(300))));
+        // Keep the existing short metadata budget, but expire it only after
+        // observing real contention rather than spending host time waiting.
+        let start = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+        let budget = std::time::Duration::from_millis(300);
+        PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(Some(budget)));
         let holder = gwt_core::operation_deadline::NamedFileLock::acquire(
             &works_path.with_extension("lock"),
             "pm.refresh",
         )
         .expect("hold the Work items lock");
-        let started = std::time::Instant::now();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its notification is lost; never decides success.
+            let requested = released.recv_timeout(gwt_core::deadline_budget::HANG_GUARD);
+            holder.unlock().expect("release the Work items lock");
+            requested
+        });
+        let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let on_contention = expired_clock.clone();
+        let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+            &works_path.with_extension("lock"),
+            move || {
+                let expiry = gwt_core::operation_deadline::current().expect("metadata deadline");
+                assert_eq!(expiry, start + budget);
+                assert_eq!(gwt_core::operation_deadline::now(), start);
+                on_contention.replace(Some(
+                    gwt_core::operation_deadline::ScopedOperationClock::set(expiry),
+                ));
+            },
+        );
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -2968,12 +2988,11 @@ mod tests {
             &mut out,
         )
         .expect("edit returns instead of hanging");
-        let elapsed = started.elapsed();
         PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(None));
         assert_eq!(code, 0, "the remote mutation succeeded: {out}");
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "returned within the bound, took {elapsed:?}"
+            expired_clock.borrow().is_some(),
+            "observe real Work items lock contention before expiry"
         );
         assert_eq!(env.pr_edit_call_log.len(), 1, "GitHub was updated first");
         let warnings = crate::cli::operation_warnings::take();
@@ -3005,7 +3024,11 @@ mod tests {
             None,
             "nothing was recorded while the lock was held"
         );
-        holder.unlock().expect("release the Work items lock");
+        release.send(()).expect("request Work items lock release");
+        holder
+            .join()
+            .expect("Work items lock watchdog")
+            .expect("Work items lock released before hang guard");
 
         // Lock free: the same edit records the PR on the Work as today.
         env.pr_edit_call_log.clear();
@@ -4780,6 +4803,14 @@ fn main() -> ExitCode {
         eprintln!("injected local inventory {fail} failure");
         return ExitCode::from(1);
     }
+    if matches!(fail.as_str(), "no-stdin" | "no-stdin-localized") && args.iter().any(|a| a == "merge-tree") && args.iter().any(|a| a == "--stdin") {
+        if fail == "no-stdin-localized" {
+            eprintln!("Fehler: unbekannte Option `stdin'");
+        } else {
+            eprintln!("error: unknown option `stdin'");
+        }
+        return ExitCode::from(129);
+    }
     let mut command = Command::new(REAL_GIT);
     #[cfg(windows)] {
         use std::os::windows::process::CommandExt;
@@ -4849,12 +4880,26 @@ fn main() -> ExitCode {
             assert_eq!(recovered["source"], "cache");
             assert_eq!(recovered["unlanded_branches"][0]["owner_issue"], 5390);
             assert_eq!(recovered["unlanded_branch_count"], 1);
+            let single_candidate_calls = fs::read_to_string(bin.join("calls"))
+                .unwrap()
+                .lines()
+                .count();
             let (code, unknown) = observe("merge-tree", serde_json::json!({"include":[]}));
             assert_eq!(code, 0, "{unknown}");
             let unknown: serde_json::Value =
                 serde_json::from_str(unknown["output"].as_str().unwrap()).unwrap();
             assert_eq!(unknown["unlanded_branch_count"], 1);
             assert!(unknown["unlanded_branches"][0]["has_non_gwt_changes"].is_null());
+            for stage in ["no-stdin", "no-stdin-localized"] {
+                let (code, compatible) = observe(stage, serde_json::json!({"include":[]}));
+                assert_eq!(code, 0, "{compatible}");
+                let compatible: serde_json::Value =
+                    serde_json::from_str(compatible["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    compatible["unlanded_branches"][0]["has_non_gwt_changes"], true,
+                    "{stage}"
+                );
+            }
             // Only a complete successful enumeration may render an empty stocktake.
             fs::remove_file(repo.join(".git/refs/remotes/origin/work/issue-5390")).unwrap();
             let (code, empty) = observe("", serde_json::json!({"include":[]}));
@@ -4891,6 +4936,35 @@ fn main() -> ExitCode {
                     "{response}"
                 );
             }
+            // Issue #5390 B: count processes, not wall time. Repeating local
+            // history and merge walks for every candidate caused native stalls.
+            for number in 1..=8 {
+                assert!(gwt_core::process::hidden_command(&real_git_path)
+                    .args([
+                        "update-ref",
+                        &format!("refs/remotes/origin/work/issue-{number}"),
+                        "HEAD"
+                    ])
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let (code, batched) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{batched}");
+            let batched: serde_json::Value =
+                serde_json::from_str(batched["output"].as_str().unwrap()).unwrap();
+            assert_eq!(batched["unlanded_branch_count"], 8);
+            assert!(batched["unlanded_branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["ahead"] == 1 && row["has_non_gwt_changes"] == true));
+            let calls = fs::read_to_string(bin.join("calls")).unwrap();
+            assert!(
+                calls.lines().count() <= single_candidate_calls + 1,
+                "batch local inventory reads: {calls}"
+            );
         });
     }
 

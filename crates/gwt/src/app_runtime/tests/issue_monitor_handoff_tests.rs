@@ -846,12 +846,13 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         agent_project_root: fixture.worktree.display().to_string(),
         ..sample_active_agent_session("tab-1", "predecessor-window")
     };
+    let historical_owner = (case != "4777-ownerless-root").then_some(fixture.execution_owner);
     save_workspace_launch_projection(
         &fixture.project_root,
         &predecessor_active,
         Some("origin/develop"),
-        Some(fixture.execution_owner.number),
-        Some(fixture.execution_owner),
+        historical_owner.map(|owner| owner.number),
+        historical_owner,
         None,
         WorkspaceLaunchProjectionKind::StartWork,
         Some(&HashSet::from([fixture.source_session_id.clone()])),
@@ -972,12 +973,26 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
     }
     if case == "4777-ownerless-root" {
-        history
+        let root = history
             .work_items
-            .iter_mut()
+            .iter()
             .find(|work| work.id == predecessor_id)
-            .unwrap()
-            .owner = None;
+            .unwrap();
+        assert_eq!(root.owner, None, "{case}: seed ownerless projection");
+        let start = root
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .unwrap();
+        assert_eq!(start.owner, None, "{case}: seed ownerless source event");
+        assert!(
+            gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                &fixture.worktree,
+                start,
+            )
+            .unwrap(),
+            "{case}: immutable source matches the ownerless fixture"
+        );
     }
     if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
         let mut start = history
@@ -1016,12 +1031,17 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             if case == "4777-missing-historical-owner" || case.contains("ownerless") {
                 // Real historical chains can lose owners at the root,
                 // terminal middle generations, or active latest Work.
-                history
+                let middle = history
                     .work_items
                     .iter_mut()
                     .find(|work| work.id == predecessor_id)
-                    .unwrap()
-                    .owner = None;
+                    .unwrap();
+                middle.owner = None;
+                // Shared intake refolds inline events. Seed the historical
+                // owner consistently instead of racing it back from Start.
+                for event in &mut middle.events {
+                    event.owner = None;
+                }
                 if case == "5082-ownerless-current" {
                     start.id = format!("{case}-middle-start");
                     start.work_item_id =
@@ -1040,6 +1060,9 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 start.work_item_id =
                     gwt_core::workspace_projection::successor_work_id(&predecessor_id);
                 start.related_work_item_id = Some(predecessor_id.clone());
+                if case == "4777-ownerless-root" {
+                    start.owner = Some(format!("SPEC-{}", fixture.execution_owner.number));
+                }
                 history.apply_event(start);
             }
         }
@@ -1483,6 +1506,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             staged_diff,
             "{case}: retain staged source bytes"
         );
+    }
+    if case == "4777-missing-historical-owner" {
+        // Exercise the background refold before comparing history, regardless
+        // of whether the launch thread happened to finish its intake first.
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &works_path,
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
     }
     let updated = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
         .unwrap()
