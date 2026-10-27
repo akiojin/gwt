@@ -199,6 +199,21 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
     let context = runtime.project_context_for_root(&repo).unwrap();
     runtime.pm_agent_idle_wake_events(&context);
+    let pm = owner_runtime_probe(&runtime, &pm_id);
+    pm.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("PreToolUse", "{}")
+            .expect("the actual PM starts a managed turn before delivery");
+    });
+    assert_eq!(
+        gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &registered_pm_session_id(&repo),
+        ))
+        .unwrap()
+        .status,
+        gwt_agent::AgentStatus::Running,
+        "the native PM is busy before its queued idle notification is delivered"
+    );
     runtime.handle_runtime_hook_event(runtime_hook_state(
         "running",
         &registered_pm_session_id(&repo),
@@ -213,6 +228,10 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
         .is_none(),
         "a new PM turn must retain the queued edge instead of submitting it"
     );
+    pm.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+            .expect("the actual PM completes its managed turn");
+    });
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(
         runtime
@@ -303,6 +322,16 @@ fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
     };
     assert_eq!(tasks.lock().unwrap().len(), 1);
     let tasks = Arc::clone(tasks);
+    let original = owner_runtime_probe(&runtime, &pm_id);
+    let owner = project_owner_fixture(&mut runtime, &pm_id);
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: original.id.clone(),
+            incarnation: original.incarnation,
+        }),
+    )
+    .expect("normally retire the exact original PM before installing its replacement");
+    assert!(original.pty.tree_exit_confirmed());
     let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
     runtime.blocking_tasks = BlockingTaskSpawner::Queued(tasks);
     drain_pm_wake_delivery_tasks(&mut runtime);
@@ -902,8 +931,21 @@ fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
 
     seed_quiet_standing_supervision(&repo);
     let _pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
-    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "pm-session-live");
-    let mut observed = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let physical = owner_runtime_probe(&runtime, &pm_window_id);
+    let owner = project_owner_fixture(&mut runtime, &pm_window_id);
+    let running = owner_runtime_status_event(&owner, &physical, "Running", "PreToolUse");
+    runtime.handle_project_owner_event(
+        &runtime.test_context(),
+        1,
+        owner.client().identity().unwrap(),
+        running,
+    );
+    runtime.window_last_output_at.remove(&pm_window_id);
+    let runtime_path =
+        gwt_agent::runtime_state_path(&runtime.sessions_dir, &registered_pm_session_id(&repo));
+    let mut observed = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("the actual registered PM's physical runtime record");
+    observed.status = gwt_agent::AgentStatus::Running;
     observed.runtime_incarnation = Some(runtime.runtimes[&pm_window_id].incarnation);
     observed.source_event = Some("Stop".into());
     observed.last_activity_at = "2026-08-10T00:00:00Z".parse().unwrap();

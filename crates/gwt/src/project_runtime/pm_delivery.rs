@@ -683,7 +683,14 @@ pub(crate) fn deliver_pm_wake(
             });
         }
         let prompt = pm_wake_delivery_prompt(root, &delivery.prompt, true);
-        if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
+        if !permit.load(Ordering::Acquire)
+            || (entry.handle.has_unsent_user_input() && !owns_input)
+            || target_session.is_some_and(|session| {
+                pm_wake_runtime_is_busy(
+                    &gwt_agent::runtime_state_path(sessions_dir, session),
+                    incarnation,
+                )
+            })
         {
             return Ok(PmWakeWrite::Deferred);
         }
