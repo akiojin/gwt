@@ -3416,27 +3416,26 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "agent-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (owner, probe, mut runtime, mut events) = managed_exit_fixture(
+        temp.path(),
+        1,
+        "No conversation found with session ID: resume-target-1",
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(b"No conversation found with session ID: resume-target-1\r\n");
-
-    let _ = runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("Process exited with status 1".to_string()),
-        true,
-    );
+    let window_id = combined_window_id("tab-1", "exit-agent");
+    let projected = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
+    let owner_detail = projected
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                detail: Some(detail),
+                ..
+            } => Some(detail),
+            _ => None,
+        })
+        .expect("the actual owner emits the terminal error diagnostic");
+    assert!(owner_detail.contains("Exact session restore failed"));
+    assert!(!owner_detail.contains("resume-target-1"));
 
     let detail = runtime
         .window_details
@@ -3445,11 +3444,15 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
         .unwrap_or_default();
     assert!(
         detail.contains("Exact session restore failed"),
-        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}"
+        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}; authoritative owner: {owner_detail}"
     );
     assert!(
         !detail.contains("resume-target-1"),
         "diagnostic must not persist the provider conversation id, got: {detail}"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Error)
     );
     assert!(
         !runtime.runtimes.contains_key(&window_id),

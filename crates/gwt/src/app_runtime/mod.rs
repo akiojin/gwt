@@ -14355,11 +14355,16 @@ impl AppRuntime {
                 if let Some(error) = error {
                     return self.status_events(id, WindowProcessStatus::Error, Some(error));
                 }
-                let runtime = self.runtimes.get_mut(&id).expect("fenced remote runtime");
-                runtime.status_revision = runtime.status_revision.saturating_add(1);
-                runtime.exit_confirmed = true;
-                runtime.status = WindowProcessStatus::Stopped;
-                self.apply_owner_status_projection(&id, WindowProcessStatus::Stopped, None)
+                let runtime = self.runtimes.remove(&id).expect("fenced remote runtime");
+                self.active_agent_sessions.remove(&id);
+                // Diagnostic exits retain their row and final authoritative Status.
+                // Explicit/natural window removal has already consumed its cache.
+                let (status, detail) = if runtime.exit_confirmed {
+                    (runtime.status, runtime.detail)
+                } else {
+                    (WindowProcessStatus::Stopped, None)
+                };
+                self.apply_owner_status_projection(&id, status, detail)
             }
             OwnerEvent::LaunchProgress {
                 id,
