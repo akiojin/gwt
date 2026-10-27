@@ -258,6 +258,36 @@ twice for the same user makes the second invocation print the
 existing URL to stderr and exit 0 instead of starting a second
 server.
 
+### Mobile access (in development)
+
+Safe access from iOS Safari and Android Chrome is being developed in
+[SPEC #6476](https://github.com/akiojin/gwt/issues/6476). Device authorization
+and device-record persistence are implemented as internal foundations, but are
+not connected to the running server. Mobile pairing, encrypted remote transport,
+automatic Direct/Relay selection, and phone validation are not available yet.
+`--bind` changes the listening address; it does not enable these protections.
+Keep the existing browser server on loopback or a trusted network.
+
+The planned self-hosted connection has these prerequisites:
+
+- A mobile-reachable HTTPS origin with a browser-trusted certificate to load
+  the client and exchange connection information. The PC's loopback HTTP URL
+  is not a remote bootstrap URL; serving a private LAN IP over HTTP does not
+  provide the secure context required by the planned browser authentication.
+- Explicit approval on the PC before a phone can operate its paired project.
+  The PC continues to run CLI/Git/agents and enforce authorization.
+- A reachable self-hosted relay when a direct path cannot be established.
+  NAT traversal cannot guarantee a direct connection on every network; an
+  absent or unreachable relay must leave the client disconnected.
+- No required Tailscale account/app or paid service subscription. Existing
+  operator-controlled hardware and connectivity may be used, but hosting,
+  bandwidth, a suitable hostname, and certificate management still need to
+  be provided. Free public relay capacity is not included.
+
+The SPEC records the planned deployment, HTTPS bootstrap, network conditions,
+and failure behavior. Runnable mobile setup instructions will follow transport
+integration and validation; the existing LAN bind example is not that setup.
+
 ### `gwt serve` removal
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
