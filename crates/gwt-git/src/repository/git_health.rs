@@ -186,6 +186,7 @@ pub fn record_metadata_failure(repo: &Path, command: &str, stderr: &str) -> Opti
         "bad git config",
         "not a git repository",
         "invalid gitfile",
+        "gitfile does not point to a valid repository",
         "unable to read config",
         "cannot chdir",
         "invalid line",
@@ -397,6 +398,25 @@ mod tests {
     }
 
     #[test]
+    fn invalid_gitfile_repository_is_fenced_until_its_marker_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join(".git");
+        fs::write(&marker, "gitdir: missing-admin\n").unwrap();
+        let diagnosis = record_metadata_failure(
+            temp.path(),
+            "git rev-parse --git-common-dir",
+            &format!(
+                "fatal: gitfile does not point to a valid repository: {}",
+                marker.display()
+            ),
+        )
+        .expect("Git 2.56 invalid gitfile is a metadata failure");
+        assert_eq!(cached_metadata_failure(temp.path()), Some(diagnosis));
+        fs::write(&marker, "gitdir: repaired-admin\n").unwrap();
+        assert!(cached_metadata_failure(temp.path()).is_none());
+    }
+
+    #[test]
     fn bare_configuration_failure_is_fenced_until_the_metadata_changes() {
         let temp = tempfile::tempdir().unwrap();
         let bare = temp.path().join("shared.git");
@@ -468,6 +488,13 @@ mod tests {
             "repairing the reported include must resume Git inspection"
         );
         assert!(record_metadata_failure(&bare, "git fetch", "process deadline expired").is_none());
+        assert!(cached_metadata_failure(&bare).is_none());
+        assert!(record_metadata_failure(
+            &bare,
+            "git fetch",
+            "fatal: unable to access 'https://example.invalid/repo.git/': Could not resolve host",
+        )
+        .is_none());
         assert!(cached_metadata_failure(&bare).is_none());
     }
 }
