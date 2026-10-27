@@ -1375,11 +1375,9 @@ fn pm_crash_records_backoff_and_respawns() {
         let mut events = Vec::new();
         // test-hygiene: allow-wall-clock-deadline actual child exit and owner lifecycle response hang guard
         let completed = tokio::time::timeout(Duration::from_secs(15), async {
-            let mut lifecycle_seen = false;
             loop {
                 let event = source.recv().await.expect("actual owner lifecycle");
-                lifecycle_seen |= matches!(&event, gwt::project_runtime::events::OwnerEvent::PmLifecycle { outcome, .. } if outcome.session_id == session_id);
-                let done = lifecycle_seen && matches!(&event, gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None } if id == &probe.id && *incarnation == probe.incarnation);
+                let done = matches!(&event, gwt::project_runtime::events::OwnerEvent::PmLifecycle { outcome, .. } if outcome.session_id == session_id);
                 events.push(event);
                 if done { break; }
             }
@@ -1421,6 +1419,10 @@ fn pm_crash_records_backoff_and_respawns() {
         runtime.handle_project_owner_event(&context, 1, &identity, event);
     }
     assert!(
+        !runtime.active_agent_sessions.contains_key(&window_id),
+        "successful physical PM cleanup releases its reservation before Closed arrives"
+    );
+    assert!(
         runtime
             .project_state(&context)
             .unwrap()
@@ -1460,13 +1462,23 @@ fn pm_crash_records_backoff_and_respawns() {
         "crash is recorded on the backoff ladder"
     );
     assert_eq!(
+        runtime.pending_launch_completions.len(),
+        1,
+        "immediate respawn resumes the PM conversation"
+    );
+    assert_eq!(
+        runtime.pending_auto_resume_sources.get(&window_id),
+        Some(&session_id),
+        "the single owner restore intent resumes the original PM Session"
+    );
+    assert_eq!(
         runtime
             .project_state(&runtime.test_context())
             .unwrap()
             .pending_pm_launches
             .len(),
         1,
-        "immediate respawn resumes the PM conversation"
+        "the resumed PM is tracked even when its saved alias is reused"
     );
 }
 
