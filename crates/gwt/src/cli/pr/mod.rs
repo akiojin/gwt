@@ -2903,8 +2903,8 @@ mod tests {
     }
 
     /// Issue #4850 AC-1/AC-2/AC-3: with `works.lock` held by someone else,
-    /// `pr.edit` still returns `ok` for the committed GitHub update within the
-    /// bound, carries a warning that names the holder and the skipped
+    /// `pr.edit` still returns `ok` for the committed GitHub update when the
+    /// metadata deadline expires, carries a warning naming the holder and skipped
     /// recording, and records nothing; with the lock free it records the PR
     /// metadata exactly as before.
     #[test]
@@ -2944,17 +2944,37 @@ mod tests {
         };
         assert_eq!(recorded_pr_number(&works_path), None);
 
-        // Another process is holding the Work items lock (a Monitor scan, a
-        // PM refresh). The deadline is shortened so the test does not wait
-        // the production ten seconds.
-        PR_METADATA_RECORD_DEADLINE_OVERRIDE
-            .with(|cell| cell.set(Some(std::time::Duration::from_millis(300))));
+        // Keep the existing short metadata budget, but expire it only after
+        // observing real contention rather than spending host time waiting.
+        let start = std::time::Instant::now();
+        let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+        let budget = std::time::Duration::from_millis(300);
+        PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(Some(budget)));
         let holder = gwt_core::operation_deadline::NamedFileLock::acquire(
             &works_path.with_extension("lock"),
             "pm.refresh",
         )
         .expect("hold the Work items lock");
-        let started = std::time::Instant::now();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its notification is lost; never decides success.
+            let requested = released.recv_timeout(gwt_core::deadline_budget::HANG_GUARD);
+            holder.unlock().expect("release the Work items lock");
+            requested
+        });
+        let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let on_contention = expired_clock.clone();
+        let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+            &works_path.with_extension("lock"),
+            move || {
+                let expiry = gwt_core::operation_deadline::current().expect("metadata deadline");
+                assert_eq!(expiry, start + budget);
+                assert_eq!(gwt_core::operation_deadline::now(), start);
+                on_contention.replace(Some(
+                    gwt_core::operation_deadline::ScopedOperationClock::set(expiry),
+                ));
+            },
+        );
         let mut out = String::new();
         let code = run(
             &mut env,
@@ -2968,12 +2988,11 @@ mod tests {
             &mut out,
         )
         .expect("edit returns instead of hanging");
-        let elapsed = started.elapsed();
         PR_METADATA_RECORD_DEADLINE_OVERRIDE.with(|cell| cell.set(None));
         assert_eq!(code, 0, "the remote mutation succeeded: {out}");
         assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "returned within the bound, took {elapsed:?}"
+            expired_clock.borrow().is_some(),
+            "observe real Work items lock contention before expiry"
         );
         assert_eq!(env.pr_edit_call_log.len(), 1, "GitHub was updated first");
         let warnings = crate::cli::operation_warnings::take();
@@ -3005,7 +3024,11 @@ mod tests {
             None,
             "nothing was recorded while the lock was held"
         );
-        holder.unlock().expect("release the Work items lock");
+        release.send(()).expect("request Work items lock release");
+        holder
+            .join()
+            .expect("Work items lock watchdog")
+            .expect("Work items lock released before hang guard");
 
         // Lock free: the same edit records the PR on the Work as today.
         env.pr_edit_call_log.clear();
@@ -4728,6 +4751,221 @@ mod tests {
                 "has_non_gwt_changes": false,
             })
         );
+    }
+
+    /// Issue #5390 slice A: exercise the envelope and production tracked reader,
+    /// failing only the selected Git command while forwarding all other reads.
+    #[test]
+    fn pr_list_tracked_local_failures_are_errors_and_recover() {
+        let _env = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        with_fake_gh_capture("success", |repo, gh_calls| {
+            use std::fs;
+
+            let home = tempfile::tempdir().unwrap();
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+            let _author = ScopedEnvVar::set("GIT_AUTHOR_DATE", "2026-10-27T00:00:00Z");
+            let _committer = ScopedEnvVar::set("GIT_COMMITTER_DATE", "2026-10-27T00:00:00Z");
+            seed_non_ui_pr_repo(repo);
+            fs::write(repo.join("source.txt"), "unlanded source\n").unwrap();
+            for args in [
+                vec!["add", "source.txt"],
+                vec!["commit", "-qm", "source"],
+                vec!["update-ref", "refs/remotes/origin/work/issue-5390", "HEAD"],
+            ] {
+                assert!(gwt_core::process::hidden_command("git")
+                    .args(args)
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let bin = home.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            let real_git_path = which::which("git").unwrap();
+            let real_git = serde_json::to_string(&real_git_path).unwrap();
+            let revisions = gwt_core::process::hidden_command(&real_git_path)
+                .args(["rev-parse", "HEAD", "HEAD~1", "HEAD^{tree}"])
+                .current_dir(repo)
+                .output()
+                .unwrap();
+            assert!(revisions.status.success());
+            let revisions = String::from_utf8(revisions.stdout).unwrap();
+            let shim = r#"
+use std::{env, fs, io::Write, process::{Command, ExitCode}};
+fn main() -> ExitCode {
+    let bin = env::current_exe().unwrap().parent().unwrap().to_path_buf();
+    let args: Vec<_> = env::args().skip(1).collect();
+    writeln!(fs::OpenOptions::new().create(true).append(true).open(bin.join("calls")).unwrap(), "{args:?}").unwrap();
+    let fail = fs::read_to_string(bin.join("fail")).unwrap_or_default();
+    if !fail.is_empty() && args.contains(&fail) {
+        eprintln!("injected local inventory {fail} failure");
+        return ExitCode::from(1);
+    }
+    if matches!(fail.as_str(), "no-stdin" | "no-stdin-localized") && args.iter().any(|a| a == "merge-tree") && args.iter().any(|a| a == "--stdin") {
+        if fail == "no-stdin-localized" {
+            eprintln!("Fehler: unbekannte Option `stdin'");
+        } else {
+            eprintln!("error: unknown option `stdin'");
+        }
+        return ExitCode::from(129);
+    }
+    let mut command = Command::new(REAL_GIT);
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    ExitCode::from(command.args(args).status().unwrap().code().unwrap_or(1) as u8)
+}
+"#.replace("REAL_GIT", &real_git);
+            let source = bin.join("shim.rs");
+            fs::write(&source, &shim).unwrap();
+            assert!(gwt_core::process::hidden_command("rustc")
+                .arg(&source)
+                .arg("-o")
+                .arg(bin.join(format!("git{}", std::env::consts::EXE_SUFFIX)))
+                .current_dir(&bin)
+                .status()
+                .unwrap()
+                .success());
+            let path = std::env::join_paths(
+                std::iter::once(bin.clone())
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap();
+            let _path = ScopedEnvVar::set("PATH", path);
+            let cache_path = gwt_core::paths::gwt_project_dir_for_repo_path(repo)
+                .join(gwt_git::PR_INVENTORY_CACHE_FILE);
+            let cache = gwt_git::pr_status::PrInventoryCache {
+                fetched_at: Some(chrono::Utc::now()),
+                ..Default::default()
+            };
+            cache.save(&cache_path).unwrap();
+            let mut env = crate::cli::DefaultCliEnv::new("fixture", "repo", repo.into());
+            let mut observe = |stage: &str, params: serde_json::Value| {
+                fs::write(bin.join("fail"), stage).unwrap();
+                fs::write(bin.join("calls"), "").unwrap();
+                let git_start = gwt_core::process::thread_git_duration_ms();
+                let started = std::time::Instant::now();
+                let mut captured = Vec::new();
+                let code = crate::cli::json_envelope::dispatch_input(
+                    &mut env,
+                    "gwtd",
+                    &serde_json::json!({"schema_version":1,"operation":"pr.list","params":params})
+                        .to_string(),
+                    Some(&mut captured),
+                );
+                let response: serde_json::Value = serde_json::from_slice(&captured).unwrap();
+                let calls = fs::read_to_string(bin.join("calls")).unwrap();
+                let evidence = serde_json::json!({
+                    "stage": stage, "params": params, "exit_code": code,
+                    "fixture_revisions": revisions,
+                    "total_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    "logged_git_ms": gwt_core::process::thread_git_duration_ms() - git_start,
+                    "git_calls": calls.lines().count(), "git_argv": calls,
+                    "gh_calls_cumulative": fs::read_to_string(gh_calls).unwrap_or_default().lines().count(),
+                    "response": response,
+                });
+                println!("PR_LIST_A_EVIDENCE {evidence}");
+                (code, response)
+            };
+            // Observe both regressions before asserting, so RED preserves both.
+            let enumeration = observe("for-each-ref", serde_json::json!({}));
+            let divergence = observe("rev-list", serde_json::json!({"include":[]}));
+            let (code, recovered) = observe("", serde_json::json!({}));
+            assert_eq!(code, 0, "{recovered}");
+            let recovered: serde_json::Value =
+                serde_json::from_str(recovered["output"].as_str().unwrap()).unwrap();
+            assert_eq!(recovered["source"], "cache");
+            assert_eq!(recovered["unlanded_branches"][0]["owner_issue"], 5390);
+            assert_eq!(recovered["unlanded_branch_count"], 1);
+            let single_candidate_calls = fs::read_to_string(bin.join("calls"))
+                .unwrap()
+                .lines()
+                .count();
+            let (code, unknown) = observe("merge-tree", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{unknown}");
+            let unknown: serde_json::Value =
+                serde_json::from_str(unknown["output"].as_str().unwrap()).unwrap();
+            assert_eq!(unknown["unlanded_branch_count"], 1);
+            assert!(unknown["unlanded_branches"][0]["has_non_gwt_changes"].is_null());
+            for stage in ["no-stdin", "no-stdin-localized"] {
+                let (code, compatible) = observe(stage, serde_json::json!({"include":[]}));
+                assert_eq!(code, 0, "{compatible}");
+                let compatible: serde_json::Value =
+                    serde_json::from_str(compatible["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    compatible["unlanded_branches"][0]["has_non_gwt_changes"], true,
+                    "{stage}"
+                );
+            }
+            // Only a complete successful enumeration may render an empty stocktake.
+            fs::remove_file(repo.join(".git/refs/remotes/origin/work/issue-5390")).unwrap();
+            let (code, empty) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{empty}");
+            let empty: serde_json::Value =
+                serde_json::from_str(empty["output"].as_str().unwrap()).unwrap();
+            assert_eq!(empty["unlanded_branch_count"], 0);
+            assert_eq!(empty["unlanded_branches"], serde_json::json!([]));
+            // A cold PR cache uses fake gh, then the same tracked entry reuses it.
+            fs::remove_file(&cache_path).unwrap();
+            let (code, cold) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{cold}");
+            let cold: serde_json::Value =
+                serde_json::from_str(cold["output"].as_str().unwrap()).unwrap();
+            assert_eq!(cold["source"], "github");
+            let (code, warm) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{warm}");
+            let warm: serde_json::Value =
+                serde_json::from_str(warm["output"].as_str().unwrap()).unwrap();
+            assert_eq!(warm["source"], "cache");
+            for (stage, (code, response)) in
+                [("for-each-ref", enumeration), ("rev-list", divergence)]
+            {
+                assert_ne!(
+                    code, 0,
+                    "{stage} must not become an empty success: {response}"
+                );
+                assert_eq!(response["ok"], false);
+                assert!(
+                    response["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&format!("injected local inventory {stage} failure")),
+                    "{response}"
+                );
+            }
+            // Issue #5390 B: count processes, not wall time. Repeating local
+            // history and merge walks for every candidate caused native stalls.
+            for number in 1..=8 {
+                assert!(gwt_core::process::hidden_command(&real_git_path)
+                    .args([
+                        "update-ref",
+                        &format!("refs/remotes/origin/work/issue-{number}"),
+                        "HEAD"
+                    ])
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let (code, batched) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{batched}");
+            let batched: serde_json::Value =
+                serde_json::from_str(batched["output"].as_str().unwrap()).unwrap();
+            assert_eq!(batched["unlanded_branch_count"], 8);
+            assert!(batched["unlanded_branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["ahead"] == 1 && row["has_non_gwt_changes"] == true));
+            let calls = fs::read_to_string(bin.join("calls")).unwrap();
+            assert!(
+                calls.lines().count() <= single_candidate_calls + 1,
+                "batch local inventory reads: {calls}"
+            );
+        });
     }
 
     #[test]

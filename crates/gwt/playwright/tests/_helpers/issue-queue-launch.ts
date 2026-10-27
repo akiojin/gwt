@@ -10,7 +10,7 @@ import { startExactRelaunchFixture, writeFixtureNodeCommand } from "./exact-rela
 
 /** Real monitor, claims, materialization and PTY; GitHub and provider are local recorders. */
 export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
-  targetIssueNumber?: 44; switching?: boolean; positive?: boolean;
+  targetIssueNumber?: 44; switching?: boolean; positive?: boolean; terminalConvergence?: boolean;
 } = {}) {
   const windows = process.platform === "win32";
   const comments: { id: number; body: string; updated_at: string }[] = [];
@@ -26,7 +26,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
     title: "Next planned switch fixture", url: `https://github.com/fixture/queue/issues/${options.targetIssueNumber}` }] : [])];
   const issueComments = new Map(issues.map(value => [value.number, value.number === issue.number ? comments : [] as typeof comments]));
   let nextCommentId = 1;
-  const restIssue = (value: typeof issue) => ({ ...value, state: "open", html_url: value.url,
+  const restIssue = (value: typeof issue) => ({ ...value, state: value.state.toLowerCase(), html_url: value.url,
     updated_at: value.updatedAt, user: { login: "fixture" } });
   const server = createServer(async (request, response) => {
     requests.push({ method: request.method || "", url: request.url || "" });
@@ -58,6 +58,21 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       comment.body = payload.body;
       comment.updated_at = new Date().toISOString();
       result = comment;
+    } else if (options.terminalConvergence && request.method === "PATCH"
+      && /^\/repos\/fixture\/queue\/issues\/\d+$/.test(request.url || "")) {
+      const selected = issues.find(value => value.number === Number(request.url!.split("/").at(-1)));
+      if (!selected) { response.writeHead(404); response.end("{}"); return; }
+      selected.state = String(payload.state).toUpperCase();
+      selected.updatedAt = new Date().toISOString();
+      result = restIssue(selected);
+    } else if (options.terminalConvergence && request.method === "DELETE"
+      && /^\/repos\/fixture\/queue\/issues\/\d+\/labels\//.test(request.url || "")) {
+      const parts = request.url!.split("/");
+      const selected = issues.find(value => value.number === Number(parts[5]));
+      if (!selected) { response.writeHead(404); response.end("{}"); return; }
+      selected.labels = selected.labels.filter(label => label.name !== decodeURIComponent(parts[7]));
+      selected.updatedAt = new Date().toISOString();
+      result = selected.labels;
     } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues(?:\?|$)/.test(request.url || "")) {
       result = issues.map(restIssue);
     } else if (request.method === "GET" && /^\/repos\/fixture\/queue\/issues\/\d+(?:\?|$)/.test(request.url || "")) {
@@ -128,7 +143,8 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
-      freshNativeIds: !!options.switching,
+      terminalConvergence: options.terminalConvergence,
+      freshNativeIds: !!options.switching || !!options.terminalConvergence,
       switching: options.switching ? { sourceIssueNumber: issue.number,
         positive: !!options.positive && process.platform === "linux" && process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE === "1" } : undefined,
       monitorPreferences: {
@@ -136,7 +152,9 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         auto_apply_updates: false, terminal_queue_auto_refill: false,
         launch_profile: { agent_id: "codex", version: "installed", runtime_target: "Host", skip_permissions: true },
       },
-      async beforeStart({ project, env, preferences }) {
+      async beforeStart({ home, project, env, preferences }) {
+        if (options.terminalConvergence)
+          await writeFile(join(home, ".gwt/config.toml"), "[agent]\nterminal_close_grace_secs = 1\n");
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
         daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
@@ -183,6 +201,13 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
         };
         const remote = join(home, "origin.git");
         remotePath = remote;
+        if (options.terminalConvergence) {
+          // Match this repository's treatment of generated local hook config.
+          await writeFile(join(project, ".gitignore"), "/.codex/hooks.json\n");
+          git("add", "--", ".gitignore");
+          git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+            "commit", "-qm", "test: ignore generated local hook config");
+        }
         git("init", "--bare", "-q", remote);
         git("remote", "add", "origin", remote);
         git("push", "-q", "-u", "origin", "main");
@@ -210,6 +235,7 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
 `;
         const ghCommand = await writeFixtureNodeCommand(bin, "gh", gh, true);
         Object.assign(env, {
+          ...(options.terminalConvergence ? { GWT_GITHUB_REPO: "fixture/queue" } : {}),
           RUST_LOG: "info",
           GWT_OWNER_GITHUB_TEST_MODE: "loopback-v1",
           GWT_OWNER_GITHUB_REST_BASE: endpoint,
@@ -268,10 +294,10 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return { predecessorId: predecessor.id, successorId, orphan, worktree,
       branch: start.execution_container.branch, stagedDiff: stagedDiff(worktree) };
   }
-  function readOperation(operation: "execution.status" | "perf.startup", cwd: string) {
+  function readOperation(operation: "execution.status" | "perf.startup", cwd: string, exact = false) {
     const result = spawnSync(checkoutGwtd, [], { cwd, env: auditEnv, encoding: "utf8", timeout: 30_000, windowsHide: true,
       input: JSON.stringify({ schema_version: 1, operation,
-        params: operation === "execution.status" ? { issue: issue.number } : {} }),
+        params: operation === "execution.status" && !exact ? { issue: issue.number } : {} }),
     });
     if (result.status !== 0) throw new Error(`Fixture ${operation} failed`);
     const envelope = JSON.parse(result.stdout);
@@ -288,6 +314,29 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     if (result.error) throw result.error;
     if (!result.stdout.trim()) throw new Error(`Fixture ${operation} returned no envelope: ${result.stderr}`);
     return JSON.parse(result.stdout);
+  }
+  async function closeIssue() {
+    if (!options.terminalConvergence) throw new Error("Closing requires the isolated terminal fixture");
+    // The loopback HTTP server runs on this worker. A synchronous child would
+    // prevent it answering the canonical client's requests.
+    const child = spawn(checkoutGwtd, [], {
+      cwd: active.project, env: auditEnv, windowsHide: true,
+    });
+    let stdout = "", stderr = "", timedOut = false;
+    child.stdout.on("data", data => { stdout += data; });
+    child.stderr.on("data", data => { stderr += data; });
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 45_000);
+    let code;
+    try {
+      child.stdin.end(JSON.stringify({ schema_version: 1, operation: "issue.close",
+        params: { number: issue.number, reason: "completed" } }));
+      code = await new Promise<number | null>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+    } finally { clearTimeout(timer); }
+    if (timedOut || code !== 0) throw new Error("Fixture issue.close failed: " + stdout + stderr);
+    return JSON.parse(stdout);
   }
   async function restoreSummary(since: string) {
     for (const directory of [join(active.home, ".gwt", "logs"), projectLogs]) {
@@ -330,9 +379,11 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     workItems, eventShardPath, stagedDiff, seedActiveOrphan,
     scheduleOperation,
     fixtureOperation: scheduleOperation,
+    closeIssue,
     monitorPreferencesBytes: () => readFile(join(projectState, "issue-monitor.json")),
     auditHooks: (cwd: string) => auditHooks(cwd, false),
     executionStatus: (cwd: string) => readOperation("execution.status", cwd),
+    terminalExecutionStatus: (cwd: string) => readOperation("execution.status", cwd, true),
     startupReport: () => readOperation("perf.startup", active.project).startup,
     async stop() {
       try { await active.stop(); }

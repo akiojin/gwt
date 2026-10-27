@@ -1,0 +1,2598 @@
+{
+  "record_id": "vrr-0c5963bbb3dc4c9bb6e6954ceac58f1b",
+  "verified_head": "4b34cd44ada8bbe71ea1cd1f2da78ce19e3ed1e6",
+  "started_at": "2026-10-27T00:45:22.882905300Z",
+  "all_passed": true,
+  "plan_covered": true,
+  "commands": [
+    {
+      "command": "rustc --version",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "GWT_VERIFY_PERFORMANCE=1 CARGO_TARGET_DIR=E:/gwt/work/issue-6422/target pwsh -NoProfile -File scripts/verify-issue-5596.ps1 -Sequential -CargoLoad -LaunchCount 2 -PostAckDiagnostics -EvidenceDirectory target/verification/issue-6422/paired/dark --project=chromium-dark",
+      "exit_code": 0,
+      "headed_e2e": {
+        "artifacts": [
+          "E:\\gwt\\work\\issue-6422\\target\\verification\\issue-6422\\paired\\dark\\playwright\\gwt-attachments\\attachment-0.png",
+          "E:\\gwt\\work\\issue-6422\\target\\verification\\issue-6422\\paired\\dark\\playwright\\issue-6422-post-ack-live-I-2e6a6-ed-low-high-resource-policy-chromium-dark\\trace.zip"
+        ],
+        "chromium_dark_passed": 1,
+        "chromium_light_passed": 0,
+        "failed": 0,
+        "status": "passed"
+      },
+      "measurement": {
+        "admission_wait_ms": 19,
+        "cap_relief_wait_ms": 142,
+        "raw_exit_code": 0,
+        "reason": null,
+        "status": "ready",
+        "targets": [
+          {
+            "cpu_percent_milli": 10409,
+            "cpu_time_ms": 18093,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 11578,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "native immediate Job (ancestry requires registry)",
+                "owner_pid": 0
+              }
+            ],
+            "observed_ms": 173807,
+            "pid": 27696,
+            "required_uncapped": true,
+            "sample_count": 25,
+            "start_time_seconds": 1793061913
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 173807,
+            "pid": 49612,
+            "required_uncapped": false,
+            "sample_count": 25,
+            "start_time_seconds": 1793061921
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 173807,
+            "pid": 45776,
+            "required_uncapped": false,
+            "sample_count": 25,
+            "start_time_seconds": 1793061921
+          },
+          {
+            "cpu_percent_milli": 3356,
+            "cpu_time_ms": 5765,
+            "first_observed_ms": 1012,
+            "initial_cpu_time_ms": 906,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 171755,
+            "pid": 27028,
+            "required_uncapped": false,
+            "sample_count": 23,
+            "start_time_seconds": 1793061944
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 1012,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 171755,
+            "pid": 20500,
+            "required_uncapped": false,
+            "sample_count": 23,
+            "start_time_seconds": 1793061944
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 2191,
+            "initial_cpu_time_ms": 625,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 18292,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061945
+          },
+          {
+            "cpu_percent_milli": 38760,
+            "cpu_time_ms": 469,
+            "first_observed_ms": 3446,
+            "initial_cpu_time_ms": 109,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1210,
+            "pid": 43868,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793061947
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 3446,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1210,
+            "pid": 34724,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793061947
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 4656,
+            "initial_cpu_time_ms": 859,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 48388,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061948
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 5902,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 44808,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061950
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 5902,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 35640,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061950
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 5902,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 40352,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7112,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 47932,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061951
+          },
+          {
+            "cpu_percent_milli": 9,
+            "cpu_time_ms": 16,
+            "first_observed_ms": 7112,
+            "initial_cpu_time_ms": 46,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 165655,
+            "pid": 11812,
+            "required_uncapped": false,
+            "sample_count": 18,
+            "start_time_seconds": 1793061950
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7112,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 5648,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061951
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7112,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 15876,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061951
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7112,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 165655,
+            "pid": 7280,
+            "required_uncapped": false,
+            "sample_count": 18,
+            "start_time_seconds": 1793061950
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8406,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 46476,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061952
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8406,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 44056,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061952
+          },
+          {
+            "cpu_percent_milli": 9,
+            "cpu_time_ms": 16,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 163104,
+            "pid": 6996,
+            "required_uncapped": false,
+            "sample_count": 16,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1543,
+            "pid": 24696,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 11492,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 29508,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 41560,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 42200,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 20360,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 39372,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 46000,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 39520,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 32076,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 76928,
+            "cpu_time_ms": 1187,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 328,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1543,
+            "pid": 49352,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 53781,
+            "cpu_time_ms": 87719,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 640,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 163104,
+            "pid": 45740,
+            "required_uncapped": false,
+            "sample_count": 16,
+            "start_time_seconds": 1793061952
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 45264,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 21644,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 47176,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 3707,
+            "cpu_time_ms": 6047,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 140,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 163104,
+            "pid": 37332,
+            "required_uncapped": false,
+            "sample_count": 16,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9663,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1543,
+            "pid": 27556,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793061953
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11206,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161561,
+            "pid": 50100,
+            "required_uncapped": false,
+            "sample_count": 15,
+            "start_time_seconds": 1793061955
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11206,
+            "initial_cpu_time_ms": 125,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 39316,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061955
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11206,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161561,
+            "pid": 31512,
+            "required_uncapped": false,
+            "sample_count": 15,
+            "start_time_seconds": 1793061955
+          },
+          {
+            "cpu_percent_milli": 18016,
+            "cpu_time_ms": 28860,
+            "first_observed_ms": 12583,
+            "initial_cpu_time_ms": 890,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 160184,
+            "pid": 10172,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793061955
+          },
+          {
+            "cpu_percent_milli": 1180322,
+            "cpu_time_ms": 1890688,
+            "first_observed_ms": 12583,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 160184,
+            "pid": 8436,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793061955
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 12583,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 160184,
+            "pid": 35544,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793061956
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 15289,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 155847,
+            "pid": 48184,
+            "required_uncapped": false,
+            "sample_count": 11,
+            "start_time_seconds": 1793061958
+          },
+          {
+            "cpu_percent_milli": 160,
+            "cpu_time_ms": 250,
+            "first_observed_ms": 15289,
+            "initial_cpu_time_ms": 1671,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 155847,
+            "pid": 43236,
+            "required_uncapped": false,
+            "sample_count": 11,
+            "start_time_seconds": 1793061958
+          },
+          {
+            "cpu_percent_milli": 20226,
+            "cpu_time_ms": 31234,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 281,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 45548,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 10,
+            "cpu_time_ms": 16,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 18648,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 26704,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 5069,
+            "cpu_time_ms": 7828,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 453,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 36652,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 5990,
+            "cpu_time_ms": 9250,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 953,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 27816,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061959
+          },
+          {
+            "cpu_percent_milli": 131,
+            "cpu_time_ms": 203,
+            "first_observed_ms": 16715,
+            "initial_cpu_time_ms": 156,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 154421,
+            "pid": 47296,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 12720,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 3471,
+            "cpu_time_ms": 5250,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 640,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 151217,
+            "pid": 43540,
+            "required_uncapped": false,
+            "sample_count": 8,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 47752,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 49400,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 28680,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 9,
+            "cpu_time_ms": 15,
+            "first_observed_ms": 18217,
+            "initial_cpu_time_ms": 78,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 151217,
+            "pid": 8624,
+            "required_uncapped": false,
+            "sample_count": 8,
+            "start_time_seconds": 1793061960
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 19826,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 33772,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061964
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21412,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 33068,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21412,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 47500,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21412,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 2372,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21412,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 20048,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 22959,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 149808,
+            "pid": 37760,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793061966
+          },
+          {
+            "cpu_percent_milli": 1543,
+            "cpu_time_ms": 2312,
+            "first_observed_ms": 22959,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 149808,
+            "pid": 33160,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793061966
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 22959,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 149808,
+            "pid": 46648,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793061966
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 26137,
+            "initial_cpu_time_ms": 171,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 1908,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061970
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 26137,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 44764,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793061970
+          },
+          {
+            "cpu_percent_milli": 10,
+            "cpu_time_ms": 16,
+            "first_observed_ms": 26137,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 146630,
+            "pid": 7808,
+            "required_uncapped": false,
+            "sample_count": 5,
+            "start_time_seconds": 1793061969
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 49991,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 122776,
+            "pid": 49996,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793061989
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 49991,
+            "initial_cpu_time_ms": 1328,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 122776,
+            "pid": 45380,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793061989
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 49991,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 122776,
+            "pid": 46944,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793062059
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 49991,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                "owner_pid": 45740
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 122776,
+            "pid": 35608,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793061989
+          }
+        ]
+      }
+    },
+    {
+      "command": "GWT_VERIFY_PERFORMANCE=1 CARGO_TARGET_DIR=E:/gwt/work/issue-6422/target pwsh -NoProfile -File scripts/verify-issue-5596.ps1 -Sequential -CargoLoad -LaunchCount 2 -PostAckDiagnostics -EvidenceDirectory target/verification/issue-6422/paired/light --project=chromium-light",
+      "exit_code": 0,
+      "headed_e2e": {
+        "artifacts": [
+          "E:\\gwt\\work\\issue-6422\\target\\verification\\issue-6422\\paired\\light\\playwright\\gwt-attachments\\attachment-0.png",
+          "E:\\gwt\\work\\issue-6422\\target\\verification\\issue-6422\\paired\\light\\playwright\\issue-6422-post-ack-live-I-2e6a6-ed-low-high-resource-policy-chromium-light\\trace.zip"
+        ],
+        "chromium_dark_passed": 0,
+        "chromium_light_passed": 1,
+        "failed": 0,
+        "status": "passed"
+      },
+      "measurement": {
+        "admission_wait_ms": 20,
+        "cap_relief_wait_ms": 157,
+        "raw_exit_code": 0,
+        "reason": null,
+        "status": "ready",
+        "targets": [
+          {
+            "cpu_percent_milli": 9737,
+            "cpu_time_ms": 17688,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 29890,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": null,
+                "job_name": "native immediate Job (ancestry requires registry)",
+                "owner_pid": 0
+              }
+            ],
+            "observed_ms": 181647,
+            "pid": 27696,
+            "required_uncapped": true,
+            "sample_count": 24,
+            "start_time_seconds": 1793061913
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 181647,
+            "pid": 45776,
+            "required_uncapped": false,
+            "sample_count": 24,
+            "start_time_seconds": 1793061921
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 0,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 181647,
+            "pid": 49612,
+            "required_uncapped": false,
+            "sample_count": 24,
+            "start_time_seconds": 1793061921
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 1010,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 179447,
+            "pid": 38604,
+            "required_uncapped": false,
+            "sample_count": 22,
+            "start_time_seconds": 1793062118
+          },
+          {
+            "cpu_percent_milli": 3282,
+            "cpu_time_ms": 5890,
+            "first_observed_ms": 1010,
+            "initial_cpu_time_ms": 953,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 179447,
+            "pid": 37484,
+            "required_uncapped": false,
+            "sample_count": 22,
+            "start_time_seconds": 1793062118
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 2222,
+            "initial_cpu_time_ms": 750,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 41132,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062120
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 3439,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1272,
+            "pid": 27116,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793062121
+          },
+          {
+            "cpu_percent_milli": 8569,
+            "cpu_time_ms": 109,
+            "first_observed_ms": 3439,
+            "initial_cpu_time_ms": 562,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1272,
+            "pid": 39844,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793062121
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 4711,
+            "initial_cpu_time_ms": 1125,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 37728,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062122
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 5924,
+            "initial_cpu_time_ms": 93,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 174533,
+            "pid": 4404,
+            "required_uncapped": false,
+            "sample_count": 18,
+            "start_time_seconds": 1793062124
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7182,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 28540,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062125
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7182,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 173275,
+            "pid": 43620,
+            "required_uncapped": false,
+            "sample_count": 17,
+            "start_time_seconds": 1793062124
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7182,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 17836,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7182,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 49664,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 7182,
+            "initial_cpu_time_ms": 46,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 28764,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062125
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8534,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 29400,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 54266,
+            "cpu_time_ms": 93297,
+            "first_observed_ms": 8534,
+            "initial_cpu_time_ms": 406,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 171923,
+            "pid": 13512,
+            "required_uncapped": false,
+            "sample_count": 16,
+            "start_time_seconds": 1793062126
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8534,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 41268,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8534,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 30728,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 8534,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 5240,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1412,
+            "pid": 47196,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793062127
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 49008,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062128
+          },
+          {
+            "cpu_percent_milli": 37606,
+            "cpu_time_ms": 531,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 1078,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1412,
+            "pid": 28340,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793062127
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 7500,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 3172,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062128
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 27656,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 1412,
+            "pid": 44036,
+            "required_uncapped": false,
+            "sample_count": 2,
+            "start_time_seconds": 1793062127
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 170608,
+            "pid": 45720,
+            "required_uncapped": false,
+            "sample_count": 15,
+            "start_time_seconds": 1793062127
+          },
+          {
+            "cpu_percent_milli": 3727,
+            "cpu_time_ms": 6359,
+            "first_observed_ms": 9849,
+            "initial_cpu_time_ms": 750,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 170608,
+            "pid": 10056,
+            "required_uncapped": false,
+            "sample_count": 15,
+            "start_time_seconds": 1793062127
+          },
+          {
+            "cpu_percent_milli": 1119375,
+            "cpu_time_ms": 1893938,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 169196,
+            "pid": 47808,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 169196,
+            "pid": 33064,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793062128
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 1265,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 40304,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 41928,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 32640,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 169196,
+            "pid": 42388,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 24028,
+            "cpu_time_ms": 40656,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 250,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 169196,
+            "pid": 48236,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 169196,
+            "pid": 4132,
+            "required_uncapped": false,
+            "sample_count": 14,
+            "start_time_seconds": 1793062128
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 11261,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 39344,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062129
+          },
+          {
+            "cpu_percent_milli": 607,
+            "cpu_time_ms": 1000,
+            "first_observed_ms": 14108,
+            "initial_cpu_time_ms": 984,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 164617,
+            "pid": 30692,
+            "required_uncapped": false,
+            "sample_count": 11,
+            "start_time_seconds": 1793062131
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 14108,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 164617,
+            "pid": 6076,
+            "required_uncapped": false,
+            "sample_count": 11,
+            "start_time_seconds": 1793062131
+          },
+          {
+            "cpu_percent_milli": 7133,
+            "cpu_time_ms": 11641,
+            "first_observed_ms": 15527,
+            "initial_cpu_time_ms": 1046,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 163198,
+            "pid": 46396,
+            "required_uncapped": false,
+            "sample_count": 10,
+            "start_time_seconds": 1793062133
+          },
+          {
+            "cpu_percent_milli": 3908,
+            "cpu_time_ms": 6250,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 812,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 159914,
+            "pid": 36648,
+            "required_uncapped": false,
+            "sample_count": 8,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161757,
+            "pid": 30712,
+            "required_uncapped": false,
+            "sample_count": 9,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 154,
+            "cpu_time_ms": 250,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 265,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161757,
+            "pid": 33048,
+            "required_uncapped": false,
+            "sample_count": 9,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 20922,
+            "cpu_time_ms": 33844,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 1093,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161757,
+            "pid": 48204,
+            "required_uncapped": false,
+            "sample_count": 9,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 5206,
+            "cpu_time_ms": 8422,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 703,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161757,
+            "pid": 49004,
+            "required_uncapped": false,
+            "sample_count": 9,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 161757,
+            "pid": 31912,
+            "required_uncapped": false,
+            "sample_count": 9,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 16968,
+            "initial_cpu_time_ms": 62,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 159914,
+            "pid": 47932,
+            "required_uncapped": false,
+            "sample_count": 8,
+            "start_time_seconds": 1793062134
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 18508,
+            "initial_cpu_time_ms": 296,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 46480,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062136
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 19985,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 28752,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062138
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 19985,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 29508,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062138
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 19985,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 10560,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062138
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21503,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 158954,
+            "pid": 18440,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793062139
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 21503,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 158954,
+            "pid": 26440,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793062139
+          },
+          {
+            "cpu_percent_milli": 1464,
+            "cpu_time_ms": 2328,
+            "first_observed_ms": 21503,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 158954,
+            "pid": 48252,
+            "required_uncapped": false,
+            "sample_count": 7,
+            "start_time_seconds": 1793062139
+          },
+          {
+            "cpu_percent_milli": 29,
+            "cpu_time_ms": 46,
+            "first_observed_ms": 24708,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 155749,
+            "pid": 31084,
+            "required_uncapped": false,
+            "sample_count": 5,
+            "start_time_seconds": 1793062142
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 15,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 4868,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062254
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [],
+            "observed_ms": 0,
+            "pid": 43036,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 0
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 125,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 0,
+            "pid": 33604,
+            "required_uncapped": false,
+            "sample_count": 1,
+            "start_time_seconds": 1793062212
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 0,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              }
+            ],
+            "observed_ms": 128636,
+            "pid": 49236,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793062170
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 46,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 128636,
+            "pid": 43440,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793062207
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 31,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 128636,
+            "pid": 42144,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793062170
+          },
+          {
+            "cpu_percent_milli": 0,
+            "cpu_time_ms": 0,
+            "first_observed_ms": 51821,
+            "initial_cpu_time_ms": 2734,
+            "job_cap_error": null,
+            "job_caps": [
+              {
+                "hard_cap_percent": null,
+                "job_name": "Local\\gwt-pane-8da399b0-02e6-4bf3-bcac-a0d6352928c2",
+                "owner_pid": 33132
+              },
+              {
+                "hard_cap_percent": 8,
+                "job_name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                "owner_pid": 13512
+              }
+            ],
+            "observed_ms": 128636,
+            "pid": 46800,
+            "required_uncapped": false,
+            "sample_count": 4,
+            "start_time_seconds": 1793062171
+          }
+        ]
+      }
+    }
+  ],
+  "verification_record_content_hash": "3e3b5506b73ad2037cbea4f2ce65c5d69577dc0ad3b5281565201405a60c4771",
+  "verification_plan_hash": "a91311cd92f9af97f55165d571682bf48f0ec243bae383f4afbb4aead608db4a"
+}

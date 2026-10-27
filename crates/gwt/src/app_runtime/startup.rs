@@ -183,6 +183,9 @@ impl RestoreRefusal {
         match code {
             "settled_execution" => Self::TerminalWork(TerminalCloseReason::SettledExecution),
             "closed_issue" => Self::TerminalWork(TerminalCloseReason::ClosedIssue),
+            "closed_issue_bookkeeping_warning" => {
+                Self::TerminalWork(TerminalCloseReason::ClosedIssueBookkeepingWarning)
+            }
             "revoked_launch" => Self::TerminalWork(TerminalCloseReason::RevokedLaunch),
             "lost_ownership" => Self::TerminalWork(TerminalCloseReason::LostOwnership),
             "monitor_stopped" => Self::MonitorHold("monitor_stopped"),

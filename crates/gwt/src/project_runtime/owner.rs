@@ -165,6 +165,71 @@ impl AgentOperation {
                     .and_then(serde_json::Value::as_u64)
             })
     }
+
+    fn pending_monitor_rejection_matches_source(
+        &self,
+        owner: crate::cli::execution_state::ExecutionOwnerKey,
+        worktree_path: &Path,
+        branch: Option<&str>,
+        source_session_id: Option<&str>,
+    ) -> bool {
+        if self.pending_monitor_rejection_issue() != Some(owner.number) {
+            return false;
+        }
+        let Some(rejection) = self.request.get("rejection").and_then(|value| {
+            serde_json::from_value::<super::events::OwnerMonitorLaunchRejection>(value.clone()).ok()
+        }) else {
+            return false;
+        };
+        let (source, handoff) = match (
+            rejection.expected_session.as_deref(),
+            rejection.expected_handoff.as_deref(),
+        ) {
+            (Some(source), Some(handoff)) => (source, handoff),
+            (None, None) => {
+                // An initial auth refusal captures a delivery, not an asking
+                // Session. Strict target resolution has already verified this
+                // path's project membership and its actual Git branch/owner.
+                return rejection
+                    .expected_delivery
+                    .as_deref()
+                    .is_some_and(|delivery| {
+                        delivery.issue_number == owner.number
+                            && delivery.linked_issue_kind
+                                == match owner.kind {
+                                    crate::cli::execution_state::ExecutionOwnerKind::Spec => {
+                                        crate::LinkedIssueKind::Spec
+                                    }
+                                    crate::cli::execution_state::ExecutionOwnerKind::Issue => {
+                                        crate::LinkedIssueKind::Issue
+                                    }
+                                }
+                            && branch.is_some_and(|branch| {
+                                !delivery.branch_name.trim().is_empty()
+                                    && crate::launch_runtime::normalize_branch_name(branch)
+                                        == crate::launch_runtime::normalize_branch_name(
+                                            delivery.branch_name.trim(),
+                                        )
+                            })
+                    });
+            }
+            _ => return false,
+        };
+        let Ok(Some(identity)) = gwt_agent::SessionExecutionIdentity::from_session(source) else {
+            return false;
+        };
+        handoff.session_id == identity.session_id
+            && handoff.issue_number == owner.number
+            && identity.linked_issue_number == Some(owner.number)
+            && identity.execution_binding.owner_number == owner.number
+            && identity.execution_binding.owner_kind == owner.kind.as_str()
+            && source_session_id == Some(identity.session_id.as_str())
+            && branch.is_some_and(|branch| {
+                crate::launch_runtime::normalize_branch_name(branch)
+                    == crate::launch_runtime::normalize_branch_name(&identity.branch)
+            })
+            && super::launch_finalization::path_matches(&identity.worktree_path, worktree_path)
+    }
 }
 
 type FreshReadinessResult =
@@ -2905,14 +2970,6 @@ impl OwnerState {
         work_id: String,
         reply: oneshot::Sender<OwnerReply>,
     ) {
-        if self
-            .agent_operations
-            .values()
-            .any(|operation| operation.pending_monitor_rejection_issue().is_some())
-        {
-            let _ = reply.send(Err("an agent operation is in progress".into()));
-            return;
-        }
         use super::continuation::{
             ContinueWorkInput, ContinueWorkPane, ContinueWorkPending, ContinueWorkView,
         };
@@ -2959,7 +3016,7 @@ impl OwnerState {
             gwt_git::detect_repo_type(&self.root),
             gwt_git::RepoType::NonRepo
         );
-        let action = super::continuation::coordinate_continue_work(
+        let action = super::continuation::coordinate_continue_work_with_monitor_rejection_guard(
             ContinueWorkInput {
                 project_root: &self.root,
                 sessions_dir: &gwt_core::paths::gwt_sessions_dir(),
@@ -2976,7 +3033,23 @@ impl OwnerState {
                 outcomes: &self.continue_work_outcomes,
                 issuer: Some(&self.issuer),
             },
+            |owner, worktree_path, branch, source_session_id| {
+                self.agent_operations.values().any(|operation| {
+                    operation.pending_monitor_rejection_matches_source(
+                        owner,
+                        worktree_path,
+                        branch,
+                        source_session_id,
+                    )
+                })
+            },
         );
+        if matches!(&action, super::continuation::ContinueWorkAction::Failure { failure, cacheable: false }
+            if failure.code == "monitor_rejection_in_progress")
+        {
+            let _ = reply.send(Err("an agent operation is in progress".into()));
+            return;
+        }
         self.apply_continue_action(client_id, operation_id, work_id, action, reply);
     }
     fn refresh_owner_session_snapshot(&mut self, id: &str) {

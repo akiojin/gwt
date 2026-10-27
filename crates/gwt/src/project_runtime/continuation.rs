@@ -1725,10 +1725,28 @@ pub fn coordinate_continue_work(
     input: ContinueWorkInput<'_>,
     view: ContinueWorkView<'_>,
 ) -> ContinueWorkAction {
+    coordinate_continue_work_with_monitor_rejection_guard(input, view, |_, _, _, _| false)
+}
+
+pub(crate) fn coordinate_continue_work_with_monitor_rejection_guard(
+    input: ContinueWorkInput<'_>,
+    view: ContinueWorkView<'_>,
+    monitor_rejection_in_progress: impl FnOnce(
+        gwt::cli::execution_state::ExecutionOwnerKey,
+        &Path,
+        Option<&str>,
+        Option<&str>,
+    ) -> bool,
+) -> ContinueWorkAction {
     let client_id = input.client_id;
     let operation_id = input.operation_id.to_string();
     let work_id = input.work_id.to_string();
-    ContinueWorkCoordinator { input, view }.continue_work_action(client_id, operation_id, work_id)
+    ContinueWorkCoordinator { input, view }.continue_work_action(
+        client_id,
+        operation_id,
+        work_id,
+        monitor_rejection_in_progress,
+    )
 }
 
 pub fn reconcile_activated_pending_continue_work(
@@ -3193,6 +3211,12 @@ impl ContinueWorkCoordinator<'_> {
         client_id: &str,
         operation_id: String,
         work_id: String,
+        monitor_rejection_in_progress: impl FnOnce(
+            gwt::cli::execution_state::ExecutionOwnerKey,
+            &Path,
+            Option<&str>,
+            Option<&str>,
+        ) -> bool,
     ) -> ContinueWorkAction {
         let context = &self.input;
         if !canonical_public_id(&operation_id, 256) || !canonical_public_id(&work_id, 512) {
@@ -3295,6 +3319,25 @@ impl ContinueWorkCoordinator<'_> {
                 return self.failure_action(context, client_id, operation_id, work_id, failure)
             }
         };
+        // Immutable replay and strict target resolution precede this fence;
+        // a different Work must not be blocked by an unrelated rejection.
+        if monitor_rejection_in_progress(
+            target.owner,
+            &target.worktree_path,
+            target.work_branch.as_deref(),
+            target.work_agent_session_id.as_deref(),
+        ) {
+            return self.uncached_failure_action(
+                client_id,
+                operation_id,
+                work_id,
+                ContinueWorkFailure::failed(
+                    "monitor_rejection_in_progress",
+                    "an agent operation is in progress",
+                    true,
+                ),
+            );
+        }
         // Issue #3759: Continue work is the GUI recovery route for a
         // stranded owner. Rebuild a lost worktree pointer/projection from
         // the owner ledger before the strict read so the route does not

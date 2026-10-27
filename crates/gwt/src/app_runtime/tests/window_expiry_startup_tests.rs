@@ -157,6 +157,26 @@ fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
     };
     let eligible = TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution);
 
+    // A timer alone cannot reuse old Warning eligibility while a scan is
+    // pending. The next observation can discover an action or authority hold.
+    runtime.set_window_status("tab-1", "codex-1", WindowProcessStatus::Idle);
+    let warning =
+        TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning);
+    for cause in ["obligation_open", "execution_blocked_or_corrupt"] {
+        runtime.terminal_convergence_observed_events_at(grace, observation(warning, 7), t0);
+        runtime.close_expired_terminal_window_candidates_at(t0 + grace);
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert_eq!(runtime.terminal_close_candidates[&window_id].since, t0);
+        runtime.terminal_convergence_observed_events_at(
+            grace,
+            observation(TerminalCloseEligibility::Ineligible(cause), 7),
+            t0 + grace,
+        );
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.terminal_close_candidates.is_empty());
+    }
+    runtime.set_window_status("tab-1", "codex-1", WindowProcessStatus::Running);
+
     runtime.terminal_convergence_observed_events_at(grace, observation(eligible, 7), t0);
     assert_eq!(runtime.terminal_close_grace, grace);
     let since = runtime
@@ -240,6 +260,15 @@ fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
 /// can reach real terminal delivery settlement and the exact window close.
 #[test]
 fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
+    completed_restore_reaches_exact_close(false);
+}
+
+#[test]
+fn closed_completed_idle_pane_releases_capacity_with_bookkeeping_warning() {
+    completed_restore_reaches_exact_close(true);
+}
+
+fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     use crate::app_runtime::terminal_convergence::{
         observe_terminal_windows_in_background, RestoreAdmission, TerminalCloseEligibility,
         TerminalCloseReason, TerminalWindowSnapshot,
@@ -271,6 +300,9 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     config.working_dir = Some(repo.clone());
     config.branch = Some("feature/demo".into());
     config.base_branch = Some("feature/demo".into());
+    if bookkeeping_warning {
+        config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    }
     configure_owner_fixture_start_gate(&owner);
     let owner_id = owner.pane_id("agent-42");
     let launched = owner_fixture_block_on(owner.command(
@@ -328,9 +360,27 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     state.project_owner_identity = Some(identity.clone());
     let idle = owner_runtime_status_event(&owner, &physical, "Idle", "Stop");
     runtime.handle_project_owner_event(&context, 1, &identity, idle);
+    if bookkeeping_warning {
+        // The authenticated owner hook above updates its live projection;
+        // the provider's CLI hook also persists that Stop in Session metadata.
+        physical.with_agent_environment(|| {
+            gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+                .expect("actual provider Stop metadata");
+        });
+    }
     let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
     let session = gwt_agent::Session::load(&session_path).expect("load actual bound holder");
     assert!(session.restore_window_on_startup);
+    if bookkeeping_warning {
+        assert_eq!(session.launch_route, gwt_agent::LaunchRoute::Autonomous);
+        assert_eq!(session.status, gwt_agent::AgentStatus::Idle);
+        assert_eq!(
+            owner_fixture_block_on(owner.probe(&owner_id, incarnation))
+                .unwrap()
+                .status,
+            WindowProcessStatus::Idle
+        );
+    }
     runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     save_workspace_launch_projection(
         &repo,
@@ -381,6 +431,21 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
         .expect("settle actual Completed record"),
         execution::SettleResult::Settled(_)
     ));
+    if bookkeeping_warning {
+        // Preserve the original shard bytes while reproducing untracked
+        // bookkeeping and unavailable upstream readback after completion.
+        run_git(&repo, &["rm", "-r", "--cached", ".gwt/work/events"]);
+        run_git(
+            &repo,
+            &[
+                "config",
+                "branch.feature/demo.merge",
+                "refs/heads/missing-upstream",
+            ],
+        );
+        gwt::cli::verification_record::save_work_event_settlement_record(&repo, &session_id, true)
+            .expect("record the current generation's bookkeeping warning");
+    }
     let diagnosis = execution::diagnose_for_projection(&repo, Some(&session_id));
     assert_eq!(
         diagnosis.ecr_status,
@@ -390,7 +455,32 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
         diagnosis.binding_state,
         execution::ExecutionBindingState::Terminal
     );
-    assert_eq!(diagnosis.settlement_severity, "clear");
+    assert_eq!(
+        diagnosis.settlement_severity,
+        if bookkeeping_warning {
+            "warning"
+        } else {
+            "clear"
+        }
+    );
+    assert_eq!(diagnosis.settlement_obligation_open, bookkeeping_warning);
+    assert!(diagnosis.open_obligations.is_empty());
+    assert_eq!(
+        diagnosis.work_event_receipt_matches_current_generation,
+        Some(true)
+    );
+    let execution_bytes = fs::read(execution::state_path(&repo)).unwrap();
+    let receipt_bytes = gwt::cli::trusted_store::read(&repo, "work-event-settlement.json").unwrap();
+    let work_bytes: Vec<_> = fs::read_dir(repo.join(".gwt/work/events"))
+        .unwrap()
+        .flat_map(|prefix| fs::read_dir(prefix.unwrap().path()).unwrap())
+        .map(|entry| entry.unwrap().path())
+        .map(|path| {
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    assert!(!work_bytes.is_empty());
     assert_eq!(
         workflow_policy::evaluate(&event, &repo)
             .expect("evaluate restored Completed identity gate"),
@@ -400,14 +490,58 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let mut prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     prefs.enabled = true;
-    prefs.launched_issues = vec![gwt::IssueMonitorLaunchedIssue {
-        issue_number: 42,
-        window_id: window_id.clone(),
-    }];
+    prefs.launched_issues = if bookkeeping_warning {
+        vec![]
+    } else {
+        vec![gwt::IssueMonitorLaunchedIssue {
+            issue_number: 42,
+            window_id: window_id.clone(),
+        }]
+    };
+    prefs.closure_records = if bookkeeping_warning {
+        vec![gwt::issue_monitor::IssueClosureRecord {
+            issue_number: 42,
+            generation: 1,
+            state: gwt::issue_monitor::IssueClosureState::Closed,
+            evidence: gwt::issue_monitor::IssueClosureEvidence::DirectRelease,
+            issue_updated_at: None,
+            reopened_after_close: false,
+        }]
+    } else {
+        vec![]
+    };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed exact Monitor delivery");
+    let accounting = gwt::IssueMonitorState::with_prefs(
+        gwt::IssueMonitorConfig::default(),
+        gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+    );
+    if bookkeeping_warning {
+        let snapshot = runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        assert_eq!(snapshot.windows.len(), 1);
+        assert_eq!(
+            snapshot.windows[0].session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert!(snapshot.windows[0].monitor_owned);
+        // The real owner already published this physical pane's host-qualified
+        // census. The GUI's tab-1 alias observes that Session; adding it again
+        // without its owner origin would describe a second physical pane.
+        assert_eq!(
+            accounting.agent_status().occupied_slot_count,
+            Some(1),
+            "the actual owner census accounts for its one physical pane"
+        );
+    }
+    let reason = if bookkeeping_warning {
+        TerminalCloseReason::ClosedIssueBookkeepingWarning
+    } else {
+        TerminalCloseReason::SettledExecution
+    };
     assert_eq!(
         runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
-        RestoreAdmission::RefuseTerminal(TerminalCloseReason::SettledExecution)
+        RestoreAdmission::RefuseTerminal(reason)
     );
     let generation = runtime
         .window_lifecycle_generations
@@ -422,7 +556,7 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
             window_id: window_id.clone(),
             session_id: session_id.to_string(),
             project_root: repo.clone(),
-            worktree_path: repo,
+            worktree_path: repo.clone(),
             window_status: WindowProcessStatus::Idle,
             lifecycle_generation: Some(generation),
         }],
@@ -430,7 +564,11 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     );
     assert_eq!(
         observations[0].eligibility,
-        TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution)
+        TerminalCloseEligibility::Eligible(reason)
+    );
+    assert_eq!(
+        runtime.restore_work_terminality(&session, &repo, Some(&window_id)),
+        RestoreAdmission::RefuseTerminal(reason)
     );
     assert!(gwt::load_issue_monitor_prefs(&prefs_path)
         .expect("read settlement")
@@ -440,10 +578,63 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     runtime.blocking_tasks = spawner;
     let grace = Duration::from_secs(60);
     let t0 = Instant::now();
-    runtime.terminal_convergence_observed_events_at(grace, observations, t0);
+    if bookkeeping_warning {
+        let mut previously_clear = observations.clone();
+        previously_clear[0].eligibility =
+            TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution);
+        runtime.terminal_convergence_observed_events_at(
+            grace,
+            previously_clear,
+            t0 - Duration::from_secs(30),
+        );
+    }
+    runtime.terminal_convergence_observed_events_at(grace, observations.clone(), t0);
     assert!(runtime.window_lookup.contains_key(&window_id));
-    runtime.close_expired_terminal_window_candidates_at(t0 + grace);
+    assert_eq!(runtime.terminal_close_candidates[&window_id].reason, reason);
+    assert_eq!(runtime.terminal_close_candidates[&window_id].since, t0);
+    let expires = if bookkeeping_warning {
+        let running = owner_runtime_status_event(&owner, &physical, "Running", "UserPromptSubmit");
+        runtime.handle_project_owner_event(&context, 1, &identity, running);
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Running)
+        );
+        runtime.close_expired_terminal_window_candidates_at(t0 + grace);
+        assert!(
+            runtime.window_lookup.contains_key(&window_id),
+            "renewed work stays open"
+        );
+        assert!(!runtime.terminal_close_candidates.contains_key(&window_id));
+        let idle = owner_runtime_status_event(&owner, &physical, "Idle", "Stop");
+        runtime.handle_project_owner_event(&context, 1, &identity, idle);
+        assert_eq!(
+            runtime.window_status(&window_id),
+            Some(WindowProcessStatus::Idle)
+        );
+        runtime.terminal_convergence_observed_events_at(grace, observations.clone(), t0 + grace);
+        t0 + grace + grace
+    } else {
+        t0 + grace
+    };
+    runtime.close_expired_terminal_window_candidates_at(expires);
+    if bookkeeping_warning {
+        assert!(
+            runtime.window_lookup.contains_key(&window_id),
+            "the bare timer retains a Warning until a fresh background observation"
+        );
+        let latest = observe_terminal_windows_in_background(
+            &runtime.sessions_dir,
+            runtime.terminal_window_snapshots(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            latest[0].eligibility,
+            TerminalCloseEligibility::Eligible(reason)
+        );
+        runtime.terminal_convergence_observed_events_at(grace, latest, expires);
+    }
     assert!(!runtime.window_lookup.contains_key(&window_id));
+    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(runtime.tabs[0].workspace.window("agent-42").is_none());
     let finalizer = finalizers
         .lock()
@@ -462,6 +653,36 @@ fn completed_restore_reaches_monitor_settlement_and_exact_window_close() {
     assert!(owner_fixture_block_on(owner.probe(&physical.id, physical.incarnation)).is_err());
     assert_eq!(closed.status, gwt_agent::AgentStatus::Stopped);
     assert!(!closed.restore_window_on_startup);
+    if bookkeeping_warning {
+        // The physical finalizer precedes capacity release. Draining the real
+        // owner joins its final runtime census publication before readback.
+        runtime.test_project_owners.remove(&repo);
+        owner_fixture_block_on(
+            Arc::try_unwrap(owner)
+                .ok()
+                .expect("fixture's sole owner")
+                .shutdown(),
+        );
+        let closed_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let accounting =
+            gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), closed_prefs);
+        let snapshot = runtime
+            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .unwrap();
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(accounting.agent_status().occupied_slot_count, Some(0));
+    }
+    assert_eq!(
+        fs::read(execution::state_path(&repo)).unwrap(),
+        execution_bytes
+    );
+    assert_eq!(
+        gwt::cli::trusted_store::read(&repo, "work-event-settlement.json").unwrap(),
+        receipt_bytes
+    );
+    for (path, bytes) in work_bytes {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
 }
 
 // Issue #3927 (SPEC #3340 T-627 / PM ruling): the settlement bridge releases

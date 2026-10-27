@@ -222,6 +222,8 @@ impl NamedFileLock {
         let mut contention_observed = false;
         let result = lock_exclusive_with_observer(&file, || {
             contention_observed = true;
+            #[cfg(any(test, feature = "test-support"))]
+            notify_named_lock_contention(path);
             on_first_contention();
             if report_contention {
                 let _ = named_lock_error(
@@ -260,10 +262,7 @@ impl NamedFileLock {
     /// Work transaction): ordinary contention is not logged, only a failed
     /// acquisition is — and that failure still names the observed holder.
     pub fn acquire_quiet(path: &Path, operation: &str) -> io::Result<Self> {
-        Self::acquire_with_observer(path, operation, false, || {
-            #[cfg(any(test, feature = "test-support"))]
-            notify_named_lock_contention(path);
-        })
+        Self::acquire_with_observer(path, operation, false, || {})
     }
 
     /// Try once. Only actual OS lock contention is returned as `WouldBlock`.
@@ -672,10 +671,20 @@ mod tests {
             let _clock = ScopedOperationClock::set(start);
             let expiry = start + Duration::from_secs(1);
             let _deadline = ScopedOperationDeadline::enter(expiry);
+            let notifications = std::rc::Rc::new(Cell::new(0));
+            let observed = notifications.clone();
+            let _observer = ScopedNamedLockContentionObserver::set(&contender_path, move || {
+                observed.set(observed.get() + 1);
+            });
             let error = NamedFileLock::acquire_observed(&contender_path, "pm_prefs", || {
                 TEST_NOW.with(|clock| clock.set(Some(expiry)));
             })
             .unwrap_err();
+            assert_eq!(
+                notifications.get(),
+                1,
+                "the named observer sees real contention once"
+            );
             let message = error.to_string();
             assert!(message.contains("board.append"), "{message}");
             assert!(

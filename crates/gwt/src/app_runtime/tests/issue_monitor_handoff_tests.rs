@@ -991,12 +991,13 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         agent_project_root: fixture.worktree.display().to_string(),
         ..sample_active_agent_session("tab-1", "predecessor-window")
     };
+    let historical_owner = (case != "4777-ownerless-root").then_some(fixture.execution_owner);
     save_workspace_launch_projection(
         &fixture.project_root,
         &predecessor_active,
         Some("origin/develop"),
-        Some(fixture.execution_owner.number),
-        Some(fixture.execution_owner),
+        historical_owner.map(|owner| owner.number),
+        historical_owner,
         None,
         WorkspaceLaunchProjectionKind::StartWork,
         Some(&HashSet::from([fixture.source_session_id.clone()])),
@@ -1126,12 +1127,26 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             });
     }
     if case == "4777-ownerless-root" {
-        history
+        let root = history
             .work_items
-            .iter_mut()
+            .iter()
             .find(|work| work.id == predecessor_id)
-            .unwrap()
-            .owner = None;
+            .unwrap();
+        assert_eq!(root.owner, None, "{case}: seed ownerless projection");
+        let start = root
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .unwrap();
+        assert_eq!(start.owner, None, "{case}: seed ownerless source event");
+        assert!(
+            gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                &fixture.worktree,
+                start,
+            )
+            .unwrap(),
+            "{case}: immutable source matches the ownerless fixture"
+        );
     }
     if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
         let mut start = history
@@ -1170,12 +1185,17 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             if case == "4777-missing-historical-owner" || case.contains("ownerless") {
                 // Real historical chains can lose owners at the root,
                 // terminal middle generations, or active latest Work.
-                history
+                let middle = history
                     .work_items
                     .iter_mut()
                     .find(|work| work.id == predecessor_id)
-                    .unwrap()
-                    .owner = None;
+                    .unwrap();
+                middle.owner = None;
+                // Shared intake refolds inline events. Seed the historical
+                // owner consistently instead of racing it back from Start.
+                for event in &mut middle.events {
+                    event.owner = None;
+                }
                 if case == "5082-ownerless-current" {
                     start.id = format!("{case}-middle-start");
                     start.work_item_id =
@@ -1194,6 +1214,9 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 start.work_item_id =
                     gwt_core::workspace_projection::successor_work_id(&predecessor_id);
                 start.related_work_item_id = Some(predecessor_id.clone());
+                if case == "4777-ownerless-root" {
+                    start.owner = Some(format!("SPEC-{}", fixture.execution_owner.number));
+                }
                 history.apply_event(start);
             }
         }
@@ -1649,6 +1672,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             staged_diff,
             "{case}: retain staged source bytes"
         );
+    }
+    if case == "4777-missing-historical-owner" {
+        // Exercise the background refold before comparing history, regardless
+        // of whether the launch thread happened to finish its intake first.
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &works_path,
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
     }
     let updated = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
         .unwrap()
@@ -4658,6 +4691,100 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         "the source scan must not materialize a pane: {scanned}"
     );
     let _scan_pause = owner.pause_next_monitor_scan().unwrap();
+    // An unrelated real Work remains usable while this delivery is rejected.
+    // Establish its successful operation before the rejection is paused, so
+    // the same actor later has both a fresh Continue and an immutable replay.
+    let unrelated_worktree = fixture
+        .project_root
+        .parent()
+        .unwrap()
+        .join("unrelated-continue");
+    let unrelated_branch = "work/issue-3166";
+    run_git(
+        &fixture.project_root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            unrelated_branch,
+            unrelated_worktree.to_str().unwrap(),
+            "develop",
+        ],
+    );
+    let mut unrelated_config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&unrelated_worktree)
+        .branch(unrelated_branch)
+        .base_branch("develop")
+        .model("gpt-5.5")
+        .reasoning_level("low")
+        .skip_permissions(true)
+        .build();
+    unrelated_config.linked_issue_number = Some(3166);
+    unrelated_config.explicit_follow_up = true;
+    let unrelated =
+        pane_control_tests::control_owner_launch(&owner, "unrelated-continue", unrelated_config);
+    if unrelated.pending_fresh_execution.is_some() {
+        authenticate_monitor_owner_readiness(&owner, &unrelated);
+    }
+    let unrelated =
+        owner_fixture_block_on(owner.probe(&unrelated.id, unrelated.incarnation)).unwrap();
+    let unrelated_session = unrelated.session.as_ref().unwrap();
+    let unrelated_work_id = gwt_core::workspace_projection::canonical_work_id(
+        &fixture.project_root,
+        Some(unrelated_branch),
+        Some(&unrelated_worktree),
+    )
+    .unwrap();
+    assert_ne!(unrelated_work_id, predecessor_work_id);
+    let mut unrelated_start = gwt_core::workspace_projection::WorkEvent::new(
+        gwt_core::workspace_projection::WorkEventKind::Start,
+        &unrelated_work_id,
+        unrelated_session.created_at,
+    );
+    unrelated_start.owner = Some("Issue #3166".into());
+    unrelated_start.agent_session_id = Some(unrelated_session.id.clone());
+    unrelated_start.agent_id = Some(unrelated_session.agent_id.to_string());
+    unrelated_start.execution_container = Some(
+        gwt_core::workspace_projection::WorkspaceExecutionContainerRef {
+            branch: Some(unrelated_branch.into()),
+            worktree_path: Some(unrelated_worktree.clone()),
+            pr_number: None,
+            pr_url: None,
+            pr_state: None,
+        },
+    );
+    gwt_core::workspace_projection::record_workspace_work_event(
+        &unrelated_worktree,
+        unrelated_start,
+    )
+    .unwrap();
+    let mut continue_events = owner.subscribe();
+    let replay_operation_id = uuid::Uuid::new_v4().to_string();
+    let established = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-established".into(),
+            operation_id: replay_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ))
+    .expect("unrelated Work Continue succeeds before the rejection");
+    assert_eq!(established["id"], unrelated.id);
+    let established_outcome =
+        std::iter::from_fn(|| continue_events.try_recv().ok()).find_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::ContinueWorkOutcome {
+                operation_id,
+                work_id,
+                outcome,
+                ..
+            } if operation_id == replay_operation_id && work_id == unrelated_work_id => {
+                Some(outcome)
+            }
+            _ => None,
+        });
+    assert_eq!(
+        established_outcome,
+        Some(gwt::ContinueWorkOutcomeKind::FocusedExisting)
+    );
     fixture.runtime.issue_monitor_provider_auth_probe =
         gwt::issue_monitor::provider_auth_state_from_env;
 
@@ -4860,6 +4987,36 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
             work_id,
         },
     ));
+    let unrelated_operation_id = uuid::Uuid::new_v4().to_string();
+    let unrelated_continue_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-during-rejection".into(),
+            operation_id: unrelated_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ));
+    let replay_result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ContinueWork {
+            client_id: "unrelated-established".into(),
+            operation_id: replay_operation_id.clone(),
+            work_id: unrelated_work_id.clone(),
+        },
+    ));
+    let unrelated_outcomes = std::iter::from_fn(|| continue_events.try_recv().ok())
+        .filter_map(|event| match event {
+            gwt::project_runtime::events::OwnerEvent::ContinueWorkOutcome {
+                operation_id,
+                work_id,
+                outcome,
+                ..
+            } => Some((operation_id, work_id, outcome)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let unrelated_after = owner_fixture_block_on(owner.probe(&unrelated.id, unrelated.incarnation));
+    let unrelated_was_live = unrelated_after
+        .as_ref()
+        .is_ok_and(|pane| pane.pty.try_wait().is_ok_and(|exit| exit.is_none()));
     let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
         .working_dir(&fixture.worktree)
         .branch(git_stdout(&fixture.worktree, &["branch", "--show-current"]))
@@ -4929,6 +5086,7 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         )
         .unwrap();
     }
+    pane_control_tests::control_close(&owner, &unrelated);
     assert!(continue_result.as_ref().is_err_and(|error| error.contains("operation is in progress")),
         "Continue must not prepare a second writer while the exact rejection is unfinished: {continue_result:?}");
     assert!(
@@ -4947,6 +5105,33 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
     );
     assert_eq!(inventory_after["panes"], inventory_before["panes"]);
     assert_eq!(inventory_after["pending"], inventory_before["pending"]);
+    assert!(unrelated_continue_result.is_ok(),
+        "an unrelated Work must remain continuable during another Issue's rejection: new={unrelated_continue_result:?}; immutable_replay={replay_result:?}");
+    assert!(
+        replay_result.is_ok(),
+        "an established immutable operation must remain replayable: {replay_result:?}"
+    );
+    for operation_id in [&unrelated_operation_id, &replay_operation_id] {
+        assert!(
+            unrelated_outcomes.iter().any(|(operation, work, outcome)| {
+                operation == operation_id
+                    && work == &unrelated_work_id
+                    && *outcome == gwt::ContinueWorkOutcomeKind::FocusedExisting
+            }),
+            "each permitted Continue must focus the existing exact holder: {unrelated_outcomes:?}"
+        );
+    }
+    let unrelated_after = unrelated_after.expect("the unrelated physical holder remains installed");
+    assert!(unrelated_was_live);
+    assert_eq!(unrelated_after.id, unrelated.id);
+    assert_eq!(unrelated_after.incarnation, unrelated.incarnation);
+    assert_eq!(
+        unrelated_after.session.as_ref().unwrap().id,
+        unrelated_session.id
+    );
+    assert_eq!(unrelated_after.pty.process_id(), unrelated.pty.process_id());
+    assert!(Arc::ptr_eq(&unrelated_after.pty, &unrelated.pty));
+    assert!(unrelated.pty.tree_exit_confirmed());
     let completion = take_preflight_rejection_completion(&mut fixture);
     let receipt = completion
         .result

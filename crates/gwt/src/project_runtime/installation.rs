@@ -3095,6 +3095,8 @@ pub struct ExecutionTerminalFacts {
     pub session_matches_execution: bool,
     /// `settlement_severity == "clear"`.
     pub settlement_clear: bool,
+    /// Warning-only bookkeeping with authenticated current-generation provenance.
+    pub settlement_warning_authorized: bool,
     pub settlement_obligation_open: bool,
     pub open_obligations: usize,
     /// Issue #4783 AC-1: the generation was Blocked by a revoked-launch
@@ -3139,6 +3141,8 @@ impl ExecutionTerminalFacts {
             owner_number: diagnosis.owner_number,
             session_matches_execution: false,
             settlement_clear: diagnosis.settlement_severity == "clear",
+            settlement_warning_authorized: diagnosis.settlement_severity == "warning"
+                && diagnosis.work_event_receipt_matches_current_generation == Some(true),
             settlement_obligation_open: diagnosis.settlement_obligation_open,
             open_obligations: diagnosis.open_obligations.len(),
             launch_revoked: diagnosis.ecr_status
@@ -3206,6 +3210,8 @@ pub enum TerminalCloseReason {
     SettledExecution,
     /// FR-044 (b): durable closed / completed Issue record.
     ClosedIssue,
+    /// A completed idle writer of a closed Issue retains only bookkeeping warnings.
+    ClosedIssueBookkeepingWarning,
     /// FR-044 (c): the Monitor durably replaced this launch with another
     /// window and this one is no longer running.
     RevokedLaunch,
@@ -3223,6 +3229,7 @@ impl TerminalCloseReason {
         match self {
             Self::SettledExecution => "settled_execution",
             Self::ClosedIssue => "closed_issue",
+            Self::ClosedIssueBookkeepingWarning => "closed_issue_bookkeeping_warning",
             Self::RevokedLaunch => "revoked_launch",
             Self::LostOwnership => "lost_ownership",
             Self::MonitorStopped => "monitor_stopped",
@@ -3239,7 +3246,7 @@ pub enum TerminalCloseEligibility {
 
 /// FR-044: decide whether one Issue-linked Agent window may be closed by the
 /// runtime. Missing, stale, corrupt, or unreadable facts fail closed; so do
-/// NeedsHuman, Error / Interrupted / Blocked, open obligations, and windows
+/// NeedsHuman, Error / Interrupted / Blocked, open action obligations, and windows
 /// the Monitor still tracks without a terminal fact.
 pub fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalCloseEligibility {
     use crate::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
@@ -3284,6 +3291,26 @@ pub fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalCloseEli
     ) || execution.binding == ExecutionBindingState::Corrupt
     {
         return Ineligible("execution_blocked_or_corrupt");
+    }
+    // Issue #3590 / T-050: retain the warning and its original receipt, but
+    // let this exact completed idle writer return its physical Monitor slot.
+    if monitor.issue_closed
+        && execution.status == ExecutionDiagnosisState::Completed
+        && execution.binding == ExecutionBindingState::Terminal
+        && execution.owner_number == Some(issue_number)
+        && execution.session_matches_execution
+        && execution.settlement_warning_authorized
+        && execution.open_obligations == 0
+        && matches!(
+            facts.window_status,
+            WindowProcessStatus::Idle | WindowProcessStatus::Stopped
+        )
+        && matches!(
+            session_status,
+            gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
+        )
+    {
+        return Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning);
     }
     if execution.settlement_obligation_open || execution.open_obligations > 0 {
         return Ineligible("obligation_open");
@@ -3649,6 +3676,69 @@ pub fn workspace_resume_context_for_work_item(
             summary: None,
             next_action: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod terminal_window_tests {
+    use super::*;
+    use crate::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    #[test]
+    fn closed_bookkeeping_warning_preserves_live_and_untrusted_panes() {
+        let original = TerminalWindowFacts {
+            linked_issue: Some(42),
+            session_status: Some(gwt_agent::AgentStatus::Idle),
+            window_status: WindowProcessStatus::Idle,
+            execution: Some(ExecutionTerminalFacts {
+                status: ExecutionDiagnosisState::Completed,
+                binding: ExecutionBindingState::Terminal,
+                owner_number: Some(42),
+                session_matches_execution: true,
+                settlement_clear: false,
+                settlement_warning_authorized: true,
+                settlement_obligation_open: true,
+                open_obligations: 0,
+                launch_revoked: false,
+            }),
+            monitor: Some(MonitorTerminalFacts {
+                issue_closed: true,
+                ..Default::default()
+            }),
+        };
+        assert_eq!(
+            classify_terminal_window(&original),
+            TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning)
+        );
+
+        let invalid: [fn(&mut TerminalWindowFacts); 9] = [
+            |facts| facts.monitor.as_mut().unwrap().issue_closed = false,
+            |facts| facts.window_status = WindowProcessStatus::Running,
+            |facts| facts.session_status = Some(gwt_agent::AgentStatus::Running),
+            |facts| facts.execution.as_mut().unwrap().session_matches_execution = false,
+            |facts| facts.execution.as_mut().unwrap().owner_number = Some(7),
+            |facts| {
+                facts
+                    .execution
+                    .as_mut()
+                    .unwrap()
+                    .settlement_warning_authorized = false
+            },
+            |facts| facts.execution.as_mut().unwrap().open_obligations = 1,
+            |facts| facts.execution.as_mut().unwrap().status = ExecutionDiagnosisState::Active,
+            |facts| facts.execution.as_mut().unwrap().binding = ExecutionBindingState::Corrupt,
+        ];
+        for invalidate in invalid {
+            let mut facts = original.clone();
+            invalidate(&mut facts);
+            assert!(
+                matches!(
+                    classify_terminal_window(&facts),
+                    TerminalCloseEligibility::Ineligible(_)
+                ),
+                "{facts:?}"
+            );
+        }
     }
 }
 

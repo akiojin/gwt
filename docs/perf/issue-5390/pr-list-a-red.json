@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "owner_issue": 5390,
+  "slice": "A",
+  "phase": "RED",
+  "command": "cargo test -p gwt --lib pr_list_tracked_local_failures_are_errors_and_recover -- --nocapture",
+  "cargo_exit_code": 101,
+  "expected_failure": "for-each-ref must not become an empty success",
+  "metadata": {
+    "source_head": "92462a39a8d667cc0551eb9d4bf0f4dfe8095a13",
+    "production_sha256": "9a6171c79a0ab9ec26886c311586ef5c31c76fb6c9988896051966b29cfd5cb5",
+    "test_source_sha256": "297ad4b0e0decb3139f70db37fcd7c1ede2c5f27e05ac5191bcbc305d4e59dd5",
+    "test_binary": "target/debug/deps/gwt-7a9ec5b01c489598.exe",
+    "test_binary_sha256": "51106d9511a053580455a8bc947a2517398d3ba0fa44471cc9a839d5a1e218f9",
+    "git_version": "git version 2.51.2.windows.1",
+    "rustc_version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+  },
+  "fixture": {
+    "initial_commit": "5d00c01646d1f2f24cdd202ad3f56e7f4f411126",
+    "source_commit": "d195eb494538f935704e061a70ccc0e0086cc949",
+    "source_tree": "b6982d6579593be9aeba760306725a6f43e84a51",
+    "source_file": "source.txt",
+    "source_content": "unlanded source\n",
+    "date": "2026-10-27T00:00:00Z",
+    "origin": "https://example.com/t/trusted-store.git",
+    "initial_refs": [
+      "origin/develop=initial_commit",
+      "origin/work/issue-5390=source_commit"
+    ],
+    "cache": "fetched_at=runtime now; include=default; rows=[]; heavy={}"
+  },
+  "fixture_manifest_sha256": "bbb4adff7f2f880feee2c60ca4f21fe02166c8f05c5801b40c20690a1965a7d3",
+  "observations": [
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 0,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ]
+      ],
+      "git_calls": 1,
+      "logged_git_ms": 95,
+      "params": {},
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T01:54:00.625124600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+      },
+      "stage": "for-each-ref",
+      "total_ms": 111.0194
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 0,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ],
+        [
+          "-C",
+          "<fixture-repo>",
+          "rev-list",
+          "--count",
+          "--left-right",
+          "origin/work/issue-5390...origin/develop"
+        ]
+      ],
+      "git_calls": 2,
+      "logged_git_ms": 126,
+      "params": {
+        "include": []
+      },
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T01:54:00.625124600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+      },
+      "stage": "rev-list",
+      "total_ms": 144.8461
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 0,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ],
+        [
+          "-C",
+          "<fixture-repo>",
+          "rev-list",
+          "--count",
+          "--left-right",
+          "origin/work/issue-5390...origin/develop"
+        ],
+        [
+          "merge-tree",
+          "--write-tree",
+          "--name-only",
+          "--no-messages",
+          "-z",
+          "origin/develop",
+          "origin/work/issue-5390"
+        ],
+        [
+          "diff",
+          "--quiet",
+          "origin/develop",
+          "b6982d6579593be9aeba760306725a6f43e84a51",
+          "--",
+          ":(top,glob)**",
+          ":(top,exclude,glob).gwt/**"
+        ]
+      ],
+      "git_calls": 4,
+      "logged_git_ms": 399,
+      "params": {},
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T01:54:00.625124600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 1,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5390\",\n      \"has_non_gwt_changes\": true,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5390\n    }\n  ]\n}\n"
+      },
+      "stage": "",
+      "total_ms": 415.4318
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 0,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ],
+        [
+          "-C",
+          "<fixture-repo>",
+          "rev-list",
+          "--count",
+          "--left-right",
+          "origin/work/issue-5390...origin/develop"
+        ],
+        [
+          "merge-tree",
+          "--write-tree",
+          "--name-only",
+          "--no-messages",
+          "-z",
+          "origin/develop",
+          "origin/work/issue-5390"
+        ]
+      ],
+      "git_calls": 3,
+      "logged_git_ms": 219,
+      "params": {
+        "include": []
+      },
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T01:54:00.625124600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 1,\n  \"unlanded_branches\": [\n    {\n      \"ahead\": 1,\n      \"branch\": \"work/issue-5390\",\n      \"has_non_gwt_changes\": null,\n      \"has_open_pr\": false,\n      \"last_commit_at\": \"2026-10-27T00:00:00Z\",\n      \"owner_issue\": 5390\n    }\n  ]\n}\n"
+      },
+      "stage": "merge-tree",
+      "total_ms": 235.6456
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 0,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ]
+      ],
+      "git_calls": 1,
+      "logged_git_ms": 90,
+      "params": {
+        "include": []
+      },
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 0,\n  \"fetched_at\": \"2026-10-27T01:54:00.625124600Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+      },
+      "stage": "",
+      "total_ms": 98.9043
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 2,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ]
+      ],
+      "git_calls": 1,
+      "logged_git_ms": 90,
+      "params": {
+        "include": []
+      },
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 1,\n  \"fetched_at\": \"2026-10-27T01:54:01.645831200Z\",\n  \"github_calls\": 1,\n  \"hydrated\": 0,\n  \"pull_requests\": [\n    {\n      \"age_hours\": 4145,\n      \"auto_merge_enabled\": false,\n      \"base_ref_name\": \"\",\n      \"blocker\": null,\n      \"check_counts\": {\n        \"failure\": 0,\n        \"in_progress\": 0,\n        \"skipped\": 0,\n        \"success\": 1,\n        \"total\": 1\n      },\n      \"ci_status\": \"SUCCESS\",\n      \"closing_issues\": [],\n      \"created_at\": \"2026-05-07T08:00:00Z\",\n      \"default_action\": \"propose merge\",\n      \"default_action_executable\": true,\n      \"default_action_operation\": null,\n      \"dwell_hours\": 4145,\n      \"escalate_after_cycles\": 3,\n      \"escalation_due\": true,\n      \"fallback\": null,\n      \"head_ref_name\": \"\",\n      \"is_draft\": false,\n      \"kind\": \"pull_request\",\n      \"lifecycle\": \"MERGE-CANDIDATE\",\n      \"lifecycle_source\": \"observed\",\n      \"merge_state_status\": \"CLEAN\",\n      \"mergeable\": \"MERGEABLE\",\n      \"number\": 12,\n      \"owner_issue\": null,\n      \"owner_issue_closed\": false,\n      \"owner_issue_source\": null,\n      \"review_status\": \"APPROVED\",\n      \"stale\": true,\n      \"stale_after_hours\": 72,\n      \"title\": \"Current PR\",\n      \"unchanged_cycles\": 0,\n      \"updated_at\": \"2026-05-07T08:00:00Z\",\n      \"url\": \"https://github.com/akiojin/gwt/pull/12\"\n    }\n  ],\n  \"skipped_unchanged\": 0,\n  \"source\": \"github\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+      },
+      "stage": "",
+      "total_ms": 279.48220000000003
+    },
+    {
+      "exit_code": 0,
+      "fixture_revisions": "d195eb494538f935704e061a70ccc0e0086cc949\n5d00c01646d1f2f24cdd202ad3f56e7f4f411126\nb6982d6579593be9aeba760306725a6f43e84a51\n",
+      "gh_calls_cumulative": 2,
+      "git_argv": [
+        [
+          "for-each-ref",
+          "--format=%(refname:short)%09%(committerdate:iso-strict)",
+          "--no-merged",
+          "origin/develop",
+          "refs/remotes/origin/work/",
+          "refs/remotes/origin/pm/resident"
+        ]
+      ],
+      "git_calls": 1,
+      "logged_git_ms": 112,
+      "params": {
+        "include": []
+      },
+      "response": {
+        "exit_code": 0,
+        "kind": "pull_request",
+        "ok": true,
+        "operation": "pr.list",
+        "output": "{\n  \"bookkeeping_only_branch_count\": 0,\n  \"bookkeeping_only_branches\": [],\n  \"cache_age_secs\": 0,\n  \"count\": 1,\n  \"fetched_at\": \"2026-10-27T01:54:01.645831200Z\",\n  \"github_calls\": 0,\n  \"hydrated\": 0,\n  \"pull_requests\": [\n    {\n      \"age_hours\": 4145,\n      \"auto_merge_enabled\": false,\n      \"base_ref_name\": \"\",\n      \"blocker\": null,\n      \"check_counts\": {\n        \"failure\": 0,\n        \"in_progress\": 0,\n        \"skipped\": 0,\n        \"success\": 1,\n        \"total\": 1\n      },\n      \"ci_status\": \"SUCCESS\",\n      \"closing_issues\": [],\n      \"created_at\": \"2026-05-07T08:00:00Z\",\n      \"default_action\": \"propose merge\",\n      \"default_action_executable\": true,\n      \"default_action_operation\": null,\n      \"dwell_hours\": 4145,\n      \"escalate_after_cycles\": 3,\n      \"escalation_due\": true,\n      \"fallback\": null,\n      \"head_ref_name\": \"\",\n      \"is_draft\": false,\n      \"kind\": \"pull_request\",\n      \"lifecycle\": \"MERGE-CANDIDATE\",\n      \"lifecycle_source\": \"observed\",\n      \"merge_state_status\": \"CLEAN\",\n      \"mergeable\": \"MERGEABLE\",\n      \"number\": 12,\n      \"owner_issue\": null,\n      \"owner_issue_closed\": false,\n      \"owner_issue_source\": null,\n      \"review_status\": \"APPROVED\",\n      \"stale\": true,\n      \"stale_after_hours\": 72,\n      \"title\": \"Current PR\",\n      \"unchanged_cycles\": 1,\n      \"updated_at\": \"2026-05-07T08:00:00Z\",\n      \"url\": \"https://github.com/akiojin/gwt/pull/12\"\n    }\n  ],\n  \"skipped_unchanged\": 0,\n  \"source\": \"cache\",\n  \"throttled\": null,\n  \"unlanded_branch_count\": 0,\n  \"unlanded_branches\": []\n}\n"
+      },
+      "stage": "",
+      "total_ms": 121.16799999999999
+    }
+  ],
+  "limitations": [
+    "Times cover dispatch_input through captured JSON parsing; DefaultCliEnv construction and process startup excluded.",
+    "logged_git_ms is the current-thread logged Git duration sum. git_argv/calls are native shim observations. Per-command and cache/history/reply stage timings were not separately measured.",
+    "gh_calls_cumulative includes fake gh rate_limit and failed probes; github_calls in the response is the existing budget-spending count. No real GitHub network is measured.",
+    "Native test executable exercises the production JSON dispatcher, DefaultCliEnv and tracked reader in-process; this is not a standalone gwtd process or the 180-second installed binary reproduction.",
+    "Temporary repo argv is normalized to <fixture-repo>; all other response data is preserved."
+  ]
+}

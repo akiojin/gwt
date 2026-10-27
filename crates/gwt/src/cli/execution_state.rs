@@ -20474,17 +20474,24 @@ mod tests {
             Some(worktree.to_owned()),
         )
         .unwrap();
-        gwt_agent::SessionRuntimeState::for_execution(
+        let pty = pane.shared_pty();
+        let child_pid = pty.process_id().expect("actual finalizer fixture child");
+        gwt_agent::SessionRuntimeState::for_execution_process(
             gwt_agent::AgentStatus::Running,
             &identity,
             incarnation,
+            crate::process::host_process_start_time(std::process::id())
+                .expect("actual finalizer fixture host birth"),
+            child_pid,
+            crate::process::host_process_start_time(child_pid)
+                .expect("actual finalizer fixture child birth"),
         )
         .save(&gwt_agent::runtime_state_path(
             &gwt_core::paths::gwt_sessions_dir(),
             session_id,
         ))
         .unwrap();
-        (identity, pane.shared_pty())
+        (identity, pty)
     }
 
     fn issue_3744_wait_until(mut condition: impl FnMut() -> bool) {
@@ -20651,6 +20658,54 @@ mod tests {
         assert!(marker.is_file(), "a false persist result must be recorded");
         assert_eq!(fs::read(session_path).unwrap(), session_before);
         assert_eq!(fs::read(sidecar).unwrap(), runtime_before);
+    }
+
+    #[test]
+    fn completed_exact_close_persists_terminal_session_without_changing_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = unset_live_session_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session_id = "completed-exact-close-3590";
+        let (identity, pty) = issue_3744_runtime(worktree.path(), session_id, 3590);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(matches!(
+            settle(worktree.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let before = generation_authority_bytes(worktree.path(), generation_owner());
+        assert!(crate::session_finalizer::finalize_exact_close(
+            &sessions, &identity, 3591, &pty, session_id
+        )
+        .ok()
+        .flatten()
+        .is_none());
+        assert!(
+            pty.try_wait().unwrap().is_none(),
+            "a stale incarnation cannot signal the captured child"
+        );
+        assert_eq!(
+            crate::session_finalizer::finalize_exact_close(
+                &sessions, &identity, 3590, &pty, session_id
+            )
+            .unwrap(),
+            Some(())
+        );
+        assert!(issue_3744_stopped(&sessions, &identity, 3590));
+        assert!(
+            !gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml")))
+                .unwrap()
+                .restore_window_on_startup
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), generation_owner()),
+            before
+        );
     }
 
     #[test]
