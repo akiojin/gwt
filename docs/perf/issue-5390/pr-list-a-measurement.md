@@ -6,6 +6,11 @@ instead of a successful empty stocktake. Optional source classification failure
 still retains the branch with `has_non_gwt_changes: null`. Stale PR snapshots
 still report an unobserved stocktake through the existing null contract.
 
+The initial truthfulness comparison below is preserved from source commit
+`a7c740931812a6daa30287b85118038e622e0ade`. The final compatibility repair and
+its additional checked base read are recorded separately below; the original
+RED/GREEN hashes and timings have not been reassigned to the later code.
+
 ## Reproduction and provenance
 
 Run `cargo test -p gwt --lib pr_list_tracked_local_failures_are_errors_and_recover -- --nocapture`.
@@ -79,6 +84,41 @@ owner inference, optional unknown classification, cache/REST/budget/backoff,
 and stale-history protection. Existing CLI inventory tests cover successful
 rendering and stale nulls. The new test supplies the missing actual tracked
 error and recovery assertions, rather than testing only the renderer.
+
+## Review compatibility repair
+
+PR review exposed an existing hardcoded `origin/develop` assumption that became
+a visible operation error after required-read failures stopped being hidden.
+The added tracked-reader regression first failed with
+`fatal: malformed object name origin/develop` in a main-only project.
+[Base regression evidence](pr-list-a-base-review.json) preserves that RED and
+GREEN with its source and native test executable hashes. Its GREEN precedes a
+documentation-only update clarifying that the public constant is preferred.
+
+The private resolver uses the existing checked `remote_branch_exists` reads.
+It prefers `origin/develop`, then uses the full local `origin/HEAD` target,
+and tries `origin/main` / `origin/master` only when the default hint is absent.
+A dangling explicit default and the absence of every usable remote base remain
+errors. It never uses local `HEAD` to manufacture an empty inventory. No fetch,
+remote mutation, public API, settings, cache policy, or authority was added.
+
+One fixture proves main-only reads, a custom remote default preceding main,
+develop precedence, dangling-default errors, and no-base errors. The final
+unchanged actual CLI fixture is preserved in
+[compatibility observations](pr-list-a-green-compat.json), including the final
+source/test/binary hashes, all seven complete responses, argv, counts and times.
+On this develop fixture, each observation now includes one checked `show-ref`
+before the stocktake. This additional read preserves integration-base validity;
+it is not claimed as a latency reduction. The original comparison remains
+historical evidence, while final canonical verification binds the final HEAD.
+
+CI also identified the new CLI fixture's environment lock as invisible to the
+existing same-function contract: the lock had been acquired inside its shared
+helper in another file. The test now explicitly holds the existing reentrant
+`env_test_lock` in its own function. The helper and guard remain unchanged.
+The existing `ci_contracts` environment-lock test is included in acceptance
+verification. The failed coverage shard could not aggregate coverage; it was
+unmeasured, not a threshold failure.
 
 `total_ms` covers dispatcher entry through captured JSON parsing, excluding
 process startup and `DefaultCliEnv` construction. `logged_git_ms` is the
