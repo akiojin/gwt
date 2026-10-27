@@ -22,16 +22,17 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activityModel = createUiStateStore({ agents: live, count: 2 }, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
-  const runtimes = new Map(), mounts = [], previews = new Set(), selected = [], focused = [];
-  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel,
+  const runtimes = new Map(), mounts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
+  const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
+  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
-    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); if (root.classList.contains("work-tail")) assert.equal(options?.tailLines, 3); return () => { previews.delete(pre); pre.remove(); }; },
+    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
     onFocus: id => focused.push(id), onLayout() {}, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, selected, focused };
+  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
 
 test("Works implements the approved list and native terminal API", () => {
@@ -279,8 +280,41 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   const css = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
   assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|position:\s*fixed/i);
   assert.match(css, /var\(--font-mono\)/);
+  assert.match(css, /height:\s*calc\(var\(--works-preview-lines,\s*3\)/);
   assert.match(css, /@media\s*\(max-width:\s*[^)]+\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
+});
+
+
+test("Works output line settings update both lists without replacing the native terminal", async () => {
+  const f = await fixture();
+  const host = f.document.createElement("aside"); f.document.querySelector("main").append(host);
+  f.surface.setPreviewHost(host);
+  const row = f.surface.element.querySelector('.work-row[data-window-id="one"]');
+  const native = f.runtimes.get("one");
+  assert.ok(f.previewMounts.every(mount => mount.lines === 3));
+  row.querySelector(".work-tail pre").dispatchEvent(new f.window.Event("click", { bubbles: true }));
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true, "reading or selecting output does not open its terminal");
+  for (const lines of [5, 10]) {
+    f.systemSettingsModel.update(state => ({ ...state, worksPreviewLines: lines })); f.flush();
+    assert.equal(f.surface.element.style.getPropertyValue("--works-preview-lines"), String(lines));
+    assert.equal(host.querySelector(".works-surface").style.getPropertyValue("--works-preview-lines"), String(lines));
+    for (const root of [f.surface.element, host]) {
+      const tail = root.querySelector('.work-row[data-window-id="one"] .work-tail');
+      assert.equal(f.previewMounts.filter(mount => mount.root === tail).at(-1).lines, lines);
+      assert.equal(tail.querySelectorAll("pre").length, 1, "old text subscription is disposed");
+    }
+    assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"]'), row);
+    assert.equal(f.runtimes.get("one"), native);
+    assert.equal(f.surface.element.querySelectorAll(".work-row").length, 2);
+    assert.match(f.surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
+  }
+  f.surface.openWork("one");
+  f.systemSettingsModel.update(state => ({ ...state, worksPreviewLines: 3 })); f.flush();
+  assert.ok(f.surface.element.querySelector(".works-terminal-host").contains(native));
+  f.surface.dispose();
+  assert.equal(f.previews.size, 0);
+  assert.equal(f.frames.size, 0);
 });

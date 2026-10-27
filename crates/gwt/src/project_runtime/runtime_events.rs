@@ -517,6 +517,7 @@ pub struct ScreenPolicyOutcome {
     pub clear_detail: bool,
     pub failure: Option<crate::IssueMonitorFailure>,
     pub permission_prompt: Option<u64>,
+    pub approval_reentered: bool,
 }
 
 pub fn observe_screen_policy(
@@ -562,6 +563,7 @@ pub fn observe_screen_policy(
             state.approval = Some(latch);
         }
         (Some(_), Some(fingerprint)) => {
+            outcome.approval_reentered = true;
             state.approval = Some(ApprovalPromptState {
                 active_fingerprint: Some(fingerprint),
                 ..Default::default()

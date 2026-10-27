@@ -576,6 +576,7 @@ impl AppRuntime {
         codex_trust_managed_hooks: Option<bool>,
         board_provider: Option<String>,
         agent_resource: Option<gwt::protocol::AgentResourceSettings>,
+        works_preview_lines: Option<u32>,
     ) -> Vec<OutboundEvent> {
         let path = gwt_core::paths::gwt_config_path();
         vec![OutboundEvent::reply(
@@ -586,6 +587,7 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
         )]
     }

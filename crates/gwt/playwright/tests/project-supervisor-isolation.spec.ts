@@ -14,13 +14,15 @@ import { gotoLiveGwt, readLiveHubCatalog, sendLiveGwtEvent, withLiveGwtBackendLo
 const BASE = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const HOME = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
 const ROOT = resolve(process.env.GWT_PLAYWRIGHT_CHECKOUT_ROOT ?? process.cwd());
-const GWTD = process.env.GWT_PLAYWRIGHT_GWTD ?? join(ROOT, "target/debug/gwtd");
+const GWTD = process.env.GWT_PLAYWRIGHT_GWTD ?? join(ROOT, `target/debug/gwtd${process.platform === "win32" ? ".exe" : ""}`);
+const SHELL = process.platform === "win32" ? process.env.ComSpec ?? "cmd.exe" : "/bin/sh";
+const SHELL_ARGS = process.platform === "win32" ? ["/d", "/q"] : ["-i"];
 const ISSUE = 473501;
-type Project = { root: string; key: string; endpoint: any; endpointFile: string; birth: string; owner: any; intentionallyKilled: boolean };
-type Pane = { id: string; gui_id: string; incarnation: number; session_id: string; child_pid: number };
+type Project = { root: string; key: string; endpoint: any; endpointFile: string; birth: string; owner: any; intentionallyKilled: boolean; pane?: Pane };
+type Pane = { id: string; gui_id: string; incarnation: number; session_id: string; child_pid: number; child_birth: string };
 type Fixture = { a: Project; b: Project; pa: Pane; pb: Pane; pages: Page[]; errors: string[]; theme: string };
 
-test.skip(!BASE || !HOME || process.platform === "win32", "requires a POSIX browser-check checkout and fresh HOME");
+test.skip(!BASE || !HOME, "requires a browser-check checkout and fresh HOME");
 test.use({ headless: false, viewport: { width: 1440, height: 960 } });
 test.setTimeout(240_000);
 
@@ -31,7 +33,7 @@ function isolatedEnv() {
 }
 
 async function cli(project: string, operation: string, params: Record<string, unknown> = {}) {
-  const child = spawn(GWTD, [], { cwd: project, env: isolatedEnv(), stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(GWTD, [], { cwd: project, env: isolatedEnv(), stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   let output = "", error = "";
   child.stdout.on("data", data => { output += data; });
   child.stderr.on("data", data => { error += data; });
@@ -48,8 +50,24 @@ async function cli(project: string, operation: string, params: Record<string, un
 }
 
 function processBirth(pid: number) {
-  try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim(); }
+  if (!Number.isInteger(pid) || pid <= 0) return "";
+  try {
+    return process.platform === "win32"
+      ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`],
+      { encoding: "utf8", windowsHide: true }).trim()
+      : execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  }
   catch { return ""; }
+}
+
+function processParent(pid: number) {
+  expect(Number.isInteger(pid) && pid > 0, "real physical child PID").toBe(true);
+  return process.platform === "win32"
+    ? execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').ParentProcessId`],
+    { encoding: "utf8", windowsHide: true }).trim()
+    : execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" }).trim();
 }
 
 async function command(project: Project, command: Record<string, unknown>, timeout = 15_000) {
@@ -86,30 +104,44 @@ async function prepareProject(page: Page, directory: string, label: string, memb
     // Stable fixture members still pass through the real owner's reservation.
     // Random catalog initials make independent fixture projects collide.
     agent_roster: { schema_version: 1, revision: 1, members: [{
-      agent_member_id: `fixture-${label}-${randomUUID()}`, name: memberName,
+      agent_member_id: `fixture-${label}-${randomUUID()}`, agent_id: "supervisor-isolation-fixture", name: memberName,
       enabled: true, created_at: new Date().toISOString(), origin_session_id: null,
       last_issue_number: null, last_spec_number: null, assignment: null,
     }] } }));
   try {
   await readLiveHubCatalog(page, BASE, { send: { kind: "reopen_recent_project", path: root },
     until: (catalog, key) => catalog.projects.some(project => project.project_key === key), arg: key });
-  let endpoint: any, endpointFile = "";
+  // Keep this project's real GUI attachment alive before opening the next
+  // project. A catalog entry alone does not retain a GuiManaged owner.
+  await gotoLiveGwt(page, BASE, { projectKey: key, enableTestBridge: true });
+  await expect(page.locator("[data-project-owner-health]")).toHaveAttribute("data-state", "healthy", { timeout: 45_000 });
+  let endpoint: any, endpointFile = "", owner: any, birth = "";
   await expect.poll(async () => {
     const directory = join(HOME, ".gwt/projects", key, "runtime/daemon");
     for (const name of await readdir(directory).catch(() => [])) {
       if (!name.endsWith(".json")) continue;
       const candidate = JSON.parse(await readFile(join(directory, name), "utf8"));
       if (candidate.scope?.repo_hash === key && candidate.project_transport_url) {
+        let health: any;
+        try { health = await command({ key, endpoint: candidate } as Project, { type: "health" }); }
+        catch { continue; }
+        if (health.pid !== candidate.pid || health.project_key !== key
+          || health.startup_intent !== "gui_managed" || health.gui_presence_count < 1) continue;
+        const observedBirth = processBirth(candidate.pid);
+        if (!observedBirth) continue;
         endpoint = candidate;
         endpointFile = join(directory, name);
+        owner = health;
+        birth = observedBirth;
+        return true;
       }
     }
-    return Boolean(endpoint);
+    return false;
   }, { timeout: 45_000 }).toBe(true);
-  const project = { root, key, endpoint, endpointFile, birth: processBirth(endpoint.pid), owner: null, intentionallyKilled: false };
-  project.owner = await command(project, { type: "health" });
+  const project = { root, key, endpoint, endpointFile, birth, owner, intentionallyKilled: false };
   expect(project.birth).not.toBe("");
   expect(project.owner).toMatchObject({ pid: endpoint.pid, project_key: key, startup_intent: "gui_managed" });
+  expect(project.owner.gui_presence_count).toBeGreaterThan(0);
   expect(project.owner.host_started_at).toBeGreaterThan(0);
   expect(project.owner.host_instance_id).not.toBe("");
   return project;
@@ -123,7 +155,7 @@ async function prepareProject(page: Page, directory: string, label: string, memb
 // execution binding, registry row, capability and physical child itself.
 function launchConfig(project: Project) {
   return {
-    agent_id: { type: "Custom", value: "supervisor-isolation-fixture" }, command: "/bin/sh", args: ["-i"],
+    agent_id: { type: "Custom", value: "supervisor-isolation-fixture" }, command: SHELL, args: SHELL_ARGS,
     pending_initial_prompt: null, env_vars: { TERM: "xterm-256color" }, codex_auth_root: null, remove_env: [],
     working_dir: project.root, branch: "work/isolation", base_branch: "main", display_name: "Supervisor isolation fixture", color: "gray",
     model: null, tool_version: null, reasoning_level: null, session_mode: "Normal", resume_session_id: null,
@@ -135,7 +167,7 @@ function launchConfig(project: Project) {
       entrypoint: "project supervisor isolation fixture", launch_route: "manual", requested_skip_permissions: true,
       skip_forced: true, effective_skip_permissions: true, interactive_request_ignored: false,
       reason: "The local shell fixture has no permission prompts.", recovery_action: "",
-      provider_mapping: { provider: "custom:supervisor-isolation-fixture", supported: true, args: ["-i"], env_overlay: [] },
+      provider_mapping: { provider: "custom:supervisor-isolation-fixture", supported: true, args: SHELL_ARGS, env_overlay: [] },
       decided_at: new Date().toISOString() },
   };
 }
@@ -147,10 +179,12 @@ async function launch(project: Project): Promise<Pane> {
   expect(pane).toMatchObject({ id, host_pid: project.endpoint.pid, awaiting_readiness: false });
   expect(pane.session_id).not.toBe("");
   expect(pane.incarnation).toBeGreaterThan(0);
+  pane.child_birth = processBirth(pane.child_pid);
+  project.pane = pane;
+  expect(pane.child_birth, "the actual physical fixture child is alive").not.toBe("");
   const session = await readFile(join(HOME, ".gwt/sessions", `${pane.session_id}.toml`), "utf8");
   expect(session, "a producing Session must exist; absent bindings cannot pass AC-3").toMatch(/\[execution_binding(?:\.|\])/);
-  expect(execFileSync("ps", ["-o", "ppid=", "-p", String(pane.child_pid)], { encoding: "utf8" }).trim())
-    .toBe(String(project.endpoint.pid));
+  expect(processParent(pane.child_pid)).toBe(String(project.endpoint.pid));
   await assertLiveSession(project, pane);
   return pane;
 }
@@ -183,7 +217,7 @@ async function echo(page: Page, project: Project, pane: Pane, label: string) {
   const token = `GWT_ISOLATION_${label}_${randomUUID().replaceAll("-", "")}`;
   const started = Date.now();
   // Split the marker so the PTY's echoed input cannot satisfy the assertion.
-  await input(page, pane, `printf 'GWT_%s\\n' '${token.slice(4)}'\r`);
+  await input(page, pane, `node -e "console.log('GWT_'+'${token.slice(4)}')"\r`);
   await expect.poll(async () => (await command(project, { type: "snapshot", id: pane.id, incarnation: pane.incarnation })).screen,
     { timeout: 10_000, intervals: [100] }).toContain(token);
   // The echo is read through the checkout GUI's actual projection as well.
@@ -212,7 +246,7 @@ async function echo(page: Page, project: Project, pane: Pane, label: string) {
 
 async function fixture(page: Page, info: TestInfo): Promise<Fixture> {
   expect(await realpath(HOME)).not.toBe(await realpath(homedir()));
-  expect(resolve(GWTD)).toBe(join(ROOT, "target/debug/gwtd"));
+  expect(resolve(GWTD)).toBe(join(ROOT, `target/debug/gwtd${process.platform === "win32" ? ".exe" : ""}`));
   const directory = await realpath(await mkdtemp(join(HOME, "supervisor-isolation-")));
   const projects: Project[] = [];
   const pages = [page];
@@ -225,10 +259,6 @@ async function fixture(page: Page, info: TestInfo): Promise<Fixture> {
   const scenario = (info.project.name.includes("light") ? 2 : 0) + (info.title.startsWith("Hub") ? 1 : 0);
   const member = 2 * (4 * info.retry + scenario);
   expect(members[member + 1], "distinct real fixture initials for each scenario/theme/retry").toBeDefined();
-  const a = await prepareProject(page, directory, "alpha", members[member]); projects.push(a);
-  const b = await prepareProject(page, directory, "beta", members[member + 1]); projects.push(b);
-  expect(a.key).not.toBe(b.key);
-  expect(a.endpoint.pid).not.toBe(b.endpoint.pid);
   const theme = info.project.name.includes("light") ? "light" : "dark";
   const errors: string[] = [];
   pages.push(await page.context().newPage(), await page.context().newPage());
@@ -237,8 +267,10 @@ async function fixture(page: Page, info: TestInfo): Promise<Fixture> {
     current.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
     await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
   }
-  await gotoLiveGwt(pages[0], BASE, { projectKey: a.key, enableTestBridge: true });
-  await gotoLiveGwt(pages[1], BASE, { projectKey: b.key, enableTestBridge: true });
+  const a = await prepareProject(pages[0], directory, "alpha", members[member]); projects.push(a);
+  const b = await prepareProject(pages[1], directory, "beta", members[member + 1]); projects.push(b);
+  expect(a.key).not.toBe(b.key);
+  expect(a.endpoint.pid).not.toBe(b.endpoint.pid);
   await gotoLiveGwt(pages[2], BASE, { hub: true });
   for (const current of pages) await expect(current.locator("html")).toHaveAttribute("data-theme", theme);
   const pa = await launch(a), pb = await launch(b);
@@ -265,6 +297,10 @@ async function fixture(page: Page, info: TestInfo): Promise<Fixture> {
     await expect.poll(() => current.evaluate(id => (window as any).__gwtTerminalTestApi?.metrics(id)?.isReady, pane.gui_id),
       { timeout: 30_000 }).toBe(true);
   }
+  // Prove real shell output reaches both the owner and the headed terminal
+  // before any latency, saturation or retirement measurement begins.
+  await echo(pages[0], a, pa, "A_READY");
+  await echo(pages[1], b, pb, "B_READY");
   return { a, b, pa, pb, pages, errors, theme };
   } catch (error) {
     await cleanupProjects(pages.at(-1)!, projects);
@@ -299,9 +335,29 @@ async function cleanupProjects(page: Page, projects: Project[]) {
   for (const project of projects) {
     try {
       if (!project.intentionallyKilled && processBirth(project.endpoint.pid) === project.birth) {
-        const inventory = await command(project, { type: "list_panes" });
-        for (const pane of inventory.panes) {
-          await command(project, { type: "close", id: pane.id, incarnation: pane.incarnation });
+        const currentEndpoint = JSON.parse(await readFile(project.endpointFile, "utf8"));
+        expect(JSON.stringify(currentEndpoint) === JSON.stringify(project.endpoint), "cleanup retains the captured private endpoint").toBe(true);
+        const health = await command(project, { type: "health" });
+        expect(health).toMatchObject({ pid: project.endpoint.pid, project_key: project.key,
+          host_started_at: project.owner.host_started_at, host_instance_id: project.owner.host_instance_id });
+        // Draining owners intentionally reject ListPanes. Their authenticated
+        // health projection retains only the exact failed retirement to retry.
+        const inventory = health.draining ? health.reconciliation : (await command(project, { type: "list_panes" })).panes;
+        for (const exact of inventory) {
+          const pane = project.pane;
+          expect(pane, "cleanup only closes this fixture's captured producing Session").toBeDefined();
+          expect(exact).toMatchObject({ id: pane!.id, incarnation: pane!.incarnation });
+          if (health.draining) {
+            const runtime = JSON.parse(await readFile(runtimePath(project, pane!), "utf8"));
+            expect(runtime).toMatchObject({ host_started_at: project.owner.host_started_at,
+              runtime_incarnation: pane!.incarnation, child_pid: pane!.child_pid });
+            expect(runtime.execution_identity).toMatchObject({ session_id: pane!.session_id, repo_hash: project.key,
+              worktree_path: project.root });
+          } else {
+            expect(exact).toMatchObject({ session_id: pane!.session_id, child_pid: pane!.child_pid });
+          }
+          expect(processBirth(project.endpoint.pid)).toBe(project.birth);
+          await command(project, { type: "close", id: pane!.id, incarnation: pane!.incarnation });
         }
       }
     } catch (error) { failures.push(error); }
@@ -311,6 +367,8 @@ async function cleanupProjects(page: Page, projects: Project[]) {
       // drain. This is an exit hang guard, not an assertion at that boundary.
       await expect.poll(() => processBirth(project.endpoint.pid), { timeout: 45_000,
         message: `owned ${project.key} daemon ${project.endpoint.pid} exits after its GUI reconnect grace` }).not.toBe(project.birth);
+      if (project.pane) expect(processBirth(project.pane.child_pid), "the captured physical child exits with its owner")
+        .not.toBe(project.pane.child_birth);
     } catch (error) { failures.push(error); }
   }
   if (failures.length) throw new AggregateError(failures, "owned project fixture cleanup failed: " + failures.map(error => String(error)).join("\n"));
@@ -336,6 +394,11 @@ async function recordHealthTransitions(page: Page, projectKey: string, hub = fal
   }, { projectKey, hub });
 }
 
+async function floodCounter(project: Project, pane: Pane) {
+  const snapshot = await command(project, { type: "snapshot", id: pane.id, incarnation: pane.incarnation });
+  return Math.max(-1, ...[...snapshot.screen.matchAll(/GWT_A_FLOOD_(\d+)/g)].map(match => Number(match[1])));
+}
+
 test("A output saturation and exact owner kill preserve B Session, pane and Hub", async ({ page }, info) => {
   await withLiveGwtBackendLock(BASE, info, async () => {
     const f = await fixture(page, info);
@@ -347,11 +410,16 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
       // Bounded-duration real PTY output. The subprocess stops on its own even
       // when a test assertion fails; no unbounded producer survives teardown.
       await input(aPage, f.pa, `node -e "let n=0;const end=Date.now()+60000;function burst(){if(Date.now()>=end)return;const ok=process.stdout.write('\\x1b[HGWT_A_FLOOD_'+n+++' '+'x'.repeat(1024));if(ok)setImmediate(burst);else process.stdout.once('drain',burst)}burst()"\r`);
-      await expect.poll(async () => (await command(f.a, { type: "snapshot", id: f.pa.id, incarnation: f.pa.incarnation })).screen,
-        { timeout: 15_000 }).toMatch(/GWT_A_FLOOD_\d+/);
+      let initialFlood = -1;
+      await expect.poll(async () => {
+        initialFlood = await floodCounter(f.a, f.pa);
+        return initialFlood;
+      }, { timeout: 15_000 }).toBeGreaterThanOrEqual(0);
       const loaded = [await echo(bPage, f.b, f.pb, "LOAD1"), await echo(bPage, f.b, f.pb, "LOAD2"), await echo(bPage, f.b, f.pb, "LOAD3")];
       expect(Math.max(...loaded), "B response stays within baseline plus the existing 500ms UI dispatch budget")
         .toBeLessThanOrEqual(Math.max(...baseline) + 500);
+      const loadedFlood = await floodCounter(f.a, f.pa);
+      expect(loadedFlood, "A's actual output advances while B responds").toBeGreaterThan(initialFlood);
       expect(await assertLiveSession(f.b, f.pb)).toEqual(before);
       const prefsPath = join(HOME, ".gwt/projects", f.b.key, "project-state/issue-monitor.json");
       const beforeScan = JSON.parse(await readFile(prefsPath, "utf8")).last_scan_at;
@@ -372,8 +440,11 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
         ? "completed own lookup failure; worker progress only"
         : "completed scan";
       info.annotations.push({ type: "monitor-scan-evidence", description: scanScope });
-      const flood = await command(f.a, { type: "snapshot", id: f.pa.id, incarnation: f.pa.incarnation });
-      expect(flood.screen).toMatch(/GWT_A_FLOOD_\d+/);
+      let completedFlood = -1;
+      await expect.poll(async () => {
+        completedFlood = await floodCounter(f.a, f.pa);
+        return completedFlood;
+      }, { timeout: 10_000 }).toBeGreaterThan(loadedFlood);
       // A is intentionally saturated. Its already authenticated owner identity
       // remains tied to this unchanged private endpoint and exact OS birth;
       // requiring another A RPC would test A responsiveness rather than B isolation.
@@ -399,6 +470,7 @@ test("A output saturation and exact owner kill preserve B Session, pane and Hub"
       expect(f.errors, "zero console/page errors across A, B and Hub").toEqual([]);
       await info.attach(`owner-isolation-${f.theme}`, { body: Buffer.from(JSON.stringify({ baseline_ms: baseline,
         saturated_ms: loaded, b_session: before, a_pid: f.a.endpoint.pid, b_pid: f.b.endpoint.pid,
+        a_flood: { initial: initialFlood, after_b_response: loadedFlood, after_monitor: completedFlood },
         monitor: { scope: scanScope, before: beforeScan, completed: completedScan.last_scan_at,
           failure: completedScan.last_scan_error ?? completedScan.last_error ?? null } })), contentType: "application/json" });
       await info.attach(`hub-after-owner-failure-${f.theme}`, { body: await hub.screenshot(), contentType: "image/png" });
@@ -417,6 +489,7 @@ test("Hub observes and retries A exact failed retirement while B stays usable", 
     const path = runtimePath(f.a, f.pa);
     let saved: string | undefined;
     let scenarioFailure: unknown;
+    const retirementHealth: any[] = [];
     try {
       saved = await readFile(path, "utf8");
       const changed = { ...JSON.parse(saved), runtime_incarnation: f.pa.incarnation + 1 };
@@ -425,18 +498,19 @@ test("Hub observes and retries A exact failed retirement while B stays usable", 
       // Close the actual GUI project, not just its browser page. The owner
       // retains exact failed retirement evidence after its last GUI lease.
       await f.pages[0].locator("#close-project-button").click();
-      // The existing controller automatically confirms an empty running-agent
-      // preview. Starting fixtures may take that route; a modal, when shown,
-      // must still be confirmed by the real operator control.
-      await expect.poll(async () => {
-        const health = await command(f.a, { type: "health" });
-        return health.gui_presence_count === 0
-          || await f.pages[0].locator('[data-role="close-project-confirm"]').isVisible();
-      }, { timeout: 15_000 }).toBe(true);
+      // An empty preview is automatically confirmed and navigates to the Hub.
+      // Observe that UI completion separately from the existing owner drain
+      // assertion; GUI residency is released by the native subscriber.
+      await expect.poll(async () => new URL(f.pages[0].url()).pathname === "/"
+        || await f.pages[0].locator('[data-role="close-project-confirm"]').isVisible(),
+      { timeout: 15_000 }).toBe(true);
       const confirmClose = f.pages[0].locator('[data-role="close-project-confirm"]');
       if (await confirmClose.isVisible()) await confirmClose.click();
       await expect.poll(async () => {
         const health = await command(f.a, { type: "health" });
+        expect(health).toMatchObject({ pid: f.a.endpoint.pid, project_key: f.a.key,
+          host_started_at: f.a.owner.host_started_at, host_instance_id: f.a.owner.host_instance_id });
+        retirementHealth.push({ observed_at_ms: Date.now(), ...health });
         return { draining: health.draining, failed: health.reconciliation_required, presence: health.gui_presence_count };
       }, { timeout: 45_000, intervals: [250] }).toEqual({ draining: true, failed: true, presence: 0 });
       await hub.locator('[data-hub-action="refresh-orphans"]').click();
@@ -461,7 +535,13 @@ test("Hub observes and retries A exact failed retirement while B stays usable", 
       await assertLiveSession(f.b, f.pb);
       expect(f.errors, "zero console/page errors").toEqual([]);
       await info.attach(`orphan-recovered-${f.theme}`, { body: await hub.screenshot(), contentType: "image/png" });
-    } catch (error) { scenarioFailure = error; throw error; }
+    } catch (error) {
+      scenarioFailure = error;
+      await info.attach(`orphan-retirement-${f.theme}`, { body: Buffer.from(JSON.stringify({
+        url: f.pages[0].url(), owner_at_capture: f.a.owner, owner_health: retirementHealth, error: String(error),
+      })), contentType: "application/json" });
+      throw error;
+    }
     finally {
       if (saved) { await writeFile(path + ".fixture-tmp", saved); await rename(path + ".fixture-tmp", path); }
       try { await cleanup(f); }

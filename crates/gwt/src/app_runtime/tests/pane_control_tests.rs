@@ -4016,8 +4016,114 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
 }
 
 #[test]
+fn agent_name_keeps_bound_session_independent_of_roster_readback() {
+    use gwt::project_runtime::events::OwnerCommand;
+
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 1);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
+        |prefs| prefs.agent_roster.as_mut().unwrap().members[0].name = "Falcon".into(),
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let pane = control_owner_launch(&owner, "agent", control_launch_config(&root, 42));
+    let pane = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
+    let session = pane.session.as_ref().unwrap();
+    let binding = session.execution_binding.as_ref().unwrap();
+    let execution_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    assert!(pane.pending_fresh_execution.is_none());
+    assert_eq!(binding.owner_kind, "issue");
+    assert_eq!(binding.owner_number, 42);
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(
+            &session.worktree_path,
+            execution_owner
+        )
+        .unwrap(),
+        Some(binding.identity.clone())
+    );
+    assert_eq!(
+        gwt::cli::execution_state::diagnose_owner(&session.worktree_path, execution_owner)
+            .ecr_status,
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    );
+    assert!(pane.has_capability_bearer(pane.grant.as_ref().unwrap()));
+    let positive = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "bound-name-control".into(),
+        },
+    );
+    assert_eq!(positive.close, None);
+    assert!(positive
+        .events
+        .iter()
+        .any(|event| event["request_id"] == "bound-name-control"
+            && event["ok"] == true
+            && event["agent_name"] == "Falcon"));
+    assert_eq!(session.agent_name.as_deref(), Some("Falcon"));
+    assert!(session.agent_member_id.is_some());
+    assert_ne!(pane.pty.process_id().unwrap(), std::process::id());
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let session_path = sessions.join(format!("{}.toml", session.id));
+    let before = fs::read(&session_path).unwrap();
+    let prefs = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    let original_prefs = fs::read(&prefs).unwrap();
+    fs::write(&prefs, "unreadable roster").unwrap();
+    let result = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "bound-name".into(),
+        },
+    );
+    let layout =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap();
+    owner_fixture_block_on(owner.command(OwnerCommand::UpdateLayout { layout })).unwrap();
+    let after = fs::read(&session_path).unwrap();
+    let saved = gwt_agent::Session::load(&session_path).unwrap();
+    let unreadable_prefs = fs::read_to_string(&prefs).unwrap();
+    // Restore only the injected fault before normal physical cleanup, including
+    // the RED run where naming currently rejects the already-bound Session.
+    fs::write(&prefs, original_prefs).unwrap();
+    control_close(&owner, &pane);
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    assert_eq!(result.close, None);
+    let named = result
+        .events
+        .iter()
+        .find(|event| event["request_id"] == "bound-name")
+        .unwrap();
+    assert_eq!(
+        named["ok"], true,
+        "bound Session naming must not read the roster: {named}"
+    );
+    assert_eq!(named["agent_name"], "Falcon");
+    assert_eq!(unreadable_prefs, "unreadable roster");
+    assert_eq!(after, before, "naming must not rewrite the bound Session");
+    assert_eq!(saved.agent_name, session.agent_name);
+    assert_eq!(saved.agent_member_id, session.agent_member_id);
+}
+
+#[test]
 fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
+
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
@@ -4041,22 +4147,29 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     let mut config = control_launch_config(&root, 42);
     config.linked_issue_number = None;
     config.explicit_follow_up = false;
-    let pane = control_owner_launch(&owner, "agent", config);
-    let source_id = pane.session.as_ref().unwrap().id.clone();
-    owner_runtime_status_event(&owner, &pane, "Waiting", "PermissionRequest");
+    let source = control_owner_launch(&owner, "agent", config);
+    let source_id = source.session.as_ref().unwrap().id.clone();
+    owner_runtime_status_event(&owner, &source, "Waiting", "PermissionRequest");
     let live = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
-        id: pane.id.clone(),
-        incarnation: pane.incarnation,
+        id: source.id.clone(),
+        incarnation: source.incarnation,
     }))
     .unwrap();
     assert_eq!(live["agent_name"], "Falcon");
     assert_eq!(live["session_id"], source_id);
-    assert_eq!(live["child_pid"], pane.pty.process_id().unwrap());
+    assert_eq!(live["child_pid"], source.pty.process_id().unwrap());
     assert_eq!(
         live["status"],
         serde_json::json!(WindowProcessStatus::Waiting)
     );
-    assert!(pane.pty.try_wait().unwrap().is_none());
+    assert!(source.pty.try_wait().unwrap().is_none());
+    let mut row =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap()
+            .windows
+            .into_iter()
+            .find(|row| row.session_id.as_deref() == Some(source_id.as_str()))
+            .unwrap();
     let history_before = fs::read(&history).unwrap();
 
     // Review inherited names still use the original global allocator layer;
@@ -4064,6 +4177,7 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     let mut config = control_launch_config(&root, 43);
     config.linked_issue_number = None;
     config.explicit_follow_up = false;
+    config.suppress_execution_control = true;
     config
         .env_vars
         .insert("GWT_REVIEW_DISPATCH".into(), "1".into());
@@ -4102,15 +4216,16 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         control_close(&owner, &candidate);
         assert!(candidate.pty.try_wait().unwrap().is_some());
     }
-    let retained = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
-    assert!(Arc::ptr_eq(&retained.pty, &pane.pty));
+    let retained = owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).unwrap();
+    assert!(Arc::ptr_eq(&retained.pty, &source.pty));
     assert!(retained.pty.try_wait().unwrap().is_none());
     assert_eq!(retained.status, WindowProcessStatus::Waiting);
-    control_close(&owner, &pane);
-    assert!(pane.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &source);
+    assert!(source.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
     owner_fixture_block_on(owner.shutdown());
     assert!(rejected.is_err(),
-        "another Agent must not duplicate the retained live initial; actual candidate: {unexpected_identity:?}; response: {rejected:?}");
+        "another inherited Agent name must not duplicate the retained live initial; actual candidate: {unexpected_identity:?}; response: {rejected:?}");
     assert!(
         rejected
             .unwrap_err()
@@ -4128,16 +4243,18 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
     assert_eq!(stopped.status, gwt_agent::AgentStatus::Stopped);
     assert_eq!(stopped.agent_name.as_deref(), Some("Falcon"));
+    assert!(fs::read_to_string(&history)
+        .unwrap()
+        .lines()
+        .any(|line| line == "\"Falcon\""));
 
-    // Replay the same drained Session in the old optional metadata format.
+    // Replay the same drained Session and actual owner row in the old optional
+    // metadata format, retaining their physical source identity.
     stopped.agent_name = None;
     stopped.agent_member_id = None;
     stopped.restore_window_on_startup = true;
     stopped.save(&sessions).unwrap();
-    let mut row = sample_window("agent", WindowPreset::Agent, WindowProcessStatus::Stopped);
-    row.session_id = Some(source_id.clone());
-    row.agent_id = Some(stopped.agent_id.command().into());
-    row.agent_name = Some("Falcon".into());
+    row.status = gwt::persistence::WindowState::Stopped;
     save_legacy_name_rows(&root, vec![row]);
     let owner = owner_fixture_block_on(
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),

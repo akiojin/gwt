@@ -778,7 +778,7 @@ fn continue_work_prefers_exact_custom_durable_session() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_agent = write_fake_agent_command(temp.path(), "review-bot");
     let _path = prepend_tool_parent_to_path(&fake_agent);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-custom-durable",
         ProjectionOnlyContinueFixture {
@@ -835,7 +835,7 @@ fn continue_work_durable_session_requires_same_work_ref_agent() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-ref-agent-mismatch",
         ProjectionOnlyContinueFixture {
@@ -903,7 +903,7 @@ fn continue_work_missing_work_agent_identity_rejects_durable_codex_and_custom_se
             gwt_agent::AgentId::Custom("review-bot".to_string()),
         ),
     ] {
-        let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+        let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
             temp.path(),
             case_name,
             ProjectionOnlyContinueFixture {
@@ -991,7 +991,7 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-actual-branch-divergence",
         ProjectionOnlyContinueFixture {
@@ -1023,7 +1023,7 @@ fn projection_continue_rejects_actual_worktree_branch_divergence_without_mutatio
     let failure = continue_work_domain_failure(
         &runtime,
         "client-branch-divergence",
-        &("operation-branch-divergence".to_string()),
+        "operation-branch-divergence",
         &(work_id),
     );
 
@@ -1056,7 +1056,7 @@ fn continue_work_shell_ref_cannot_authenticate_agent_session() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-shell-ref",
         ProjectionOnlyContinueFixture {
@@ -1085,7 +1085,7 @@ fn continue_work_shell_ref_cannot_authenticate_agent_session() {
     let failure = continue_work_domain_failure(
         &runtime,
         "client-shell-ref",
-        &("shell-ref-operation".to_string()),
+        "shell-ref-operation",
         &(work_id),
     );
 
@@ -1104,7 +1104,7 @@ fn projection_only_continue_ignores_noncanonical_projected_session_path() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-noncanonical-session-path",
         ProjectionOnlyContinueFixture {
@@ -1274,7 +1274,7 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         ProjectKind::Git,
         &[],
     );
-    let mut runtime = sample_runtime(&temp.path().join("runtime"), vec![tab], Some("tab-foreign"));
+    let runtime = sample_runtime(&temp.path().join("runtime"), vec![tab], Some("tab-foreign"));
     let mut forged =
         gwt_agent::Session::new(&foreign, "work/issue-2359", gwt_agent::AgentId::Codex);
     forged.id = predecessor_session_id.to_string();
@@ -1284,12 +1284,8 @@ fn durable_continue_recovery_rejects_foreign_worktree_with_matching_project_root
         .save(&runtime.sessions_dir)
         .expect("save foreign Session with matching project root");
 
-    let failure = continue_work_domain_failure(
-        &runtime,
-        "client-foreign-recovery",
-        &(operation_id.to_string()),
-        &(work_id.to_string()),
-    );
+    let failure =
+        continue_work_domain_failure(&runtime, "client-foreign-recovery", operation_id, work_id);
 
     assert_eq!(failure.outcome, gwt::ContinueWorkOutcomeKind::Failed);
     assert!(!failure.retryable);
@@ -1325,7 +1321,7 @@ fn projection_only_continue_ignores_durable_session_with_conflicting_owner() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-conflicting-session-owner",
         ProjectionOnlyContinueFixture {
@@ -1376,7 +1372,7 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-session-hidden-container-conflict",
         ProjectionOnlyContinueFixture {
@@ -1407,7 +1403,7 @@ fn projection_only_continue_authenticates_container_before_using_durable_session
     let failure = continue_work_domain_failure(
         &runtime,
         "client-projection-container-first",
-        &("projection-container-first-operation".to_string()),
+        "projection-container-first-operation",
         &(work_id),
     );
 
@@ -1825,7 +1821,7 @@ fn continue_work_heals_issue_kind_work_owner_against_trusted_spec_authority() {
     let _home = ScopedGwtHome::set(temp.path());
     let fake_codex = write_fake_codex(temp.path());
     let _path = prepend_tool_parent_to_path(&fake_codex);
-    let (mut runtime, repo, owner, work_id) = projection_only_continue_runtime(
+    let (runtime, repo, owner, work_id) = projection_only_continue_runtime(
         temp.path(),
         "projection-only-owner-kind-heal",
         ProjectionOnlyContinueFixture {
@@ -2509,7 +2505,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         WindowPreset::Shell,
         WindowProcessStatus::Ready,
     );
-    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
     let mut predecessor =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     predecessor.id = predecessor_session_id.to_string();
@@ -2556,12 +2552,7 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
     let authority_before =
         snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
 
-    let events = continue_work_domain_failure(
-        &runtime,
-        "client-retry",
-        &(operation_id.to_string()),
-        &(work_id.to_string()),
-    );
+    let events = continue_work_domain_failure(&runtime, "client-retry", operation_id, work_id);
 
     assert_eq!(
         events.outcome,
@@ -2591,12 +2582,8 @@ fn continue_work_retry_after_host_crash_aborts_stale_prepared_candidate() {
         .save(&runtime.sessions_dir)
         .expect("restore exact candidate fixture");
 
-    let reconciled = continue_work_domain_failure(
-        &runtime,
-        "client-retry-exact",
-        &(operation_id.to_string()),
-        &(work_id.to_string()),
-    );
+    let reconciled =
+        continue_work_domain_failure(&runtime, "client-retry-exact", operation_id, work_id);
     assert_eq!(reconciled.outcome, gwt::ContinueWorkOutcomeKind::Failed);
     assert!(!reconciled.retryable);
     assert_eq!(reconciled.code, "continuation_aborted");
@@ -2758,7 +2745,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
         WindowPreset::Shell,
         WindowProcessStatus::Ready,
     );
-    let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
+    let runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-1"));
     let mut predecessor =
         gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
     predecessor.id = predecessor_session_id.to_string();
@@ -2784,12 +2771,8 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             snapshot_optional_files(&exact_continue_authority_artifacts(&repo, owner));
         let work_before = tracked_workspace_work_store_snapshot(&repo);
 
-        let retained = continue_work_domain_failure(
-            &runtime,
-            "client-retry-dangling",
-            &(operation_id.to_string()),
-            &(work_id.to_string()),
-        );
+        let retained =
+            continue_work_domain_failure(&runtime, "client-retry-dangling", operation_id, work_id);
 
         assert_eq!(
             retained.outcome,
@@ -2827,12 +2810,8 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
             .expect("materialize same-id Aborted candidate after Missing observation");
     }));
 
-    let raced = continue_work_domain_failure(
-        &runtime,
-        "client-retry-materialized",
-        &(operation_id.to_string()),
-        &(work_id.to_string()),
-    );
+    let raced =
+        continue_work_domain_failure(&runtime, "client-retry-materialized", operation_id, work_id);
 
     assert_eq!(raced.outcome, gwt::ContinueWorkOutcomeKind::ConflictUnknown);
     assert!(raced.retryable);
@@ -2841,12 +2820,7 @@ fn continue_work_retry_rejects_lingering_work_transaction_for_aborted_attempt() 
     assert_tracked_workspace_work_store_unchanged(&repo, &work_before);
     fs::remove_file(&candidate_path).expect("restore true Missing state for successful cleanup");
 
-    let events = continue_work_domain_failure(
-        &runtime,
-        "client-retry",
-        &(operation_id.to_string()),
-        &(work_id.to_string()),
-    );
+    let events = continue_work_domain_failure(&runtime, "client-retry", operation_id, work_id);
     assert_eq!(events.outcome, gwt::ContinueWorkOutcomeKind::Failed);
     assert!(!events.retryable);
     assert_eq!(events.code, "continuation_aborted");
@@ -3065,7 +3039,7 @@ fn continue_work_prepared_and_aborted_cleanup_reject_agent_substitution_without_
             WindowPreset::Shell,
             WindowProcessStatus::Ready,
         );
-        let mut runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-cleanup"));
+        let runtime = sample_runtime(&runtime_root, vec![tab], Some("tab-cleanup"));
         let mut predecessor =
             gwt_agent::Session::new(&repo, "work/issue-2359", gwt_agent::AgentId::Codex);
         predecessor.id = predecessor_session_id.clone();

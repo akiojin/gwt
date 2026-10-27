@@ -435,7 +435,7 @@ fn managed_owner_session_at(
     (owner, pane)
 }
 
-fn managed_project_owner_projection(
+pub(super) fn managed_project_owner_projection(
     temp_root: &Path,
     repo: &Path,
     owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
@@ -470,38 +470,56 @@ fn managed_project_owner_projection(
     runtime
 }
 
-fn managed_exit_fixture(
+fn managed_exit_command(exit_code: u8) -> (String, Vec<String>) {
+    if cfg!(windows) {
+        ("powershell".into(), vec!["-NoProfile".into(), "-Command".into(), format!(
+            "[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit {exit_code}"
+        )])
+    } else {
+        ("/bin/sh".into(), vec!["-c".into(), format!(
+            "stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; IFS= read -r line; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit {exit_code}"
+        )])
+    }
+}
+
+pub(super) fn managed_exit_fixture(
     temp: &Path,
     exit_code: u8,
     output: &str,
+    resume: bool,
 ) -> (
     gwt::project_runtime::test_support::ProjectOwnerHarness,
     gwt::project_runtime::test_support::OwnerRuntimeProbe,
     AppRuntime,
     tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
 ) {
-    let repo = temp.join("exit-project");
-    fs::create_dir_all(&repo).unwrap();
-    init_repo_with_initial_commit(&repo);
-    seed_owner_fixture_roster(&repo, 4);
-    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
-    let events = owner.subscribe();
-    let mut config = managed_owner_config_at(&repo, &repo, "main");
-    if cfg!(windows) {
-        config.command = "powershell".into();
-        config.args = vec!["-NoProfile".into(), "-Command".into(), format!(
-            "$null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit {exit_code}"
-        )];
+    let (repo, owner, mut config) = if resume {
+        let (owner, _, config) = managed_bound_resume_source(temp);
+        (
+            temp.join("repo"),
+            Arc::try_unwrap(owner).ok().unwrap(),
+            config,
+        )
     } else {
-        config.command = "/bin/sh".into();
-        config.args = vec!["-c".into(), format!(
-            "stty -echo; IFS= read -r line; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit {exit_code}"
-        )];
-    }
+        let repo = temp.join("exit-project");
+        fs::create_dir_all(&repo).unwrap();
+        init_repo_with_initial_commit(&repo);
+        seed_owner_fixture_roster(&repo, 4);
+        let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+        let config = managed_owner_config_at(&repo, &repo, "main");
+        (repo, owner, config)
+    };
+    let events = owner.subscribe();
+    (config.command, config.args) = managed_exit_command(exit_code);
     config
         .env_vars
         .insert("GWT_EXIT_FIXTURE_OUTPUT".into(), output.into());
+    let predecessor = config.predecessor_session_id.clone();
     let probe = super::pane_control_tests::control_owner_launch(&owner, "exit-agent", config);
+    if let Some(session_id) = predecessor {
+        assert_eq!(probe.session.as_ref().unwrap().id, session_id);
+    }
+    owner_fixture_block_on(wait_managed_exit_ready(&owner, &probe));
     let mut runtime = managed_project_owner_projection(temp, &repo, &owner, &[&probe]);
     let context = runtime.test_context();
     let state = runtime.project_state_mut(&context).unwrap();
@@ -510,25 +528,106 @@ fn managed_exit_fixture(
     (owner, probe, runtime, events)
 }
 
-fn finish_managed_exit(
+pub(super) fn managed_monitor_exit_fixture(
+    temp: &Path,
+    issue: u64,
+    exit_code: u8,
+    output: &str,
+) -> (
+    PathBuf,
+    gwt::project_runtime::test_support::ProjectOwnerHarness,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    AppRuntime,
+    tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+) {
+    let (repo, owner, delivery) =
+        owner_monitor_fixture(temp, issue, true, &["pane-contract-fixture"]);
+    let observed = owner.subscribe();
+    let mut config = pane_control_tests::control_launch_config(&repo, issue);
+    (config.command, config.args) = managed_exit_command(exit_code);
+    config
+        .env_vars
+        .insert("GWT_EXIT_FIXTURE_OUTPUT".into(), output.into());
+    let probe =
+        owner_monitor_launch_with_config(&repo, &owner, issue, "monitor-agent", delivery, config);
+    owner_fixture_block_on(wait_managed_exit_ready(&owner, &probe));
+    let monitor = owner_monitor_read(&repo, issue);
+    assert_eq!(
+        monitor.active_count(),
+        1,
+        "the real bound launch occupies one Monitor slot"
+    );
+    assert!(
+        monitor.live_claim_id(issue).is_some(),
+        "the exact launch retains its real claim"
+    );
+    let mut runtime = managed_project_owner_projection(temp, &repo, &owner, &[&probe]);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    (repo, owner, probe, runtime, observed)
+}
+
+async fn wait_managed_exit_ready(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    probe: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    // test-hygiene: allow-wall-clock-deadline Bounds an OS/IPC hang while real provider output establishes readiness; no elapsed-time assertion.
+    tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+        loop {
+            let snapshot = owner
+                .command(gwt::project_runtime::events::OwnerCommand::Snapshot {
+                    id: probe.id.clone(),
+                    incarnation: probe.incarnation,
+                })
+                .await
+                .expect("actual managed provider readiness snapshot");
+            if snapshot["screen"]
+                .as_str()
+                .is_some_and(|screen| screen.contains("GWT_MANAGED_EXIT_READY"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the actual managed provider must reach its input gate");
+}
+
+pub(super) fn finish_managed_exit(
     owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
     probe: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
     runtime: &mut AppRuntime,
     events: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
 ) -> Vec<OutboundEvent> {
     use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
-    let context = runtime.test_context();
     let identity = owner.client().identity().unwrap().clone();
+    let context = runtime
+        .runtimes
+        .iter()
+        .find_map(|(alias, projection)| {
+            (projection.owner_identity == identity
+                && projection.owner_pane_id == probe.id
+                && projection.incarnation == probe.incarnation)
+                .then(|| runtime.window_lookup.get(alias))
+                .flatten()
+                .and_then(|address| runtime.project_context(&address.tab_id))
+        })
+        .expect("the exact owner runtime's project context");
     owner_fixture_block_on(async {
         owner
             .command(OwnerCommand::Input {
                 id: probe.id.clone(),
                 incarnation: probe.incarnation,
-                data: b"exit\n".to_vec(),
+                data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
             })
             .await
             .expect("release the actual provider exit gate");
         let mut projected = Vec::new();
+        let mut closed_count = 0;
         loop {
             // test-hygiene: allow-wall-clock-deadline Bounds delivery of actual owner exit/reap acknowledgement; no scheduler ordering is asserted.
             let event = tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, events.recv())
@@ -566,9 +665,23 @@ fn finish_managed_exit(
                 }
             }
             if closed {
+                closed_count += 1;
                 break;
             }
         }
+        owner.command(OwnerCommand::Health).await.unwrap();
+        while let Ok(event) = events.try_recv() {
+            if matches!(&event, OwnerEvent::Closed { id, incarnation, .. }
+                if id == &probe.id && *incarnation == probe.incarnation)
+            {
+                closed_count += 1;
+            }
+            projected.extend(runtime.handle_project_owner_event(&context, 1, &identity, event));
+        }
+        assert_eq!(
+            closed_count, 1,
+            "one exact owner close finalizes this generation"
+        );
         assert!(
             probe.pty.tree_exit_confirmed(),
             "the actual provider tree was reaped"
@@ -2344,7 +2457,11 @@ fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
         runtime.launch_wizard_cache.sessions();
         let generation = runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
         let client_cell = Arc::new(Mutex::new(Some(Ok(owner.client()))));
-        let cancel_ack = Arc::new(tokio::sync::Mutex::new(None));
+        // This scalar presentation fixture has no original launch command and
+        // therefore grants no cancellation authority to its synthetic observer.
+        let cancel_ack = Arc::new(tokio::sync::Mutex::new(
+            super::super::RemoteLaunchCancellation::default(),
+        ));
         runtime.pending_launch_completions.insert(
             window_id.clone(),
             super::super::launch::PendingLaunchCompletion {
@@ -2355,6 +2472,8 @@ fn launch_failure_retains_structured_retry_metadata_in_terminal_status() {
                 owner_pane_id: captured.id.clone(),
                 client_cell: client_cell.clone(),
                 cancel_ack: cancel_ack.clone(),
+                manual_request: None,
+                manual_wizard: None,
             },
         );
         // This is a read-model classification contract. Keep the actual owner
@@ -2613,10 +2732,14 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
         vec![
             "-NoProfile".into(),
             "-Command".into(),
-            "$null = [Console]::ReadLine(); exit 0".into(),
+            "[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); exit 0"
+                .into(),
         ]
     } else {
-        vec!["-c".into(), "read ready; exit 0".into()]
+        vec![
+            "-c".into(),
+            "printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; exit 0".into(),
+        ]
     };
     let id = owner.pane_id("resumed");
     let executor = tokio::runtime::Runtime::new().unwrap();
@@ -2670,6 +2793,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
         assert!(receipt.get("launch_failure").is_none(), "{receipt}");
         let incarnation = receipt["incarnation"].as_u64().unwrap();
         let pane = owner.probe(&id, incarnation).await.unwrap();
+        wait_managed_exit_ready(&owner, &pane).await;
         let running = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
         assert_eq!(running.status, gwt_agent::AgentStatus::Running);
         assert_eq!(running.execution_identity.as_ref(), Some(&expected));
@@ -2698,7 +2822,12 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
             .command(OwnerCommand::Input {
                 id: id.clone(),
                 incarnation,
-                data: b"finish\n".to_vec(),
+                data: if cfg!(windows) {
+                    b"finish\r"
+                } else {
+                    b"finish\n"
+                }
+                .to_vec(),
             })
             .await
             .unwrap();
@@ -2853,16 +2982,27 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("repo");
-    init_repo(&repo);
+    init_repo_with_initial_commit(&repo);
     let fake_codex = write_fake_agent_command(temp.path(), "codex");
     let fake_claude = write_fake_agent_command(temp.path(), "claude");
     for command in [&fake_codex, &fake_claude] {
         write_executable_test_file(
             command,
             if cfg!(windows) {
-                "@echo off\r\npause\r\n"
+                concat!(
+                    "@echo off\r\n",
+                    "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+                    ":probe\r\n",
+                    "if \"%~1\"==\"\" goto launch\r\n",
+                    "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+                    "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+                    "shift\r\n",
+                    "goto probe\r\n",
+                    ":launch\r\n",
+                    "powershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; while ($true) { [void][Console]::ReadKey($true) }\"\r\n",
+                )
             } else {
-                "#!/bin/sh\nread line\n"
+                "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; exec cat >/dev/null\n"
             },
         );
     }
@@ -2873,6 +3013,7 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         fake_codex.parent().expect("fixture directory"),
     );
     write_profile_config(&temp.path().join("profile-config.toml"), &settings);
+    settings.save(&gwt_core::paths::gwt_config_path()).unwrap();
     let tab = sample_project_tab_with_window_at(
         "tab-1",
         "legacy-codex",
@@ -2881,6 +3022,8 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         WindowProcessStatus::Stopped,
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
     // AC27/40: each direct route needs an enabled member with its fixed tool.
     gwt::agent_names::read_project_roster(&repo, &runtime.sessions_dir)
         .expect("registered Codex member");
@@ -2888,11 +3031,13 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
         &repo,
         &runtime.sessions_dir,
         gwt::agent_names::AgentRosterAction::Add {
+            name: None,
             agent_id: Some("claude".into()),
         },
         None,
     )
     .expect("registered Claude member for the second direct route");
+    configure_owner_fixture_tools(&repo, &["codex", "claude"]);
     let codex_id = combined_window_id("tab-1", "legacy-codex");
     let (spawn_env, _) = runtime
         .active_profile_spawn_env()
@@ -2910,8 +3055,47 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     // Resolve the empty cache before launch so a later lazy disk load cannot
     // hide a missing direct-preset Session registration.
     let _ = runtime.launch_wizard_cache.agent_preferences();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     runtime.restart_window_events(&codex_id);
     runtime.create_window_events(&runtime.test_context(), WindowPreset::Claude, None);
+    let pending = runtime
+        .pending_launch_completions
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pending.len(),
+        2,
+        "both direct routes queue real owner launches"
+    );
+    let owner = project_owner_fixture(&mut runtime, &codex_id);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    drain_queued_blocking_tasks(&tasks);
+    let AppEventProxy::Stub(recorded) = &runtime.proxy else {
+        panic!("direct preset completion proxy")
+    };
+    let recorded = recorded.clone();
+    let owner_inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    for id in pending {
+        let completion = take_remote_owner_launch_completion_for_window(&recorded, Some(&id));
+        assert!(
+            matches!(
+                &completion.result,
+                Ok(super::super::RemoteOwnerLaunchOutcome::Runtime(..))
+            ),
+            "the actual direct owner launch must succeed: {:?}; expected pane={}; actual owner={:?}; actual panes={}",
+            completion.result.as_ref().err(), completion.owner_pane_id,
+            owner.client().identity(), owner_inventory["panes"],
+        );
+        runtime.handle_remote_owner_launch_complete(completion);
+    }
 
     let inventory = gwt::session_inventory::observe_sessions(&repo, &runtime.sessions_dir);
     let uncached_sessions = runtime
@@ -2928,6 +3112,15 @@ fn direct_agent_presets_create_and_restart_are_observed_until_stopped() {
     let live_windows = runtime.runtimes.keys().cloned().collect::<Vec<_>>();
     for id in &live_windows {
         runtime.stop_window_runtime(id);
+    }
+    drain_queued_blocking_tasks(&tasks);
+    let completed = std::mem::take(&mut *recorded.lock().unwrap());
+    for event in completed {
+        if let Some(UserEvent::RemoteRuntimeCommandComplete(completion)) =
+            runtime.accept_project_completion(event)
+        {
+            runtime.handle_remote_runtime_command_complete(*completion);
+        }
     }
     assert!(
         uncached_sessions.is_empty(),
@@ -3203,26 +3396,21 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-
-    let events = runtime.handle_runtime_status_with_exit_confirmation(
+    let (owner, probe, mut runtime, mut observed) =
+        managed_exit_fixture(temp.path(), 7, "provider failed", false);
+    let window_id = combined_window_id("tab-1", "exit-agent");
+    let session_id = &probe.session.as_ref().unwrap().id;
+    let session_path = runtime.sessions_dir.join(format!("{session_id}.toml"));
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, session_id);
+    let session_before = fs::read(&session_path).unwrap();
+    let proof_before = fs::read(&runtime_path).unwrap();
+    let physical_before =
+        owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    let events = runtime.handle_daemon_runtime_status(
         window_id.clone(),
         WindowProcessStatus::Stopped,
         Some("Process exited".to_string()),
-        true,
     );
-
     assert!(
         events
             .iter()
@@ -3233,11 +3421,38 @@ fn app_runtime_runtime_status_stopped_keeps_active_agent_window_for_diagnostics(
         runtime.window_lookup.contains_key(&window_id),
         "PTY stop alone must keep the agent window open so diagnostics remain visible"
     );
+    assert!(runtime.active_agent_sessions.contains_key(&window_id));
     assert!(
-        runtime.tabs[0].workspace.window("codex-1").is_some(),
+        probe.pty.try_wait().unwrap().is_none(),
+        "display status cannot kill the actual child"
+    );
+    let physical = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    assert_eq!(physical.pty.process_id(), probe.pty.process_id());
+    assert_eq!(physical.session.as_ref().unwrap().id, *session_id);
+    assert_eq!(physical.status, physical_before.status);
+    assert_eq!(fs::read(&session_path).unwrap(), session_before);
+    assert_eq!(fs::read(&runtime_path).unwrap(), proof_before);
+
+    let projected = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+    assert!(runtime.window_lookup.contains_key(&window_id));
+    assert!(
+        runtime.tabs[0].workspace.window("exit-agent").is_some(),
         "workspace must retain the stopped agent window"
     );
-    assert!(!runtime.active_agent_sessions.contains_key(&window_id));
+    assert!(
+        !runtime.active_agent_sessions.contains_key(&window_id),
+        "the exact diagnostic exit must retire its active Session: {:?}",
+        projected
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalStatus { .. }))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        gwt_agent::Session::load(&session_path)
+            .unwrap()
+            .last_exit_code,
+        Some(7)
+    );
 }
 
 #[test]
@@ -3248,18 +3463,18 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (owner, probe, mut runtime, mut events) =
-        managed_exit_fixture(temp.path(), 0, "provider finished");
+    let (owner, probe, mut runtime, mut observed) =
+        managed_exit_fixture(temp.path(), 0, "provider finished", false);
     let raw_id = probe.id.split_once("::").unwrap().1;
     let window_id = combined_window_id("tab-1", raw_id);
-    let pty = probe.pty.clone();
     let mut finalizers = owner.subscribe();
     assert!(runtime.tabs[0].workspace.window(raw_id).is_some());
+    assert_eq!(runtime.runtimes[&window_id].incarnation, probe.incarnation);
     assert_eq!(
         runtime.active_agent_sessions[&window_id].session_id,
         probe.session.as_ref().unwrap().id,
     );
-    let events = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
+    let events = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
 
     assert!(events
         .iter()
@@ -3278,8 +3493,23 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
         "the exact current exit completes one detached owner finalizer"
     );
     assert!(
-        pty.try_wait().expect("probe reaped child").is_some(),
-        "the detached finalizer reaps the exact exited generation"
+        probe.pty.try_wait().expect("probe reaped child").is_some(),
+        "the owner finalizer reaps the exact exited generation"
+    );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert!(inventory["panes"].as_array().unwrap().is_empty());
+    assert_eq!(
+        gwt_agent::Session::load(
+            &runtime
+                .sessions_dir
+                .join(format!("{}.toml", probe.session.as_ref().unwrap().id)),
+        )
+        .unwrap()
+        .last_exit_code,
+        Some(0)
     );
 }
 
@@ -3297,7 +3527,7 @@ fn app_runtime_clean_agent_exit_persists_the_pty_exit_receipt() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (owner, probe, mut runtime, mut events) =
-        managed_exit_fixture(temp.path(), 0, "provider finished");
+        managed_exit_fixture(temp.path(), 0, "provider finished", false);
     let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
     let session_id = &probe.session.as_ref().unwrap().id;
     let reloaded =
@@ -3332,7 +3562,7 @@ fn app_runtime_agent_error_exit_persists_the_real_exit_code() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let (owner, probe, mut runtime, mut events) =
-        managed_exit_fixture(temp.path(), 7, "provider finished");
+        managed_exit_fixture(temp.path(), 7, "provider finished", false);
     let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
     let session_id = &probe.session.as_ref().unwrap().id;
     let reloaded =
@@ -3395,13 +3625,20 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (owner, probe, mut runtime, mut events) = managed_exit_fixture(
+    let _custom = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
+    let (owner, probe, mut runtime, mut observed) = managed_exit_fixture(
         temp.path(),
         1,
         "No conversation found with session ID: resume-target-1",
+        true,
     );
     let window_id = combined_window_id("tab-1", "exit-agent");
-    let projected = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
+    assert_eq!(
+        probe.session.as_ref().unwrap().session_mode,
+        gwt_agent::SessionMode::Resume
+    );
+    let projected = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+    assert_eq!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 1);
     let owner_detail = projected
         .iter()
         .find_map(|event| match &event.event {
@@ -3423,7 +3660,11 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
         .unwrap_or_default();
     assert!(
         detail.contains("Exact session restore failed"),
-        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}; authoritative owner: {owner_detail}"
+        "exact-resume failure must be promoted to an explicit diagnostic, got: {detail}; actual status projections: {:?}",
+        projected
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalStatus { .. }))
+            .collect::<Vec<_>>()
     );
     assert!(
         !detail.contains("resume-target-1"),
@@ -3433,10 +3674,32 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Error)
     );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
     assert!(
-        !runtime.runtimes.contains_key(&window_id),
-        "errored runtime is still torn down after the tail is captured"
+        inventory["panes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|pane| { pane["id"] != probe.id || pane["incarnation"] != probe.incarnation }),
+        "the exact physical runtime is torn down after its tail is captured"
     );
+    assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+    assert!(probe.pty.tree_exit_confirmed());
+    let retained = &runtime.runtimes[&window_id];
+    assert!(retained.exit_confirmed);
+    assert_eq!(retained.status, WindowProcessStatus::Error);
+    assert_eq!(retained.detail.as_deref(), Some(detail.as_str()));
+    assert!(retained
+        .screen
+        .contains("No conversation found with session ID"));
+    assert_eq!(
+        retained.screen,
+        probe.pane.lock().unwrap().screen().contents()
+    );
+    assert!(!retained.screen_ansi.is_empty());
 }
 
 // Issue #3274: any agent error exit keeps its last screen output in the
@@ -3450,36 +3713,74 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (owner, agent, mut runtime, mut events) =
-        managed_exit_fixture(temp.path(), 1, "unexpected fatal: config parse error");
-    let owner = Arc::new(owner);
-    runtime
-        .test_project_owners
-        .insert(runtime.tabs[0].project_root.clone(), Arc::clone(&owner));
-    let shell = runtime.tabs[0].workspace.add_window(WindowPreset::Shell);
-    runtime.register_window("tab-1", &shell.id);
-    let shell_window_id = combined_window_id("tab-1", &shell.id);
+    let (owner, agent, _, _) = managed_exit_fixture(
+        temp.path(),
+        1,
+        "unexpected fatal: config parse error",
+        false,
+    );
+    let mut observed = owner.subscribe();
+    let shell_id = owner.pane_id("shell-1");
     let (command, args) = if cfg!(windows) {
-        ("powershell".into(), vec![
-            "-NoProfile".into(),
-            "-Command".into(),
-            "$null = [Console]::ReadLine(); [Console]::WriteLine('command not found: frobnicate'); exit 1".into(),
-        ])
+        (
+            "powershell",
+            vec![
+                "-NoProfile".into(), "-Command".into(),
+                "[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine('command not found: frobnicate'); exit 1".into(),
+            ],
+        )
     } else {
-        ("/bin/sh".into(), vec![
-            "-c".into(),
-            "stty -echo; IFS= read -r line; printf '%s\\n' 'command not found: frobnicate'; exit 1".into(),
-        ])
+        (
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; printf 'command not found: frobnicate\\n'; exit 1".into(),
+            ],
+        )
     };
-    insert_test_pane_runtime_with_command(&mut runtime, &shell_window_id, command, args, 80, 24);
-    let shell = owner_runtime_probe(&runtime, &shell_window_id);
+    let launched = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchShell {
+            id: shell_id.clone(),
+            command: command.into(),
+            args,
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    let shell =
+        owner_fixture_block_on(owner.probe(&shell_id, launched["incarnation"].as_u64().unwrap()))
+            .unwrap();
+    assert!(
+        shell.session.is_none(),
+        "the plain process has no Agent Session"
+    );
+    owner_fixture_block_on(wait_managed_exit_ready(&owner, &shell));
+    let mut runtime = managed_project_owner_projection(
+        temp.path(),
+        &temp.path().join("exit-project"),
+        &owner,
+        &[&agent, &shell],
+    );
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
     let agent_window_id = combined_window_id("tab-1", "exit-agent");
-    finish_managed_exit(&owner, &agent, &mut runtime, &mut events);
+    let shell_window_id = combined_window_id("tab-1", "shell-1");
+    let mut projected = finish_managed_exit(&owner, &agent, &mut runtime, &mut observed);
     assert!(
         shell.pty.try_wait().unwrap().is_none(),
         "the Agent exit must leave the Shell control alive"
     );
-    finish_managed_exit(&owner, &shell, &mut runtime, &mut events);
+    projected.extend(finish_managed_exit(
+        &owner,
+        &shell,
+        &mut runtime,
+        &mut observed,
+    ));
+    assert_eq!(agent.pane.lock().unwrap().last_exit().unwrap().exit_code, 1);
+    assert_eq!(shell.pane.lock().unwrap().last_exit().unwrap().exit_code, 1);
 
     let agent_detail = runtime
         .window_details
@@ -3489,7 +3790,11 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
     assert!(
         agent_detail.contains("Process exited with status 1")
             && agent_detail.contains("unexpected fatal: config parse error"),
-        "agent error detail must keep the last screen output, got: {agent_detail}"
+        "agent error detail must keep the last screen output, got: {agent_detail}; actual status projections: {:?}",
+        projected
+            .iter()
+            .filter(|event| matches!(event.event, BackendEvent::TerminalStatus { .. }))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         runtime
@@ -3695,81 +4000,78 @@ fn agent_hook_arrival_refreshes_the_issue_monitor_activity_clock() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let mut tab = sample_project_tab_with_window(
-        "tab-1",
-        "agent-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (repo, owner, probe, mut runtime, mut observed) =
+        managed_monitor_exit_fixture(temp.path(), 4975, 0, "provider finished");
+    assert!(probe.policy.last_heartbeat.is_none());
+    let session_id = &probe.session.as_ref().unwrap().id;
+    let mut hook = runtime_hook_state_for_event("Running", "PostToolUse", session_id);
+    hook.project_root = Some(repo.display().to_string());
+    hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
+    // A logical provider timestamp, so the durable comparison does not wait
+    // for the wall clock to advance beyond the launch's heartbeat.
+    hook.occurred_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+    assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
+        .unwrap()
+        .is_success());
+    let applied = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    assert!(
+        applied.policy.last_heartbeat.is_some(),
+        "the physical owner records hook activity"
     );
-    tab.project_root = repo.clone();
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let window_id = combined_window_id("tab-1", "agent-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-
-    runtime
-        .pending_launch_feedback_contexts
-        .insert(window_id.clone(), issue_monitor_feedback(4975));
-    let hook = runtime_hook_state_for_event("Running", "PostToolUse", "session-1");
-    // The worker is queued: receipt/window evidence must not claim application yet.
-    let captured = capture_tracing_events(|| {
-        runtime.handle_daemon_runtime_hook_event(hook.clone());
-        assert!(
-            runtime.last_agent_activity_for_test(&window_id).is_some(),
-            "a hook arrival must refresh the activity clock for its window"
-        );
-        assert_eq!(
-            tasks.lock().expect("queued tasks").len(),
-            1,
-            "RuntimeHook must defer heartbeat lookup and publication to one blocking worker"
-        );
-        tasks.lock().unwrap().pop().unwrap()();
-        let mut unmatched = hook.clone();
-        unmatched.gwt_session_id = Some("unmatched-session".into());
-        runtime.handle_daemon_runtime_hook_event(unmatched);
-        drop(runtime);
-    });
-    let delivery: Vec<_> = captured
-        .iter()
-        .filter(|event| event.target == "gwt.hook.delivery")
-        .collect();
-    let outcomes: Vec<_> = delivery
-        .iter()
-        .map(|event| {
-            (
-                event.fields["stage"].as_str(),
-                event.fields["outcome"].as_str(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        outcomes,
-        [
-            ("window", "matched"),
-            ("heartbeat", "publish_unconfirmed"),
-            ("window", "unmatched")
-        ]
-    );
-    for event in delivery {
-        assert_eq!(event.level, Level::INFO);
-        assert_eq!(event.fields["source_event"], "PostToolUse");
-        assert_eq!(event.fields["occurred_at"], hook.occurred_at);
-        assert_eq!(
-            event.fields["gwt_session_id"],
-            if event.fields["outcome"] == "unmatched" {
-                "unmatched-session"
-            } else {
-                "session-1"
+    let monitor = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual Monitor commit; its exact provider timestamp establishes completion.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                owner.wait_monitor_idle().await.unwrap();
+                let monitor = owner_monitor_read(&repo, 4975);
+                if monitor
+                    .autonomous_record(4975)
+                    .and_then(|record| record.last_heartbeat.as_deref())
+                    == Some(hook.occurred_at.as_str())
+                {
+                    break monitor;
+                }
+                tokio::task::yield_now().await;
             }
-        );
-    }
+        })
+        .await
+        .expect("the matched real launch publishes its heartbeat")
+    });
+    assert_eq!(
+        monitor
+            .agent_status()
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 4975)
+            .unwrap()
+            .last_activity_at
+            .as_deref(),
+        Some(hook.occurred_at.as_str()),
+        "the PM's activity clock is the same committed heartbeat"
+    );
+    let mut unmatched = hook.clone();
+    unmatched.gwt_session_id = Some("unmatched-session".into());
+    assert_eq!(
+        owner_fixture_block_on(probe.runtime_hook(&unmatched))
+            .unwrap()
+            .as_u16(),
+        401,
+        "an unmatched Session cannot borrow this launch's bearer"
+    );
+    let unchanged = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    assert_eq!(
+        unchanged.policy.last_heartbeat,
+        applied.policy.last_heartbeat
+    );
+    assert_eq!(
+        owner_monitor_read(&repo, 4975)
+            .autonomous_record(4975)
+            .unwrap()
+            .last_heartbeat
+            .as_deref(),
+        Some(hook.occurred_at.as_str())
+    );
+    let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
 }
 
 /// Issue #4608: the heartbeat throttle is measured from the last heartbeat it
@@ -3878,58 +4180,42 @@ fn agent_clean_exit_frees_the_monitor_slot_like_an_error_does() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-
-    let runtime_for = |status: WindowProcessStatus| {
-        let mut tab = sample_project_tab_with_window(
-            "tab-1",
-            "agent-1",
-            WindowPreset::Agent,
-            WindowProcessStatus::Running,
+    let run = |exit_code| {
+        let (repo, owner, probe, mut runtime, mut observed) = managed_monitor_exit_fixture(
+            &temp.path().join(format!("exit-{exit_code}")),
+            42,
+            exit_code,
+            "agent stopped",
         );
-        tab.project_root = repo.clone();
-        let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-        let window_id = combined_window_id("tab-1", "agent-1");
-        runtime.active_agent_sessions.insert(
-            window_id.clone(),
-            sample_active_agent_session("tab-1", &window_id),
+        let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+        assert_eq!(
+            probe.pane.lock().unwrap().last_exit().unwrap().exit_code,
+            u32::from(exit_code)
         );
-        let events = runtime.handle_runtime_status_with_exit_confirmation(
-            window_id,
-            status,
-            Some("Process exited".to_string()),
-            true,
+        owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+        let monitor = owner_monitor_read(&repo, 42);
+        assert_eq!(
+            monitor.active_count(),
+            0,
+            "the confirmed exit releases the bound Monitor slot"
         );
-        events
-            .iter()
-            .map(|outbound| outbound.event.event_kind().to_string())
-            .collect::<std::collections::BTreeSet<_>>()
+        assert!(
+            !monitor.prefs().failed_issues.is_empty(),
+            "the real exit notifies the Monitor"
+        );
+        monitor
     };
-
-    // The Error path is the reference: it already tells the Monitor. Compare
-    // only the Monitor-facing events — a clean exit auto-closes the window, so
-    // it legitimately stops emitting per-window state for a window that is
-    // gone, while a kept-for-diagnosis Error window keeps updating.
-    let monitor_events = |status| -> std::collections::BTreeSet<String> {
-        runtime_for(status)
-            .into_iter()
-            .filter(|kind| kind.starts_with("issue_monitor"))
-            .collect()
-    };
-    let reference = monitor_events(WindowProcessStatus::Error);
-    assert!(
-        !reference.is_empty(),
-        "precondition: the Error path notifies the Monitor"
+    let reference = run(7);
+    let clean = run(0);
+    assert_eq!(clean.active_count(), reference.active_count());
+    assert_eq!(
+        clean.prefs().failed_issues.len(),
+        reference.prefs().failed_issues.len()
     );
-    let missing: Vec<_> = reference
-        .difference(&monitor_events(WindowProcessStatus::Stopped))
-        .cloned()
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "a clean exit must release the slot just like a crash; missing: {missing:?}"
+    assert_eq!(
+        clean.inbox_item(42).unwrap().state,
+        reference.inbox_item(42).unwrap().state,
+        "a clean exit must release and notify the Monitor just like a crash"
     );
 }
 
@@ -3941,82 +4227,108 @@ fn agent_error_frees_the_monitor_slot_even_when_the_pane_is_kept_for_diagnosis()
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    init_repo(&repo);
-    let mut tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    tab.project_root = repo.clone();
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    // A live hook state is what every working agent leaves behind, so this is
-    // the normal case rather than an edge case.
-    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "Idle",
-        "Stop",
-        "session-1",
-    ));
-
-    let kept_for_diagnosis = runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("You've hit your usage limit.".to_string()),
-        true,
-    );
-    assert!(
-        runtime.recoverable_agent_error_windows.contains(&window_id),
-        "precondition: the pane is kept on screen for diagnosis"
-    );
-
-    // Control: the identical death with no live hook state left behind. This
-    // is the path that already notified the Monitor, so it defines what
-    // "notified" looks like without coupling the test to an event variant.
-    let mut control = sample_runtime(
-        temp.path(),
-        vec![{
-            let mut tab = sample_project_tab_with_window(
-                "tab-1",
-                "codex-1",
-                WindowPreset::Agent,
-                WindowProcessStatus::Running,
-            );
-            tab.project_root = repo.clone();
-            tab
-        }],
-        Some("tab-1"),
-    );
-    control.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    let notified = control.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("You've hit your usage limit.".to_string()),
-        true,
-    );
-
-    let kinds = |events: &[OutboundEvent]| {
-        events
-            .iter()
-            .map(|outbound| outbound.event.event_kind().to_string())
-            .collect::<std::collections::BTreeSet<_>>()
+    let run = |live_hook| {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        let (repo, owner, probe, mut runtime, mut observed) = managed_monitor_exit_fixture(
+            &temp
+                .path()
+                .join(if live_hook { "retained" } else { "control" }),
+            42,
+            7,
+            "You've hit your usage limit.",
+        );
+        if !live_hook {
+            let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
+            return owner_monitor_read(&repo, 42);
+        }
+        let mut hook =
+            runtime_hook_state_for_event("Idle", "Stop", &probe.session.as_ref().unwrap().id);
+        hook.project_root = Some(repo.display().to_string());
+        hook.branch = Some(probe.session.as_ref().unwrap().branch.clone());
+        hook.occurred_at = Utc::now().to_rfc3339();
+        assert!(owner_fixture_block_on(probe.runtime_hook(&hook))
+            .unwrap()
+            .is_success());
+        assert_eq!(
+            owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation))
+                .unwrap()
+                .status,
+            WindowProcessStatus::Idle
+        );
+        let context = runtime.test_context();
+        let identity = owner.client().identity().unwrap().clone();
+        owner_fixture_block_on(async {
+            owner
+                .command(OwnerCommand::Input {
+                    id: probe.id.clone(),
+                    incarnation: probe.incarnation,
+                    data: if cfg!(windows) { b"exit\r" } else { b"exit\n" }.to_vec(),
+                })
+                .await
+                .unwrap();
+            // test-hygiene: allow-wall-clock-deadline Bounds the real provider's terminal observation; the actual exit receipt establishes completion.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    let event = observed.recv().await.unwrap();
+                    let terminal = matches!(&event, OwnerEvent::Status { id, incarnation, exit_confirmed: true, .. }
+                        if id == &probe.id && *incarnation == probe.incarnation);
+                    runtime.handle_project_owner_event(&context, 1, &identity, event);
+                    if terminal { break; }
+                }
+            }).await.expect("the actual retained provider must exit");
+        });
+        let retained = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+        assert!(
+            retained.policy.recoverable_error,
+            "precondition: the actual pane is kept for diagnosis"
+        );
+        assert_eq!(retained.status, WindowProcessStatus::Error);
+        assert_eq!(retained.pty.process_id(), probe.pty.process_id());
+        assert_eq!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 7);
+        assert!(runtime.window_lookup.contains_key("tab-1::monitor-agent"));
+        let notified = owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds the actual Monitor commit while the exact diagnostic runtime remains installed.
+            tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+                loop {
+                    owner.wait_monitor_idle().await.unwrap();
+                    let monitor = owner_monitor_read(&repo, 42);
+                    if monitor.active_count() == 0 && !monitor.prefs().failed_issues.is_empty() {
+                        break monitor;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the retained pane must still release and notify its Monitor slot")
+        });
+        assert!(
+            owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok(),
+            "Monitor notification cannot depend on removing the diagnostic pane"
+        );
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+        }))
+        .unwrap();
+        assert!(probe.pty.tree_exit_confirmed());
+        notified
     };
-    let missing: Vec<_> = kinds(&notified)
-        .difference(&kinds(&kept_for_diagnosis))
-        .cloned()
-        .collect();
+    let control = run(false);
+    let retained = run(true);
+    assert_eq!(control.active_count(), 0);
+    assert_eq!(retained.active_count(), 0);
     assert!(
-        missing.is_empty(),
-        "keeping the pane for diagnosis must not swallow the Monitor notification; missing: {missing:?}"
+        !control.prefs().failed_issues.is_empty(),
+        "the real control exit notified the Monitor"
+    );
+    assert_eq!(
+        retained.prefs().failed_issues.len(),
+        control.prefs().failed_issues.len()
+    );
+    assert_eq!(
+        retained.inbox_item(42).unwrap().state,
+        control.inbox_item(42).unwrap().state,
+        "keeping the pane for diagnosis must not swallow the Monitor notification"
     );
 }
 
@@ -4151,43 +4463,114 @@ fn provider_usage_limit_keeps_the_pane_out_of_the_done_state() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
+    let codex_home = temp.path().join("codex-home");
+    let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
+    let repo = temp.path().join("quota-project");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
+    let runner = temp.path().join(if cfg!(windows) {
+        "quota-codex.cmd"
+    } else {
+        "quota-codex"
+    });
+    write_executable_test_file(
+        &runner,
+        if cfg!(windows) {
+            concat!(
+            "@echo off\r\n",
+            "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+            ":probe\r\n",
+            "if \"%~1\"==\"\" goto launch\r\n",
+            "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+            "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+            "shift\r\n",
+            "goto probe\r\n",
+            ":launch\r\n",
+            "powershell -NoProfile -Command \"[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); [Console]::WriteLine($env:GWT_EXIT_FIXTURE_OUTPUT); exit 0\"\r\n",
+        )
+        } else {
+            "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; read ready; printf '%s\\n' \"$GWT_EXIT_FIXTURE_OUTPUT\"; exit 0\n"
+        },
     );
-    let _ = runtime.handle_runtime_hook_event(runtime_hook_state_for_event(
-        "Idle",
-        "Stop",
-        "session-1",
-    ));
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .branch("work/quota-proof")
+        .build();
+    config.command = runner.display().to_string();
+    config.args.clear();
+    config.env_vars.insert(
+        "GWT_EXIT_FIXTURE_OUTPUT".into(),
+        CODEX_USAGE_LIMIT_SCREEN.into(),
+    );
+    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    assert_eq!(
+        probe.session.as_ref().unwrap().agent_id,
+        gwt_agent::AgentId::Codex
+    );
+    owner_fixture_block_on(wait_managed_exit_ready(&owner, &probe));
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let rollouts = codex_home.join("sessions");
+    fs::create_dir_all(&rollouts).unwrap();
+    fs::write(
+        rollouts.join(format!("rollout-fixture-{conversation}.jsonl")),
+        serde_json::json!({"type":"session_meta","payload":{
+            "id":conversation,"cwd":probe.session.as_ref().unwrap().worktree_path,
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    probe.with_agent_environment(|| {
+        let _thread = ScopedEnvVar::set("CODEX_THREAD_ID", &conversation);
+        gwt::daemon_runtime::handle_runtime_state(
+            "SessionStart",
+            &serde_json::json!({"session_id": conversation}).to_string(),
+        )
+        .expect("actual native provider conversation readiness");
+    });
 
     // Refusal evidence also wins when usage telemetry still reads healthy.
     runtime.set_provider_usage_accounts(vec![codex_usage_account(26.0, false)]);
-
-    let _ = runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Stopped,
-        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
-        true,
-    );
+    owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::ProviderUsageSnapshot {
+            accounts: vec![codex_usage_account(26.0, false)],
+        },
+    ))
+    .unwrap();
+    let mut observed = owner.subscribe();
+    let _ = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
 
     assert_eq!(
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Waiting),
         "a quota block is a wait for the provider, not a completed run"
     );
-    assert!(
-        runtime.active_agent_sessions.contains_key(&window_id),
-        "the session must survive so the same work can resume after the reset"
+    let session_id = &probe.session.as_ref().unwrap().id;
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml"))).unwrap();
+    assert_eq!(saved.id, *session_id);
+    assert_eq!(
+        saved.exact_resume_session_id(),
+        Some(conversation.as_str()),
+        "the same Session conversation must survive for resume after reset"
     );
+    assert_eq!(
+        gwt::project_runtime::continuation::provider_conversation_availability(&saved),
+        gwt::project_runtime::continuation::ProviderConversationAvailability::Present,
+    );
+    let address = &runtime.window_lookup[&window_id];
+    assert_eq!(
+        runtime.tabs[0]
+            .workspace
+            .window(&address.raw_id)
+            .unwrap()
+            .session_id
+            .as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(saved.last_exit_code, Some(0));
     assert!(
         runtime
             .window_details

@@ -26,11 +26,13 @@ use std::{
 };
 
 use super::continuation::ActiveOwnerLiveness;
+#[cfg(test)]
+use super::launch_config_from_persisted_session;
 use super::terminal_convergence::{RestoreAdmission, TerminalCloseReason};
 use super::{
-    combined_window_id, execute_orphan_intake_worktree_prune, launch_config_from_persisted_session,
-    plan_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune_from_inventory,
-    same_worktree_path, should_auto_start_restored_window, workspace_resume_context_for_work_item,
+    combined_window_id, execute_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, same_worktree_path,
+    should_auto_start_restored_window, workspace_resume_context_for_work_item,
     AgentCapabilityIssuer, AppRuntime, OrphanIntakePrunePlan, OutboundEvent,
     PendingStartupAutoResumeSession, PreparedProjectWindowRestore, WindowPreset,
     WindowProcessStatus, WorkspaceResumeContext,
@@ -181,6 +183,9 @@ impl RestoreRefusal {
         match code {
             "settled_execution" => Self::TerminalWork(TerminalCloseReason::SettledExecution),
             "closed_issue" => Self::TerminalWork(TerminalCloseReason::ClosedIssue),
+            "closed_issue_bookkeeping_warning" => {
+                Self::TerminalWork(TerminalCloseReason::ClosedIssueBookkeepingWarning)
+            }
             "revoked_launch" => Self::TerminalWork(TerminalCloseReason::RevokedLaunch),
             "lost_ownership" => Self::TerminalWork(TerminalCloseReason::LostOwnership),
             "monitor_stopped" => Self::MonitorHold("monitor_stopped"),
@@ -740,6 +745,7 @@ pub(super) fn codex_home_for_startup(env_codex_home: Option<std::ffi::OsString>)
     }
 }
 
+#[cfg(test)]
 pub(super) use gwt::project_runtime::installation::mark_auto_resume_source_completed;
 
 impl AppRuntime {
@@ -1037,8 +1043,8 @@ impl AppRuntime {
             }
             // Canonical Work/native-conversation admission and source retirement
             // run in RestoreSavedSession under the fixed project owner. This
-            // sweep only reserves its local asynchronous restore worktree.
-            if self.restore_worktree_is_reserved(&session) {
+            // sweep only deduplicates immutable saved-source routing intents.
+            if self.restore_source_is_reserved(&session) {
                 admission.refuse(&session.id, RestoreRefusal::WorktreeAlreadyRestoring);
                 continue;
             }
@@ -1072,29 +1078,21 @@ impl AppRuntime {
         self.pending_startup_restore_log = Some(admission);
     }
 
-    fn restore_worktree_is_reserved(&self, session: &gwt_agent::Session) -> bool {
-        // The owner admits the registered PM and retires unregistered saved
-        // PMs. A GUI reservation must not hide those retirement requests.
-        if gwt::pm_registry::is_pm_worktree(&session.worktree_path) {
-            return false;
-        }
-        let worktree = &session.worktree_path;
+    fn restore_source_is_reserved(&self, session: &gwt_agent::Session) -> bool {
+        // Deduplicate routing intents. The physical owner alone reserves a
+        // worktree after classifying requests that retire without a PTY.
         self.active_agent_sessions
             .values()
-            .any(|active| same_worktree_path(&active.worktree_path, worktree))
+            .any(|active| active.session_id == session.id)
             || self
                 .pending_startup_auto_resume_sessions
                 .iter()
-                .any(|pending| same_worktree_path(&pending.session.worktree_path, worktree))
+                .any(|pending| pending.session.id == session.id)
             || self
                 .pending_auto_resume_sources
                 .iter()
                 .any(|(window, source)| {
-                    self.window_lookup.contains_key(window)
-                        && gwt_agent::Session::load(
-                            &self.sessions_dir.join(format!("{source}.toml")),
-                        )
-                        .is_ok_and(|pending| same_worktree_path(&pending.worktree_path, worktree))
+                    self.window_lookup.contains_key(window) && source == &session.id
                 })
     }
 
@@ -1429,11 +1427,46 @@ pub(super) fn reap_defunct_active_generations(
                 continue;
             }
         };
+        // A queued routing draft cannot protect a Work that the owner must
+        // restore in a fresh Session. Unknown sources retain their protection.
+        let terminal_restore = protected_exact_sessions.contains(&exact_holder)
+            && match gwt_agent::inspect_session_path(
+                &sessions_dir.join(format!("{}.toml", candidate.session_id)),
+            ) {
+                gwt_agent::SessionPathState::Present(session)
+                    if session.id == candidate.session_id
+                        && same_worktree_path(&session.worktree_path, &candidate.worktree)
+                        && gwt_agent::SessionExecutionIdentity::from_session(&session)
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            == Some(&exact_holder) =>
+                {
+                    gwt::project_runtime::installation::restore_saved_session_work_terminality(
+                        &session,
+                        session
+                            .project_state_root
+                            .as_deref()
+                            .unwrap_or(&candidate.worktree),
+                        None,
+                    ) == RestoreAdmission::RefuseFreshSession
+                }
+                _ => false,
+            };
+        let eligible_protection = terminal_restore.then(|| {
+            protected_exact_sessions
+                .iter()
+                .filter(|holder| *holder != &exact_holder)
+                .cloned()
+                .collect::<Vec<_>>()
+        });
         match gwt::cli::execution_state::reap_startup_defunct_active_generation(
             &candidate,
             sessions_dir,
             &exact_holder,
-            protected_exact_sessions,
+            eligible_protection
+                .as_deref()
+                .unwrap_or(protected_exact_sessions),
         ) {
             Ok(gwt::cli::execution_state::StartupActiveGenerationReapOutcome::Reaped) => {
                 summary.reaped += 1;
@@ -1654,6 +1687,9 @@ impl AppRuntime {
         workspace_resume_context: Option<WorkspaceResumeContext>,
         origin: RestoreOrigin,
     ) -> Vec<OutboundEvent> {
+        if self.restore_source_is_reserved(&session) {
+            return Vec::new();
+        }
         let Some(context) = self.project_context(tab_id) else {
             return Vec::new();
         };
@@ -1681,17 +1717,19 @@ impl AppRuntime {
                     .add_window_with_title(WindowPreset::Agent, session.display_name.clone(), true)
                     .id
             });
-        tab.workspace
-            .set_session_id(&raw_id, Some(session.id.clone()));
-        tab.workspace
-            .set_agent_name(&raw_id, session.agent_name.clone());
-        tab.workspace
-            .set_agent_id(&raw_id, session.agent_id.command().to_string());
-        if let Some(purpose) = workspace_resume_context
-            .as_ref()
-            .and_then(WorkspaceResumeContext::purpose_title)
-        {
-            let _ = tab.workspace.set_purpose_title(&raw_id, Some(purpose));
+        if !placeholder_existed {
+            tab.workspace
+                .set_session_id(&raw_id, Some(session.id.clone()));
+            tab.workspace
+                .set_agent_name(&raw_id, session.agent_name.clone());
+            tab.workspace
+                .set_agent_id(&raw_id, session.agent_id.command().to_string());
+            if let Some(purpose) = workspace_resume_context
+                .as_ref()
+                .and_then(WorkspaceResumeContext::purpose_title)
+            {
+                let _ = tab.workspace.set_purpose_title(&raw_id, Some(purpose));
+            }
         }
         self.register_window(tab_id, &raw_id);
         let window_id = combined_window_id(tab_id, &raw_id);
@@ -1706,21 +1744,27 @@ impl AppRuntime {
             self.restore_launch_windows
                 .insert(window_id.clone(), Some(session.id.clone()));
         }
-        let owner_origin = if origin == RestoreOrigin::Automatic {
-            gwt_agent::SessionLaunchOrigin::AutomaticRestore
-        } else {
-            gwt_agent::SessionLaunchOrigin::UserRestart
-        };
         self.pending_auto_resume_sources
             .insert(window_id.clone(), session.id.clone());
-        match self.queue_project_owner_restore(
-            &context,
-            window_id.clone(),
-            generation,
-            Box::new(session.clone()),
-            owner_origin,
-            placeholder_existed,
-        ) {
+        let queued = if origin == RestoreOrigin::Automatic {
+            self.queue_project_owner_cold_restore(
+                &context,
+                window_id.clone(),
+                generation,
+                session.id.clone(),
+                placeholder_existed,
+            )
+        } else {
+            self.queue_project_owner_restore(
+                &context,
+                window_id.clone(),
+                generation,
+                Box::new(session.clone()),
+                gwt_agent::SessionLaunchOrigin::UserRestart,
+                placeholder_existed,
+            )
+        };
+        match queued {
             Ok(events) => events,
             Err(error) => {
                 self.pending_auto_resume_sources.remove(&window_id);
@@ -1919,7 +1963,7 @@ impl AppRuntime {
                     {
                         continue;
                     }
-                    if self.restore_worktree_is_reserved(&session) {
+                    if self.restore_source_is_reserved(&session) {
                         admission.refuse(&session.id, RestoreRefusal::WorktreeAlreadyRestoring);
                         continue;
                     }

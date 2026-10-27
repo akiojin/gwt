@@ -2609,6 +2609,7 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
         &repo,
         &sessions,
         gwt::agent_names::AgentRosterAction::Add {
+            name: None,
             agent_id: Some("codex".into()),
         },
         None,
@@ -2647,7 +2648,22 @@ fn app_runtime_selected_member_keeps_its_model_when_pool_order_changes() {
     #[cfg(not(windows))]
     fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nprintf '%s ' \"$@\"; printf '\\n'; exec /bin/cat\n").unwrap();
     #[cfg(windows)]
-    fs::write(&runner, "@echo off\r\nif \"%1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\necho %*\r\nset /p value=\r\n").unwrap();
+    fs::write(
+        &runner,
+        concat!(
+            "@echo off\r\n",
+            "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+            ":probe\r\n",
+            "if \"%~1\"==\"\" goto launch\r\n",
+            "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+            "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+            "shift\r\n",
+            "goto probe\r\n",
+            ":launch\r\n",
+            "echo %*\r\nset /p value=\r\n",
+        ),
+    )
+    .unwrap();
     config.command = runner.display().to_string();
     let canonical_profile = gwt_core::paths::gwt_config_path();
     fs::create_dir_all(canonical_profile.parent().unwrap()).unwrap();

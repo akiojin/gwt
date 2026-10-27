@@ -162,7 +162,7 @@ fn pm_wakes_exclude_terminal_and_superseded_escalations() {
 }
 
 #[test]
-fn pm_pending_wake_rechecks_subject_before_delivery() {
+fn pm_wake_pending_signal_rechecks_subject_before_delivery() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -174,8 +174,13 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     let mut subject = gwt_agent::Session::new(&repo, "work/subject", gwt_agent::AgentId::Codex);
     subject.status = gwt_agent::AgentStatus::Running;
     seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");
+    runtime.pm_wake_events(&repo, &[]);
     runtime.terminal_input_events(&pm_window_id, "draft");
-    runtime.pm_periodic_wake_events_at(&repo, "2026-08-18T01:00:00Z");
+    // Important signals remain held during input; periodic ticks are discarded.
+    runtime.pm_wake_events(
+        &repo,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)],
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .unwrap()
@@ -527,6 +532,7 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _api_key = ScopedEnvVar::unset("OPENAI_API_KEY");
     let mut fixture = monitor_relaunch_fixture_with_settlement(
         temp.path(),
         "facts-prefetch",
@@ -579,7 +585,19 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
             &Utc::now().to_rfc3339(),
         ));
     }
-    gwt::save_issue_monitor_prefs(&prefs_path, &monitor.prefs()).expect("save durable deliveries");
+    let mut scheduled = monitor.prefs();
+    for delivery in &mut scheduled.pending_launch_deliveries {
+        delivery.agent_member_id = Some(
+            match delivery.issue_number {
+                3165 => "member-Alpha",
+                3166 => "member-Bravo",
+                3167 => "member-Charlie",
+                _ => unreachable!("the three actual FIFO deliveries"),
+            }
+            .into(),
+        );
+    }
+    gwt::save_issue_monitor_prefs(&prefs_path, &scheduled).expect("save durable deliveries");
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     for issue_number in [3165, 3166, 3167] {
@@ -784,17 +802,48 @@ fn issue5596_durable_facts_prefetch_is_bounded_and_keeps_claims_fifo() {
         !fixture.runtime.tracked_window_exists(&expected_window),
         "the refused FIFO head must not consume its preview pane"
     );
-    drain_queued_blocking_tasks(&queued);
+    // Settle the immutable rejection on the real owner. The other queued
+    // task prepares 3167; it must remain pending throughout this FIFO check.
+    run_worker(0);
+    let rejection = {
+        let mut events = fixture.recorded_events.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    recorded_project_payload(event),
+                    UserEvent::IssueMonitorPreflightRejected(_)
+                )
+            })
+            .expect("owner rejection completion");
+        events.remove(index)
+    };
+    let UserEvent::IssueMonitorPreflightRejected(rejection) = fixture
+        .runtime
+        .accept_project_completion(rejection)
+        .expect("current rejection context")
+    else {
+        unreachable!("selected rejection completion")
+    };
+    assert!(
+        rejection.result.is_ok(),
+        "the actual owner must settle its no-PTY refusal: {:?}",
+        rejection.result
+    );
     fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
-            &fixture.recorded_events,
-        ));
+        .handle_monitor_preflight_rejected(*rejection);
     assert!(fixture
         .runtime
         .issue_monitor_launch_preparations
         .iter()
-        .any(|key| key.2 == 3167));
+        .any(|key| key.2 == 3167),
+        "FIFO head settlement must advance to 3167: preparations={:?}, queue={:?}, deliveries={:?}, workers={}",
+        fixture.runtime.issue_monitor_launch_preparations,
+        fixture.runtime.issue_monitor_launch_queue.len(),
+        fixture.runtime.issue_monitor_launch_deliveries,
+        queued.lock().unwrap().len(),
+    );
     assert_eq!(
         queued.lock().unwrap().len(),
         1,
@@ -1151,6 +1200,7 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         Ok(())
     })
     .expect("select all three registered people with their saved tuning");
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
         .join("agent-names.jsonl");
     let member_names = fs::read(&history_path).expect("pre-existing member names");
@@ -1263,6 +1313,9 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
             &fixture.recorded_events,
         ));
+    drain_queued_blocking_tasks(&queued);
+    let (_, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let launched = launched.expect("the physical owner installs the revalidated member");
     let windows = &fixture
         .runtime
         .tab("tab-1")
@@ -1294,6 +1347,8 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
     );
     assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
     assert_eq!(fs::read(&history_path).unwrap(), member_names);
+    pane_control_tests::control_close(&owner, &launched);
+    assert!(launched.pty.try_wait().unwrap().is_some());
 }
 
 #[test]
@@ -1318,25 +1373,43 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         MonitorNativeHolderFixture::None,
         true,
     );
+    Cache::new(issue_cache_root(&fixture.project_root))
+        .write_snapshot(&sample_issue_snapshot(
+            3166,
+            "Foreign producing owner",
+            &["bug"],
+            "Other work",
+            &Utc::now().to_rfc3339(),
+        ))
+        .unwrap();
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::machine_agent_settings::set(
+        Some(2),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        &Utc::now().to_rfc3339(),
+    )
+    .unwrap();
     // Two workers can capture this preview before either creates a pane.
-    let foreign = fixture
-        .runtime
-        .tab_mut("tab-1")
-        .unwrap()
-        .workspace
-        .add_window(WindowPreset::Agent);
-    let foreign_window_id = combined_window_id("tab-1", &foreign.id);
+    let worktree = pane_control_tests::control_launch_config(&fixture.project_root, 3166);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.working_dir.unwrap())
+        .branch(worktree.branch.unwrap())
+        .base_branch(worktree.base_branch.unwrap())
+        .skip_permissions(true)
+        .build();
+    config.linked_issue_number = Some(3166);
+    config.explicit_follow_up = true;
+    let foreign = pane_control_tests::control_owner_launch(&owner, "agent-1", config);
+    issue5596_project_owner_pane(&mut fixture, &owner, &foreign);
+    let foreign_window_id = foreign.id.clone();
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    assert!(tab
-        .workspace
-        .set_linked_issue_number(&foreign.id, Some(3166)));
+    assert!(tab.workspace.set_linked_issue_number("agent-1", Some(3166)));
     tab.workspace
-        .set_status(&foreign.id, WindowProcessStatus::Running);
+        .set_status("agent-1", WindowProcessStatus::Running);
     let expected_window_id = combined_window_id(
         "tab-1",
         &tab.workspace.next_window_id_preview(WindowPreset::Agent),
     );
-    fixture.runtime.register_window("tab-1", &foreign.id);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         let delivery = prefs
@@ -1344,7 +1417,8 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
             .iter_mut()
             .find(|delivery| Some(&delivery.delivery_id) == fixture.delivery_id.as_ref())
             .expect("queued owner A");
-        delivery.materializer_id = Some(fixture.runtime.issue_monitor_materializer_id.clone());
+        delivery.materializer_id =
+            Some(owner.client().identity().unwrap().host_instance_id.clone());
         delivery.materializer_pid = Some(std::process::id());
         delivery.materializer_window_id = Some(foreign_window_id.clone());
         Ok(())
@@ -1362,6 +1436,14 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
             gwt::IssueMonitorLaunchSessionStrategy::FreshRequired,
         );
     drain_queued_blocking_tasks(&queued);
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    drain_queued_blocking_tasks(&queued);
+    let (window_id, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let launched = launched.expect("the exact owner must reprepare a separate physical pane");
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read reprepared claim");
     let delivery = prefs
         .pending_launch_deliveries
@@ -1370,9 +1452,17 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         .expect("owner A delivery");
     assert_eq!(
         delivery.materializer_window_id.as_deref(),
-        Some(expected_window_id.as_str()),
+        Some(launched.id.as_str()),
         "owner A must not reclaim owner B's pane merely because its ID matches an old preview"
     );
+    assert_eq!(window_id, expected_window_id);
+    let unchanged = owner_fixture_block_on(owner.probe(&foreign.id, foreign.incarnation)).unwrap();
+    assert_eq!(
+        unchanged.session.as_ref().unwrap().id,
+        foreign.session.as_ref().unwrap().id
+    );
+    assert_eq!(unchanged.pty.process_id(), foreign.pty.process_id());
+    assert!(Arc::ptr_eq(&unchanged.pty, &foreign.pty));
     assert_eq!(
         fixture
             .runtime
@@ -1385,6 +1475,37 @@ fn issue5596_preclaim_reused_by_another_owner_reprepares_a_new_window() {
         Some(3166)
     );
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+    pane_control_tests::control_close(&owner, &launched);
+    pane_control_tests::control_close(&owner, &foreign);
+}
+
+fn issue5596_project_owner_pane(
+    fixture: &mut MonitorRelaunchFixture,
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    let raw_id = pane.id.split_once("::").unwrap().1;
+    fixture.runtime.tab_mut("tab-1").unwrap().workspace = WindowRegistry::from_persisted(
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(
+            &fixture.project_root,
+        ))
+        .unwrap(),
+    );
+    fixture.runtime.register_window("tab-1", raw_id);
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ))
+    .unwrap();
+    fixture.runtime.install_remote_owner_projection(
+        &fixture.runtime.test_context(),
+        &combined_window_id("tab-1", raw_id),
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        pane.session.clone(),
+    );
 }
 
 #[test]
@@ -1414,6 +1535,13 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
     let roster =
         gwt::agent_names::read_project_roster(&fixture.project_root, &fixture.runtime.sessions_dir)
             .expect("initialize the persistent roster before admission");
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
+    gwt::machine_agent_settings::set(
+        Some(3),
+        gwt::issue_monitor::IssueMonitorMaxActiveChangeSource::JsonOperation,
+        "2026-10-23T00:00:00Z",
+    )
+    .expect("retain this acceptance's explicit capacity after native owner setup");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     let history = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
         .join("agent-names.jsonl");
@@ -1460,6 +1588,9 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
         "capacity renewal must reuse the persistent member names"
     );
     assert!(fixture.runtime.issue_monitor_launch_preparations.is_empty());
+    drain_queued_blocking_tasks(&queued);
+    let (_, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let launched = launched.expect("the physical owner accepts the same capacity decision");
     let assigned = gwt::load_issue_monitor_prefs(&prefs_path)
         .unwrap()
         .agent_roster
@@ -1494,6 +1625,8 @@ fn issue6096_capacity_renewal_keeps_admission_without_repeating_launch_facts() {
             .is_err_and(|error| error == super::super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE),
         "a policy edit while the refresh is queued must retain the original fence"
     );
+    pane_control_tests::control_close(&owner, &launched);
+    assert!(launched.pty.try_wait().unwrap().is_some());
 }
 
 #[test]
@@ -1619,6 +1752,16 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         LinkedIssueKind::Issue,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     );
+    Cache::new(issue_cache_root(&fixture.project_root))
+        .write_snapshot(&sample_issue_snapshot(
+            3166,
+            "Unrelated producing owner",
+            &["bug"],
+            "Other work",
+            &Utc::now().to_rfc3339(),
+        ))
+        .unwrap();
+    let owner = start_monitor_relaunch_owner(&mut fixture, false);
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     fixture
@@ -1632,17 +1775,47 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
+    let worktree = pane_control_tests::control_launch_config(&fixture.project_root, 3166);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree.working_dir.unwrap())
+        .branch(worktree.branch.unwrap())
+        .base_branch(worktree.base_branch.unwrap())
+        .skip_permissions(true)
+        .build();
+    config.linked_issue_number = Some(3166);
+    config.explicit_follow_up = true;
+    // Keep the pending launch's registered person idle. An unrelated pane
+    // must not silently change the source profile this test is revalidating.
+    let unrelated_id = owner.pane_id("agent-1");
+    let unrelated_receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            id: unrelated_id.clone(),
+            operation_id: "unrelated-registered-agent".into(),
+            tab_id: unrelated_id.split_once("::").unwrap().0.into(),
+            config: Box::new(config),
+            metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
+                selected_agent_member_id: Some("member-Bravo".into()),
+                ..Default::default()
+            }),
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    let unrelated = owner_fixture_block_on(owner.probe(
+        &unrelated_id,
+        unrelated_receipt["incarnation"].as_u64().unwrap(),
+    ))
+    .unwrap();
+    issue5596_project_owner_pane(&mut fixture, &owner, &unrelated);
+    // Settle only the installed foreign projection readbacks before measuring revalidation.
+    drain_queued_blocking_tasks(&queued);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
-    let unrelated = tab.workspace.add_window(WindowPreset::Agent);
-    tab.workspace
-        .set_linked_issue_number(&unrelated.id, Some(3166));
-    tab.workspace
-        .set_status(&unrelated.id, WindowProcessStatus::Running);
     let expected_window_id = combined_window_id(
         "tab-1",
         &tab.workspace.next_window_id_preview(WindowPreset::Agent),
     );
-    fixture.runtime.register_window("tab-1", &unrelated.id);
+
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
     gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
         prefs.priority_order.push(3166);
@@ -1653,7 +1826,7 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         .runtime
         .handle_issue_monitor_launch_prepared(prepared)
         .is_empty());
-    run_queued_monitor_gui_diagnostics(&queued, &[2, 0]);
+    run_queued_monitor_gui_diagnostics(&queued, &[1]);
     assert_eq!(
         queued.lock().unwrap().len(),
         1,
@@ -1662,6 +1835,16 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
     let before = gwt_core::process::thread_git_spawn_count();
     drain_queued_blocking_tasks(&queued);
     let repeated_git = gwt_core::process::thread_git_spawn_count() - before;
+    assert_eq!(repeated_git, 0, "read-only revalidation must reuse Git/base/prompt facts; materializer claim belongs to the physical owner");
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    drain_queued_blocking_tasks(&queued);
+    let (window_id, launched, _) = finish_monitor_relaunch_owner(&mut fixture, Vec::new());
+    let launched = launched.expect("reused facts must reach the physical owner");
+    assert_eq!(window_id, expected_window_id);
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("read refreshed delivery");
     let claim = prefs
         .pending_launch_deliveries
@@ -1670,17 +1853,135 @@ fn issue5596_unrelated_prefs_and_window_change_reuses_fresh_launch_facts() {
         .expect("delivery retained");
     assert_eq!(
         claim.materializer_window_id.as_deref(),
-        Some(expected_window_id.as_str()),
+        Some(launched.id.as_str()),
         "the reused facts must claim the current proposed pane"
     );
-    // The offline fallback claim validates Git. Issue #6096: source preflight
-    // and final pane admission read the origin from Git config without a
-    // process spawn. Base/hydration/prompt facts remain reused.
-    assert_eq!(repeated_git, 1, "only the current claim may validate Git");
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
+    assert!(unrelated.pty.try_wait().unwrap().is_none());
+    pane_control_tests::control_close(&owner, &launched);
+    pane_control_tests::control_close(&owner, &unrelated);
 }
 
-fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
+fn issue5596_native_answer_source(
+    fixture: &mut MonitorRelaunchFixture,
+) -> (
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    String,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    let _thread_id = ScopedEnvVar::unset("CODEX_THREAD_ID");
+    // The asking provider predates the answer's Monitor delivery. A normal
+    // owner launch must not claim or ACK that separate durable delivery.
+    let owner = start_monitor_relaunch_owner(fixture, false);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&fixture.worktree)
+        .branch("work/issue-3165")
+        .base_branch("develop")
+        .model("gpt-5.5")
+        .reasoning_level("low")
+        .skip_permissions(true)
+        .build();
+    config.linked_issue_number = Some(3165);
+    config.explicit_follow_up = true;
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    let pane = pane_control_tests::control_owner_launch(&owner, "answer-holder", config);
+    let raw_id = pane.id.split_once("::").unwrap().1;
+    fixture.runtime.tab_mut("tab-1").unwrap().workspace = WindowRegistry::from_persisted(
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(
+            &fixture.project_root,
+        ))
+        .unwrap(),
+    );
+    fixture.runtime.register_window("tab-1", raw_id);
+    let window_id = combined_window_id("tab-1", raw_id);
+    let context = fixture.runtime.test_context();
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        },
+    ))
+    .unwrap();
+    fixture.runtime.install_remote_owner_projection(
+        &context,
+        &window_id,
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        pane.session.clone(),
+    );
+    let session = pane.session.as_ref().expect("actual native asking Session");
+    let native_id = format!("native-answer-{}", session.id);
+    let rollout =
+        PathBuf::from(std::env::var_os("CODEX_HOME").unwrap()).join("sessions/2026/10/27");
+    fs::create_dir_all(&rollout).unwrap();
+    fs::write(
+        rollout.join(format!("rollout-{native_id}.jsonl")),
+        serde_json::json!({"type":"session_meta", "payload": {
+            "id":native_id, "cwd":session.worktree_path,
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let hook = serde_json::json!({
+        "hook_event_name":"SessionStart", "session_id":native_id,
+        "cwd":session.worktree_path,
+    })
+    .to_string();
+    pane.with_agent_environment(|| {
+        let _ready_nonce = pane.pending_fresh_execution.as_ref().map(|pending| {
+            ScopedEnvVar::set(
+                gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV,
+                &pending.readiness_nonce,
+            )
+        });
+        gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
+        gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
+    });
+    if pane.pending_fresh_execution.is_some() {
+        authenticate_monitor_owner_readiness(&owner, &pane);
+    }
+    owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
+        .unwrap();
+    let source =
+        gwt_agent::Session::load(&fixture.sessions_dir.join(format!("{}.toml", session.id)))
+            .expect("canonical asking Session after authenticated native SessionStart");
+    assert_eq!(source.id, session.id);
+    assert_eq!(source.agent_id, gwt_agent::AgentId::Codex);
+    assert_eq!(source.exact_resume_session_id(), Some(native_id.as_str()));
+    fixture
+        .runtime
+        .launch_wizard_cache
+        .record_session(source.clone());
+    fixture.source_session_id = source.id;
+    fixture.native_conversation_id = native_id;
+    fixture.holder_window_id = Some(window_id.clone());
+    if let Some(delivery_id) = &fixture.delivery_id {
+        let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+            &fixture.project_root,
+        ))
+        .unwrap();
+        let delivery = prefs
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| &delivery.delivery_id == delivery_id)
+            .expect("the separate answer delivery must survive the baseline launch");
+        assert!(delivery.materializer_window_id.is_none());
+        assert!(delivery.materialized_window_id.is_none());
+        assert!(delivery.workspace_durable_window_id.is_none());
+    }
+    let pane = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
+    assert_eq!(
+        pane.session.as_ref().unwrap().exact_resume_session_id(),
+        Some(fixture.native_conversation_id.as_str()),
+        "the actual owner must observe the authenticated native conversation"
+    );
+    (owner, window_id, pane)
+}
+
+fn assert_issue5596_unsubmitted_answer_packet_retries(
+    close_project: bool,
+    revoke_preflight_before_commit: bool,
+) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1688,6 +1989,9 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "unsubmitted-answer",
@@ -1695,7 +1999,57 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
         MonitorNativeHolderFixture::None,
         false,
     );
+    let (owner, source_window_id, source_pane) = issue5596_native_answer_source(&mut fixture);
+    let context = fixture.runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let state = fixture.runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let mut owner_events = owner.subscribe();
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: source_pane.id.clone(),
+            incarnation: source_pane.incarnation,
+        }),
+    )
+    .expect("close and reap the actual asking provider before exact Resume");
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the exact Close/Closed IPC, not a guessed process delay.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let event = owner_events.recv().await.unwrap();
+                let closed = matches!(&event,
+                    gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None }
+                    if id == &source_pane.id && *incarnation == source_pane.incarnation);
+                fixture.runtime.handle_project_owner_event(&context, 1, &identity, event);
+                if closed { break; }
+            }
+        }).await.unwrap();
+    });
+    assert!(source_pane.pty.tree_exit_confirmed());
+    assert!(!fixture
+        .runtime
+        .active_agent_sessions
+        .contains_key(&source_window_id));
+    let source = gwt_agent::Session::load(
+        &fixture
+            .sessions_dir
+            .join(format!("{}.toml", fixture.source_session_id)),
+    )
+    .unwrap();
+    assert!(
+        !gwt::continuation_requires_new_session(&fixture.project_root, &source).unwrap(),
+        "the asking Work must remain nonterminal after its exact provider close"
+    );
     seed_resumed_autonomous_handoff(&fixture, "Keep the exact Session");
+    assert!(fixture.delivery_id.is_none());
+    let pause = close_project.then(|| {
+        owner_fixture_block_on(owner.pause_next_agent_launch_at(
+            gwt::project_runtime::test_support::OwnerLaunchStage::MaterializedBeforeInstall,
+        ))
+        .unwrap()
+    });
+    let previous_spawner = fixture.runtime.blocking_tasks.clone();
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
     fixture
@@ -1709,38 +2063,476 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
         );
     drain_queued_blocking_tasks(&queued);
     let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
-    assert!(fixture
-        .runtime
-        .handle_issue_monitor_launch_prepared(prepared)
-        .is_empty());
-    drain_queued_blocking_tasks(&queued);
-    let prepared = take_issue4803_monitor_preparation(&fixture.recorded_events);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
-    assert!(
-        matches!(
-            gwt::load_issue_monitor_prefs(&prefs_path)
-                .unwrap()
-                .autonomous_handoffs[0]
-                .delivery,
-            gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting { attempt: 1, .. }
-        ),
-        "the callback must carry an existing unsubmitted write-ahead token"
-    );
     if close_project {
-        fixture.runtime.close_project_tab_events("tab-1");
-    } else {
-        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
-            prefs.launch_profile.as_mut().expect("saved profile").model =
-                Some("changed-while-answer-worker-returned".to_string());
+        // A legal unrelated roster edit asks the GUI to revalidate these facts
+        // before it can submit the immutable owner launch command.
+        let before = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let roster = before.agent_roster.as_ref().unwrap();
+        let spare_index = roster
+            .members
+            .iter()
+            .position(|member| {
+                member.enabled
+                    && member.assignment.is_none()
+                    && source.agent_member_id.as_deref() != Some(member.agent_member_id.as_str())
+            })
+            .expect("an unassigned spare distinct from the exact asking member");
+        let spare = &roster.members[spare_index];
+        let name = format!("{} (driver revalidation)", spare.name);
+        let source_path = fixture.sessions_dir.join(format!("{}.toml", source.id));
+        let source_bytes = fs::read(&source_path).unwrap();
+        let renamed = gwt::agent_names::mutate_project_roster(
+            &fixture.project_root,
+            &fixture.sessions_dir,
+            gwt::agent_names::AgentRosterAction::Rename {
+                member_id: spare.agent_member_id.clone(),
+                name: name.clone(),
+            },
+            Some(roster.revision),
+        )
+        .expect("rename only an unrelated spare after facts capture");
+        assert!(renamed.revision > roster.revision);
+        let mut expected_roster = roster.clone();
+        expected_roster.revision = renamed.revision;
+        expected_roster.members[spare_index].name = name;
+        assert_eq!(
+            renamed, expected_roster,
+            "revalidation trigger must retain every member, assignment and fixed tool"
+        );
+        let after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(after.max_active_agents, before.max_active_agents);
+        assert_eq!(after.max_active_agents_mode, before.max_active_agents_mode);
+        assert_eq!(after.launch_profile, before.launch_profile);
+        assert_eq!(after.launch_profiles, before.launch_profiles);
+        assert_eq!(
+            after.pending_launch_deliveries,
+            before.pending_launch_deliveries
+        );
+        assert_eq!(after.autonomous_handoffs, before.autonomous_handoffs);
+        assert_eq!(
+            fs::read(&source_path).unwrap(),
+            source_bytes,
+            "roster revalidation must preserve the full asking Session, SID and selected member"
+        );
+    }
+    let before_submit = (!close_project).then(|| {
+        // Capture the raw saved head/pool and full handoff beside the exact
+        // closed source. No immutable physical launch command exists yet.
+        let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let session_bytes =
+            fs::read(fixture.sessions_dir.join(format!("{}.toml", source.id))).unwrap();
+        gwt::try_mutate_issue_monitor_prefs(&prefs_path, |current| {
+            assert_eq!(current.launch_profile, prefs.launch_profile);
+            assert_eq!(current.launch_profiles, prefs.launch_profiles);
+            current
+                .launch_profile
+                .as_mut()
+                .expect("saved profile")
+                .model = Some("changed-while-answer-worker-returned".to_string());
             Ok(())
         })
-        .expect("change profile after write-ahead");
-    }
-    assert!(fixture
+        .expect("change the raw profile after facts capture, before owner submit");
+        (prefs, session_bytes)
+    });
+    let mut preparation_events = fixture
         .runtime
-        .handle_issue_monitor_launch_prepared(prepared)
-        .is_empty());
-    drain_queued_blocking_tasks(&queued);
+        .handle_issue_monitor_launch_prepared(prepared);
+    let mut outcome = "no owner launch completion".to_string();
+    let mut completed_window_id = None;
+    if close_project {
+        let pause = pause.unwrap();
+        // test-hygiene: allow-wall-clock-deadline Shares the original checkpoint hang guard across legitimate pre-admission callbacks.
+        let checkpoint_deadline = Instant::now() + Duration::from_secs(30);
+        let (evidence, launch_worker) = loop {
+            let launch_tasks = queued.clone();
+            let worker_sessions = fixture.sessions_dir.clone();
+            let (launch_finished, mut launch_done) = tokio::sync::oneshot::channel();
+            let launch_worker = thread::spawn(move || {
+                let home_matches = gwt_core::paths::gwt_sessions_dir() == worker_sessions;
+                drain_queued_blocking_tasks(&launch_tasks);
+                let _ = launch_finished.send(home_matches);
+            });
+            let checkpoint = owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Shares the original checkpoint hang guard across legitimate pre-admission callbacks.
+                tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(checkpoint_deadline),
+                    async {
+                        tokio::select! {
+                            evidence = pause.wait() => Ok(evidence),
+                            home_matches = &mut launch_done => Err(home_matches.ok()),
+                        }
+                    },
+                )
+                .await
+            });
+            match checkpoint {
+                Ok(Ok(evidence)) => break (evidence, launch_worker),
+                stopped => {
+                    let worker_finished = matches!(&stopped, Ok(Err(Some(_))));
+                    if !worker_finished {
+                        pause.release();
+                    }
+                    let joined = launch_worker.join();
+                    if worker_finished && joined.is_ok() {
+                        let next = {
+                            let mut recorded = fixture.recorded_events.lock().unwrap();
+                            let completions = recorded
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, event)| {
+                                    matches!(
+                                        recorded_project_payload(event),
+                                        UserEvent::IssueMonitorLaunchPrepared(_)
+                                            | UserEvent::RemoteOwnerLaunchComplete(_)
+                                            | UserEvent::IssueMonitorPreflightRejected(_)
+                                    )
+                                    .then_some(index)
+                                })
+                                .collect::<Vec<_>>();
+                            match completions.as_slice() {
+                                [index]
+                                    if matches!(recorded_project_payload(&recorded[*index]),
+                                UserEvent::IssueMonitorLaunchPrepared(prepared)
+                                    if prepared.rejection.is_none()) =>
+                                {
+                                    Some(into_recorded_project_payload(recorded.remove(*index)))
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(UserEvent::IssueMonitorLaunchPrepared(prepared)) = next {
+                            // Dispatch only the existing pre-admission revalidation.
+                            // An owner/preflight completion is never refreshed or retried.
+                            preparation_events.extend(
+                                fixture
+                                    .runtime
+                                    .handle_issue_monitor_launch_prepared(*prepared),
+                            );
+                            continue;
+                        }
+                    }
+                    pause.release();
+                    let (phase, worker_home_matches) = match stopped {
+                        Ok(Err(home_matches)) => {
+                            ("worker_finished_before_checkpoint", home_matches)
+                        }
+                        Err(_) => ("checkpoint_timeout", None),
+                        Ok(Ok(_)) => unreachable!("checkpoint evidence handled above"),
+                    };
+                    let callbacks = fixture.recorded_events.lock().unwrap().iter().filter_map(|event| {
+                    match recorded_project_payload(event) {
+                        UserEvent::IssueMonitorLaunchPrepared(prepared) => Some(serde_json::json!({
+                            "kind":"prepared", "rejection":prepared.rejection.is_some(),
+                        })),
+                        UserEvent::RemoteOwnerLaunchComplete(completion) => Some(serde_json::json!({
+                            "kind":"owner_complete", "error":completion.result.as_ref().err(),
+                        })),
+                        UserEvent::IssueMonitorPreflightRejected(rejection) => Some(serde_json::json!({
+                            "kind":"preflight_rejected", "error":rejection.result.as_ref().err(),
+                        })),
+                        _ => None,
+                    }
+                }).collect::<Vec<_>>();
+                    let expected_source = serde_json::to_value(&source).unwrap();
+                    let current_source = gwt_agent::Session::load(
+                        &fixture.sessions_dir.join(format!("{}.toml", source.id)),
+                    )
+                    .map(|session| serde_json::to_value(session).unwrap());
+                    let changed_fields = expected_source
+                        .as_object()
+                        .unwrap()
+                        .keys()
+                        .filter(|field| {
+                            current_source
+                                .as_ref()
+                                .ok()
+                                .and_then(|current| current.get(*field))
+                                != expected_source.get(*field)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    eprintln!("ProjectClose checkpoint not reached: phase={phase}, callbacks={callbacks:?}, source_changed_fields={changed_fields:?}, source_read_error={:?}, caller_home_matches={}, worker_home_matches={worker_home_matches:?}",
+                    current_source.as_ref().err().map(|error| error.kind()),
+                    gwt_core::paths::gwt_sessions_dir() == fixture.sessions_dir);
+                    joined.unwrap();
+                    panic!(
+                    "ProjectClose must reach its actual pre-PTY write-ahead checkpoint: {phase}"
+                );
+                }
+            }
+        };
+        assert!(evidence.pty.is_none());
+        assert!(
+            matches!(
+                gwt::load_issue_monitor_prefs(&prefs_path)
+                    .unwrap()
+                    .autonomous_handoffs[0]
+                    .delivery,
+                gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
+                    attempt: 1,
+                    ..
+                }
+            ),
+            "the actual owner must persist an unsubmitted write-ahead token"
+        );
+        fixture.runtime.close_project_tab_events("tab-1");
+        let close_tasks = queued.clone();
+        let close_worker = thread::spawn(move || drain_queued_blocking_tasks(&close_tasks));
+        owner_fixture_block_on(async {
+            // test-hygiene: allow-wall-clock-deadline Bounds cancellation IPC; the owner current flag is the exact cancellation evidence.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while evidence.current.load(std::sync::atomic::Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        pause.release();
+        launch_worker.join().unwrap();
+        close_worker.join().unwrap();
+        let completion = take_remote_owner_launch_completion(&fixture.recorded_events);
+        outcome = format!("{:?}", completion.result.as_ref().err());
+        completed_window_id = Some(completion.window_id.clone());
+        fixture
+            .runtime
+            .handle_remote_owner_launch_complete(completion);
+        drain_queued_blocking_tasks(&queued);
+    } else {
+        // A pre-submit refusal need not produce a launch RPC completion. Drive
+        // only real queued GUI/owner callbacks, then inspect canonical retry.
+        loop {
+            drain_queued_blocking_tasks(&queued);
+            let completion = {
+                let mut recorded = fixture.recorded_events.lock().unwrap();
+                recorded
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            recorded_project_payload(event),
+                            UserEvent::IssueMonitorLaunchPrepared(_)
+                                | UserEvent::RemoteOwnerLaunchComplete(_)
+                                | UserEvent::IssueMonitorPreflightRejected(_)
+                        )
+                    })
+                    .map(|index| into_recorded_project_payload(recorded.remove(index)))
+            };
+            match completion {
+                Some(UserEvent::IssueMonitorLaunchPrepared(prepared)) => {
+                    if revoke_preflight_before_commit {
+                        let pause = owner_fixture_block_on(owner.pause_next_agent_launch_at(
+                            gwt::project_runtime::test_support::OwnerLaunchStage::PreparedBeforeMailbox,
+                        ))
+                        .unwrap();
+                        fixture
+                            .runtime
+                            .handle_issue_monitor_launch_prepared(*prepared);
+                        let tasks = queued.clone();
+                        let worker = thread::spawn(move || drain_queued_blocking_tasks(&tasks));
+                        let evidence = owner_fixture_block_on(async {
+                            // test-hygiene: allow-wall-clock-deadline Bounds arrival at the actual rejection's post-check_current checkpoint, not elapsed ordering.
+                            tokio::time::timeout(Duration::from_secs(30), pause.wait())
+                                .await
+                                .unwrap()
+                        });
+                        let was_current =
+                            evidence.current.load(std::sync::atomic::Ordering::Acquire);
+                        let before = fs::read(&prefs_path).unwrap();
+                        let before_prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                        let source_path = fixture.sessions_dir.join(format!("{}.toml", source.id));
+                        let source_before = fs::read(&source_path).unwrap();
+                        let inventory_before = owner_fixture_block_on(
+                            owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+                        )
+                        .unwrap();
+                        evidence
+                            .current
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        pause.release();
+                        let joined = worker.join();
+                        let rejection = {
+                            let mut recorded = fixture.recorded_events.lock().unwrap();
+                            recorded
+                                .iter()
+                                .position(|event| {
+                                    matches!(
+                                        recorded_project_payload(event),
+                                        UserEvent::IssueMonitorPreflightRejected(_)
+                                    )
+                                })
+                                .map(|index| into_recorded_project_payload(recorded.remove(index)))
+                        };
+                        let after = fs::read(&prefs_path).unwrap();
+                        let source_after = fs::read(&source_path).unwrap();
+                        let inventory_after = owner_fixture_block_on(
+                            owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+                        )
+                        .unwrap();
+                        fixture.runtime.blocking_tasks = previous_spawner;
+                        fixture
+                            .runtime
+                            .test_project_owners
+                            .remove(&fixture.project_root);
+                        owner_fixture_block_on(Arc::try_unwrap(owner).ok().unwrap().shutdown());
+
+                        joined.unwrap();
+                        assert!(
+                            was_current,
+                            "rejection must pass check_current before revocation"
+                        );
+                        assert!(evidence.pty.is_none());
+                        assert_eq!(evidence.session_id.as_deref(), Some(source.id.as_str()));
+                        assert_eq!(
+                            serde_json::to_value(&evidence.session).unwrap(),
+                            serde_json::to_value(Some(&source)).unwrap()
+                        );
+                        let handoff = &before_prefs.autonomous_handoffs[0];
+                        assert!(handoff.delivered_at.is_none());
+                        let gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Attempting {
+                            attempt: 1,
+                            target: Some(target),
+                            ..
+                        } = &handoff.delivery
+                        else {
+                            panic!("actual rejection must persist its exact unsubmitted Attempting token");
+                        };
+                        assert_eq!(target.gwt_session_id, source.id);
+                        assert_eq!(target.window_id, evidence.id);
+                        assert!(target.delivery_id.is_none());
+                        assert_eq!(target.materializer_pid, std::process::id());
+                        let Some(UserEvent::IssueMonitorPreflightRejected(rejection)) = rejection
+                        else {
+                            panic!("actual rejection worker must return its owner completion");
+                        };
+                        assert_eq!(rejection.operation_id, evidence.operation_id);
+                        assert!(rejection.delivery_id.is_none());
+                        assert!(
+                            rejection.result.is_err(),
+                            "revoked rejection must refuse settlement: {:?}",
+                            rejection.result
+                        );
+                        assert_eq!(after, before,
+                            "revoked rejection must preserve the exact Attempting tuple and prefs bytes");
+                        assert_eq!(source_after, source_before);
+                        assert_eq!(inventory_after, inventory_before);
+                        assert!(inventory_after["panes"].as_array().unwrap().is_empty());
+                        assert!(inventory_after["pending"].as_array().unwrap().is_empty());
+                        return;
+                    }
+                    if let Some(expected) = prepared
+                        .rejection
+                        .as_ref()
+                        .filter(|expected| expected.expected_delivery.is_none())
+                    {
+                        let before = fs::read(&prefs_path).unwrap();
+                        let source_path = fixture.sessions_dir.join(format!("{}.toml", source.id));
+                        let source_before = fs::read(&source_path).unwrap();
+                        let inventory_before = owner_fixture_block_on(
+                            owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+                        )
+                        .unwrap();
+                        let current = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                        let mut unchanged = expected.clone();
+                        unchanged.operation_id = uuid::Uuid::new_v4().to_string();
+                        unchanged.expected_profile_readset =
+                            Some((current.launch_profile, current.launch_profiles));
+                        let unchanged_result = owner_fixture_block_on(owner.command(
+                            gwt::project_runtime::events::OwnerCommand::RejectMonitorLaunch {
+                                rejection: unchanged,
+                            },
+                        ));
+                        assert!(
+                            unchanged_result
+                                .as_ref()
+                                .is_err_and(|error| error.contains("profile change")),
+                            "an unchanged raw readset cannot authorize an answer rejection"
+                        );
+                        let mut changed_source = expected.clone();
+                        changed_source.operation_id = uuid::Uuid::new_v4().to_string();
+                        changed_source
+                            .expected_session
+                            .as_mut()
+                            .unwrap()
+                            .branch
+                            .push_str("-foreign-expectation");
+                        let changed_result = owner_fixture_block_on(owner.command(
+                            gwt::project_runtime::events::OwnerCommand::RejectMonitorLaunch {
+                                rejection: changed_source,
+                            },
+                        ));
+                        assert!(
+                            changed_result
+                                .as_ref()
+                                .is_err_and(|error| error.contains("Session changed")),
+                            "an answer rejection must retain the original full Session expectation"
+                        );
+                        assert!(fs::read(&prefs_path).unwrap() == before);
+                        assert!(fs::read(&source_path).unwrap() == source_before);
+                        let unchanged_inventory = owner_fixture_block_on(
+                            owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+                        )
+                        .unwrap();
+                        assert_eq!(unchanged_inventory["panes"], inventory_before["panes"]);
+                        assert_eq!(unchanged_inventory["pending"], inventory_before["pending"]);
+                    }
+                    preparation_events.extend(
+                        fixture
+                            .runtime
+                            .handle_issue_monitor_launch_prepared(*prepared),
+                    );
+                }
+                Some(UserEvent::RemoteOwnerLaunchComplete(completion)) => {
+                    outcome = format!("{:?}", completion.result.as_ref().err());
+                    completed_window_id = Some(completion.window_id.clone());
+                    preparation_events.extend(
+                        fixture
+                            .runtime
+                            .handle_remote_owner_launch_complete(*completion),
+                    );
+                }
+                Some(UserEvent::IssueMonitorPreflightRejected(rejection)) => {
+                    assert!(rejection.delivery_id.is_none());
+                    if let Ok(receipt) = rejection.result.as_ref() {
+                        assert_eq!(
+                            receipt["operation_id"].as_str(),
+                            Some(rejection.operation_id.as_str())
+                        );
+                        assert_eq!(receipt["no_pty"], true);
+                        assert_eq!(receipt["no_submit"], true);
+                        assert!(receipt["claimed_delivery"].is_null());
+                        assert_eq!(
+                            receipt["answer_target"]["gwt_session_id"].as_str(),
+                            Some(source.id.as_str())
+                        );
+                    }
+                    outcome = format!("{:?}", rejection.result.as_ref().err());
+                    preparation_events.extend(
+                        fixture
+                            .runtime
+                            .handle_monitor_preflight_rejected(*rejection),
+                    );
+                }
+                None => break,
+                _ => unreachable!("matched Monitor completion"),
+            }
+        }
+    }
+    fixture.runtime.blocking_tasks = previous_spawner;
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    // Clean up a real unexpected launch before preserving the original RED.
+    if let Some(window_id) =
+        completed_window_id.filter(|id| fixture.runtime.runtimes.contains_key(id))
+    {
+        close_test_owner_runtime(&mut fixture.runtime, &window_id);
+    }
+    assert!(
+        !revoke_preflight_before_commit,
+        "revocation regression must reach the actual rejection checkpoint"
+    );
     let prefs =
         gwt::load_issue_monitor_prefs(&prefs_path).expect("load settled unsubmitted attempt");
     assert!(
@@ -1751,21 +2543,48 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(close_project: bool) {
                 ..
             }
         ),
-        "unsubmitted token must retain bounded exact-session retry: {:?}",
-        prefs.autonomous_handoffs[0].delivery
+        "unsubmitted token must retain bounded exact-session retry: {:?}; owner={outcome}; inventory={inventory}; preparation={preparation_events:?}",
+        prefs.autonomous_handoffs[0].delivery,
     );
     assert!(prefs.autonomous_handoffs[0].delivered_at.is_none());
+    if let Some((before_submit, source_bytes)) = before_submit {
+        assert_eq!(
+            prefs.pending_launch_deliveries,
+            before_submit.pending_launch_deliveries
+        );
+        assert_eq!(prefs.launch_profiles, before_submit.launch_profiles);
+        let mut original_handoff = before_submit.autonomous_handoffs[0].clone();
+        original_handoff.delivery = prefs.autonomous_handoffs[0].delivery.clone();
+        assert!(
+            original_handoff == prefs.autonomous_handoffs[0],
+            "settlement changes only the exact unsubmitted delivery state"
+        );
+        assert!(
+            fs::read(fixture.sessions_dir.join(format!("{}.toml", source.id))).unwrap()
+                == source_bytes,
+            "a refused pre-submit answer preserves its exact closed source Session"
+        );
+    }
+    assert!(
+        inventory["panes"].as_array().unwrap().is_empty(),
+        "no second physical provider may start after an unsubmitted attempt: {inventory}"
+    );
     assert!(fixture.runtime.pending_launch_feedback_contexts.is_empty());
 }
 
 #[test]
 fn issue5596_answer_packet_pref_stale_settles_unsubmitted_attempt() {
-    assert_issue5596_unsubmitted_answer_packet_retries(false);
+    assert_issue5596_unsubmitted_answer_packet_retries(false, false);
 }
 
 #[test]
 fn issue5596_answer_packet_project_closed_settles_unsubmitted_attempt() {
-    assert_issue5596_unsubmitted_answer_packet_retries(true);
+    assert_issue5596_unsubmitted_answer_packet_retries(true, false);
+}
+
+#[test]
+fn issue5596_revoked_answer_rejection_preserves_unsubmitted_attempt() {
+    assert_issue5596_unsubmitted_answer_packet_retries(false, true);
 }
 
 #[test]
@@ -1777,13 +2596,28 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", temp.path().join(".codex"));
+    let _session_id = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_ID_ENV);
+    let _session_runtime = ScopedEnvVar::unset(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV);
+    let _ready_nonce = ScopedEnvVar::unset(gwt_agent::GWT_CONTINUE_WORK_READY_NONCE_ENV);
     let mut fixture = monitor_relaunch_fixture(
         temp.path(),
         "answer-exact-holder",
         MonitorProviderConversationFixture::Present,
-        MonitorNativeHolderFixture::ActiveSameConversation,
+        MonitorNativeHolderFixture::None,
         true,
     );
+    let (owner, holder_window_id, holder) = issue5596_native_answer_source(&mut fixture);
+    let holder_session = holder.session.as_ref().unwrap();
+    let holder_name = holder_session
+        .agent_name
+        .clone()
+        .expect("actual canonical holder name");
+    let holder_pid = holder.pty.process_id().unwrap();
+    let holder_sid = holder_session.id.clone();
+    let delivery_id = fixture
+        .delivery_id
+        .clone()
+        .expect("durable answer delivery");
     seed_resumed_autonomous_handoff(&fixture, "Continue the asking conversation");
     gwt::machine_agent_settings::set(
         Some(3),
@@ -1791,17 +2625,11 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         "2026-10-23T00:00:00Z",
     )
     .expect("allow the exact holder and the unrelated live pane");
-    let holder_window_id = fixture.holder_window_id.clone().expect("exact holder");
-    insert_test_pane_runtime(&mut fixture.runtime, &holder_window_id);
     let tab = fixture.runtime.tab_mut("tab-1").unwrap();
     let other = tab.workspace.add_window(WindowPreset::Agent);
     tab.workspace.set_linked_issue_number(&other.id, Some(3165));
     tab.workspace
         .set_status(&other.id, WindowProcessStatus::Running);
-    let holder_raw_id = tab.workspace.persisted().windows[0].id.clone();
-    assert!(tab
-        .workspace
-        .set_agent_name(&holder_raw_id, Some("ExistingExactHolder".to_string())));
     let mut persisted = tab.workspace.persisted().clone();
     persisted.windows.swap(0, 1);
     tab.workspace = WindowRegistry::from_persisted(persisted);
@@ -1815,8 +2643,8 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
     );
     let (spawner, queued) = BlockingTaskSpawner::queued();
     fixture.runtime.blocking_tasks = spawner;
-    // Both answer workers encounter a busy canonical history. Their unused
-    // name result must not prevent delivery to the existing named holder.
+    // Facts preparation and the physical answer must reuse the canonical
+    // existing person while history is locked, without allocating a name.
     let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
         .join("agent-names.jsonl");
     fs::create_dir_all(history_path.parent().unwrap()).expect("name history directory");
@@ -1826,7 +2654,42 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
         .append(true)
         .open(&history_path)
         .expect("open name history");
+    let names_before = fs::read(&history_path).unwrap();
     fs2::FileExt::lock_exclusive(&history).expect("hold name history before answer admission");
+    let owner_identity = owner.client().identity().unwrap().clone();
+    let claim_probe = gwt::project_runtime::installation::IssueMonitorLaunchClaimInput {
+        project_root: fixture.project_root.clone(),
+        issue_number: 3165,
+        delivery_id: delivery_id.clone(),
+        materializer_window_id: holder.id.clone(),
+        materializer_id: owner_identity.host_instance_id.clone(),
+        materializer_pid: owner_identity.pid,
+        fallback_timeout:
+            gwt::project_runtime::installation::local_issue_monitor_fallback_projection_timeout(),
+        snapshot: None,
+        snapshot_tabs: Default::default(),
+    };
+    let claim_before = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(
+        &fixture.project_root,
+    ))
+    .unwrap();
+    let windows_before = owner.monitor_snapshot().unwrap().map(|snapshot| {
+        (
+            snapshot.project_tab_id,
+            snapshot
+                .windows
+                .into_iter()
+                .map(|window| {
+                    (
+                        window.window_id,
+                        window.issue_number,
+                        window.status,
+                        window.monitor_owned,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
     fixture
         .runtime
         .auto_launch_issue_monitor_delivery_events_for_project(
@@ -1836,34 +2699,22 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             fixture.delivery_id.clone(),
             gwt::IssueMonitorLaunchSessionStrategy::ResumeIfSafe,
         );
-    let mut preparation_states = Vec::new();
-    let preparation_phases = capture_tracing_events(|| {
-        for _ in 0..2 {
+    let preparation_phases =
+        capture_tracing_events(|| loop {
             drain_queued_blocking_tasks(&queued);
+            if !fixture
+                .recorded_events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| matches!(event, UserEvent::IssueMonitorLaunchPrepared(_)))
+            {
+                break;
+            }
             fixture.runtime.handle_issue_monitor_launch_prepared(
                 take_issue4803_monitor_preparation(&fixture.recorded_events),
             );
-            let prefs = gwt::load_issue_monitor_prefs(
-                &gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root),
-            )
-            .expect("read exact-holder preparation state");
-            preparation_states.push((
-                fixture
-                    .runtime
-                    .issue_monitor_launch_deliveries
-                    .get(fixture.delivery_id.as_deref().unwrap())
-                    .cloned(),
-                fixture
-                    .runtime
-                    .pending_launch_feedback_contexts
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                queued.lock().expect("queued exact-holder tasks").len(),
-                prefs.autonomous_handoffs[0].delivery.clone(),
-            ));
-        }
-    });
+        });
     fs2::FileExt::unlock(&history).expect("release name history");
     let windows = &fixture
         .runtime
@@ -1880,7 +2731,7 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             .unwrap()
             .agent_name
             .as_deref(),
-        Some("ExistingExactHolder"),
+        Some(holder_name.as_str()),
         "an answer must preserve its holder's name despite a busy history"
     );
     assert!(
@@ -1891,8 +2742,66 @@ fn issue5596_answer_packet_keeps_the_exact_holder_when_another_issue_pane_is_fir
             Some(super::super::IssueMonitorLaunchDeliveryState::Materializing { window_id, .. })
                 if window_id == &holder_window_id
         ),
-        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane; states={preparation_states:?}; phases={preparation_phases:?}"
+        "the prepared answer must reach its exact holder instead of retrying against the generic Issue pane; phases={preparation_phases:?}"
     );
+    let delivery = {
+        let mut events = fixture.recorded_events.lock().unwrap();
+        let index = events
+            .iter()
+            .position(|event| matches!(event, UserEvent::IssueMonitorAnswerDeliveryComplete(_)))
+            .expect("actual owner answer completion");
+        match events.remove(index) {
+            UserEvent::IssueMonitorAnswerDeliveryComplete(delivery) => delivery,
+            _ => unreachable!(),
+        }
+    };
+    assert_eq!(delivery.delivery_id.as_deref(), Some(delivery_id.as_str()));
+    assert_eq!(delivery.holder_window_id, holder_window_id);
+    assert_eq!(delivery.owner_pane_id, holder.id);
+    assert_eq!(delivery.runtime_incarnation, holder.incarnation);
+    assert!(
+        delivery.result.is_ok(),
+        "actual answer result: {:?}; pure_preflight_from_before={}; expected_host={owner_identity:?}; expected_window={}; pd_before={:?}; post_error_pd={:?}; windows_before={windows_before:?}; post_error_windows={:?}; post_error_daemon={:?}",
+        delivery.result,
+        claim_probe.test_preflight_claim(claim_before.clone(), Some(owner_identity.host_started_at)), holder.id,
+        claim_before.pending_launch_deliveries.iter().find(|delivery| delivery.delivery_id == delivery_id)
+            .map(|delivery| (&delivery.claim_id, &delivery.materializer_id, delivery.materializer_pid, &delivery.materializer_window_id)),
+        gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root)).map(|prefs|
+            prefs.pending_launch_deliveries.into_iter().find(|delivery| delivery.delivery_id == delivery_id)
+                .map(|delivery| (delivery.claim_id, delivery.materializer_id, delivery.materializer_pid, delivery.materializer_window_id))),
+        owner.monitor_snapshot().map(|snapshot| snapshot.map(|snapshot| (snapshot.project_tab_id,
+            snapshot.windows.into_iter().map(|window|
+                (window.window_id, window.issue_number, window.status, window.monitor_owned)).collect::<Vec<_>>()))),
+        gwt::daemon_publisher::read_issue_monitor_status(&fixture.project_root).map(|status| status.map(|status|
+            serde_json::json!({"source":status["source"],"last_scan_at":status["last_scan_at"],
+                "occupied":status["occupied_slot_count"],"inbox":status["inbox"].as_array().map(|items|
+                    items.iter().filter(|item| item["issue_number"] == 3165).map(|item|
+                        serde_json::json!({"state":item["state"],"readiness":item["readiness"],
+                            "window_id":item["launched_window_id"],"exclusion":item["exclusion_reason"]})).collect::<Vec<_>>())}))),
+    );
+    assert!(delivery.submitted);
+    fixture
+        .runtime
+        .handle_issue_monitor_answer_delivery_complete(delivery);
+    let same = owner_fixture_block_on(owner.probe(&holder.id, holder.incarnation)).unwrap();
+    assert_eq!(same.session.as_ref().unwrap().id, holder_sid);
+    assert_eq!(same.pty.process_id(), Some(holder_pid));
+    assert!(same.pty.try_wait().unwrap().is_none());
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(
+        inventory["panes"].as_array().unwrap().len(),
+        1,
+        "the generic Issue pane must not cause another physical launch: {inventory}"
+    );
+    assert_eq!(
+        fs::read(&history_path).unwrap(),
+        names_before,
+        "answer routing must not mint a name"
+    );
+    close_test_owner_runtime(&mut fixture.runtime, &holder_window_id);
 }
 
 #[test]

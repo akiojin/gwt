@@ -1367,7 +1367,10 @@ mod tests {
         let spawned_intents = intents.clone();
         let supervisor = DaemonSupervisor::with_spawner(move |context| {
             spawned_intents.lock().unwrap().push(context.startup_intent);
-            std::process::Command::new("sleep").arg("30").spawn()
+            gwt_core::process::resolved_command(gwt_core::process::ProcessPlanRequest::new("sleep"))
+                .map_err(std::io::Error::other)?
+                .arg("30")
+                .spawn()
         });
         let live = AtomicBool::new(true);
         let observe = |_: u32| live.load(Ordering::SeqCst);

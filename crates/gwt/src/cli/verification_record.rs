@@ -2912,6 +2912,7 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             "status",
             "--porcelain=v1",
             "--untracked-files=all",
+            "--ignored=traditional",
             "--",
             WORK_EVENT_LOG_RELATIVE,
             WORK_EVENT_STORE_RELATIVE,
@@ -2930,6 +2931,19 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             return Err(());
         }
         let (index, worktree_state) = (bytes[0], bytes[1]);
+        if index == b'!' && worktree_state == b'!' {
+            let path = &bytes[3..];
+            if classify_path(path) == DeliveryPath::WorkEventShard
+                && !is_certified_pr_delivery_event(worktree, path)
+            {
+                dirty.push(WorkEventDirtyPath {
+                    path: line[3..].to_string(),
+                    state: WorkEventPathState::Untracked,
+                    basis: WorkEventDirtyBasis::GwtIgnoredShard,
+                });
+            }
+            continue;
+        }
         let mut push = |state| {
             dirty.push(WorkEventDirtyPath {
                 path: line[3..].to_string(),
@@ -2954,37 +2968,6 @@ pub(crate) fn work_event_dirty_paths(worktree: &Path) -> Result<Vec<WorkEventDir
             push(WorkEventPathState::Unstaged);
         }
     }
-    let ignored = gwt_core::process::hidden_command("git")
-        .args([
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-            WORK_EVENT_STORE_RELATIVE,
-        ])
-        .current_dir(worktree)
-        .output()
-        .map_err(|_| ())?;
-    if !ignored.status.success() {
-        return Err(());
-    }
-    dirty.extend(
-        ignored
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .filter(|path| {
-                classify_path(path) == DeliveryPath::WorkEventShard
-                    && !is_certified_pr_delivery_event(worktree, path)
-            })
-            .map(|path| WorkEventDirtyPath {
-                path: String::from_utf8_lossy(path).into_owned(),
-                state: WorkEventPathState::Untracked,
-                basis: WorkEventDirtyBasis::GwtIgnoredShard,
-            }),
-    );
     Ok(dirty)
 }
 
@@ -15537,6 +15520,60 @@ fn default_integration_test_builds_a_guarded_binary() {
             !relative.contains('\\'),
             "Git path must use slash separators"
         );
+    }
+
+    #[test]
+    fn work_event_dirty_paths_reads_ignored_shards_with_one_git_process() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = WorkEventGitFixture::tracked_shards();
+        fs::write(fixture.repo.join(".git/info/exclude"), ".gwt/\n").unwrap();
+        fixture.write_event_shard("ignored-first", b"{}\n");
+        fixture.write_event_shard("ignored-second", b"{}\n");
+        fixture.write_event_log("ignored-legacy");
+        fs::write(
+            fixture
+                .repo
+                .join(WORK_EVENT_STORE_RELATIVE)
+                .join("invalid.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let shard = fixture.event_shard_path("ignored-first");
+        fs::write(
+            shard.with_file_name(format!(
+                ".{}.create-temp",
+                shard.file_name().unwrap().to_str().unwrap()
+            )),
+            b"{}\n",
+        )
+        .unwrap();
+        let trace_path = fixture.repo.join("git-trace.log");
+        let _trace = ScopedEnvVar::set("GIT_TRACE2_EVENT", &trace_path);
+
+        let mut dirty = work_event_dirty_paths(&fixture.repo).unwrap();
+        dirty.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut expected = ["ignored-first", "ignored-second"].map(|id| WorkEventDirtyPath {
+            path: pending_work_event_shard_relative_path(&fixture.repo, id).unwrap(),
+            state: WorkEventPathState::Untracked,
+            basis: WorkEventDirtyBasis::GwtIgnoredShard,
+        });
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(dirty, expected);
+        let trace = fs::read_to_string(trace_path).unwrap();
+        let repo = dunce::canonicalize(&fixture.repo).unwrap();
+        let repositories = trace
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "def_repo"
+                    && event["worktree"]
+                        .as_str()
+                        .is_some_and(|path| dunce::canonicalize(path).ok().as_ref() == Some(&repo))
+            })
+            .count();
+        assert_eq!(repositories, 1, "one fresh Git operation: {trace}");
     }
 
     #[test]

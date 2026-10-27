@@ -383,7 +383,7 @@ fn launch_complete_registers_monitor_runtime_from_worker_snapshot() {
         assert_eq!(registration.issue_number, 5187);
         assert_eq!(
             registration.project_root,
-            temp.path().canonicalize().unwrap()
+            dunce::canonicalize(temp.path()).unwrap()
         );
         assert_eq!(registration.incarnation, captured.incarnation);
         assert!(Arc::ptr_eq(&writer.handle, &physical.pty));
@@ -1152,6 +1152,8 @@ fn launch_complete_workers_preserve_other_launches_when_finishing_out_of_order()
     let _process_home = ScopedEnvVar::set("HOME", temp.path());
     let _process_userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     init_repo_with_initial_commit(temp.path());
+    seed_owner_fixture_roster(temp.path(), 2);
+    configure_owner_fixture_tools(temp.path(), &["fixture", "fixture-second"]);
     gwt::agent_names::mutate_project_roster(
         temp.path(),
         &gwt_core::paths::gwt_sessions_dir(),
@@ -1588,6 +1590,8 @@ fn app_runtime_start_work_launch_completion_registers_multiple_unassigned_agents
     };
     let (mut runtime, recorded) =
         sample_runtime_with_events(&temp.path().join(".gwt"), vec![tab], Some("tab-1"));
+    seed_owner_fixture_roster(&repo, 2);
+    configure_owner_fixture_tools(&repo, &["fixture"]);
     gwt::agent_names::mutate_project_roster(
         &repo,
         &runtime.sessions_dir,

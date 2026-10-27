@@ -69,11 +69,13 @@ struct DurableWorkspaceRequest {
 
 /// Reserve FIFO ordering on the GUI thread; the ACK worker authorizes the
 /// write only after materialization. Dropping this handle cancels the gate.
+#[cfg(test)]
 pub(crate) struct DurableWorkspaceBarrier {
     ready: mpsc::Sender<()>,
     completed: mpsc::Receiver<Result<(), String>>,
 }
 
+#[cfg(test)]
 impl DurableWorkspaceBarrier {
     pub(crate) fn allow_and_wait(&self) -> std::io::Result<()> {
         self.ready.send(()).map_err(|_| {
@@ -82,6 +84,7 @@ impl DurableWorkspaceBarrier {
                 "persist dispatcher stopped before durable workspace authorization",
             )
         })?;
+        // test-hygiene: allow-wall-clock-deadline Bounds a real durable-writer ACK channel; the received commit result establishes completion.
         match self.completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(std::io::Error::other(error)),
@@ -110,8 +113,6 @@ struct DispatcherInner {
     cond: Condvar,
     #[cfg(test)]
     before_workspace_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    durable_writes: std::sync::atomic::AtomicU64,
 }
 
 /// Owner handle: enqueue snapshots and (in tests) wait until the worker drains.
@@ -133,6 +134,7 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// wait.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
+#[cfg(test)]
 const DURABLE_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Drop for PersistDispatcher {
@@ -198,8 +200,6 @@ impl PersistDispatcher {
             cond: Condvar::new(),
             #[cfg(test)]
             before_workspace_write: Mutex::new(None),
-            #[cfg(test)]
-            durable_writes: std::sync::atomic::AtomicU64::new(0),
         });
         let worker_inner = inner.clone();
         spawner.spawn(move || worker_loop(worker_inner));
@@ -231,6 +231,7 @@ impl PersistDispatcher {
     /// Assign the exact snapshot's generation while the GUI owns it, before
     /// newer ordinary snapshots can enter the dispatcher. This does no disk I/O
     /// and does not wait; a worker must authorize the durability gate.
+    #[cfg(test)]
     pub(crate) fn reserve_workspace_durable(
         &self,
         project_root: PathBuf,
@@ -275,13 +276,6 @@ impl PersistDispatcher {
     ) -> std::io::Result<()> {
         self.reserve_workspace_durable(path, workspace)?
             .allow_and_wait()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn durable_write_count(&self) -> u64 {
-        self.inner
-            .durable_writes
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -436,10 +430,6 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
                 if request.ready.recv().is_err() {
                     (request.generation, Ok(()), None, None)
                 } else {
-                    #[cfg(test)]
-                    inner
-                        .durable_writes
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let outcome = write_project_layout(&request.project_root, &request.workspace)
                         .map_err(|error| error.to_string());
                     (request.generation, outcome, None, Some(request.completion))
@@ -580,8 +570,6 @@ mod tests {
                 state: Mutex::new(DispatcherState::default()),
                 cond: Condvar::new(),
                 before_workspace_write: Mutex::new(None),
-                #[cfg(test)]
-                durable_writes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -591,7 +579,6 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
-        let workspace_path = gwt::persistence::workspace_state_path(temp.path());
         let _owner = layout_owner(temp.path());
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
         let (write_started_tx, write_started_rx) = mpsc::sync_channel(1);

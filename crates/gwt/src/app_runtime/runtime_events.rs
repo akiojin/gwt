@@ -42,6 +42,7 @@ pub(crate) struct PendingRuntimeOutput {
 /// candidate. The cost of waiting is a held slot for two minutes; the cost of
 /// not waiting is releasing a healthy launch because its own output quoted the
 /// provider's sentence.
+#[cfg(test)]
 const PROVIDER_QUOTA_SETTLE_SECS: i64 = 120;
 
 /// Provider TUIs commonly clear and redraw the approval block after Enter.
@@ -241,8 +242,10 @@ mod runtime_hook_stage_timing_tests {
     }
 }
 
+pub(super) use gwt::project_runtime::runtime_events::classify_issue_monitor_failure;
+#[cfg(test)]
 pub(super) use gwt::project_runtime::runtime_events::{
-    classify_issue_monitor_failure, provider_label, provider_usage_limit_failure,
+    provider_label, provider_usage_limit_failure,
 };
 
 impl AppRuntime {
@@ -328,6 +331,7 @@ impl AppRuntime {
     /// `seq` is the pane stream position the reader thread observed right
     /// after parsing `data` (Issue #4095); it lets a client queue drop this
     /// chunk when a snapshot taken at or past that position is queued first.
+    #[cfg(test)]
     pub(crate) fn handle_runtime_output_event(
         &mut self,
         id: String,
@@ -806,6 +810,7 @@ impl AppRuntime {
         self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, false)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_runtime_status_event(
         &mut self,
         id: String,
@@ -830,6 +835,7 @@ impl AppRuntime {
         events
     }
 
+    #[cfg(test)]
     fn runtime_incarnation_is_current(&self, id: &str, incarnation: u64) -> bool {
         self.runtimes
             .get(id)
@@ -876,6 +882,7 @@ impl AppRuntime {
     /// `screen` is the pane's currently rendered screen, or `None` when it has
     /// no runtime to read. Idempotent: a notice that is already a confirmed hold
     /// produces nothing, so this can be called on every output chunk.
+    #[cfg(test)]
     pub(crate) fn observe_provider_quota_notice(
         &mut self,
         window_id: &str,
@@ -950,6 +957,7 @@ impl AppRuntime {
     /// days stops the whole queue at the default `max_active = 1`. The pane
     /// stays on screen with its session intact so the same conversation can be
     /// resumed after the reset.
+    #[cfg(test)]
     fn commit_provider_quota_hold(
         &mut self,
         window_id: &str,
@@ -994,6 +1002,7 @@ impl AppRuntime {
     /// hold on this call, because output resuming is proof the agent is back
     /// — and that release is what keeps a momentary false reading from
     /// outliving the chunk that caused it.
+    #[cfg(test)]
     pub(crate) fn observe_provider_api_error(
         &mut self,
         window_id: &str,
@@ -1082,22 +1091,7 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #3616: classify this pane's own live screen. The production entry
-    /// point — the output path and the poller sweep both go through here, so a
-    /// test can exercise the same read a real pty feeds.
-    pub(crate) fn observe_provider_quota_notice_from_screen(
-        &mut self,
-        window_id: &str,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Vec<OutboundEvent> {
-        // Issue #5037: trimming a tool result's indentation or dropping a
-        // code fence above the tail erases the very evidence that it is quoted.
-        let screen = self
-            .current_approval_screen(window_id)
-            .map(|(_, screen)| screen);
-        self.observe_provider_quota_notice(window_id, screen.as_deref(), now)
-    }
-
+    #[cfg(test)]
     pub(super) fn quota_provider_for_window(
         &self,
         window_id: &str,
@@ -1111,30 +1105,13 @@ impl AppRuntime {
         }
     }
 
-    /// Issue #3616: re-check every pending candidate against its pane's current
-    /// screen.
-    ///
-    /// A blocked pane emits no further output, so the output path alone would
-    /// never reach the settle deadline. This runs on the usage-poller tick,
-    /// which is also where fresh corroboration arrives.
-    pub(crate) fn sweep_provider_quota_candidates(
-        &mut self,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Vec<OutboundEvent> {
-        let pending: Vec<String> = self.provider_quota_candidates.keys().cloned().collect();
-        let mut events = Vec::new();
-        for window_id in pending {
-            events.extend(self.observe_provider_quota_notice_from_screen(&window_id, now));
-        }
-        events
-    }
-
     /// Issue #3616: the agent this pane is running, live entry first and the
     /// persisted window second.
     ///
     /// PTY teardown removes the active session before the failure is published,
     /// so the persisted fallback is what keeps the account attributable at the
     /// moment it matters — the same ordering `approval_prompt_provider` uses.
+    #[cfg(test)]
     pub(crate) fn pane_agent_id(&self, window_id: &str) -> Option<String> {
         self.active_agent_sessions
             .get(window_id)
@@ -1236,6 +1213,10 @@ impl AppRuntime {
         let Some(window_id) = window_id else {
             return events;
         };
+        if event.source_event.as_deref() == Some("UserPromptSubmit") {
+            // An exact owner ACK can release retained input without a status edge.
+            self.flush_pending_pm_wake(&window_id);
+        }
         let Some(hook_state) = gwt::window_state::runtime_hook_window_state(&event) else {
             return events;
         };
@@ -1267,6 +1248,7 @@ enum RuntimeDaemonPublish {
         data: Vec<u8>,
         preview_text: Option<String>,
     },
+    #[cfg(test)]
     Status {
         project_root: PathBuf,
         id: String,
@@ -1428,6 +1410,7 @@ fn publish_runtime_daemon_event(
                 );
             }
         }
+        #[cfg(test)]
         RuntimeDaemonPublish::Status {
             project_root,
             id,

@@ -410,6 +410,21 @@ fn revalidate_issue_monitor_launch_prepared(
     if let Some(expected) = prepared.source_facts.as_ref() {
         // Stamp before reading, so a rewrite during the reads is seen as newer.
         prepared.prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
+        if let Some(rejection) = expected.answer_profile_expectation.as_ref() {
+            let prefs = match gwt::load_issue_monitor_prefs(&prefs_path) {
+                Ok(prefs) => prefs,
+                Err(error) => {
+                    prepared.delivery.result = Err(error.to_string());
+                    prepared.delivery.admission = None;
+                    return;
+                }
+            };
+            if monitor_answer_profile_changed(rejection, &prefs) {
+                prepared.rejection = Some(rejection.clone());
+                prepared.delivery.admission = None;
+                return;
+            }
+        }
         let current = IssueMonitorLaunchSourceFacts::read(
             cache,
             provider_usage,
@@ -649,6 +664,120 @@ pub(crate) struct IssueMonitorLaunchPrepared {
     /// Issue #6096: a worker already re-evaluated these facts and admission
     /// against newer prefs, provider usage and capacity and found them equal.
     revalidated: bool,
+    pub(super) rejection: Option<Box<gwt::project_runtime::events::OwnerMonitorLaunchRejection>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IssueMonitorPreflightRejected {
+    pub(super) context: super::ProjectContext,
+    pub(super) operation_id: String,
+    pub(super) delivery_id: Option<String>,
+    pub(super) issue_number: u64,
+    pub(super) result: Result<serde_json::Value, String>,
+}
+
+fn capture_monitor_preflight_rejection(
+    request: &super::DeferredIssueMonitorLaunch,
+    prefs: &gwt::IssueMonitorPrefs,
+    sessions_dir: &Path,
+    error: &str,
+) -> Option<Box<gwt::project_runtime::events::OwnerMonitorLaunchRejection>> {
+    let delivery_id = request.delivery_id.as_deref()?;
+    let delivery = prefs.pending_launch_deliveries.iter().find(|delivery| {
+        delivery.issue_number == request.issue_number && delivery.delivery_id == delivery_id
+    })?;
+    let handoff = prefs
+        .autonomous_handoffs
+        .iter()
+        .find(|handoff| {
+            handoff.issue_number == request.issue_number
+                && handoff.state == gwt::autonomous_handoff::AutonomousHandoffState::Resumed
+                && handoff.delivered_at.is_none()
+        })
+        .cloned();
+    if !error.contains("provider_unauthenticated")
+        && !(handoff.is_some()
+            && error == "answered autonomous handoff native conversation is unavailable or foreign")
+    {
+        return None;
+    }
+    let source = match &handoff {
+        Some(handoff) => Some(Box::new(
+            gwt_agent::Session::load(&sessions_dir.join(format!("{}.toml", handoff.session_id)))
+                .ok()?,
+        )),
+        None => None,
+    };
+    Some(Box::new(
+        gwt::project_runtime::events::OwnerMonitorLaunchRejection {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_delivery: Some(Box::new(delivery.clone())),
+            expected_profile: prefs
+                .effective_launch_tiers()
+                .first()
+                .and_then(|tier| tier.first())
+                .cloned(),
+            expected_profile_readset: None,
+            expected_handoff: handoff.map(Box::new),
+            expected_session: source,
+        },
+    ))
+}
+
+fn capture_monitor_answer_profile_expectation(
+    request: &super::DeferredIssueMonitorLaunch,
+    prefs: &gwt::IssueMonitorPrefs,
+    preparation: &Result<IssueMonitorLaunchPreparation, String>,
+) -> Option<Box<gwt::project_runtime::events::OwnerMonitorLaunchRejection>> {
+    if request.delivery_id.is_some() {
+        return None;
+    }
+    let resume = match preparation.as_ref().ok()? {
+        IssueMonitorLaunchPreparation::Answer(resume) => resume.as_ref(),
+        IssueMonitorLaunchPreparation::Launch(facts) => {
+            facts.resume.as_ref().ok()?.resume.as_ref()?
+        }
+    };
+    let resumption = resume.autonomous_handoff.as_ref()?;
+    let handoff = prefs.autonomous_handoffs.iter().find(|handoff| {
+        handoff.handoff_id == resumption.handoff_id
+            && handoff.issue_number == request.issue_number
+            && handoff.session_id == resume.session.id
+            && handoff.state == gwt::autonomous_handoff::AutonomousHandoffState::Resumed
+            && handoff.delivered_at.is_none()
+            && matches!(
+                handoff.delivery,
+                gwt::autonomous_handoff::AutonomousHandoffDeliveryState::Pending
+            )
+            && gwt::issue_monitor::autonomous_handoff_answer_prompt(handoff) == resumption.prompt
+    })?;
+    Some(Box::new(
+        gwt::project_runtime::events::OwnerMonitorLaunchRejection {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            expected_delivery: None,
+            expected_profile: prefs
+                .effective_launch_tiers()
+                .first()
+                .and_then(|tier| tier.first())
+                .cloned(),
+            expected_profile_readset: Some((
+                prefs.launch_profile.clone(),
+                prefs.launch_profiles.clone(),
+            )),
+            expected_handoff: Some(Box::new(handoff.clone())),
+            expected_session: Some(Box::new(resume.session.clone())),
+        },
+    ))
+}
+
+fn monitor_answer_profile_changed(
+    expected: &gwt::project_runtime::events::OwnerMonitorLaunchRejection,
+    prefs: &gwt::IssueMonitorPrefs,
+) -> bool {
+    expected
+        .expected_profile_readset
+        .as_ref()
+        .is_some_and(|(head, pool)| prefs.launch_profile != *head || prefs.launch_profiles != *pool)
 }
 
 pub(crate) type IssueMonitorLaunchPreparationKey = (String, u64, u64, Option<String>, bool);
@@ -714,6 +843,9 @@ struct IssueMonitorLaunchSourceFacts {
     /// Issue #6299: the host Codex preflight this delivery already ran. It is
     /// not a prefs-derived input, so it is reused, never compared.
     codex_preflight: IssueMonitorCodexPreflightMemo,
+    /// Captured once before any immutable launch command, never refreshed.
+    answer_profile_expectation:
+        Option<Box<gwt::project_runtime::events::OwnerMonitorLaunchRejection>>,
 }
 
 impl PartialEq for IssueMonitorLaunchSourceFacts {
@@ -792,6 +924,7 @@ impl IssueMonitorLaunchSourceFacts {
             selection,
             handoff: issue_monitor_resume_handoff(&request.project_root, issue_number),
             codex_preflight,
+            answer_profile_expectation: None,
         }
     }
 }
@@ -3874,7 +4007,8 @@ impl AppRuntime {
                     window_id, ..
                 }) if self.tracked_window_exists(window_id) => continue,
                 Some(
-                    super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { .. }
+                    super::IssueMonitorLaunchDeliveryState::Rejecting { .. }
+                    | super::IssueMonitorLaunchDeliveryState::LaunchedPendingAck { .. }
                     | super::IssueMonitorLaunchDeliveryState::Launched { .. }
                     | super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. },
                 ) => continue,
@@ -4099,6 +4233,9 @@ impl AppRuntime {
                     return self
                         .schedule_issue_monitor_launch_failure(context, request, message, None);
                 }
+                Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
+                    return Vec::new()
+                }
                 _ => {}
             }
         }
@@ -4208,7 +4345,9 @@ impl AppRuntime {
             // Issue #6096: a prefs rewrite during these reads is not itself stale. The GUI
             // compares this stamp and lets a worker re-evaluate the same source facts.
             let source_prefs_stamp = super::issue_monitor_prefs_stamp(&prefs_path);
-            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, codex_preflight };
+            let answer_profile_expectation = prefs.as_ref().and_then(|prefs|
+                capture_monitor_answer_profile_expectation(&request, prefs, &result));
+            let source_facts = IssueMonitorLaunchSourceFacts { selection, handoff, codex_preflight, answer_profile_expectation };
             if source_facts != IssueMonitorLaunchSourceFacts::read(&cache, &provider_usage, &request, &profile_config_path, source_facts.codex_preflight.clone()) {
                 result = Err(super::launch::ISSUE_MONITOR_SPAWN_ADMISSION_STALE.to_string());
             }
@@ -4219,10 +4358,20 @@ impl AppRuntime {
             let answered_handoff_pending = prefs.as_ref().is_some_and(|prefs| prefs.autonomous_handoffs.iter().any(|handoff| handoff.issue_number == issue_number && handoff.state == gwt::autonomous_handoff::AutonomousHandoffState::Resumed && handoff.delivered_at.is_none()));
             let autonomous_mode = prefs.as_ref().is_some_and(|prefs| prefs.autonomous_mode);
             let prefs_stamp = source_prefs_stamp;
+            let rejection_error = match &result {
+                Err(error) => Some(error),
+                Ok(IssueMonitorLaunchPreparation::Launch(facts)) => facts.resume.as_ref().err(),
+                Ok(IssueMonitorLaunchPreparation::Answer(_)) => None,
+            };
+            let rejection = rejection_error.and_then(|error| prefs.as_ref().and_then(|prefs|
+                capture_monitor_preflight_rejection(&request, prefs, &sessions_dir, error)))
+                .or_else(|| source_facts.answer_profile_expectation.as_ref()
+                    .filter(|expected| prefs.as_ref().is_some_and(|prefs| monitor_answer_profile_changed(expected, prefs)))
+                    .cloned());
             proxy.send(UserEvent::IssueMonitorLaunchPrepared(Box::new(IssueMonitorLaunchPrepared {
                 context, request, prefs_stamp, provider_usage,
                 delivery: PreparedIssueMonitorDelivery { result, claim, admission, existing_window, answered_handoff_pending, autonomous_mode },
-                source_facts: Some(source_facts), revalidated: false,
+                source_facts: Some(source_facts), revalidated: false, rejection,
             })));
         }) {
             self.issue_monitor_launch_preparations.remove(&key);
@@ -4265,6 +4414,228 @@ impl AppRuntime {
         } else {
             Vec::new()
         }
+    }
+
+    fn queue_monitor_preflight_rejection(
+        &mut self,
+        context: super::ProjectContext,
+        rejection: Box<gwt::project_runtime::events::OwnerMonitorLaunchRejection>,
+    ) -> Vec<OutboundEvent> {
+        let operation_id = rejection.operation_id.clone();
+        let delivery_id = rejection
+            .expected_delivery
+            .as_deref()
+            .map(|delivery| delivery.delivery_id.clone());
+        let Some(issue_number) = rejection
+            .expected_delivery
+            .as_deref()
+            .map(|delivery| delivery.issue_number)
+            .or_else(|| {
+                rejection
+                    .expected_handoff
+                    .as_deref()
+                    .map(|handoff| handoff.issue_number)
+            })
+        else {
+            return Vec::new();
+        };
+        if let Some(delivery_id) = delivery_id.as_ref() {
+            self.issue_monitor_launch_deliveries.insert(
+                delivery_id.clone(),
+                super::IssueMonitorLaunchDeliveryState::Rejecting {
+                    operation_id: operation_id.clone(),
+                },
+            );
+        }
+        let proxy = self.proxy.for_project(context.clone());
+        let supervisor = self.daemon_supervisor.clone();
+        let failure_context = context.clone();
+        let failure_operation = operation_id.clone();
+        let failure_delivery = delivery_id.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        let client =
+                            gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
+                                context.project_root.clone(),
+                                supervisor,
+                            )
+                            .await?;
+                        let identity = client
+                            .identity()
+                            .cloned()
+                            .ok_or("authenticated rejection owner is unavailable")?;
+                        let expected_claim = rejection
+                            .expected_delivery
+                            .as_deref()
+                            .map(|delivery| delivery.claim_id.clone());
+                        let expected_source = rejection.expected_session.clone();
+                        let handoff_retry = rejection.expected_handoff.is_some();
+                        let value = client
+                            .command(
+                                gwt::project_runtime::events::OwnerCommand::RejectMonitorLaunch {
+                                    rejection,
+                                },
+                            )
+                            .await?;
+                        let claimed = &value["claimed_delivery"];
+                        if value["operation_id"].as_str() != Some(operation_id.as_str())
+                            || value["settled"] != true
+                            || value["no_pty"] != true
+                            || value["no_submit"] != true
+                            || value["handoff_retry"] != handoff_retry
+                        {
+                            return Err("Monitor preflight rejection receipt changed".into());
+                        }
+                        let window_id =
+                            format!("{}::preflight-reject-{operation_id}", context.project_key);
+                        if let Some(delivery_id) = delivery_id.as_deref() {
+                            if claimed["delivery_id"].as_str() != Some(delivery_id)
+                                || claimed["claim_id"].as_str() != expected_claim.as_deref()
+                                || claimed["issue_number"].as_u64() != Some(issue_number)
+                                || claimed["materializer_pid"].as_u64()
+                                    != Some(u64::from(identity.pid))
+                                || claimed["materializer_id"].as_str()
+                                    != Some(identity.host_instance_id.as_str())
+                                || claimed["materializer_window_id"].as_str()
+                                    != Some(window_id.as_str())
+                            {
+                                return Err(
+                                    "Monitor preflight rejection claim receipt changed".into()
+                                );
+                            }
+                        } else {
+                            let source = expected_source
+                                .as_deref()
+                                .ok_or("answer rejection receipt has no source")?;
+                            let target: gwt::autonomous_handoff::AutonomousHandoffDeliveryTarget =
+                                serde_json::from_value(value["answer_target"].clone())
+                                    .map_err(|error| error.to_string())?;
+                            let source_root =
+                                gwt::validated_project_state_root_for_session_recovery(source)
+                                    .map_err(|error| error.to_string())?;
+                            if !claimed.is_null()
+                                || target.delivery_id.is_some()
+                                || target.gwt_session_id != source.id
+                                || Some(target.native_session_id.as_str())
+                                    != source.exact_resume_session_id()
+                                || target.provider != source.agent_id.to_string()
+                                || target.issue_number != issue_number
+                                || Some(target.repo_hash.as_str()) != source.repo_hash.as_deref()
+                                || !gwt::launch_runtime::same_worktree_path(
+                                    Path::new(&target.project_state_root),
+                                    &source_root,
+                                )
+                                || target.window_id != window_id
+                                || target.materializer_pid != identity.pid
+                                || target.materializer_id != identity.host_instance_id
+                                || target.materializer_started_at != identity.host_started_at
+                            {
+                                return Err(
+                                    "Monitor preflight rejection answer receipt changed".into()
+                                );
+                            }
+                        }
+                        Ok(value)
+                    })
+                });
+            proxy.send(UserEvent::IssueMonitorPreflightRejected(Box::new(
+                IssueMonitorPreflightRejected {
+                    context,
+                    operation_id,
+                    delivery_id,
+                    issue_number,
+                    result,
+                },
+            )));
+        }) {
+            if let Some(delivery_id) = failure_delivery.as_ref().filter(|delivery_id| {
+                matches!(self.issue_monitor_launch_deliveries.get(*delivery_id),
+                Some(super::IssueMonitorLaunchDeliveryState::Rejecting { operation_id })
+                    if operation_id == &failure_operation)
+            }) {
+                self.issue_monitor_launch_deliveries.remove(delivery_id);
+            }
+            return vec![OutboundEvent::project(
+                failure_context.project_key,
+                BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "error".into(),
+                    message: error.to_string(),
+                    issue_number: Some(issue_number),
+                },
+            )];
+        }
+        Vec::new()
+    }
+
+    pub(crate) fn handle_monitor_preflight_rejected(
+        &mut self,
+        completion: IssueMonitorPreflightRejected,
+    ) -> Vec<OutboundEvent> {
+        if !self.project_context_is_current(&completion.context)
+            || completion.delivery_id.as_ref().is_some_and(|delivery_id| {
+                !matches!(self.issue_monitor_launch_deliveries.get(delivery_id),
+                Some(super::IssueMonitorLaunchDeliveryState::Rejecting { operation_id })
+                    if operation_id == &completion.operation_id)
+            })
+        {
+            return Vec::new();
+        }
+        let receipt = match completion.result {
+            Ok(receipt)
+                if receipt["operation_id"].as_str() == Some(completion.operation_id.as_str()) =>
+            {
+                receipt
+            }
+            Err(error) => {
+                if let Some(delivery_id) = completion.delivery_id.as_ref() {
+                    self.issue_monitor_launch_deliveries.remove(delivery_id);
+                }
+                return vec![OutboundEvent::project(
+                    completion.context.project_key,
+                    BackendEvent::IssueMonitorToast {
+                        notification_transition: None,
+                        notification_transition_id: None,
+                        level: "error".into(),
+                        message: error,
+                        issue_number: Some(completion.issue_number),
+                    },
+                )];
+            }
+            _ => return Vec::new(),
+        };
+        if let Some(delivery_id) = completion.delivery_id.as_ref() {
+            self.issue_monitor_launch_deliveries.remove(delivery_id);
+        }
+        let message = receipt["message"]
+            .as_str()
+            .unwrap_or("Monitor preflight rejected")
+            .to_string();
+        vec![
+            OutboundEvent::project(
+                completion.context.project_key.clone(),
+                BackendEvent::IssueMonitorLaunchFailed {
+                    issue_number: completion.issue_number,
+                    message: message.clone(),
+                },
+            ),
+            OutboundEvent::project(
+                completion.context.project_key,
+                BackendEvent::IssueMonitorToast {
+                    notification_transition: None,
+                    notification_transition_id: None,
+                    level: "error".into(),
+                    message,
+                    issue_number: Some(completion.issue_number),
+                },
+            ),
+        ]
     }
 
     fn schedule_issue_monitor_launch_failure(
@@ -4321,6 +4692,7 @@ impl AppRuntime {
             delivery,
             source_facts,
             revalidated,
+            rejection,
         } = prepared;
         let mut phase_started = IssueMonitorGuiPhases::new(self.blocking_tasks.clone());
         let correlation_delivery_id = request.delivery_id.clone();
@@ -4340,6 +4712,9 @@ impl AppRuntime {
         }
         if !registered {
             return Vec::new();
+        }
+        if let Some(rejection) = rejection {
+            return self.queue_monitor_preflight_rejection(context, rejection);
         }
         record_issue_monitor_gui_phase(
             "monitor_gui_context",
@@ -4470,6 +4845,7 @@ impl AppRuntime {
                     delivery: delivery.clone(),
                     source_facts: source_facts.clone(),
                     revalidated: true,
+                    rejection: None,
                 };
                 let proxy = self.proxy.clone();
                 let span = tracing::Span::current();
@@ -4707,6 +5083,9 @@ impl AppRuntime {
                         ));
                     }
                     return events;
+                }
+                Some(super::IssueMonitorLaunchDeliveryState::Rejecting { .. }) => {
+                    return Vec::new()
                 }
                 None => {}
             }
@@ -6580,6 +6959,49 @@ impl AppRuntime {
             }
             _ => {}
         }
+        if apply_action
+            && !session.wizard.launch_materialization_pending
+            && matches!(action, gwt::LaunchWizardAction::Submit)
+        {
+            let retained = self
+                .pending_launch_completions
+                .values()
+                .find_map(|pending| {
+                    let original = pending.manual_wizard.as_ref()?;
+                    (original.wizard_id == session.wizard_id
+                        && original.project_context == *context
+                        && pending.current.load(std::sync::atomic::Ordering::Acquire))
+                    .then(|| pending.manual_request.clone())
+                    .flatten()
+                });
+            if let Some(super::RemoteOwnerLaunchRequest::Agent { config, .. }) = retained {
+                let mut draft = session.wizard.clone();
+                draft.apply(gwt::LaunchWizardAction::Submit);
+                let unchanged = match draft.completion.take() {
+                    Some(LaunchWizardCompletion::Launch(request)) => match *request {
+                        LaunchWizardLaunchRequest::Agent(mut current) => {
+                            // A fresh form decision timestamp is not a settings edit.
+                            current.permission_decision.decided_at =
+                                config.permission_decision.decided_at;
+                            current.execution_intent = config.execution_intent.clone();
+                            matches!((serde_json::to_value(current), serde_json::to_value(&config)),
+                                (Ok(current), Ok(original)) if current == original)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                };
+                if !unchanged {
+                    session.wizard.error = Some("The retained successor has different launch settings. Restore its original settings before retrying, or cancel this launch.".into());
+                    self.store_launch_wizard(session);
+                    return vec![self.launch_wizard_state_outbound(context)];
+                }
+                session.wizard.completion = Some(LaunchWizardCompletion::Launch(Box::new(
+                    LaunchWizardLaunchRequest::Agent(config),
+                )));
+                apply_action = false;
+            }
+        }
         if apply_action {
             session.wizard.apply(action);
         }
@@ -6676,6 +7098,34 @@ impl AppRuntime {
                 vec![self.launch_wizard_state_outbound(context)]
             }
             Some(LaunchWizardCompletion::Cancelled) => {
+                let retained =
+                    self.pending_launch_completions
+                        .iter()
+                        .find_map(|(window_id, pending)| {
+                            pending
+                                .manual_wizard
+                                .as_ref()
+                                .filter(|original| original.wizard_id == session.wizard_id)
+                                .map(|_| window_id.clone())
+                        });
+                if let Some(window_id) = retained {
+                    if let Some(pending) = self.pending_launch_completions.remove(&window_id) {
+                        pending
+                            .current
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        let owner_id = pending.owner_pane_id.clone();
+                        let operation_id = pending.operation_id.clone();
+                        let client = pending.client_cell.clone();
+                        let ack = pending.cancel_ack.clone();
+                        let _ = self.blocking_tasks.try_spawn(move || {
+                            if let Ok(executor) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                                if let Err(error) = executor.block_on(super::cancel_remote_owner_launch(&owner_id, &operation_id, &client, &ack)) {
+                                    tracing::warn!(%error, "cancelled manual successor requires exact reconciliation");
+                                }
+                            }
+                        });
+                    }
+                }
                 vec![self.launch_wizard_state_broadcast(context, None)]
             }
             Some(LaunchWizardCompletion::FocusWindow { window_id }) => {
@@ -6823,6 +7273,68 @@ impl AppRuntime {
             .and_then(|_| self.tab(&session.tab_id))
             .map(|tab| tab.project_root.clone());
 
+        let retry_window = self.pending_launch_completions.iter().find_map(|(window, pending)| {
+            if !pending.current.load(std::sync::atomic::Ordering::Acquire)
+                || pending.context.as_ref() != Some(&context)
+                || self.window_lifecycle_generations.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).get(window).copied() != Some(pending.generation) {
+                return None;
+            }
+            pending.manual_wizard.as_ref().filter(|original| {
+                original.wizard_id == wizard_id && original.project_context == context
+            }).and(pending.manual_request.as_ref()).and_then(|request| match (request, &config) {
+                (super::RemoteOwnerLaunchRequest::Agent { config: original, .. }, LaunchWizardLaunchRequest::Agent(current))
+                    if matches!((serde_json::to_value(original), serde_json::to_value(current)),
+                        (Ok(original), Ok(current)) if original == current) => Some(window.clone()),
+                _ => None,
+            })
+        });
+        if let Some(window_id) = retry_window {
+            let mut pending = self.pending_launch_completions.remove(&window_id).unwrap();
+            let request = pending.manual_request.clone().unwrap();
+            let requested_agent = match &request {
+                super::RemoteOwnerLaunchRequest::Agent { config, .. } => {
+                    config.agent_id.command().to_string()
+                }
+                _ => unreachable!(),
+            };
+            let result = self.queue_project_owner_launch_request(
+                &context,
+                window_id.clone(),
+                Some(pending.generation),
+                pending.operation_id.clone(),
+                request,
+            );
+            match result {
+                Ok(mut events) => {
+                    self.pending_launch_completions
+                        .get_mut(&window_id)
+                        .unwrap()
+                        .manual_wizard = Some(session.clone());
+                    if owns_visible_slot {
+                        self.store_launch_wizard(session);
+                        events.push(self.launch_wizard_state_outbound(&context));
+                    }
+                    events.extend(self.status_events(
+                        window_id,
+                        WindowProcessStatus::Starting,
+                        Some("Launching...".into()),
+                    ));
+                    return events;
+                }
+                Err(error) => {
+                    pending.manual_wizard = Some(session.clone());
+                    self.pending_launch_completions.insert(window_id, pending);
+                    return self.finish_launch_wizard_agent_spawn(
+                        session,
+                        owns_visible_slot,
+                        &requested_agent,
+                        Err(error),
+                    );
+                }
+            }
+        }
+
         match config {
             LaunchWizardLaunchRequest::Agent(config) => self.materialize_launch_wizard_agent_with(
                 session,
@@ -6920,7 +7432,36 @@ impl AppRuntime {
             return Vec::new();
         }
         let requested_agent_id = config.agent_id.command().to_string();
-        let spawn_result = spawn(self, &session, config);
+        let manual_operation = match &config.execution_intent {
+            gwt_agent::ExecutionLaunchIntent::ManualSuccessor { operation_id, .. }
+                if session.origin == super::LaunchWizardOrigin::ManualLaunchAgent =>
+            {
+                Some(operation_id.clone())
+            }
+            _ => None,
+        };
+        let spawn_result = match spawn(self, &session, config) {
+            Ok(mut events) => {
+                if let Some(pending) = manual_operation.as_deref().and_then(|operation| {
+                    self.pending_launch_completions
+                        .values_mut()
+                        .find(|pending| {
+                            pending.operation_id == operation
+                                && pending.context.as_ref() == Some(&context)
+                                && pending.manual_request.is_some()
+                        })
+                }) {
+                    pending.manual_wizard = Some(session.clone());
+                    if owns_visible_slot {
+                        self.store_launch_wizard(session);
+                        events.push(self.launch_wizard_state_outbound(&context));
+                    }
+                    return events;
+                }
+                Ok(events)
+            }
+            Err(error) => Err(error),
+        };
         self.finish_launch_wizard_agent_spawn(
             session,
             owns_visible_slot,
@@ -6967,6 +7508,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_manual_successor_before_pane(
         &self,
         project_root: &Path,

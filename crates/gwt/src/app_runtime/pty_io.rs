@@ -161,10 +161,12 @@ fn spawn_window_close_fallback_thread(
 /// return that lands in the same PTY write as the text into the text itself —
 /// the line is inserted on the prompt but never submitted — so the submit has
 /// to be a write of its own, after the TUI has settled.
+#[cfg(test)]
 pub(super) use gwt::project_runtime::agent_dispatch::{
     drive_verified_pane_submit, pane_input_body_bytes, split_pane_submit, VerifiedPaneSubmitOutcome,
 };
 
+#[cfg(test)]
 pub(crate) use gwt::session_finalizer::pane_teardown_stall_message;
 
 /// Complete the stop phase for every runtime before any join can block.
@@ -266,10 +268,15 @@ impl AppRuntime {
                         tokio::time::timeout(Duration::from_secs(120), client.command(command))
                             .await
                             .map_err(|_| "project command timed out".to_string())?
-                            .map(|value| {
+                            .and_then(|value| {
                                 value
-                                    .get("has_unsent_user_input")
-                                    .and_then(serde_json::Value::as_bool)
+                                    .get("input_observation")
+                                    .filter(|value| !value.is_null())
+                                    .map(|value| {
+                                        serde_json::from_value(value.clone())
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .transpose()
                             })
                     })
                 });
@@ -313,22 +320,28 @@ impl AppRuntime {
         {
             return Vec::new();
         }
-        let unsent = match result {
+        let observation = match result {
             Err(error) => {
                 if approval_resolution_started {
                     self.cancel_runtime_approval_resolution(&id);
                 }
                 return self.remote_command_refusal(&id, &kind, error);
             }
-            Ok(unsent) => unsent,
+            Ok(observation) => observation,
         };
-        if let Some(unsent) = unsent {
-            self.runtimes
-                .get(&id)
-                .expect("fenced remote input")
-                .has_unsent_user_input
-                .store(unsent, std::sync::atomic::Ordering::Release);
-            if !unsent {
+        if let Some(observation) = observation {
+            let runtime = self.runtimes.get_mut(&id).expect("fenced remote input");
+            if runtime
+                .input_observation
+                .is_none_or(|old| old.revision <= observation.revision)
+            {
+                runtime.has_unsent_user_input.store(
+                    observation.has_unsent_user_input,
+                    std::sync::atomic::Ordering::Release,
+                );
+                runtime.observe_input(Some(observation));
+            }
+            if !observation.has_unsent_user_input {
                 self.flush_pending_pm_wake(&id);
             }
         }
@@ -501,8 +514,6 @@ impl AppRuntime {
         close_project_root: Option<std::path::PathBuf>,
         closing_session_id: Option<String>,
         pm_close: bool,
-        _notify_issue_monitor: bool,
-        _self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
@@ -669,6 +680,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         if let Some(runtime) = self.runtimes.get(window_id) {
             let command = gwt::project_runtime::events::OwnerCommand::Close {
@@ -825,55 +837,90 @@ mod submit_split_tests {
 
     #[test]
     fn same_operation_recovery_writes_only_submit_and_honors_a_late_ack() {
-        let writes = std::cell::RefCell::new(Vec::new());
-        let first = drive_verified_pane_submit(
-            "protected body\r",
-            false,
-            2,
-            |bytes| {
-                writes.borrow_mut().push(bytes.to_vec());
-                Ok(())
+        use gwt::pm_registry::{self, PmDeliveryReceiptStatus};
+        use gwt_core::test_support::{env_lock, ScopedEnvVar, ScopedGwtHome};
+
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _gwt_home = ScopedGwtHome::set(home.path());
+        let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "target-session");
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let operation_id = "72fc3cd4-ad49-43e3-bf3d-d791357643a3";
+        let body = "protected body";
+        let prompt = pm_registry::protected_pm_delivery_prompt(operation_id, body).unwrap();
+        let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&repo);
+        pm_registry::prepare_pm_delivery_receipt(
+            &receipt_path,
+            &pm_registry::PmDeliveryReceipt {
+                operation_id: operation_id.into(),
+                recorded_at: "2026-08-13T00:00:00Z".into(),
+                status: PmDeliveryReceiptStatus::Prepared,
+                principal_session_id: "pm-session".into(),
+                target_window_id: "tab-1::agent-1".into(),
+                target_session_id: "target-session".into(),
+                body_sha256: pm_registry::pm_delivery_prompt_sha256(body),
+                reason: None,
             },
-            |_| {},
-            || Ok(false),
         )
         .unwrap();
+        let composer = std::cell::RefCell::new(String::new());
+        let lose_submit = std::cell::Cell::new(true);
+        let body_writes = std::cell::Cell::new(0);
+        let submit_writes = std::cell::Cell::new(0);
+        let mut receive = |bytes: &[u8]| {
+            if bytes == b"\r" {
+                submit_writes.set(submit_writes.get() + 1);
+                if !lose_submit.get() {
+                    let submitted = std::mem::take(&mut *composer.borrow_mut());
+                    gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                        &repo,
+                        &serde_json::json!({"prompt": submitted}).to_string(),
+                    );
+                }
+            } else {
+                body_writes.set(body_writes.get() + 1);
+                composer
+                    .borrow_mut()
+                    .push_str(std::str::from_utf8(bytes).unwrap());
+            }
+            Ok(())
+        };
+        let verified = || {
+            Ok(
+                pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                    .unwrap()
+                    .unwrap()
+                    .status
+                    == PmDeliveryReceiptStatus::Verified,
+            )
+        };
+        let first =
+            drive_verified_pane_submit(&prompt, false, 2, &mut receive, |_| {}, verified).unwrap();
         assert!(matches!(
             first,
             VerifiedPaneSubmitOutcome::Unverified { .. }
         ));
-        let recovered = drive_verified_pane_submit(
-            "\r",
-            false,
-            2,
-            |bytes| {
-                writes.borrow_mut().push(bytes.to_vec());
-                Ok(())
-            },
-            |_| {},
-            || Ok(writes.borrow().len() == 4),
-        )
-        .unwrap();
+        assert_eq!(*composer.borrow(), prompt.trim_end_matches('\r'));
+        lose_submit.set(false);
+        let recovered =
+            drive_verified_pane_submit("\r", false, 2, &mut receive, |_| {}, verified).unwrap();
         assert_eq!(
             recovered,
             VerifiedPaneSubmitOutcome::Verified { submit_attempts: 1 }
         );
-        assert_eq!(
-            *writes.borrow(),
-            [
-                b"protected body".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec(),
-                b"\r".to_vec()
-            ]
-        );
+        assert!(composer.borrow().is_empty());
+        assert_eq!(body_writes.get(), 1);
+        assert_eq!(submit_writes.get(), 3);
         drive_verified_pane_submit(
             "\r",
             false,
             2,
             |_| panic!("late acknowledged replay must not write"),
             |_| {},
-            || Ok(true),
+            verified,
         )
         .unwrap();
     }

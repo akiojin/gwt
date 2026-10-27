@@ -1,8 +1,11 @@
-pub(crate) use gwt::agent_capability::AgentDurableAuthority;
 pub(crate) use gwt::agent_capability::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-    AgentPmSendResponder, AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance,
-    AgentSelfCloseResponder, AgentSessionPrincipal,
+    AgentSelfCloseCapabilityTicket,
+};
+#[cfg(test)]
+pub(crate) use gwt::agent_capability::{
+    AgentDurableAuthority, AgentPmSendResponder, AgentSelfCloseDirectAcceptance,
+    AgentSelfCloseResponder,
 };
 #[cfg(test)]
 use gwt::project_transport::send_agent_self_close_acceptance_for_test as send_agent_self_close_acceptance;
@@ -4208,6 +4211,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn forward_browser_inputs(
         events: &Arc<Mutex<Vec<UserEvent>>>,
         runtime: &mut crate::app_runtime::AppRuntime,

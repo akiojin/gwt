@@ -18,16 +18,19 @@
 //! Behavior-preserving move: `WindowRuntime`, `LaunchWizardSession`, and
 //! `AppRuntime::new` stay in `mod.rs` and are reached via `super`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 pub use gwt::launch_wizard::LaunchWizardMemoryCache;
 #[cfg(test)]
+pub use gwt::project_runtime::launch_payload::AgentLaunchCompletion;
+#[cfg(test)]
 pub use gwt::project_runtime::launch_payload::AgentLaunchRuntimeContext;
-pub use gwt::project_runtime::launch_payload::{
-    AgentLaunchCompletion, AgentLaunchResult, ProcessLaunch,
-};
+#[cfg(test)]
+pub use gwt::project_runtime::launch_payload::{AgentLaunchResult, ProcessLaunch};
 pub(super) use gwt::session_launch::launch_config_from_persisted_session;
 #[cfg(test)]
 pub(super) use gwt::session_launch::{
@@ -45,6 +48,7 @@ use super::{
 #[cfg(test)]
 use super::{AgentCapabilityIssuer, AppEventProxy};
 
+#[cfg(test)]
 pub(super) use gwt::project_runtime::continuation::claim_prepared_manual_successor_launch;
 
 pub(crate) struct PendingLaunchCompletion {
@@ -55,6 +59,8 @@ pub(crate) struct PendingLaunchCompletion {
     pub(crate) owner_pane_id: String,
     pub(crate) client_cell: super::RemoteLaunchClientCell,
     pub(crate) cancel_ack: super::RemoteLaunchCancelAck,
+    pub(crate) manual_request: Option<super::RemoteOwnerLaunchRequest>,
+    pub(crate) manual_wizard: Option<super::LaunchWizardSession>,
 }
 
 impl Drop for PendingLaunchCompletion {
@@ -116,6 +122,7 @@ struct AgentWindowSpawnOptions {
     deliver_pending_autonomous_answer: bool,
 }
 
+#[cfg(test)]
 pub(super) use gwt::project_runtime::launch::{
     issue_monitor_trust_candidate_from_feedback, IssueMonitorTrustCandidate,
 };
@@ -133,10 +140,13 @@ pub(crate) fn next_agent_launch_stage_id(counter: &std::sync::atomic::AtomicU64)
 /// Console window's `agent` tab surfaces the pipeline that ends in the
 /// PTY spawn. Stage semantics (`start`, `done`, `error`) follow the same
 /// vocabulary as the `spawn_logged` summary contract.
+#[cfg(test)]
 pub(super) use gwt::project_runtime::installation::emit_agent_launch_stage;
 
+#[cfg(test)]
 pub(super) use gwt::project_runtime::installation::launch_argv_summary;
 
+#[cfg(test)]
 pub use gwt::project_runtime::launch_readiness::{
     continue_work_readiness_decision, ContinueWorkReadinessWatch, ReadinessDeadlineDecision,
     ReadinessPaneEvidence,
@@ -485,31 +495,6 @@ impl AppRuntime {
                 prepared_monitor_admission: prepared,
                 monitor_requested_tier: requested_tier,
                 deliver_pending_autonomous_answer: deliver_pending_answer,
-                ..Default::default()
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn spawn_agent_window_with_prepared_monitor_admission(
-        &mut self,
-        tab_id: &str,
-        config: gwt_agent::LaunchConfig,
-        workspace_resume_context: Option<WorkspaceResumeContext>,
-        launch_feedback_context: LaunchFeedbackContext,
-        prepared: PreparedIssueMonitorSpawnAdmission,
-    ) -> Result<Vec<OutboundEvent>, String> {
-        self.spawn_agent_window_with_options(
-            tab_id,
-            config,
-            AgentWindowSpawnOptions {
-                selected_agent_member_id: None,
-                inherited_agent_name: None,
-                workspace_resume_context,
-                launch_feedback_context: Some(launch_feedback_context),
-                agent_kanban_target: None,
-                continuation: None,
-                prepared_monitor_admission: Some(prepared),
                 ..Default::default()
             },
         )

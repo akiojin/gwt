@@ -244,17 +244,18 @@ fn assert_public_ws_agent_route_boundary(
 ) {
     let (fixture, expectation) =
         prepare_public_ws_agent_route(temp_root, provider, npm_fixture, launch_env);
-    let result = tokio::runtime::Builder::new_current_thread()
+    let socket = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Phase 75 Tokio runtime")
-        .block_on(assert_public_ws_conpty_boundary_async(expectation));
-    if let Err(error) = result {
-        panic!(
-            "real gwt public /ws -> ConPTY boundary failed: {error}\ngwt stderr:\n{}",
-            fixture.stderr()
-        );
-    }
+        .block_on(assert_public_ws_conpty_boundary_async(expectation))
+        .unwrap_or_else(|error| {
+            panic!(
+                "real gwt public /ws -> ConPTY boundary failed: {error}\ngwt stderr:\n{}",
+                fixture.stderr()
+            )
+        });
+    drop(socket);
     let owned_pid = fixture.pid();
     drop(fixture);
     // A terminated Windows process object can remain in a Toolhelp snapshot
@@ -276,17 +277,87 @@ fn prepare_public_ws_agent_route(
 ) -> (WindowsRealGwtFixture, PublicRouteExpectation) {
     let workspace = temp_root.join("public ws 作業ツリー");
     let home = temp_root.join("public ws browser profile");
-    std::fs::create_dir_all(&workspace).expect("create public WS workspace");
-    let git_init = gwt_core::process::hidden_command("git")
-        .args(["init", "--quiet"])
-        .current_dir(&workspace)
+    let seed = temp_root.join("public ws source");
+    std::fs::create_dir_all(&seed).expect("create public WS source repository");
+    std::fs::create_dir_all(&home).expect("create isolated public WS profile");
+    for args in [
+        vec![
+            "init".to_string(),
+            "--quiet".into(),
+            "-b".into(),
+            "main".into(),
+        ],
+        vec![
+            "-c".into(),
+            "user.name=gwt fixture".into(),
+            "-c".into(),
+            "user.email=gwt@example.invalid".into(),
+            "commit".into(),
+            "--allow-empty".into(),
+            "-qm".into(),
+            "native public route fixture".into(),
+        ],
+        vec![
+            "remote".into(),
+            "add".into(),
+            "origin".into(),
+            format!(
+                "https://github.com/fixture/native-startup-{}.git",
+                uuid::Uuid::new_v4()
+            ),
+        ],
+    ] {
+        let mut git = gwt_core::process::hidden_command("git");
+        gwt_core::process::scrub_git_env(&mut git);
+        let output = git
+            .args(args)
+            .current_dir(&seed)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .output()
+            .expect("prepare public WS source repository");
+        assert!(
+            output.status.success(),
+            "prepare public WS source repository: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A Normal repository must first accept migration in the product UI.
+    // Match the headed fixture's already admitted, actual linked worktree.
+    let mut git = gwt_core::process::hidden_command("git");
+    gwt_core::process::scrub_git_env(&mut git);
+    let linked = git
+        .args(["worktree", "add", "--quiet", "-b", "master"])
+        .arg(&workspace)
+        .arg("main")
+        .current_dir(&seed)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .output()
-        .expect("initialize public WS Git workspace");
+        .expect("create public WS linked worktree");
     assert!(
-        git_init.status.success(),
-        "initialize public WS Git workspace: {}",
-        String::from_utf8_lossy(&git_init.stderr)
+        linked.status.success(),
+        "create public WS linked worktree: {}",
+        String::from_utf8_lossy(&linked.stderr)
     );
+    assert!(workspace.join(".git").is_file());
+    let scope = gwt_core::daemon::RuntimeScope::from_project_root(
+        &workspace,
+        gwt_core::daemon::RuntimeTarget::Host,
+    )
+    .expect("public WS canonical project scope");
+    let preferences = home
+        .join(".gwt/projects")
+        .join(scope.repo_hash)
+        .join("project-state");
+    std::fs::create_dir_all(&preferences).expect("create isolated public WS project preferences");
+    // Use the ordinary per-project PM preference before this admitted project
+    // opens. The native tree acceptance owns exactly one agent pane per app.
+    std::fs::write(
+        preferences.join("pm.json"),
+        r#"{"settings":{"auto_start":false}}"#,
+    )
+    .expect("disable automatic PM launch in the isolated public WS profile");
     let sessions_dir = home.join(".gwt").join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("create public WS sessions directory");
     std::fs::copy(&npm_fixture.npmrc, home.join(".npmrc"))
@@ -399,7 +470,7 @@ struct PublicRouteExpectation {
 
 async fn assert_public_ws_conpty_boundary_async(
     expectation: PublicRouteExpectation,
-) -> Result<(), String> {
+) -> Result<RestoreSocket, String> {
     let PublicRouteExpectation {
         ws_url,
         workspace,
@@ -594,7 +665,6 @@ async fn assert_public_ws_conpty_boundary_async(
     let agent_deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     let mut route_events = Vec::new();
     let mut route_diagnostics = Vec::new();
-    let mut agent_dsr_replied = false;
     while !capture.is_file() && tokio::time::Instant::now() < agent_deadline {
         let attempt_deadline = std::cmp::min(
             tokio::time::Instant::now() + Duration::from_millis(250),
@@ -617,33 +687,8 @@ async fn assert_public_ws_conpty_boundary_async(
                                     if let Ok(bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(encoded)
                                     {
-                                        if !agent_dsr_replied
-                                            && bytes.windows(4).any(|window| window == b"\x1b[6n")
-                                        {
-                                            let terminal_id =
-                                                value["id"].as_str().ok_or_else(|| {
-                                                    "agent terminal output omitted its window id"
-                                                        .to_string()
-                                                })?;
-                                            socket
-                                                .send(
-                                                    tokio_tungstenite::tungstenite::Message::Text(
-                                                        serde_json::json!({
-                                                            "kind": "terminal_input",
-                                                            "id": terminal_id,
-                                                            "data": "\u{1b}[1;1R",
-                                                        })
-                                                        .to_string()
-                                                        .into(),
-                                                    ),
-                                                )
-                                                .await
-                                                .map_err(|error| {
-                                                    format!(
-                                                        "send agent terminal DSR response: {error}"
-                                                    )
-                                                })?;
-                                            agent_dsr_replied = true;
+                                        if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+                                            return Err("owner-handled agent cursor query leaked to the public stream".into());
                                         }
                                         route_diagnostics
                                             .push(String::from_utf8_lossy(&bytes).into_owned());
@@ -763,6 +808,7 @@ async fn assert_public_ws_conpty_boundary_async(
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut shell_id = None;
+    let mut early_shell_events = std::collections::VecDeque::new();
     while shell_id.is_none() && tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let message = tokio::time::timeout(remaining, socket.next())
@@ -777,6 +823,9 @@ async fn assert_public_ws_conpty_boundary_async(
             continue;
         };
         if value["kind"] != "workspace_state" {
+            // The owner can publish startup output before the GUI's window
+            // projection. Retain those frames until its exact id is known.
+            early_shell_events.push_back(value);
             continue;
         }
         shell_id = value["workspace"]["tabs"]
@@ -794,40 +843,31 @@ async fn assert_public_ws_conpty_boundary_async(
     let marker = "PHASE75-PUBLIC-WS-CONPTY";
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut decoded_output = String::new();
-    let mut dsr_replied = false;
     let mut command_sent = false;
+    let mut remote_snapshot_seen = false;
+    let mut child_ready = false;
+    let mut shell_screen = vt100::Parser::new(24, 100, 0);
+    let mut shell_events = Vec::new();
     while tokio::time::Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let message = tokio::time::timeout(remaining, socket.next())
-            .await
-            .map_err(|_| format!("timed out waiting for marker; output={decoded_output:?}"))?
-            .ok_or_else(|| "public websocket closed before terminal output".to_string())?
-            .map_err(|error| format!("read terminal output: {error}"))?;
-        let Some(payload) = message.to_text().ok() else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
-            continue;
-        };
-        if value["kind"] == "terminal_status"
-            && value["id"].as_str() == Some(shell_id.as_str())
-            && value["status"] == "running"
-            && !command_sent
-        {
-            socket
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    serde_json::json!({
-                        "kind": "terminal_input",
-                        "id": shell_id,
-                        "data": format!("echo {marker}\r"),
-                    })
-                    .to_string()
-                    .into(),
-                ))
+        let value = if let Some(value) = early_shell_events.pop_front() {
+            value
+        } else {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let message = tokio::time::timeout(remaining, socket.next())
                 .await
-                .map_err(|error| format!("send terminal_input after Running: {error}"))?;
-            command_sent = true;
-            continue;
+                .map_err(|_| format!("timed out waiting for Shell marker; shell={shell_id}, remote_snapshot={remote_snapshot_seen}, child_ready={child_ready}, command_sent={command_sent}, events={shell_events:?}; output={decoded_output:?}"))?
+                .ok_or_else(|| "public websocket closed before terminal output".to_string())?
+                .map_err(|error| format!("read terminal output: {error}"))?;
+            let Some(payload) = message.to_text().ok() else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+                continue;
+            };
+            value
+        };
+        if value["id"].as_str() == Some(shell_id.as_str()) {
+            shell_events.push((value["kind"].clone(), value["status"].clone()));
         }
         if !matches!(
             value["kind"].as_str(),
@@ -843,22 +883,21 @@ async fn assert_public_ws_conpty_boundary_async(
             .decode(encoded)
             .map_err(|error| format!("decode terminal output: {error}"))?;
         decoded_output.push_str(&String::from_utf8_lossy(&bytes));
-        if !dsr_replied && decoded_output.contains("\u{1b}[6n") {
-            socket
-                .send(tokio_tungstenite::tungstenite::Message::Text(
-                    serde_json::json!({
-                        "kind": "terminal_input",
-                        "id": shell_id,
-                        "data": "\u{1b}[1;1R",
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .map_err(|error| format!("send terminal DSR response: {error}"))?;
-            dsr_replied = true;
+        if bytes.windows(4).any(|window| window == b"\x1b[6n") {
+            return Err("owner-handled Shell cursor query leaked to the public stream".into());
         }
-        if !command_sent {
+        // A Shell snapshot comes from the installed immutable remote-runtime
+        // cache. Startup status/output alone can precede that input binding.
+        remote_snapshot_seen |= value["kind"] == "terminal_snapshot";
+        if value["kind"] == "terminal_snapshot" {
+            shell_screen = vt100::Parser::new(24, 100, 0);
+        }
+        shell_screen.process(&bytes);
+        // Parsed visible child output proves that ConPTY progressed beyond
+        // its native DSR handshake. The owner answers that query once; this
+        // public client must never inject a second report.
+        child_ready |= !shell_screen.screen().contents().trim().is_empty();
+        if remote_snapshot_seen && child_ready && !command_sent {
             socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(
                     serde_json::json!({
@@ -873,8 +912,14 @@ async fn assert_public_ws_conpty_boundary_async(
                 .map_err(|error| format!("send terminal_input after PTY output: {error}"))?;
             command_sent = true;
         }
-        if decoded_output.contains(marker) {
-            return Ok(());
+        if command_sent
+            && shell_screen
+                .screen()
+                .contents()
+                .lines()
+                .any(|line| line.trim() == marker)
+        {
+            return Ok(socket);
         }
     }
     Err(format!(
@@ -1248,6 +1293,108 @@ fn install_fixture_provider(fixture: &WindowsNpmRegistryFixture, provider: Provi
     installed_bin
 }
 
+fn native_shell_failure_diagnostics(
+    executor: &tokio::runtime::Runtime,
+    app: &WindowsRealGwtFixture,
+    provider: Provider,
+    phase: &str,
+) -> serde_json::Value {
+    let mut diagnostic = executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds only the read-only post-failure diagnostic; it never retries or extends the failed readiness assertion.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let Ok(client) = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+                &app.workspace, &app.home.join(".gwt"),
+            ).await else { return serde_json::json!({"owner_lookup":"unavailable"}); };
+            let identity = client.identity().map(|identity| serde_json::json!({
+                "pid":identity.pid, "birth":identity.host_started_at,
+                "instance":identity.host_instance_id,
+            }));
+            let Ok(inventory) = client.command(gwt::project_runtime::events::OwnerCommand::ListPanes).await
+            else { return serde_json::json!({"owner":identity,"inventory":"unavailable"}); };
+            let shells = inventory["panes"].as_array().into_iter().flatten()
+                .filter(|pane| pane["session_id"].is_null()).collect::<Vec<_>>();
+            let shell = match shells.as_slice() {
+                [pane] => {
+                    let pid = pane["child_pid"].as_u64().and_then(|pid| u32::try_from(pid).ok());
+                    Some(serde_json::json!({
+                        "id":pane["id"], "incarnation":pane["incarnation"],
+                        "child_pid":pid, "child_birth":pid.and_then(gwt::process::host_process_start_time),
+                        "screen_nonempty":pane["screen"].as_str().is_some_and(|text| !text.trim().is_empty()),
+                        "screen_seq":pane["screen_seq"], "status":pane["status"],
+                        "raw_status":pane["raw_status"], "closing":pane["closing"],
+                    }))
+                }
+                _ => None,
+            };
+            serde_json::json!({"owner":identity,"shell_count":shells.len(),"shell":shell})
+        }).await.unwrap_or_else(|_| serde_json::json!({"owner_diagnostic":"unavailable_before_hang_guard"}))
+    });
+    // GUI and daemon both log to this fixture HOME. Retain only the temporary
+    // content-free target before unwinding removes those persistent files.
+    let mut log_dirs = vec![app.home.join(".gwt/logs")];
+    if let Ok(projects) = std::fs::read_dir(app.home.join(".gwt/projects")) {
+        log_dirs.extend(projects.flatten().map(|entry| entry.path().join("logs")));
+    }
+    let mut protocol = Vec::new();
+    for dir in log_dirs {
+        let Ok(files) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let Ok(log) = gwt_core::logging::read_log_file(&file.path()) else {
+                continue;
+            };
+            for event in log
+                .entries
+                .into_iter()
+                .filter(|event| event.source == "gwt_terminal_protocol")
+            {
+                let fields = event
+                    .fields
+                    .into_iter()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.as_str(),
+                            "current"
+                                | "gen"
+                                | "skip"
+                                | "ok"
+                                | "window_id"
+                                | "incarnation"
+                                | "seq"
+                                | "stage"
+                                | "command_basename"
+                                | "argc"
+                                | "gate"
+                                | "child_pid"
+                                | "child_started_at"
+                                | "read_len"
+                                | "public_len"
+                                | "canonical_query_seen_chunk"
+                                | "report_count"
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                if protocol.len() < 64 {
+                    protocol.push(serde_json::json!({"timestamp":event.timestamp,"message":event.message,"fields":fields}));
+                }
+            }
+        }
+    }
+    diagnostic["protocol"] = serde_json::json!(protocol);
+    let artifact = PathBuf::from("target/issue-4735-fixforward").join(format!(
+        "windows-native-shell-{}-{phase}-diagnostic.json",
+        provider.agent_id().command(),
+    ));
+    if let Some(parent) = artifact.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&diagnostic) {
+        let _ = std::fs::write(artifact, bytes);
+    }
+    diagnostic
+}
+
 /// AC-9 exercises startup admission and the public GUI close path, in addition
 /// to the lower-level PendingPane/natural-exit coverage in gwt-terminal.
 #[test]
@@ -1261,7 +1408,10 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     let installed_bin = install_fixture_provider(&npm, provider);
     install_restore_tree_probe(&installed_bin, provider);
     let mut env = launch_env_with_real_gwtd(&npm, &installed_bin);
-    env.insert("RUST_LOG".into(), "info,gwt.pane.teardown=info".into());
+    env.insert(
+        "RUST_LOG".into(),
+        "info,gwt.pane.teardown=info,gwt_terminal_protocol=debug".into(),
+    );
     env.insert("GWT_PHASE75_HOLD_OPEN_MS".into(), "600000".into());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1274,10 +1424,16 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     let survivor_app = RestoreApp::new(survivor_app);
     let survivor_capture = survivor_expectation.capture.clone();
     let survivor_sessions = survivor_expectation.sessions_dir.clone();
-    runtime
+    // The verified browser session owns this transient GUI's lifetime.
+    let survivor_socket = runtime
         .block_on(assert_public_ws_conpty_boundary_async(survivor_expectation))
         .unwrap_or_else(|error| {
-            panic!("survivor public launch: {error}\n{}", survivor_app.stderr())
+            let diagnostic =
+                native_shell_failure_diagnostics(&runtime, &survivor_app, provider, "survivor");
+            panic!(
+                "survivor public launch: {error}\nowner diagnostic: {diagnostic}\n{}",
+                survivor_app.stderr()
+            )
         });
     let survivor = RestoreTree::capture(&survivor_capture, &survivor_sessions, &survivor_app.root);
     let survivor_receipt = std::fs::read(&survivor_capture).unwrap();
@@ -1289,9 +1445,16 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     let first_app = RestoreApp::new(first_app);
     let capture = first_expectation.capture.clone();
     let sessions_dir = first_expectation.sessions_dir.clone();
-    runtime
+    let first_socket = runtime
         .block_on(assert_public_ws_conpty_boundary_async(first_expectation))
-        .unwrap_or_else(|error| panic!("initial public launch: {error}\n{}", first_app.stderr()));
+        .unwrap_or_else(|error| {
+            let diagnostic =
+                native_shell_failure_diagnostics(&runtime, &first_app, provider, "initial");
+            panic!(
+                "initial public launch: {error}\nowner diagnostic: {diagnostic}\n{}",
+                first_app.stderr()
+            )
+        });
     let first = RestoreTree::capture(&capture, &sessions_dir, &first_app.root);
     assert_ne!(
         first.owner_pid, survivor.owner_pid,
@@ -1316,6 +1479,7 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     let home = first_app.home.clone();
     let workspace = first_app.workspace.clone();
     drop(first_app);
+    drop(first_socket);
     first.owner.terminate();
     first.assert_tree_exited();
     assert_eq!(live_restore_gates([&first, &survivor]), 1);
@@ -1324,7 +1488,8 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
 
     // Reuse the exact HOME, saved workspace and installed provider. No
     // reopen_recent_project, Board launch, PendingPane or spawn helper is sent
-    // after restart: frontend_ready admits the actual startup restore sweep.
+    // after restart: synchronize the saved workspace, then send the browser's
+    // startup_auto_resume_ready to admit the actual startup restore sweep.
     let mut restart_env = env.clone();
     restart_env.insert("GWT_PHASE75_CAPTURE".into(), capture.display().to_string());
     restart_env.insert(
@@ -1381,6 +1546,7 @@ fn windows_startup_restored_provider_tree_closes_through_public_gui() {
     .unwrap();
     // The survivor guard owns the daemon as well as its tree on migrated hosts.
     drop(restored_app);
+    drop(survivor_socket);
     drop(survivor_app);
 }
 
@@ -1805,6 +1971,8 @@ async fn restore_event(socket: &mut RestoreSocket) -> Result<Option<serde_json::
 async fn connect_saved_restore_project(
     app: &WindowsRealGwtFixture,
 ) -> Result<RestoreSocket, String> {
+    let canonical_workspace = std::fs::canonicalize(&app.workspace)
+        .map_err(|error| format!("canonicalize saved workspace: {error}"))?;
     let url = app.public_ws_url();
     let (mut hub, _) = tokio_tungstenite::connect_async(&url)
         .await
@@ -1833,6 +2001,34 @@ async fn connect_saved_restore_project(
         .await
         .map_err(|error| format!("connect restored project: {error}"))?;
     restore_send(&mut socket, serde_json::json!({"kind":"frontend_ready"})).await?;
+    loop {
+        // test-hygiene: allow-wall-clock-deadline the original startup discovery deadline also bounds the browser's saved-workspace synchronization before its one readiness ACK
+        if Instant::now() >= deadline {
+            return Err("saved project workspace never synchronized at startup".into());
+        }
+        let Some(event) = restore_event(&mut socket).await? else {
+            continue;
+        };
+        if event["kind"] != "workspace_state" {
+            continue;
+        }
+        let tab = &event["workspace"]["tabs"][0];
+        let tab_root = tab["project_root"]
+            .as_str()
+            .and_then(|path| std::fs::canonicalize(Path::new(path)).ok());
+        if tab["project_key"].as_str() != Some(key.as_str())
+            || tab_root.as_deref() != Some(canonical_workspace.as_path())
+        {
+            return Err("restored project connection served another saved workspace".into());
+        }
+        // The browser sends this once after applying workspace_state.
+        restore_send(
+            &mut socket,
+            serde_json::json!({"kind":"startup_auto_resume_ready"}),
+        )
+        .await?;
+        break;
+    }
     Ok(socket)
 }
 
@@ -1862,7 +2058,9 @@ async fn wait_startup_restore_and_close(
     survivor_receipt: &[u8],
     survivor_runtime: &[u8],
 ) -> Result<serde_json::Value, String> {
-    let mut socket = connect_saved_restore_project(app).await?;
+    let mut socket = connect_saved_restore_project(app)
+        .await
+        .map_err(|error| format!("startup restore connection: {error}"))?;
     // test-hygiene: allow-wall-clock-deadline real provider capture, restored projection, and exact finalizer join receipts establish ordering; the deadline only bounds OS and IPC delivery
     let deadline = Instant::now() + TEST_AGENT_READY_TIMEOUT;
     let mut windows = Vec::new();
@@ -1885,13 +2083,7 @@ async fn wait_startup_restore_and_close(
                         .decode(encoded)
                         .map_err(|error| error.to_string())?;
                     if bytes.windows(4).any(|part| part == b"\x1b[6n") {
-                        restore_send(
-                            &mut socket,
-                            serde_json::json!({
-                                "kind":"terminal_input", "id":event["id"], "data":"\u{1b}[1;1R"
-                            }),
-                        )
-                        .await?;
+                        return Err("restored owner leaked a cursor query to the GUI".into());
                     }
                 }
             }
@@ -1968,10 +2160,27 @@ async fn wait_startup_restore_and_close(
             }
         }
     };
+    let captured_liveness = |tree: &RestoreTree| {
+        serde_json::json!({
+            "owner": {"pid":tree.owner.pid,"birth":tree.owner.created,"live":tree.owner.running()},
+            "processes": tree.processes.iter().enumerate().map(|(index, process)| {
+                let role = match index {
+                    0 => "gate",
+                    index if index + 3 == tree.processes.len() => "provider",
+                    index if index + 2 == tree.processes.len() => "descendant",
+                    index if index + 1 == tree.processes.len() => "grandchild",
+                    _ => "cmd_wrapper",
+                };
+                serde_json::json!({"role":role,"pid":process.pid,"birth":process.created,"live":process.running()})
+            }).collect::<Vec<_>>(),
+        })
+    };
     assert_eq!(
         live_restore_gates([&restored, survivor]),
         2,
-        "two live gated agent panes before close"
+        "two live gated agent panes before close; restored={}; survivor={}",
+        captured_liveness(&restored),
+        captured_liveness(survivor),
     );
     let owner_client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
         &app.workspace,
@@ -2090,7 +2299,9 @@ async fn assert_restore_survivor_io(
     app: &WindowsRealGwtFixture,
     session_id: &str,
 ) -> Result<(), String> {
-    let mut socket = connect_saved_restore_project(app).await?;
+    let mut socket = connect_saved_restore_project(app)
+        .await
+        .map_err(|error| format!("survivor IO connection: {error}"))?;
     // test-hygiene: allow-wall-clock-deadline real survivor shell and PTY output markers establish progress after close; the deadline only bounds OS and IPC delivery
     let deadline = Instant::now() + Duration::from_secs(30);
     let provider_window = loop {
@@ -2162,7 +2373,6 @@ fn restore_finalizer_join_completed(
     owner_pane_id: &str,
     incarnation: u64,
 ) -> bool {
-    let mut logs = vec![app.stderr()];
     let mut pending = vec![app.home.join(".gwt")];
     while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -2172,47 +2382,37 @@ fn restore_finalizer_join_completed(
             let path = entry.path();
             if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                 pending.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "log") {
-                if let Ok(log) = std::fs::read_to_string(path) {
-                    logs.push(log);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == "gwt.log" || name.starts_with("gwt.log."))
+            {
+                let Ok(log) = gwt_core::logging::read_log_file(&path) else {
+                    continue;
+                };
+                if log.entries.iter().any(|event| {
+                    event.source == "gwt.pane.teardown"
+                        && event
+                            .fields
+                            .get("window_id")
+                            .and_then(|value| value.as_str())
+                            == Some(owner_pane_id)
+                        && event
+                            .fields
+                            .get("incarnation")
+                            .and_then(|value| value.as_u64())
+                            == Some(incarnation)
+                        && event.fields.get("stage").and_then(|value| value.as_str())
+                            == Some("close_finalizer")
+                        && event.fields.get("outcome").and_then(|value| value.as_str())
+                            == Some("completed")
+                }) {
+                    return true;
                 }
             }
         }
     }
-    logs.iter().any(|log| {
-        log.lines().any(|line| {
-            // Strip tracing's ANSI decoration before inspecting field values.
-            let mut plain = String::new();
-            let mut escape = false;
-            for character in line.chars() {
-                if character == '\u{1b}' {
-                    escape = true;
-                } else if escape {
-                    if character == 'm' {
-                        escape = false;
-                    }
-                } else {
-                    plain.push(character);
-                }
-            }
-            let incarnation_matches = serde_json::from_str::<serde_json::Value>(&plain)
-                .ok()
-                .is_some_and(|event| {
-                    event.get("fields").unwrap_or(&event)["incarnation"] == incarnation
-                })
-                || plain.split_whitespace().any(|field| {
-                    let field = field.trim_end_matches(',');
-                    field == format!("incarnation={incarnation}")
-                        || field == format!("incarnation=\"{incarnation}\"")
-                });
-            plain.contains(owner_pane_id)
-                && incarnation_matches
-                && plain.contains("close_finalizer")
-                && (plain.contains("outcome=completed")
-                    || plain.contains("outcome=\"completed\"")
-                    || plain.contains("\"outcome\":\"completed\""))
-        })
-    })
+    false
 }
 
 fn route_capture_path(root: &Path, route_id: &str) -> PathBuf {

@@ -1498,6 +1498,13 @@ pub fn fresh_execution_readiness_receipt(
     pending: &PendingFreshExecutionLaunch,
     operation_id: String,
 ) -> Result<gwt::AgentExecutionContinuationReceipt, gwt::AgentWorkspaceUpdateError> {
+    if !path_matches(
+        &pending.worktree_path,
+        &pending.session_identity.worktree_path,
+    ) || !worktree_matches_project_state(&pending.worktree_path, &pending.project_root)
+    {
+        return Err(fresh_execution_readiness_conflict());
+    }
     let work_id = gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
         .ok()
         .flatten()
@@ -1512,18 +1519,42 @@ pub fn fresh_execution_readiness_receipt(
                 .work_items
                 .iter()
                 .find(|work| {
-                    work.id == work_id
-                        && !work.is_terminal()
-                        && projection_continue_authority_matches(
-                            work,
-                            &pending.project_root,
-                            pending.owner,
-                            &pending.worktree_path,
-                            &pending.session_identity.branch,
-                            &pending.session_identity.agent_id,
-                            Some(&pending.session_identity.session_id),
-                            true,
-                        )
+                    if work.id != work_id || work.is_terminal() {
+                        return false;
+                    }
+                    let owner_matches = projection_only_continue_owner(work).is_ok_and(|owner| {
+                        owner.number == pending.owner.number
+                            && owner
+                                .declared_kind
+                                .is_none_or(|kind| kind == pending.owner.kind)
+                    });
+                    // Fresh activation already proved this local target. Other
+                    // hosts' historical containers need not exist on this host.
+                    let target_matches = work.execution_containers.iter().any(|container| {
+                        container
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(|path| path_matches(path, &pending.worktree_path))
+                            && container.branch.as_deref().is_some_and(|branch| {
+                                crate::launch_runtime::normalize_branch_name(branch)
+                                    == crate::launch_runtime::normalize_branch_name(
+                                        &pending.session_identity.branch,
+                                    )
+                            })
+                    });
+                    let mut sessions = work
+                        .agents
+                        .iter()
+                        .filter(|agent| agent.session_id == pending.session_identity.session_id);
+                    owner_matches
+                        && target_matches
+                        && sessions.next().is_some_and(|agent| {
+                            work_agent_ref_authenticates_agent(
+                                agent,
+                                &pending.session_identity.agent_id,
+                            )
+                        })
+                        && sessions.next().is_none()
                 })
                 .map(|work| work.id.clone())
         })
@@ -1694,10 +1725,28 @@ pub fn coordinate_continue_work(
     input: ContinueWorkInput<'_>,
     view: ContinueWorkView<'_>,
 ) -> ContinueWorkAction {
+    coordinate_continue_work_with_monitor_rejection_guard(input, view, |_, _, _, _| false)
+}
+
+pub(crate) fn coordinate_continue_work_with_monitor_rejection_guard(
+    input: ContinueWorkInput<'_>,
+    view: ContinueWorkView<'_>,
+    monitor_rejection_in_progress: impl FnOnce(
+        gwt::cli::execution_state::ExecutionOwnerKey,
+        &Path,
+        Option<&str>,
+        Option<&str>,
+    ) -> bool,
+) -> ContinueWorkAction {
     let client_id = input.client_id;
     let operation_id = input.operation_id.to_string();
     let work_id = input.work_id.to_string();
-    ContinueWorkCoordinator { input, view }.continue_work_action(client_id, operation_id, work_id)
+    ContinueWorkCoordinator { input, view }.continue_work_action(
+        client_id,
+        operation_id,
+        work_id,
+        monitor_rejection_in_progress,
+    )
 }
 
 pub fn reconcile_activated_pending_continue_work(
@@ -3162,6 +3211,12 @@ impl ContinueWorkCoordinator<'_> {
         client_id: &str,
         operation_id: String,
         work_id: String,
+        monitor_rejection_in_progress: impl FnOnce(
+            gwt::cli::execution_state::ExecutionOwnerKey,
+            &Path,
+            Option<&str>,
+            Option<&str>,
+        ) -> bool,
     ) -> ContinueWorkAction {
         let context = &self.input;
         if !canonical_public_id(&operation_id, 256) || !canonical_public_id(&work_id, 512) {
@@ -3264,6 +3319,25 @@ impl ContinueWorkCoordinator<'_> {
                 return self.failure_action(context, client_id, operation_id, work_id, failure)
             }
         };
+        // Immutable replay and strict target resolution precede this fence;
+        // a different Work must not be blocked by an unrelated rejection.
+        if monitor_rejection_in_progress(
+            target.owner,
+            &target.worktree_path,
+            target.work_branch.as_deref(),
+            target.work_agent_session_id.as_deref(),
+        ) {
+            return self.uncached_failure_action(
+                client_id,
+                operation_id,
+                work_id,
+                ContinueWorkFailure::failed(
+                    "monitor_rejection_in_progress",
+                    "an agent operation is in progress",
+                    true,
+                ),
+            );
+        }
         // Issue #3759: Continue work is the GUI recovery route for a
         // stranded owner. Rebuild a lost worktree pointer/projection from
         // the owner ledger before the strict read so the route does not

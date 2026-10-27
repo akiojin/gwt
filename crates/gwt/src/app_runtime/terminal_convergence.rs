@@ -27,9 +27,11 @@ use super::*;
 use std::time::Duration;
 
 pub(crate) use gwt::project_runtime::installation::{
-    classify_terminal_window, restore_admission_for_facts, ExecutionTerminalFacts,
-    MonitorTerminalFacts, RestoreAdmission, TerminalCloseEligibility, TerminalCloseReason,
-    TerminalWindowFacts,
+    classify_terminal_window, RestoreAdmission, TerminalCloseEligibility, TerminalCloseReason,
+};
+#[cfg(test)]
+pub(crate) use gwt::project_runtime::installation::{
+    restore_admission_for_facts, ExecutionTerminalFacts, MonitorTerminalFacts, TerminalWindowFacts,
 };
 
 /// Immutable facts about one Issue-linked Agent window captured on the Tao
@@ -392,6 +394,7 @@ impl AppRuntime {
                         .get(&observation.window_id)
                         .is_some_and(|candidate| {
                             candidate.session_id == observation.session_id
+                                && candidate.reason == reason
                                 && candidate.lifecycle_generation
                                     == observation.lifecycle_generation
                         });
@@ -420,7 +423,7 @@ impl AppRuntime {
                 }
             }
         }
-        self.close_expired_terminal_window_candidates_at(now)
+        self.close_expired_terminal_window_candidates(now, true)
     }
 
     /// FR-046: close every candidate whose grace elapsed, after revalidating
@@ -429,6 +432,14 @@ impl AppRuntime {
     pub(crate) fn close_expired_terminal_window_candidates_at(
         &mut self,
         now: Instant,
+    ) -> Vec<OutboundEvent> {
+        self.close_expired_terminal_window_candidates(now, false)
+    }
+
+    fn close_expired_terminal_window_candidates(
+        &mut self,
+        now: Instant,
+        fresh_observations: bool,
     ) -> Vec<OutboundEvent> {
         let grace = self.terminal_close_grace;
         let expired: Vec<(String, TerminalCloseCandidate)> = self
@@ -439,7 +450,15 @@ impl AppRuntime {
             .collect();
         let mut events = Vec::new();
         for (window_id, candidate) in expired {
-            self.terminal_close_candidates.remove(&window_id);
+            if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
+                && !matches!(
+                    self.window_status(&window_id),
+                    Some(WindowProcessStatus::Idle | WindowProcessStatus::Stopped)
+                )
+            {
+                self.terminal_close_candidates.remove(&window_id);
+                continue;
+            }
             let session_matches = self
                 .active_agent_sessions
                 .get(&window_id)
@@ -455,6 +474,7 @@ impl AppRuntime {
                 || !session_matches
                 || !generation_matches
             {
+                self.terminal_close_candidates.remove(&window_id);
                 tracing::info!(
                     target: "gwt.pane.teardown",
                     window_id = %window_id,
@@ -464,6 +484,15 @@ impl AppRuntime {
                 );
                 continue;
             }
+            // Warning cleanup needs this scan's classification, applied above
+            // after background Session/ledger reads. A timer retains the grace
+            // candidate until then, without adding disk IO to the Tao thread.
+            if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
+                && !fresh_observations
+            {
+                continue;
+            }
+            self.terminal_close_candidates.remove(&window_id);
             tracing::info!(
                 target: "gwt.pane.teardown",
                 window_id = %window_id,
@@ -486,6 +515,7 @@ impl AppRuntime {
     /// Monitor binding, so only the identity-free facts — a closed Issue or
     /// a settled execution — can refuse it; `RevokedLaunch` needs the exact
     /// window and is never inferred from a missing one.
+    #[cfg(test)]
     pub(crate) fn restore_work_terminality(
         &self,
         session: &gwt_agent::Session,
@@ -504,6 +534,33 @@ impl AppRuntime {
 mod tests {
     use super::*;
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    #[test]
+    fn non_completed_diagnoses_skip_the_additional_identity_read() {
+        let session = gwt_agent::Session::new(
+            Path::new("unused"),
+            "work/issue-42",
+            gwt_agent::AgentId::Codex,
+        );
+        for status in [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ] {
+            let mut execution = active_execution(42);
+            execution.status = status;
+            let mut reads = 0;
+            assert!(!execution.matches_completed_session(&session, |_| {
+                reads += 1;
+                Ok(None)
+            }));
+            assert_eq!(
+                reads, 0,
+                "{status:?} never uses the Completed identity fence"
+            );
+        }
+    }
 
     #[test]
     fn observer_reads_each_monitor_path_once_per_tick_including_failures() {
@@ -727,6 +784,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: true,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 0,
             launch_revoked: false,
@@ -740,6 +798,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: false,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 1,
             launch_revoked: false,
@@ -755,6 +814,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: false,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 0,
             launch_revoked: true,

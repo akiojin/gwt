@@ -934,6 +934,8 @@ export function createSettingsSurface({
           return {
             ...state,
             language: event.language || (updated ? state.language : "auto"),
+            worksPreviewLines: Number.isInteger(event.works_preview_lines) && event.works_preview_lines >= 3 && event.works_preview_lines <= 10
+              ? event.works_preview_lines : updated ? state.worksPreviewLines : 3,
             codexTrustManagedHooks: event.codex_trust_managed_hooks !== false,
             boardProvider: event.board_provider || state.boardProvider || "local",
             agentResource: normalizeAgentResource(event.agent_resource, state.agentResource),
@@ -999,6 +1001,7 @@ export function createSettingsSurface({
       // (auto/en/ja); the backend `system_settings` reply seeds it.
       const systemSettingsModel = createUiStateStore({
         language: "auto",
+        worksPreviewLines: 3,
         codexTrustManagedHooks: true,
         // SPEC #1921 Phase 86 (#3813): agent process-tree resource policy.
         // Numeric null = automatic (derived from max active agents / cores).
@@ -1057,7 +1060,15 @@ export function createSettingsSurface({
         renderSystemPanelInAllSettingsWindows(state, true);
       });
       let nextProfilesRequest = 0;
-      const issueSettingsModel = createUiStateStore({});
+      const issueSettingsModel = createUiStateStore({}, { scheduleFrame });
+      issueSettingsModel.subscribeFrame(state => {
+        const root = activeProjectTab()?.project_root;
+        return root ? state[root]?.profilesSaveToken : null;
+      }, token => {
+        const root = activeProjectTab()?.project_root;
+        if (!root || !token || issueSettingsModel.read()[root]?.profilesSaveToken !== token) return;
+        send({ kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+      });
       const globalUpdateModel = createUiStateStore({ auto_apply_updates: null, auto_apply_updates_effective: false, loaded: false, drains: {} }, { scheduleFrame });
       const renderedUpdateStatuses = new WeakMap();
       function renderUpdateStatus(body, state) {
@@ -1156,6 +1167,7 @@ export function createSettingsSurface({
         const bound = Array.isArray(event.profiles) && event.profiles.every(profile => profile.agent_member_id);
         issueSettingsModel.update(state => ({ ...state, [root]: {
           ...state[root], profiles: event.profiles, choices: event.choices, profilesRequestId: event.request_id,
+          profilesSaveToken: event.request_id == null ? state[root]?.profilesSaveToken : JSON.stringify([root, event.request_id]),
           rosterProfilesPending: bound ? false : state[root]?.rosterProfilesPending,
         } }));
       }
@@ -1318,6 +1330,9 @@ export function createSettingsSurface({
         if (settingsWindowBodies.size) {
           requestSettingsSnapshots(true);
           renderSystemPanelInAllSettingsWindows();
+        } else {
+          // Works shares this global presentation setting without mounting Settings.
+          send({ kind: "get_system_settings" });
         }
       }
       let editingCustomAgentId = null;
@@ -1777,11 +1792,13 @@ export function createSettingsSurface({
           const control = suffix => panel.querySelector(`[id$='-settings-${suffix}']`);
           for (const [suffix, value] of [
             ["system-language", state.language || "auto"],
+            ["works-preview-lines", state.worksPreviewLines],
             ["system-agent-preset", resource.preset || "automatic"],
             ["system-agent-priority", resource.priority || "below-normal"],
             ["system-agent-cpu-limit", resource.cpuLimitPercent ?? ""],
             ["system-agent-build-jobs", resource.buildJobs ?? ""],
           ]) control(suffix).value = String(value);
+          control("works-preview-lines").disabled = !state.loaded;
           control("system-codex-hooks").checked = state.codexTrustManagedHooks !== false;
           control("system-agent-resource-enabled").checked = resource.enabled !== false;
           for (const suffix of ["system-agent-preset", "system-agent-priority",
@@ -1834,6 +1851,32 @@ export function createSettingsSurface({
           "Used for narrative outputs (Work summaries and Board post bodies). " +
           "Settings UI text and gwtd subcommands stay English.";
         section.appendChild(help);
+
+        const worksSection = createDiv("settings-section");
+        const worksLabel = createNode("label", "settings-label", "Works output lines");
+        worksLabel.setAttribute("for", "settings-works-preview-lines");
+        const worksLines = document.createElement("input");
+        worksLines.id = "settings-works-preview-lines";
+        worksLines.className = "settings-input";
+        worksLines.type = "number";
+        worksLines.setAttribute("min", "3"); worksLines.setAttribute("max", "10"); worksLines.setAttribute("step", "1");
+        worksLines.setAttribute("aria-label", "Works output lines");
+        worksLines.value = String(state.worksPreviewLines);
+        worksLines.disabled = !state.loaded;
+        worksLines.addEventListener("change", () => {
+          const next = Number(worksLines.value);
+          if (!worksLines.value.trim() || !Number.isInteger(next) || next < 3 || next > 10) {
+            systemSettingsModel.update(state => ({ ...state,
+              statusMessage: "Works output lines must be a whole number from 3 to 10.", statusKind: "error" }));
+            renderSystemPanelInAllSettingsWindows();
+            return;
+          }
+          systemSettingsModel.update(state => ({ ...state, statusMessage: "Saving…", statusKind: "info" }));
+          renderSystemPanelInAllSettingsWindows();
+          send({ kind: "update_system_settings", language: systemSettingsModel.read().language || "auto", works_preview_lines: next });
+        });
+        worksSection.append(worksLabel, worksLines, createNode("p", "settings-help",
+          "Show 3–10 lines of terminal output in Works and its read-only list. Default: 3. Applies across projects."));
 
         const trustSection = createDiv("settings-section");
         const trustLabel = document.createElement("label");
@@ -2422,6 +2465,7 @@ export function createSettingsSurface({
         status.dataset.role = "system-settings-status";
 
         panel.appendChild(section);
+        panel.appendChild(worksSection);
         panel.appendChild(trustSection);
         panel.appendChild(resourceSection);
         panel.appendChild(boardSection);

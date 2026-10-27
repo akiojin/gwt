@@ -70,11 +70,12 @@ pub(crate) use app_runtime::LaunchWizardMemoryCache;
 pub(crate) use app_runtime::{
     build_frontend_sync_events, KnowledgeLoadRequest, LaunchWizardSession,
 };
+#[cfg(test)]
+pub(crate) use app_runtime::{ActiveAgentSession, AgentLaunchResult};
 pub(crate) use app_runtime::{
-    ActiveAgentSession, ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome,
-    AgentLaunchResult, AppEventProxy, AppRuntime, BlockingTaskSpawner, DispatchTarget,
-    IssueLaunchWizardPrepared, OutboundEvent, ProcessLaunch, ProjectNavigationPayload,
-    ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
+    ActiveWorkProjectionPrepared, AgentFrontendDispatchOutcome, AppEventProxy, AppRuntime,
+    BlockingTaskSpawner, DispatchTarget, IssueLaunchWizardPrepared, OutboundEvent,
+    ProjectNavigationPayload, ProjectNavigationPrepared, ProjectOpenTarget, ProjectTabRuntime,
     ScheduledIssueMonitorScanOutcome, WindowAddress, WindowCloseMonitorResult,
 };
 pub(crate) use attachment_upload::{AttachmentUploadStore, UploadedAttachment};
@@ -89,10 +90,12 @@ pub(crate) use docker_launch::{
     DockerLaunchServiceAction,
 };
 #[cfg(test)]
+pub(crate) use embedded_server::AgentSelfCloseResponder;
+#[cfg(test)]
 use embedded_server::{broadcast_runtime_hook_event, health_handler, hook_forward_authorized};
 pub(crate) use embedded_server::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentFrontendRequest,
-    AgentSelfCloseCapabilityTicket, AgentSelfCloseResponder, AgentSessionPrincipal,
+    AgentSelfCloseCapabilityTicket,
 };
 use embedded_server::{ClientHub, EmbeddedServer};
 #[cfg(test)]
@@ -101,11 +104,14 @@ pub(crate) use launch_runtime::{
     install_launch_gwt_bin_env_with_lookup, prune_orphan_intake_worktrees,
     resolve_ephemeral_launch_worktree, resolve_launch_worktree, resolve_launch_worktree_request,
 };
+#[cfg(test)]
+pub(crate) use launch_runtime::{build_shell_process_launch, resolve_shell_launch_worktree};
 pub(crate) use launch_runtime::{
-    build_shell_process_launch, execute_orphan_intake_worktree_prune,
-    plan_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune_from_inventory,
-    resolve_shell_launch_worktree, OrphanIntakePrunePlan,
+    execute_orphan_intake_worktree_prune, plan_orphan_intake_worktree_prune,
+    plan_orphan_intake_worktree_prune_from_inventory, OrphanIntakePrunePlan,
 };
+#[cfg(test)]
+pub(crate) use runtime_support::should_auto_close_agent_window;
 #[cfg(test)]
 pub(crate) use runtime_support::{
     app_state_view_from_parts, first_available_worktree_path, normalize_active_tab_id,
@@ -117,8 +123,7 @@ pub(crate) use runtime_support::{
     knowledge_kind_for_preset, local_branch_exists, normalize_branch_name,
     normalize_recent_project_path, normalize_recent_projects, origin_remote_ref,
     prune_missing_recent_projects, resolve_project_target, run_cli, same_worktree_path,
-    should_auto_close_agent_window, should_auto_start_restored_window, synthetic_branch_entry,
-    usable_worktree_path_for_branch,
+    should_auto_start_restored_window, synthetic_branch_entry, usable_worktree_path_for_branch,
 };
 pub(crate) use update_front_door::spawn_startup_update_check;
 #[cfg(test)]
@@ -2042,6 +2047,7 @@ enum UserEvent {
     ProviderUsageSnapshot {
         accounts: Vec<gwt_core::usage::ProviderUsage>,
     },
+    #[cfg(test)]
     RuntimeOutput {
         id: String,
         incarnation: u64,
@@ -2063,6 +2069,7 @@ enum UserEvent {
         data: Vec<u8>,
         preview_text: Option<String>,
     },
+    #[cfg(test)]
     RuntimeStatus {
         id: String,
         incarnation: u64,
@@ -2189,6 +2196,7 @@ enum UserEvent {
         waiting: bool,
     },
     IssueMonitorLaunchPrepared(Box<app_runtime::IssueMonitorLaunchPrepared>),
+    IssueMonitorPreflightRejected(Box<app_runtime::IssueMonitorPreflightRejected>),
     IssueMonitorLaunchFactsPrefetched(Box<app_runtime::IssueMonitorLaunchFactsPrefetched>),
     IssueMonitorLaunchRequest {
         project_root: PathBuf,
@@ -2270,6 +2278,7 @@ enum UserEvent {
         project_root: PathBuf,
         dispatch: gwt::AutonomousReviewDispatch,
     },
+    #[cfg(test)]
     LaunchProgress {
         window_id: String,
         message: String,
@@ -2283,6 +2292,7 @@ enum UserEvent {
     },
     /// SPEC-2014 FR-139 — raw docker launch preparation output bytes that
     /// should be appended to the launching agent window's terminal.
+    #[cfg(test)]
     LaunchTerminalOutput {
         window_id: String,
         data: Vec<u8>,
@@ -2489,7 +2499,9 @@ mod tests {
             owner_pane_id: "unbound-completion".into(),
             operation_id: "stale-operation".into(),
             client_cell: Arc::new(Mutex::new(None)),
-            cancel_ack: Arc::new(tokio::sync::Mutex::new(Some(Ok(())))),
+            cancel_ack: Arc::new(tokio::sync::Mutex::new(
+                crate::app_runtime::RemoteLaunchCancellation::acknowledged_for_test(),
+            )),
             restore_refusal: None,
             restore_feedback: None,
             result: Err("launch failed before owner admission".into()),
@@ -10917,10 +10929,11 @@ fn main() -> std::io::Result<()> {
 
                 }
             }
-            Event::UserEvent(UserEvent::AgentFrontend { client_id, grant: _, request: _ }) => {
+            Event::UserEvent(UserEvent::AgentFrontend { client_id, grant, request }) => {
                 // This host listener has no producing capability issuer. A
                 // stale GUI grant must never reach the project owner's writers.
                 apply_agent_frontend_dispatch_outcome(&clients, &client_id, AgentFrontendDispatchOutcome::StaleCapability);
+                drop((grant, request));
             }
             Event::UserEvent(UserEvent::LogEntry { entry }) => {
                 // Issue #3366 — gated on an open Logs window; see
@@ -10933,6 +10946,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_provider_usage_snapshot(accounts, chrono::Utc::now());
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeOutput {
                 id,
                 incarnation,
@@ -10974,6 +10988,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.handle_daemon_runtime_output(id, data, preview_text);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::RuntimeStatus {
                 id,
                 incarnation,
@@ -11207,6 +11222,9 @@ fn main() -> std::io::Result<()> {
             Event::UserEvent(UserEvent::IssueMonitorLaunchPrepared(prepared)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_prepared(*prepared));
             }
+            Event::UserEvent(UserEvent::IssueMonitorPreflightRejected(completion)) => {
+                clients.dispatch(app.handle_monitor_preflight_rejected(*completion));
+            }
             Event::UserEvent(UserEvent::IssueMonitorLaunchFactsPrefetched(prefetched)) => {
                 clients.dispatch(app.handle_issue_monitor_launch_facts_prefetched(*prefetched));
             }
@@ -11337,6 +11355,7 @@ fn main() -> std::io::Result<()> {
                     );
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchProgress { window_id, message }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11355,6 +11374,7 @@ fn main() -> std::io::Result<()> {
                 let events = app.client_pane_snapshot_repair_events(&client_id, &pane_ids);
                 clients.dispatch(events);
             }
+            #[cfg(test)]
             Event::UserEvent(UserEvent::LaunchTerminalOutput { window_id, data }) => {
                 if let Some(project_key) = app.project_key_for_window(&window_id).cloned() {
                     clients.dispatch(vec![OutboundEvent::project(
@@ -11431,7 +11451,8 @@ fn main() -> std::io::Result<()> {
                 )]);
             }
             #[cfg(test)]
-            Event::UserEvent(UserEvent::LaunchComplete { .. }) => {
+            Event::UserEvent(UserEvent::LaunchComplete { window_id, window_generation, .. }) => {
+                drop((window_id, window_generation));
                 unreachable!("pure launch preparation fixture has no native GUI event loop")
             }
             Event::UserEvent(UserEvent::IssueMonitorLaunchDeliveryAcknowledged(acknowledged)) => {
@@ -11463,7 +11484,6 @@ fn main() -> std::io::Result<()> {
                 if may_open_project && !events.is_empty() {
                     board_projection_watchers.sync(app, proxy.clone());
                     workspace_projection_watchers.sync(app, proxy.clone());
-                    #[cfg(unix)]
                     board_daemon_subscribers.sync(app, proxy.clone());
                 }
                 clients.dispatch(events);

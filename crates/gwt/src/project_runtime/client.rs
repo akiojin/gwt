@@ -115,6 +115,60 @@ impl ProjectRuntimeClient {
                 "1".parse().expect("static presence header"),
             );
         }
+        #[cfg(windows)]
+        let (stream, _) = {
+            use tokio_tungstenite::tungstenite::error::{Error, UrlError};
+
+            let host = request
+                .uri()
+                .host()
+                .ok_or_else(|| Error::Url(UrlError::NoHostName).to_string())?;
+            // The private owner publishes plain HTTP. Resolve the same host
+            // and try every address in order, as connect_async does, but create
+            // the socket with NO_HANDLE_INHERIT before any concurrent spawn.
+            // Otherwise a later project's daemon can retain this GUI lease.
+            let port = match request.uri().scheme_str() {
+                Some("ws") => request.uri().port_u16().unwrap_or(80),
+                _ => return Err(Error::Url(UrlError::UnsupportedUrlScheme).to_string()),
+            };
+            let addresses = tokio::net::lookup_host(format!("{host}:{port}"))
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut connected = None;
+            let mut last_error = None;
+            for address in addresses {
+                let socket = if address.is_ipv4() {
+                    tokio::net::TcpSocket::new_v4()
+                } else {
+                    tokio::net::TcpSocket::new_v6()
+                };
+                let result = match socket {
+                    Ok(socket) => socket.connect(address).await,
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(socket) => {
+                        connected = Some(socket);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            let socket = connected.ok_or_else(|| {
+                last_error
+                    .unwrap_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "could not resolve to any address",
+                        )
+                    })
+                    .to_string()
+            })?;
+            tokio_tungstenite::client_async(request, socket)
+                .await
+                .map_err(|error| error.to_string())?
+        };
+        #[cfg(not(windows))]
         let (stream, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(|error| error.to_string())?;

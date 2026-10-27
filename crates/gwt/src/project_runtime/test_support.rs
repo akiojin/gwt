@@ -355,6 +355,13 @@ impl ProjectOwnerHarness {
         self.client.command(command).await
     }
 
+    pub async fn set_operation_clock(
+        &self,
+        clock: Option<std::time::Instant>,
+    ) -> Result<(), String> {
+        self.owner.test_set_operation_clock(clock).await
+    }
+
     pub async fn agent_switch_source_exited(
         &self,
         proof: crate::issue_monitor::IssueMonitorRuntimeStopRequest,
@@ -623,6 +630,8 @@ impl OwnerRuntimeProbe {
 #[doc(hidden)]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub enum OwnerLaunchStage {
+    ManualPredecessorStoppedBeforePreparation,
+    FinalizedBeforeRuntimePublication,
     MaterializedBeforeInstall,
     #[default]
     PreparedBeforeMailbox,
@@ -778,7 +787,7 @@ pub fn run_pty_start_gate_helper() {
     #[cfg(not(unix))]
     {
         let exit_code = outcome.expect("run test PTY start gate");
-        assert_eq!(exit_code, 0, "released PTY target failed");
+        std::process::exit(exit_code.clamp(0, 255));
     }
 }
 
