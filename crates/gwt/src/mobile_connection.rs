@@ -19,6 +19,7 @@ const SESSION_TTL_SECS: u64 = 300;
 const DEVICE_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 const MAX_PENDING_PAIRINGS: usize = 8;
 const MAX_CHALLENGES: usize = 64;
+const MAX_CHALLENGES_PER_DEVICE: usize = 4;
 const MAX_DEVICES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -266,7 +267,14 @@ impl MobileAuthorization {
         device.check(project, now)?;
         let expires_at = deadline(now, CHALLENGE_TTL_SECS)?.min(device.expires_at);
         self.challenges.retain(|_, c| now < c.expires_at);
-        if self.challenges.len() >= MAX_CHALLENGES {
+        if self.challenges.len() >= MAX_CHALLENGES
+            || self
+                .challenges
+                .values()
+                .filter(|challenge| challenge.device_id == device_id)
+                .count()
+                >= MAX_CHALLENGES_PER_DEVICE
+        {
             return Err(AuthorizationError::Capacity);
         }
         let id = Uuid::new_v4().to_string();
@@ -597,6 +605,65 @@ mod tests {
                 .unwrap_err(),
             AuthorizationError::Expired
         );
+    }
+
+    #[test]
+    fn challenge_capacity_is_per_device_and_recovers_after_consumption_or_expiry() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut challenges: Vec<_> = (0..4)
+            .map(|_| auth.challenge(&device.id, &project(), NOW).unwrap())
+            .collect();
+        assert_eq!(
+            auth.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        let other_key = self::key();
+        let other = paired(&mut auth, &other_key);
+        let mut peer = session(&mut auth, &other, &other_key);
+        auth.dispatch(&mut peer, &project(), 0, NOW, || ()).unwrap();
+
+        // Refusal preserves issued challenges; either response consumes one slot.
+        let challenge = challenges.pop().unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        auth.authenticate(&challenge.id, signature.as_ref(), NOW)
+            .unwrap();
+        let replacement = auth.challenge(&device.id, &project(), NOW).unwrap();
+        assert_eq!(
+            auth.authenticate(&replacement.id, &[0; 64], NOW)
+                .unwrap_err(),
+            AuthorizationError::InvalidSignature
+        );
+        auth.challenge(&device.id, &project(), NOW).unwrap();
+        assert_eq!(
+            auth.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        auth.challenge(&device.id, &project(), NOW + CHALLENGE_TTL_SECS)
+            .unwrap();
+    }
+
+    #[test]
+    fn challenge_capacity_remains_globally_bounded_and_recovers_after_revocation() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let devices: Vec<_> = (0..16).map(|_| paired(&mut auth, &key())).collect();
+        for device in &devices {
+            for _ in 0..4 {
+                auth.challenge(&device.id, &project(), NOW).unwrap();
+            }
+        }
+        let other = paired(&mut auth, &key());
+        assert_eq!(
+            auth.challenge(&other.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        auth.revoke(&devices[0].id).unwrap();
+        auth.challenge(&other.id, &project(), NOW).unwrap();
     }
 
     #[test]
