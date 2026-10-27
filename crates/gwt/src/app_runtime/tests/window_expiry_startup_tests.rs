@@ -292,7 +292,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     configure_owner_fixture_tools(&repo, &["pane-contract-fixture"]);
     let owner = Arc::new(
         owner_fixture_block_on(
-            gwt::project_runtime::test_support::ProjectOwnerHarness::start(&repo),
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&repo),
         )
         .unwrap(),
     );
@@ -511,10 +511,30 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         vec![]
     };
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed exact Monitor delivery");
-    let accounting = gwt::IssueMonitorState::with_prefs(
-        gwt::IssueMonitorConfig::default(),
-        gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
-    );
+    // The real owner publishes its first census on the five-second cadence.
+    // Observe that input before asserting the original exact occupied count.
+    // test-hygiene: allow-wall-clock-deadline Bounds the real owner's OS-process census observation; its worker retains the production five-second cadence.
+    let census_deadline = Instant::now() + Duration::from_secs(10);
+    let accounting = loop {
+        let accounting = gwt::IssueMonitorState::with_prefs(
+            gwt::IssueMonitorConfig::default(),
+            gwt::load_issue_monitor_prefs(&prefs_path).unwrap(),
+        );
+        if !bookkeeping_warning
+            || accounting
+                .agent_status()
+                .occupied_slot_count
+                .is_some_and(|count| count > 0)
+        {
+            break accounting;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Observes that native worker's actual durable census without fabricating process evidence or changing its clock.
+            Instant::now() < census_deadline,
+            "the actual owner must publish its live census before occupancy is asserted"
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
     if bookkeeping_warning {
         let snapshot = runtime
             .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())

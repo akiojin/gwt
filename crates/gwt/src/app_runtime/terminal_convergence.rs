@@ -108,7 +108,6 @@ pub(crate) fn settle_issue_monitor_terminal_delivery_in_background(
         delivery_id: monitor.pending_launch_delivery_id(issue_number),
         window_id: Some(window_id.to_string()),
     };
-    #[cfg(unix)]
     let publication = {
         let payload = gwt::runtime_daemon_events::issue_monitor_payload(
             "control",
@@ -124,12 +123,6 @@ pub(crate) fn settle_issue_monitor_terminal_delivery_in_background(
         );
         gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
     };
-    #[cfg(not(unix))]
-    let publication = Err(
-        gwt::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
-            "Issue Monitor daemon control is unavailable on this platform".to_string(),
-        ),
-    );
     match publication {
         Ok(()) => Ok(()),
         Err(error) if error.allows_local_fallback() => {
