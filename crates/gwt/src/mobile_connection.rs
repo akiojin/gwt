@@ -63,6 +63,15 @@ pub enum AuthorizationError {
     Replay,
 }
 
+/// Authorization rejection does not write; a storage error disables access.
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceUpdateError {
+    #[error(transparent)]
+    Authorization(#[from] AuthorizationError),
+    #[error("could not persist mobile device authorization: {0}")]
+    Storage(#[source] io::Error),
+}
+
 /// Durable public metadata only. Revocation tombstones survive snapshot restore.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -263,6 +272,46 @@ impl MobileAuthorization {
             .revoked = true;
         self.challenges
             .retain(|_, challenge| challenge.device_id != device_id);
+        Ok(())
+    }
+
+    /// Approve on the trusted PC control plane, returning success only after save.
+    /// The owner holds its single-writer fence through this entire call.
+    /// See [`Self::revoke_and_save`] for storage failure and recovery semantics.
+    pub fn approve_and_save(
+        &mut self,
+        request_id: &str,
+        now: u64,
+        path: &Path,
+    ) -> Result<DeviceRecord, DeviceUpdateError> {
+        let device = self.approve(request_id, now)?;
+        self.save_or_disable(path)?;
+        Ok(device)
+    }
+
+    /// Revoke on the trusted PC control plane, returning success only after save.
+    ///
+    /// Keep the owner's single-writer fence through this call. A storage error
+    /// disables access and invalidates all sessions/pending requests/challenges,
+    /// retaining the latest in-memory records, including revocation tombstones.
+    /// Replacement may already have happened: never roll back to an old snapshot.
+    /// Repair storage and save this same authority successfully before the trusted
+    /// owner explicitly enables it again; successful save alone does not enable it.
+    /// The private/trusted path requirements of [`Self::save`] still apply.
+    pub fn revoke_and_save(
+        &mut self,
+        device_id: &str,
+        path: &Path,
+    ) -> Result<(), DeviceUpdateError> {
+        self.revoke(device_id)?;
+        self.save_or_disable(path)
+    }
+
+    fn save_or_disable(&mut self, path: &Path) -> Result<(), DeviceUpdateError> {
+        if let Err(error) = self.save(path) {
+            self.disable();
+            return Err(DeviceUpdateError::Storage(error));
+        }
         Ok(())
     }
 
@@ -954,6 +1003,132 @@ mod tests {
                 Err(error) if error.kind() == std::io::ErrorKind::InvalidData
             ));
             assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        }
+    }
+
+    #[test]
+    fn persisted_updates_save_before_success_and_leave_authorization_rejections_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let pending = auth
+            .request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let device = auth.approve_and_save(&pending.id, NOW, &path).unwrap();
+        let mut restored = MobileAuthorization::load(&path).unwrap();
+        restored.enable();
+        session(&mut restored, &device, &key);
+
+        let before = std::fs::read(&path).unwrap();
+        let missing = dir.path().join("missing/devices.json");
+        assert!(matches!(
+            auth.approve_and_save(&pending.id, NOW, &missing),
+            Err(DeviceUpdateError::Authorization(
+                AuthorizationError::UnknownRequest
+            ))
+        ));
+        assert!(matches!(
+            auth.revoke_and_save("unknown", &missing),
+            Err(DeviceUpdateError::Authorization(
+                AuthorizationError::UnknownDevice
+            ))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(auth.check_enabled(), Ok(()));
+
+        auth.revoke_and_save(&device.id, &path).unwrap();
+        let mut restored = MobileAuthorization::load(&path).unwrap();
+        restored.enable();
+        assert_eq!(
+            restored.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        assert_eq!(auth.check_enabled(), Ok(()));
+    }
+
+    #[test]
+    fn failed_approval_save_disables_access_and_clears_transient_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing/devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut old = session(&mut auth, &device, &key);
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let pending = auth
+            .request_pairing("Tablet", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let unapproved = auth
+            .request_pairing("Other", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        assert!(matches!(
+            auth.approve_and_save(&pending.id, NOW, &path),
+            Err(DeviceUpdateError::Storage(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(auth.check_enabled(), Err(AuthorizationError::Disabled));
+        assert_eq!(auth.devices().len(), 2);
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW, || panic!("disabled effect")),
+            Err(AuthorizationError::Disabled)
+        );
+
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        auth.save(&path).unwrap();
+        assert_eq!(auth.check_enabled(), Err(AuthorizationError::Disabled));
+        auth.enable();
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW, || panic!("stale effect")),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            auth.authenticate(&challenge.id, &[], NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        assert_eq!(
+            auth.approve(&unapproved.id, NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        assert_eq!(MobileAuthorization::load(&path).unwrap().devices().len(), 2);
+        session(&mut auth, &device, &key);
+    }
+
+    #[test]
+    fn failed_revocation_save_preserves_tombstone_through_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut old = session(&mut auth, &device, &key);
+        auth.save(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(matches!(
+            auth.revoke_and_save(&device.id, &path),
+            Err(DeviceUpdateError::Storage(_))
+        ));
+        assert_eq!(auth.check_enabled(), Err(AuthorizationError::Disabled));
+        assert!(auth.devices()[0].is_revoked());
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW, || panic!("disabled effect")),
+            Err(AuthorizationError::Disabled)
+        );
+        std::fs::remove_dir(&path).unwrap();
+        auth.save(&path).unwrap();
+        auth.enable();
+        let mut restored = MobileAuthorization::load(&path).unwrap();
+        restored.enable();
+        for authority in [&mut auth, &mut restored] {
+            assert_eq!(
+                authority
+                    .challenge(&device.id, &project(), NOW)
+                    .unwrap_err(),
+                AuthorizationError::Revoked
+            );
         }
     }
 
