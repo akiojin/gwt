@@ -157,6 +157,26 @@ fn terminal_convergence_grace_candidate_resets_and_closes_the_exact_window() {
     };
     let eligible = TerminalCloseEligibility::Eligible(TerminalCloseReason::SettledExecution);
 
+    // A timer alone cannot reuse old Warning eligibility while a scan is
+    // pending. The next observation can discover an action or authority hold.
+    runtime.set_window_status("tab-1", "codex-1", WindowProcessStatus::Idle);
+    let warning =
+        TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning);
+    for cause in ["obligation_open", "execution_blocked_or_corrupt"] {
+        runtime.terminal_convergence_observed_events_at(grace, observation(warning, 7), t0);
+        runtime.close_expired_terminal_window_candidates_at(t0 + grace);
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert_eq!(runtime.terminal_close_candidates[&window_id].since, t0);
+        runtime.terminal_convergence_observed_events_at(
+            grace,
+            observation(TerminalCloseEligibility::Ineligible(cause), 7),
+            t0 + grace,
+        );
+        assert!(runtime.window_lookup.contains_key(&window_id));
+        assert!(runtime.terminal_close_candidates.is_empty());
+    }
+    runtime.set_window_status("tab-1", "codex-1", WindowProcessStatus::Running);
+
     runtime.terminal_convergence_observed_events_at(grace, observation(eligible, 7), t0);
     assert_eq!(runtime.terminal_close_grace, grace);
     let since = runtime
@@ -502,12 +522,28 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
             .window_hook_states
             .insert(window_id.clone(), WindowProcessStatus::Idle);
         runtime.set_window_status("tab-1", "agent-42", WindowProcessStatus::Idle);
-        runtime.terminal_convergence_observed_events_at(grace, observations, t0 + grace);
+        runtime.terminal_convergence_observed_events_at(grace, observations.clone(), t0 + grace);
         t0 + grace + grace
     } else {
         t0 + grace
     };
     runtime.close_expired_terminal_window_candidates_at(expires);
+    if bookkeeping_warning {
+        assert!(
+            runtime.window_lookup.contains_key(&window_id),
+            "the bare timer retains a Warning until a fresh background observation"
+        );
+        let latest = observe_terminal_windows_in_background(
+            &runtime.sessions_dir,
+            runtime.terminal_window_snapshots(),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            latest[0].eligibility,
+            TerminalCloseEligibility::Eligible(reason)
+        );
+        runtime.terminal_convergence_observed_events_at(grace, latest, expires);
+    }
     assert!(!runtime.window_lookup.contains_key(&window_id));
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     if bookkeeping_warning {

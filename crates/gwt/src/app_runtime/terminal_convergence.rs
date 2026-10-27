@@ -925,7 +925,7 @@ impl AppRuntime {
                 }
             }
         }
-        self.close_expired_terminal_window_candidates_at(now)
+        self.close_expired_terminal_window_candidates(now, true)
     }
 
     /// FR-046: close every candidate whose grace elapsed, after revalidating
@@ -934,6 +934,14 @@ impl AppRuntime {
     pub(crate) fn close_expired_terminal_window_candidates_at(
         &mut self,
         now: Instant,
+    ) -> Vec<OutboundEvent> {
+        self.close_expired_terminal_window_candidates(now, false)
+    }
+
+    fn close_expired_terminal_window_candidates(
+        &mut self,
+        now: Instant,
+        fresh_observations: bool,
     ) -> Vec<OutboundEvent> {
         let grace = self.terminal_close_grace;
         let expired: Vec<(String, TerminalCloseCandidate)> = self
@@ -944,13 +952,13 @@ impl AppRuntime {
             .collect();
         let mut events = Vec::new();
         for (window_id, candidate) in expired {
-            self.terminal_close_candidates.remove(&window_id);
             if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
                 && !matches!(
                     self.window_status(&window_id),
                     Some(WindowProcessStatus::Idle | WindowProcessStatus::Stopped)
                 )
             {
+                self.terminal_close_candidates.remove(&window_id);
                 continue;
             }
             let session_matches = self
@@ -968,6 +976,7 @@ impl AppRuntime {
                 || !session_matches
                 || !generation_matches
             {
+                self.terminal_close_candidates.remove(&window_id);
                 tracing::info!(
                     target: "gwt.pane.teardown",
                     window_id = %window_id,
@@ -977,6 +986,15 @@ impl AppRuntime {
                 );
                 continue;
             }
+            // Warning cleanup needs this scan's classification, applied above
+            // after background Session/ledger reads. A timer retains the grace
+            // candidate until then, without adding disk IO to the Tao thread.
+            if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
+                && !fresh_observations
+            {
+                continue;
+            }
+            self.terminal_close_candidates.remove(&window_id);
             tracing::info!(
                 target: "gwt.pane.teardown",
                 window_id = %window_id,
