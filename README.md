@@ -1019,6 +1019,17 @@ supplied snapshots with no blocker edges yield []. Degraded or aborted snapshots
 these facts with the enclosing Monitor provenance and coverage limits. This partial inverse
 does not prove no impact, current blockage, importance, transitive delay or critical path,
 and does not authorize priority, readiness or launch changes.
+`policy.dependency_reachability` follows the union of those supplied edges to list distinct
+direct and indirect dependents in numeric order, excluding the root even in cycles or
+self-loops. Cycle and bundle declarations alone do not create edges. Goal, milestone and
+roadmap diagnostics expose the same field: traverse globally, including external blockers
+and intermediate Issues, then filter dependent endpoints using their existing membership
+rules and omit empty rows. An absent Monitor yields null even for empty membership; no
+reachable dependents yields []. Raw observations, direct impacts and degraded/aborted
+provenance stay unchanged. This is reachability across merged partial observations, not a
+complete graph or proof that the dependencies were simultaneously valid. It establishes no
+current blockage, delay, critical path, priority, health, readiness or launch permission.
+
 Each milestone's `dependency_observations` selects these rows for its effective member
 Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
 Row order, repeats and missing dependency data remain visible; absent Monitor yields null,

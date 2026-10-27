@@ -928,6 +928,16 @@ Monitor は宣言がない場合に診断を省略し、解消済み・不明の
 Monitor の取得元・スキャン時刻・観測範囲の制約を併せて確認してください。
 この部分的な逆引きから影響なし・現在の阻害・重要度・推移的な遅延・critical path は
 判断できず、優先順位・起動可能性・起動の変更を許可しません。
+`policy.dependency_reachability` は、供給辺を併合して直接・間接の到達先を
+番号順・重複なしで示します。循環や自己参照でも停止し、根自身を除外します。
+cycle・bundle 宣言だけから辺は作りません。Goal・milestone・ロードマップの各診断も
+同じ項目を持ち、外部 blocker・中間 Issue を含む全体を探索した後、既存の所属条件で
+到達先だけを絞り、空の行を除きます。Monitor 不在は空所属でも null、到達先なしは []
+です。元の観測・直接依存の逆引き・degraded/aborted の事実と provenance は保持します。
+これは部分観測を併合した構造上の到達可能性であり、完全なグラフや依存が同時に有効
+だったことを保証しません。現在の閉塞・遅延・critical path・priority・health・readiness・
+起動許可の根拠にはなりません。
+
 各 milestone の `dependency_observations` は、直接参照した Issue と、一意な非空
 milestone ID で解決した roadmap 所属 Issue の行を抽出します。供給順・重複・依存情報の
 欠測を保持し、Monitor 不在は null、一致行がなければ [] です。`unobserved_issues` と
