@@ -264,7 +264,7 @@ Safe access from iOS Safari and Android Chrome is being developed in
 [SPEC #6476](https://github.com/akiojin/gwt/issues/6476). Device authorization
 and device-record persistence are implemented as internal foundations, but are
 not connected to the running server. Mobile pairing, encrypted remote transport,
-automatic Direct/Relay selection, and phone validation are not available yet.
+automatic Direct/Relay selection, and validation on physical phones are not available yet.
 `--bind` changes the listening address; it does not enable these protections.
 Keep the existing browser server on loopback or a trusted network.
 
