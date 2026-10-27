@@ -6894,6 +6894,7 @@ fn scan_issue_monitor_once_blocking(
                 &scope.project_root,
                 &owner,
                 &repo,
+                &loaded.linked_prs,
             )
         },
     ) {
@@ -7064,6 +7065,7 @@ fn scan_issue_monitor_once_blocking(
                 loaded.issues.iter().filter(|issue| {
                     queued.contains(&issue.number) || dependencies.contains(&issue.number)
                 }),
+                &loaded.linked_prs,
             );
             let mut dependency_observations = std::collections::BTreeMap::new();
             for issue_number in dependencies {
