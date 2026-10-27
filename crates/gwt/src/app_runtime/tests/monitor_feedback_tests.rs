@@ -162,7 +162,7 @@ fn pm_wakes_exclude_terminal_and_superseded_escalations() {
 }
 
 #[test]
-fn pm_pending_wake_rechecks_subject_before_delivery() {
+fn pm_wake_pending_signal_rechecks_subject_before_delivery() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -174,8 +174,13 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     let mut subject = gwt_agent::Session::new(&repo, "work/subject", gwt_agent::AgentId::Codex);
     subject.status = gwt_agent::AgentStatus::Running;
     seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");
+    runtime.pm_wake_events(&repo, &[]);
     runtime.terminal_input_events(&pm_window_id, "draft");
-    runtime.pm_periodic_wake_events_at(&repo, "2026-08-18T01:00:00Z");
+    // Important signals remain held during input; periodic ticks are discarded.
+    runtime.pm_wake_events(
+        &repo,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)],
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .unwrap()

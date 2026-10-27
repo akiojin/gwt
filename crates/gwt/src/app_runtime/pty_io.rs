@@ -330,7 +330,8 @@ pub(super) fn write_pane_input_then_submit(
         } else {
             pane.lock()
                 .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
+                .shared_pty()
+                .write_machine_input(body.as_bytes())
                 .map_err(|error| error.to_string())
         };
     };
@@ -373,7 +374,8 @@ pub(super) fn write_pane_input_and_submit_blocking(
         } else {
             pane.lock()
                 .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
+                .shared_pty()
+                .write_machine_input(body.as_bytes())
                 .map_err(|error| error.to_string())
         };
     };

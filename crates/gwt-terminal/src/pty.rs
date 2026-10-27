@@ -381,6 +381,7 @@ struct SpawnDiagnostic {
 struct PtyInputState {
     protected: bool,
     ordinary_input_revision: u64,
+    last_human_input_at: Option<Instant>,
     protected_transaction_revision: u64,
     queued: VecDeque<Vec<u8>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
@@ -915,6 +916,16 @@ impl PtyHandle {
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, true)
+    }
+
+    /// Preserve ordinary input ordering/composer protection without treating
+    /// an automated write as human activity.
+    pub fn write_machine_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, false)
+    }
+
+    fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
         let mut state = self
             .input_state
             .lock()
@@ -928,6 +939,16 @@ impl PtyHandle {
         }
         if !data.is_empty() {
             state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
+        }
+        // Escape-only terminal responses must not postpone supervision. The
+        // existing content classifier also covers paste payloads and edits.
+        if human
+            && (chunk_has_prompt_content(data)
+                || data
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
+        {
+            state.last_human_input_at = Some(gwt_core::operation_deadline::now());
         }
         state.note_user_input(data);
         if state.protected {
@@ -969,6 +990,13 @@ impl PtyHandle {
             .lock()
             .ok()
             .map(|state| state.ordinary_input_revision)
+    }
+
+    /// Atomically observe an empty composer after a full human quiet interval.
+    pub fn quiet_ordinary_input_revision(&self, quiet_for: Duration) -> Option<u64> {
+        let state = self.input_state.lock().ok()?;
+        (!state.unsent_user_input && state.human_input_is_quiet(quiet_for))
+            .then_some(state.ordinary_input_revision)
     }
 
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
@@ -1551,6 +1579,14 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
 }
 
 impl PtyInputState {
+    fn human_input_is_quiet(&self, quiet_for: Duration) -> bool {
+        self.last_human_input_at.is_none_or(|at| {
+            gwt_core::operation_deadline::now()
+                .checked_duration_since(at)
+                .is_some_and(|elapsed| elapsed >= quiet_for)
+        })
+    }
+
     fn note_user_input(&mut self, data: &[u8]) {
         self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
     }
@@ -1718,6 +1754,17 @@ impl PtyInputReservation {
         expected: u64,
         operation: impl FnOnce() -> Result<T, TerminalError>,
     ) -> Result<T, TerminalError> {
+        self.with_quiet_ordinary_input(expected, Duration::ZERO, operation)
+    }
+
+    /// Keep revision, composer and quiet-time checks in the same body commit
+    /// critical section. The callback must not acquire input state again.
+    pub fn with_quiet_ordinary_input<T>(
+        &self,
+        expected: u64,
+        quiet_for: Duration,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
         let state = self
             .handle
             .input_state
@@ -1725,7 +1772,10 @@ impl PtyInputReservation {
             .map_err(|error| TerminalError::PtyIoError {
                 details: format!("input state lock poisoned: {error}"),
             })?;
-        if state.ordinary_input_revision != expected || state.unsent_user_input {
+        if state.ordinary_input_revision != expected
+            || state.unsent_user_input
+            || (!quiet_for.is_zero() && !state.human_input_is_quiet(quiet_for))
+        {
             return Err(TerminalError::PtyIoError {
                 details: "ordinary input changed before protected body commit".into(),
             });
@@ -2941,11 +2991,19 @@ mod tests {
         handle.write_input(b"user prompt\r").unwrap();
         assert!(!handle.has_unsent_user_input());
         assert!(handle.ordinary_input_revision().unwrap() > before);
+        let human_time = handle.input_state.lock().unwrap().last_human_input_at;
+        assert!(human_time.is_some());
+        handle.write_machine_input(b"automated prompt\r").unwrap();
+        handle.write_input(b"\x1b[1;1R").unwrap();
         let revision = handle.ordinary_input_revision();
         let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
         reservation.write_input(b"protected body").unwrap();
         reservation.write_input(b"\r").unwrap();
         assert_eq!(handle.ordinary_input_revision(), revision);
+        assert_eq!(
+            handle.input_state.lock().unwrap().last_human_input_at,
+            human_time
+        );
     }
 
     #[test]
