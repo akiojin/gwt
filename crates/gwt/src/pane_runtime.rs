@@ -5,7 +5,10 @@
 
 use std::{
     io::Read,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::Instant,
 };
@@ -41,6 +44,7 @@ pub fn spawn_output_thread(
     id: String,
     incarnation: u64,
     pane: Arc<Mutex<Pane>>,
+    current: Arc<AtomicBool>,
     sink: impl Fn(PaneRuntimeEvent) + Send + 'static,
 ) -> JoinHandle<()> {
     // Reserve the reader before the status worker can observe an immediate
@@ -49,7 +53,9 @@ pub fn spawn_output_thread(
         .lock()
         .map_err(|error| error.to_string())
         .and_then(|pane| pane.reader().map_err(|error| error.to_string()));
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     thread::spawn(move || {
+        let _dispatch = tracing::dispatcher::set_default(&dispatch);
         let reader = match reader {
             Ok(reader) => reader,
             Err(error) => {
@@ -65,19 +71,40 @@ pub fn spawn_output_thread(
         };
 
         let mut reader = reader;
-        let mut buffer = [0u8; OUTPUT_BATCH_MAX_BYTES];
+        // A read can release the three withheld bytes of a split CSI 6n
+        // candidate. Keep the resulting public chunk within the existing bound.
+        let mut buffer = [0u8; OUTPUT_BATCH_MAX_BYTES - 3];
         loop {
             match reader.read(&mut buffer) {
-                Ok(0) => break,
+                Ok(0) => {
+                    let tail = pane.lock().ok().and_then(|mut pane| {
+                        let data = pane.finish_owner_output();
+                        (!data.is_empty())
+                            .then(|| (data, pane.output_seq(), pane.screen().contents()))
+                    });
+                    if let Some((data, seq, screen)) = tail {
+                        sink(PaneRuntimeEvent::Output {
+                            id: id.clone(),
+                            incarnation,
+                            data,
+                            seq,
+                            screen: Some(screen),
+                        });
+                    }
+                    break;
+                }
                 Ok(read) => {
-                    let chunk = buffer[..read].to_vec();
+                    let mut chunk = buffer[..read].to_vec();
                     let lock_started = Instant::now();
                     let mut seq = 0;
                     let mut screen = None;
+                    let mut responses = None;
                     if let Ok(mut pane) = pane.lock() {
                         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
                         let parse_started = Instant::now();
-                        pane.process_bytes(&chunk);
+                        let output = pane.process_owner_output(&chunk);
+                        chunk = output.data;
+                        responses = Some((pane.shared_pty(), output.cursor_reports));
                         seq = pane.output_seq();
                         screen = Some(pane.screen().contents());
                         let parse_us = parse_started.elapsed().as_micros() as u64;
@@ -95,6 +122,35 @@ pub fn spawn_output_thread(
                                 parse_us,
                                 "reader thread held pane mutex (output parsing)"
                             );
+                        }
+                    }
+                    // The parser captured each cursor at the query's stream
+                    // position. Never hold Pane while waiting for its writer.
+                    if let Some((pty, reports)) = responses {
+                        if !reports.is_empty() {
+                            tracing::debug!(
+                                target: "gwt_terminal_protocol",
+                                stage = "owner_cursor_response",
+                                window_id = id.as_str(),
+                                incarnation,
+                                seq,
+                                report_count = reports.len(),
+                                "answering terminal cursor query"
+                            );
+                        }
+                        for report in reports {
+                            if let Err(error) = pty.write_cursor_position_report(report, &current) {
+                                if current.load(Ordering::Acquire) {
+                                    sink(PaneRuntimeEvent::Status {
+                                        id,
+                                        incarnation,
+                                        status: WindowProcessStatus::Error,
+                                        detail: Some(error.to_string()),
+                                        exit_confirmed: false,
+                                    });
+                                    return;
+                                }
+                            }
                         }
                     }
                     sink(PaneRuntimeEvent::Output {
@@ -229,7 +285,7 @@ fn runtime_status_from_pane_status(status: &PaneStatus) -> (WindowProcessStatus,
 mod tests {
     use std::{
         collections::HashMap,
-        sync::{mpsc, Arc, Mutex},
+        sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
         time::Duration,
     };
 
@@ -290,14 +346,17 @@ mod tests {
             )
             .unwrap(),
         ));
-        if cfg!(windows) {
-            let _ = pane.lock().unwrap().write_input(b"\x1b[1;1R");
-        }
         let (sender, receiver) = mpsc::channel();
         let output_sender = sender.clone();
-        let output = spawn_output_thread("pane-1".into(), 42, pane.clone(), move |event| {
-            let _ = output_sender.send(("output", event));
-        });
+        let output = spawn_output_thread(
+            "pane-1".into(),
+            42,
+            pane.clone(),
+            Arc::new(AtomicBool::new(true)),
+            move |event| {
+                let _ = output_sender.send(("output", event));
+            },
+        );
         let status = spawn_status_thread("pane-1".into(), 42, pane.clone(), move |event| {
             let _ = sender.send(("status", event));
         });
@@ -347,6 +406,7 @@ mod tests {
         output.join().unwrap();
         status.join().unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("pane-worker-output"));
+        assert!(!bytes.windows(4).any(|window| window == b"\x1b[6n"));
         assert!(identities
             .iter()
             .all(|(id, incarnation)| id == "pane-1" && *incarnation == 42));

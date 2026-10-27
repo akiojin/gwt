@@ -1,7 +1,10 @@
-pub(crate) use gwt::agent_capability::AgentDurableAuthority;
 pub(crate) use gwt::agent_capability::{
     AgentCapabilityGrant, AgentCapabilityIssuer, AgentCapabilityRegistry, AgentFrontendRequest,
-    AgentPmSendResponder, AgentSelfCloseCapabilityTicket, AgentSelfCloseDirectAcceptance,
+    AgentSelfCloseCapabilityTicket,
+};
+#[cfg(test)]
+pub(crate) use gwt::agent_capability::{
+    AgentDurableAuthority, AgentPmSendResponder, AgentSelfCloseDirectAcceptance,
     AgentSelfCloseResponder,
 };
 #[cfg(test)]

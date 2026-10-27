@@ -161,10 +161,12 @@ fn spawn_window_close_fallback_thread(
 /// return that lands in the same PTY write as the text into the text itself —
 /// the line is inserted on the prompt but never submitted — so the submit has
 /// to be a write of its own, after the TUI has settled.
+#[cfg(test)]
 pub(super) use gwt::project_runtime::agent_dispatch::{
     drive_verified_pane_submit, pane_input_body_bytes, split_pane_submit, VerifiedPaneSubmitOutcome,
 };
 
+#[cfg(test)]
 pub(crate) use gwt::session_finalizer::pane_teardown_stall_message;
 
 /// Complete the stop phase for every runtime before any join can block.
@@ -266,10 +268,15 @@ impl AppRuntime {
                         tokio::time::timeout(Duration::from_secs(120), client.command(command))
                             .await
                             .map_err(|_| "project command timed out".to_string())?
-                            .map(|value| {
+                            .and_then(|value| {
                                 value
-                                    .get("has_unsent_user_input")
-                                    .and_then(serde_json::Value::as_bool)
+                                    .get("input_observation")
+                                    .filter(|value| !value.is_null())
+                                    .map(|value| {
+                                        serde_json::from_value(value.clone())
+                                            .map_err(|error| error.to_string())
+                                    })
+                                    .transpose()
                             })
                     })
                 });
@@ -313,22 +320,28 @@ impl AppRuntime {
         {
             return Vec::new();
         }
-        let unsent = match result {
+        let observation = match result {
             Err(error) => {
                 if approval_resolution_started {
                     self.cancel_runtime_approval_resolution(&id);
                 }
                 return self.remote_command_refusal(&id, &kind, error);
             }
-            Ok(unsent) => unsent,
+            Ok(observation) => observation,
         };
-        if let Some(unsent) = unsent {
-            self.runtimes
-                .get(&id)
-                .expect("fenced remote input")
-                .has_unsent_user_input
-                .store(unsent, std::sync::atomic::Ordering::Release);
-            if !unsent {
+        if let Some(observation) = observation {
+            let runtime = self.runtimes.get_mut(&id).expect("fenced remote input");
+            if runtime
+                .input_observation
+                .is_none_or(|old| old.revision <= observation.revision)
+            {
+                runtime.has_unsent_user_input.store(
+                    observation.has_unsent_user_input,
+                    std::sync::atomic::Ordering::Release,
+                );
+                runtime.observe_input(Some(observation));
+            }
+            if !observation.has_unsent_user_input {
                 self.flush_pending_pm_wake(&id);
             }
         }
@@ -669,6 +682,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn stop_window_runtime(&mut self, window_id: &str) {
         if let Some(runtime) = self.runtimes.get(window_id) {
             let command = gwt::project_runtime::events::OwnerCommand::Close {

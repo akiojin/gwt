@@ -205,36 +205,17 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().expect("tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "codex-1",
-        repo.clone(),
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    let session = ActiveAgentSession {
-        window_id: window_id.clone(),
-        session_id: "session-1".to_string(),
-        agent_id: "codex".to_string(),
-        branch_name: "work/20260506-1652".to_string(),
-        display_name: "Codex".to_string(),
-        worktree_path: temp.path().join("work/20260506-1652"),
-        agent_project_root: temp.path().join("work/20260506-1652").display().to_string(),
-        runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-        tab_id: "tab-1".to_string(),
-    };
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), session.clone());
+    let _home = ScopedGwtHome::set(temp.path());
+    let (owner, probe, mut runtime, mut source) =
+        super::managed_launch_tests::managed_exit_fixture(temp.path(), 0, "", false);
+    let repo = runtime.tabs[0].project_root.clone();
+    let session = probe
+        .active_session
+        .as_ref()
+        .expect("actual owner AgentRecord");
     save_start_work_workspace_projection(
         &repo,
-        &session,
+        session,
         "origin/main",
         None,
         None,
@@ -243,12 +224,8 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     )
     .expect("save projection");
 
-    let events = runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Stopped,
-        Some("Process exited".to_string()),
-        true,
-    );
+    let events =
+        super::managed_launch_tests::finish_managed_exit(&owner, &probe, &mut runtime, &mut source);
 
     let projection = gwt_core::workspace_projection::load_workspace_projection(&repo)
         .expect("load projection")
@@ -265,6 +242,7 @@ fn app_runtime_stopped_agent_cleans_saved_projection_and_broadcasts_active_work_
     assert_eq!(active_work.active_agents, 0);
     assert!(active_work.agents.is_empty());
     assert_eq!(active_work.status_category, "idle");
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]
@@ -841,14 +819,17 @@ fn app_runtime_coordination_hooks_still_emit_browser_hook_event() {
 
 #[test]
 fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_state_changes() {
-    let temp = tempdir().unwrap();
-    let _home = ScopedGwtHome::set(temp.path());
-    let root = temp.path().join("repo");
-    for (claimed_session, registered_pm, should_refresh) in [
-        ("session-1", true, true),
-        ("retired-session", true, false),
-        ("session-1", false, false),
+    use gwt::project_runtime::events::OwnerCommand;
+    for (current_claim, registered_pm, should_refresh) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
     ] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        init_repo_with_initial_commit(&root);
         let tab = sample_project_tab_with_window_at(
             "tab-1",
             "agent-1",
@@ -858,56 +839,121 @@ fn app_runtime_pm_status_changed_refreshes_only_the_exact_registered_pm_without_
         );
         let (mut runtime, recorded_events) =
             sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let id = combined_window_id("tab-1", "agent-1");
+        let _pane = attach_live_pm_pane(&mut runtime, &id);
+        // Finish the real launch's background projection before observing only
+        // work caused by this notification.
+        runtime.blocking_tasks = BlockingTaskSpawner::thread();
+        runtime.active_work_projection_broadcast_for_tab("tab-1");
+        wait_for_active_work_projection(&mut runtime);
+        runtime_state_hook_events(&mut runtime, &id, "Running", 1);
+        assert_eq!(
+            owner_runtime_probe(&runtime, &id)
+                .active_session
+                .unwrap()
+                .agent_id,
+            "claude"
+        );
+        let prompt = b"\x1b[2J\x1b[HBash command\r\n\r\n cargo test -p gwt\r\n\r\n\
+            Do you want to proceed?\r\n > 1. Yes\r\n\
+            2. No, and tell Claude what to do differently\r\n\r\n\
+            Enter to confirm \xc2\xb7 Esc to cancel\r\n";
+        approval_owner_screen(&mut runtime, &id, prompt, approval_owner_future_anchor());
+        let owner = project_owner_fixture(&mut runtime, &id);
+        let before = owner_runtime_probe(&runtime, &id);
+        let session_id = &before.session.as_ref().unwrap().id;
+        let latch = before.policy.approval.expect("actual PM approval latch");
+        if !registered_pm {
+            assert!(
+                gwt::pm_registry::deregister_pm(
+                    &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+                    session_id,
+                )
+                .unwrap()
+                .1
+            );
+        }
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
-        let id = combined_window_id("tab-1", "agent-1");
-        runtime
-            .active_agent_sessions
-            .insert(id.clone(), sample_active_agent_session("tab-1", &id));
-        let context = runtime.project_context("tab-1").unwrap();
-        if registered_pm {
-            runtime
-                .project_state_mut(&context)
-                .unwrap()
-                .pm_sessions
-                .insert(root.clone(), "session-1".into());
-        }
-        let latch = ApprovalPromptLatch {
-            active_fingerprint: Some(7),
-            ..Default::default()
-        };
-        runtime.window_approval_waiting.insert(id.clone(), latch);
+        recorded_events.lock().unwrap().clear();
         let status_before = runtime.window_status(&id);
-        let mut event = runtime_hook_coordination_event(claimed_session);
+        let gui_latch_before = runtime.window_approval_waiting.get(&id).copied();
+        let mut event = runtime_hook_coordination_event(if current_claim {
+            session_id
+        } else {
+            "retired-session"
+        });
         event.source_event = Some("PmStatusChanged".into());
         event.message = Some("coordination:PmStatusChanged".into());
         event.project_root = Some(root.display().to_string());
         // A provider-id fallback match must never grant PM notification authority.
-        event.agent_session_id = Some("session-1".into());
+        event.agent_session_id = Some(session_id.clone());
 
-        let events = runtime.handle_runtime_hook_event(event);
+        let mut source = owner.subscribe();
+        owner_fixture_block_on(async {
+            assert_eq!(
+                before.runtime_hook(&event).await.unwrap(),
+                if current_claim {
+                    reqwest::StatusCode::NO_CONTENT
+                } else {
+                    reqwest::StatusCode::UNAUTHORIZED
+                }
+            );
+            owner.command(OwnerCommand::Health).await.unwrap();
+        });
+        let events = relay_approval_owner_events(&mut runtime, &id, &mut source);
+        let after = owner_runtime_probe(&runtime, &id);
+        let status_after = runtime.window_status(&id);
+        let gui_latch_after = runtime.window_approval_waiting.get(&id).copied();
+        for task in std::mem::take(&mut *tasks.lock().unwrap()) {
+            task();
+        }
+        let completed = recorded_events.lock().unwrap();
+        let census = completed.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::RemoteOwnerInventoryComplete(completion)
+                    if completion.context.project_root == root && completion.result.is_ok()
+            )
+        });
+        let prepared = completed.iter().any(|event| {
+            matches!(
+                recorded_project_payload(event),
+                UserEvent::ActiveWorkProjectionPrepared(completion)
+                    if completion.project_root == root && completion.result.is_ok()
+            )
+        });
+        drop(completed);
+        close_test_owner_runtime(&mut runtime, &id);
 
+        assert_eq!(status_after, status_before);
+        assert_eq!(gui_latch_after, gui_latch_before);
+        let after_latch = after
+            .policy
+            .approval
+            .expect("PM notification keeps approval");
+        assert_eq!(after_latch.active_fingerprint, latch.active_fingerprint);
         assert_eq!(
-            tasks.lock().unwrap().len(),
-            usize::from(should_refresh) * 2,
-            "only the exact registered PM requests the census and Work preparation"
+            after_latch.resolving_fingerprint,
+            latch.resolving_fingerprint
         );
-        assert_eq!(runtime.window_status(&id), status_before);
-        assert_eq!(runtime.window_approval_waiting.get(&id), Some(&latch));
+        assert_eq!(after_latch.resolution_started, latch.resolution_started);
+        assert_eq!(
+            after.policy.approval_settle_at,
+            before.policy.approval_settle_at
+        );
         assert!(!events.iter().any(|event| matches!(
             event.event,
             BackendEvent::TerminalStatus { .. } | BackendEvent::WindowState { .. }
         )));
-        if should_refresh {
-            for _ in 0..2 {
-                let task = tasks.lock().unwrap().remove(0);
-                task();
-            }
-            assert!(recorded_events.lock().unwrap().iter().any(|event| matches!(
-                recorded_project_payload(event),
-                UserEvent::ActiveWorkProjectionPrepared(_)
-            )));
-        }
+        assert_eq!(
+            census, should_refresh,
+            "only the exact registered PM refreshes the owner census"
+        );
+        assert_eq!(
+            prepared, should_refresh,
+            "only the exact registered PM prepares Work"
+        );
     }
 }
 
@@ -938,7 +984,7 @@ fn app_runtime_browser_hook_event_strips_continue_work_readiness_nonce() {
     assert!(!encoded.contains("private-ready-nonce"));
 }
 
-fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {
+pub(super) fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {
     let repo = temp.join("hook-project");
     fs::create_dir_all(&repo).unwrap();
     init_repo_with_initial_commit(&repo);
@@ -948,6 +994,31 @@ fn runtime_state_hook_fixture(temp: &Path) -> (AppRuntime, String) {
         .branch("work/runtime-hook-fixture")
         .build();
     let id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let probe = owner_runtime_probe(&runtime, &id);
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline startup hang guard; the real provider's marker proves the reader has parsed its only startup output before injected screens
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Snapshot {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual provider startup output");
+    });
     (runtime, id)
 }
 
@@ -1245,27 +1316,32 @@ fn app_runtime_persistence_keeps_hook_native_waiting_without_approval_overlay() 
 fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let prompt = b"Would you like to run the following command?\r\n\r\n\
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n\r\n\
         cargo test -p gwt window_state\r\n\r\n\
         > 1. Yes, proceed\r\n\
           2. No, and tell Codex what to do differently\r\n\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(prompt);
-
-    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    let mut source = owner.subscribe();
+    let seq = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(prompt);
+        pane.output_seq()
+    };
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Output {
+            id: probe.id,
+            incarnation: probe.incarnation,
+            data: prompt.to_vec(),
+            seq,
+            screen: None,
+        }),
+    )
+    .unwrap();
+    let events = relay_approval_owner_events(&mut runtime, &window_id, &mut source);
 
     assert!(events.iter().any(|event| matches!(
         event.event,
@@ -1274,48 +1350,37 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
             ..
         }
     )));
-    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_some());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_provider_auth_notice_parks_the_live_owner_from_pty_output() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    init_repo_without_origin(&repo);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab.workspace.set_agent_id("agent-1", "codex"));
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
+    let (mut runtime, window_id, repo) = monitor_owned_codex_output_fixture(temp.path());
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            enabled: true,
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
-                issue_number: 42,
-                window_id: window_id.clone(),
-            }],
-            ..Default::default()
-        },
-    )
-    .unwrap();
     let output = b"\x1b[2J\x1b[H\xe2\x96\xa0 Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(output);
-    runtime.handle_runtime_output(window_id.clone(), output.to_vec());
-    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+    process_test_owner_output(&mut runtime, &window_id, output);
+    let persisted = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the real Monitor failure transaction; elapsed time cannot establish handoff ownership.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs.autonomous_records.iter().any(|record| {
+                    record.issue_number == 42 && record.phase == gwt::AutonomousPhase::NeedsHuman
+                }) {
+                    break prefs;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual provider-auth NeedsHuman handoff")
+    });
     assert!(
         persisted.launched_issues.is_empty(),
         "reauthentication releases the slot"
@@ -1335,53 +1400,116 @@ fn app_runtime_provider_auth_notice_parks_the_live_owner_from_pty_output() {
         persisted.provider_quota_holds.is_empty(),
         "auth never creates a quota hold"
     );
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .quota_hold
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
+}
+
+fn monitor_owned_codex_output_fixture(temp: &Path) -> (AppRuntime, String, PathBuf) {
+    use gwt::project_runtime::events::OwnerCommand;
+    let (root, owner, delivery) = owner_monitor_fixture(temp, 42, true, &["codex"]);
+    configure_owner_fixture_tools(&root, &["codex"]);
+    let tab = sample_project_tab_with_window_at(
+        "tab-1",
+        "agent-1",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    let mut runtime = sample_runtime(temp, vec![tab], Some("tab-1"));
+    pin_live_pm_fixture_agents(&runtime, temp);
+    let selected = pane_control_tests::control_launch_config(&root, 42);
+    let worktree = selected.working_dir.unwrap();
+    run_git(&worktree, &["branch", "-m", "work/issue-42"]);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(worktree)
+        .branch("work/issue-42")
+        .base_branch(selected.base_branch.unwrap())
+        .build();
+    config.linked_issue_number = Some(42);
+    config.explicit_follow_up = true;
+    let codex_home = temp.join(".codex");
+    fs::create_dir_all(&codex_home).unwrap();
+    config
+        .env_vars
+        .insert("CODEX_HOME".into(), codex_home.display().to_string());
+    let probe = owner_monitor_launch_with_config(&root, &owner, 42, "agent-1", delivery, config);
+    let snapshot = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The actual native provider's READY output orders later screen injection; this only bounds an OS/IPC hang.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let snapshot = owner
+                    .command(OwnerCommand::Snapshot {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY"))
+                {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual Monitor provider readiness")
+    });
+    assert_eq!(owner_monitor_read(&root, 42).active_count(), 1);
+    assert!(owner_monitor_read(&root, 42).live_claim_id(42).is_some());
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let context = runtime.test_context();
+    let client = owner.client();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = client.identity().cloned();
+    let window_id = combined_window_id("tab-1", "agent-1");
+    runtime.install_remote_owner_projection(
+        &context,
+        &window_id,
+        client,
+        serde_json::from_value(snapshot).unwrap(),
+        probe.session.clone(),
+    );
+    runtime
+        .test_project_owners
+        .insert(root.clone(), Arc::new(owner));
+    (runtime, window_id, root)
 }
 
 #[test]
 fn app_runtime_codex_directory_trust_prompt_escalates_only_monitor_owned_live_window() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let repo = temp.path().join("repo");
-    std::fs::create_dir_all(&repo).expect("create repo");
-    init_repo_without_origin(&repo);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        repo.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab.workspace.set_agent_id("agent-1", "codex"));
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
+    let (mut runtime, window_id, repo) = monitor_owned_codex_output_fixture(temp.path());
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            enabled: true,
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
-                issue_number: 42,
-                window_id: window_id.clone(),
-            }],
-            ..gwt::IssueMonitorPrefs::default()
-        },
-    )
-    .expect("seed prefs");
-    let prompt = b"You are in /tmp/managed-worktree\r\n\r\n\
+    let prompt = b"\x1b[2J\x1b[HYou are in /tmp/managed-worktree\r\n\r\n\
         Do you trust the contents of this directory? Working with untrusted contents comes with higher\r\n\
         risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec\r\n\
         policies to load.\r\n\r\n\
         > 1. Yes, continue\r\n  2. No, quit\r\n\r\n  Press enter to continue\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(prompt);
-
-    runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
-
-    let persisted = gwt::load_issue_monitor_prefs(&prefs_path).expect("reload prefs");
+    process_test_owner_output(&mut runtime, &window_id, prompt);
+    let persisted = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the actual Monitor handoff transaction, not a guessed scheduling delay.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs.autonomous_records.iter().any(|record| {
+                    record.issue_number == 42 && record.phase == gwt::AutonomousPhase::NeedsHuman
+                }) {
+                    break prefs;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual directory-trust NeedsHuman handoff")
+    });
     assert!(
         persisted.launched_issues.is_empty(),
         "NeedsHuman releases the slot"
@@ -1396,6 +1524,11 @@ fn app_runtime_codex_directory_trust_prompt_escalates_only_monitor_owned_live_wi
         !runtime.window_approval_waiting.contains_key(&window_id),
         "directory trust is a typed terminal handoff, not tool-approval Waiting"
     );
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -1451,28 +1584,75 @@ fn app_runtime_directory_trust_prompt_is_inert_for_unowned_codex_window() {
 fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let mut tab = sample_project_tab_with_window(
-        "tab-1",
-        "agent-1",
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab.workspace.set_agent_id("agent-1", "claude"));
+    let root = temp.path().join("claude-project");
+    fs::create_dir_all(&root).unwrap();
+    init_repo_with_initial_commit(&root);
+    let tab = sample_project_tab("tab-1", "Claude project", root, ProjectKind::Git, &[]);
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let prompt = b"Bash command\r\n\r\n  cargo test -p gwt\r\n\r\n\
+    let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::ClaudeCode)
+        .branch("work/approval-claude-fixture")
+        .build();
+    let window_id = spawn_owner_codex_fixture(&mut runtime, "tab-1", config, None);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    assert_eq!(probe.active_session.as_ref().unwrap().agent_id, "claude");
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The native provider's real READY output orders the later injected screen; this only bounds an OS/IPC hang.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Snapshot {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_PM_FIXTURE_READY"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual Claude startup output");
+    });
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let address = runtime.window_lookup[&window_id].clone();
+    let saved = runtime
+        .tab(&address.tab_id)
+        .unwrap()
+        .workspace
+        .window(&address.raw_id)
+        .unwrap();
+    assert_eq!(saved.preset, WindowPreset::Agent);
+    assert_eq!(saved.agent_id.as_deref(), Some("claude"));
+    // The GUI's optional live-session cache is not the provider authority.
+    runtime.active_agent_sessions.remove(&window_id);
+    let prompt = b"\x1b[2J\x1b[HBash command\r\n\r\n  cargo test -p gwt\r\n\r\n\
         Do you want to proceed?\r\n\
         > 1. Yes\r\n\
           2. No, and tell Claude what to do differently\r\n\r\n\
         Enter to confirm \xc2\xb7 Esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(prompt);
-
-    let events = runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+    let mut source = owner.subscribe();
+    let seq = {
+        let mut pane = probe.pane.lock().unwrap();
+        pane.process_bytes(prompt);
+        pane.output_seq()
+    };
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Output {
+            id: probe.id,
+            incarnation: probe.incarnation,
+            data: prompt.to_vec(),
+            seq,
+            screen: None,
+        }),
+    )
+    .unwrap();
+    let events = relay_approval_owner_events(&mut runtime, &window_id, &mut source);
 
     assert!(events.iter().any(|event| matches!(
         event.event,
@@ -1481,65 +1661,65 @@ fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt(
             ..
         }
     )));
-    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_some());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime
-        .window_hook_states
-        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let anchor = approval_owner_future_anchor();
     let prompt = b"Would you like to run the following command?\r\n\r\n\
         cargo test -p gwt\r\n\r\n\
         > 1. Yes, proceed\r\n\
           2. No, and tell Codex what to do differently\r\n\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(prompt);
-    runtime.handle_runtime_output(window_id.clone(), prompt.to_vec());
+    approval_owner_screen(&mut runtime, &window_id, prompt, anchor);
 
     assert!(runtime
         .terminal_input_events(&window_id, "\u{1b}[A")
         .is_empty());
-    assert!(runtime.window_approval_waiting.contains_key(&window_id));
-    let partial_redraw = runtime.observe_runtime_approval_prompt(&window_id, None);
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_some());
+    let partial_redraw = approval_owner_screen(&mut runtime, &window_id, b"\x1b[2J\x1b[H", anchor);
     assert!(partial_redraw.is_empty());
-    assert!(runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_some());
 
     let submitted = runtime.terminal_input_events(&window_id, "1\r");
 
     assert!(submitted.is_empty());
-    let latch = runtime
-        .window_approval_waiting
-        .get(&window_id)
+    assert!(drain_browser_owner_input(&mut runtime).is_empty());
+    let latch = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
         .expect("approval remains latched until rendered output changes");
     assert_eq!(latch.resolving_fingerprint, latch.active_fingerprint);
 
-    let pending = runtime.observe_runtime_approval_prompt(&window_id, None);
+    let pending = approval_owner_screen(&mut runtime, &window_id, b"", anchor);
     assert!(pending.is_empty());
-    let token = runtime.window_approval_waiting[&window_id]
-        .pending_settle_token
-        .expect("settle token");
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(b"\x1b[2J\x1b[HWorking\r\n");
-    let cleared = runtime.handle_runtime_approval_settle(&window_id, token);
+    let due = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval_settle_at
+        .expect("owner settle deadline");
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        b"\x1b[2J\x1b[HWorking\r\n",
+        anchor,
+    );
+    let cleared = approval_owner_tick(&mut runtime, &window_id, due);
     assert!(cleared.iter().any(|event| matches!(
         event.event,
         BackendEvent::WindowState {
@@ -1547,7 +1727,11 @@ fn app_runtime_terminal_navigation_and_submit_keep_wait_until_output_resolves_it
             ..
         }
     )));
-    assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 fn approval_owner_future_anchor() -> Instant {
@@ -1738,39 +1922,33 @@ fn app_runtime_approval_settle_uses_owner_deadline_without_gui_token_event() {
 fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime
-        .window_hook_states
-        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let anchor = approval_owner_future_anchor();
     let first = b"Would you like to run the following command?\r\n first-command\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(first);
-    runtime.handle_runtime_output(window_id.clone(), first.to_vec());
+    approval_owner_screen(&mut runtime, &window_id, first, anchor);
+    let first_fingerprint = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .unwrap()
+        .active_fingerprint;
     runtime.terminal_input_events(&window_id, "1\r");
+    drain_browser_owner_input(&mut runtime);
+    assert!(
+        owner_runtime_probe(&runtime, &window_id)
+            .policy
+            .approval
+            .unwrap()
+            .resolution_started
+    );
 
     let second =
         b"\x1b[2J\x1b[HWould you like to run the following command?\r\n second-command\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(second);
-    let events = runtime.handle_runtime_output(window_id.clone(), second.to_vec());
+    let events = approval_owner_screen(&mut runtime, &window_id, second, anchor);
     let states = events
         .iter()
         .filter_map(|event| match event.event {
@@ -1783,82 +1961,168 @@ fn app_runtime_different_prompt_after_submit_emits_clear_then_waiting_reentry() 
         states,
         vec![WindowProcessStatus::Running, WindowProcessStatus::Waiting]
     );
+    let next = owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .unwrap();
+    assert_ne!(next.active_fingerprint, first_fingerprint);
+    assert!(!next.resolution_started);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_pane_send_marks_resolution_before_delayed_submit() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        prompt,
+        approval_owner_future_anchor(),
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime.window_approval_waiting.insert(
-        window_id.clone(),
-        ApprovalPromptLatch {
-            active_fingerprint: Some(7),
-            resolving_fingerprint: None,
-            resolution_started: false,
-            pending_settle_token: None,
-        },
-    );
+    let pane = owner_runtime_probe(&runtime, &window_id);
+    let fingerprint = pane.policy.approval.unwrap().active_fingerprint;
 
-    let events =
+    let queued =
         runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
+    assert!(queued.is_empty());
+    // The owner marks the exact prompt before dispatching the physical worker;
+    // its typed ACK proves that the delayed submit also completed successfully.
+    let events = drain_browser_owner_input(&mut runtime);
 
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: true, .. })));
     assert_eq!(
-        runtime
-            .window_approval_waiting
-            .get(&window_id)
-            .and_then(|latch| latch.resolving_fingerprint),
-        Some(7)
+        owner_runtime_probe(&runtime, &window_id)
+            .policy
+            .approval
+            .unwrap()
+            .resolving_fingerprint,
+        fingerprint
     );
+    assert!(
+        owner_runtime_probe(&runtime, &window_id)
+            .policy
+            .approval
+            .unwrap()
+            .resolution_started
+    );
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_failed_input_paths_do_not_mark_approval_resolution() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.window_approval_waiting.insert(
-        window_id.clone(),
-        ApprovalPromptLatch {
-            active_fingerprint: Some(11),
-            resolving_fingerprint: None,
-            resolution_started: false,
-            pending_settle_token: None,
-        },
-    );
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    approval_owner_screen(&mut runtime, &window_id, prompt, Instant::now());
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let before = owner_runtime_probe(&runtime, &window_id);
+    let approval = before.policy.approval.expect("actual owner approval latch");
+    assert!(!approval.resolution_started);
+    let writer = before.writer.clone().expect("actual current writer");
+    let input = before
+        .pty
+        .ordinary_input_observation()
+        .map(|(revision, unsent, _)| (revision, unsent));
+    let session = before.session.as_ref().unwrap();
+    let session_path = runtime.sessions_dir.join(format!("{}.toml", session.id));
+    let session_bytes = fs::read(&session_path).unwrap();
+    // A stale GUI intent must be refused before touching the successor's
+    // actual approval policy, writer, input or durable Session.
+    runtime.runtimes.get_mut(&window_id).unwrap().incarnation = before.incarnation + 1;
 
     let terminal_events = runtime.terminal_input_events(&window_id, "1\r");
-    let pane_events =
+    let mut pane_events =
         runtime.pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r");
 
     assert!(terminal_events.is_empty());
+    assert!(
+        pane_events.is_empty(),
+        "the RPC reply arrives through the typed completion"
+    );
+    pane_events.extend(drain_browser_owner_input(&mut runtime));
     assert!(pane_events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: false, .. })));
-    let latch = runtime
-        .window_approval_waiting
-        .get(&window_id)
-        .expect("latch");
+    let after = owner_fixture_block_on(owner.probe(&before.id, before.incarnation)).unwrap();
+    let latch = after
+        .policy
+        .approval
+        .expect("actual owner approval remains");
     assert!(!latch.resolution_started);
     assert!(latch.resolving_fingerprint.is_none());
+    assert_eq!(latch.active_fingerprint, approval.active_fingerprint);
+    assert_eq!(
+        after.policy.approval_settle_at,
+        before.policy.approval_settle_at
+    );
+    assert_eq!(
+        after
+            .pty
+            .ordinary_input_observation()
+            .map(|(revision, unsent, _)| (revision, unsent)),
+        input
+    );
+    assert!(after.current.load(std::sync::atomic::Ordering::Acquire));
+    assert!(Arc::ptr_eq(after.writer.as_ref().unwrap(), &writer));
+    assert_eq!(after.session.as_ref().unwrap().id, session.id);
+    assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
+    assert!(after.pty.try_wait().unwrap().is_none());
+    runtime.runtimes.get_mut(&window_id).unwrap().incarnation = before.incarnation;
+
+    // Exercise only the current-writer guard on this still-live fixture. No
+    // cancellation or lifecycle transition has occurred before restoration.
+    writer
+        .current
+        .store(false, std::sync::atomic::Ordering::Release);
+    assert!(runtime.terminal_input_events(&window_id, "1\r").is_empty());
+    assert!(runtime
+        .pane_send_input_to_window_events("client-1".to_string(), &window_id, "1\r")
+        .is_empty());
+    let expired_events = drain_browser_owner_input(&mut runtime);
+    let expired = owner_fixture_block_on(owner.probe(&before.id, before.incarnation)).unwrap();
+    let writer_was_current = expired.current.load(std::sync::atomic::Ordering::Acquire);
+    writer
+        .current
+        .store(true, std::sync::atomic::Ordering::Release);
+    assert!(expired_events
+        .iter()
+        .any(|event| matches!(event.event, BackendEvent::PaneSendResult { ok: false, .. })));
+    let latch = expired
+        .policy
+        .approval
+        .expect("approval remains after refused writer");
+    assert!(!latch.resolution_started);
+    assert!(latch.resolving_fingerprint.is_none());
+    assert!(!writer_was_current);
+    assert_eq!(latch.active_fingerprint, approval.active_fingerprint);
+    assert_eq!(
+        expired.policy.approval_settle_at,
+        before.policy.approval_settle_at
+    );
+    assert!(Arc::ptr_eq(expired.writer.as_ref().unwrap(), &writer));
+    assert_eq!(
+        expired
+            .pty
+            .ordinary_input_observation()
+            .map(|(revision, unsent, _)| (revision, unsent)),
+        input
+    );
+    assert_eq!(expired.session.as_ref().unwrap().id, session.id);
+    assert_eq!(fs::read(&session_path).unwrap(), session_bytes);
+    assert!(expired.pty.try_wait().unwrap().is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -1902,34 +2166,37 @@ fn app_runtime_custom_agent_name_containing_codex_is_not_classified_as_codex() {
 fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Running)
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    runtime
-        .window_hook_states
-        .insert(window_id.clone(), WindowProcessStatus::Running);
-    runtime.handle_runtime_approval_wait_state(&window_id, true);
-    owner_runtime_probe(&runtime, &window_id)
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    approval_owner_screen(&mut runtime, &window_id, prompt, Instant::now());
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    assert!(probe.policy.approval.is_some());
+    probe
         .pane
         .lock()
         .expect("pane")
         .process_bytes(b"SECRET_TOKEN=/private/path command --token sentinel\r\n");
 
-    let events = runtime.handle_runtime_status(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("failed SECRET_TOKEN=/private/path".to_string()),
-    );
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("failed SECRET_TOKEN=/private/path".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    let events = relay_approval_owner_events(&mut runtime, &window_id, &mut source);
     let serialized = format!("{events:?}");
 
     assert!(events.iter().any(|event| matches!(
@@ -1947,41 +2214,43 @@ fn app_runtime_approval_error_beats_live_hook_and_redacts_prompt_tail_everywhere
         Some("Agent approval prompt ended unexpectedly")
     );
     assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
     let prompt = b"Would you like to run the following command?\r\n\
         SECRET_TOKEN=/private/path command --token sentinel\r\n\
         > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
         Press enter to confirm or esc to cancel\r\n";
-    owner_runtime_probe(&runtime, &window_id)
-        .pane
-        .lock()
-        .expect("pane")
-        .process_bytes(prompt);
+    probe.pane.lock().expect("pane").process_bytes(prompt);
     assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
 
-    let events = runtime.handle_runtime_status(
-        window_id.clone(),
-        WindowProcessStatus::Error,
-        Some("failed SECRET_TOKEN=/private/path".to_string()),
-    );
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Error,
+            detail: Some("failed SECRET_TOKEN=/private/path".into()),
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    let events = relay_approval_owner_events(&mut runtime, &window_id, &mut source);
     let serialized = format!("{events:?}");
 
     assert!(!serialized.contains("SECRET_TOKEN"));
@@ -1991,30 +2260,34 @@ fn app_runtime_approval_error_redacts_screen_before_output_event_sets_latch() {
         runtime.window_details.get(&window_id).map(String::as_str),
         Some("Agent approval prompt ended unexpectedly")
     );
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_progress_hook_clears_approval_wait_even_when_hook_state_is_unchanged() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        prompt,
+        approval_owner_future_anchor(),
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    runtime
-        .window_hook_states
-        .insert(window_id.clone(), WindowProcessStatus::Running);
-    runtime.handle_runtime_approval_wait_state(&window_id, true);
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_some());
 
-    let cleared = runtime.handle_runtime_hook_event(runtime_hook_state("Running", "session-1"));
+    let cleared = runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
 
     assert!(cleared.iter().any(|event| matches!(
         event.event,
@@ -2024,28 +2297,44 @@ fn app_runtime_progress_hook_clears_approval_wait_even_when_hook_state_is_unchan
         }
     )));
     assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
 fn app_runtime_terminal_state_clears_approval_wait_tracking() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let prompt = b"\x1b[2J\x1b[HWould you like to run the following command?\r\n command\r\n\
+        > 1. Yes, proceed\r\n 2. No, and tell Codex what to do differently\r\n\
+        Press enter to confirm or esc to cancel\r\n";
+    approval_owner_screen(
+        &mut runtime,
+        &window_id,
+        prompt,
+        approval_owner_future_anchor(),
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    runtime.handle_runtime_approval_wait_state(&window_id, true);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
+    assert!(probe.policy.approval.is_some());
 
-    let events =
-        runtime.handle_runtime_status(window_id.clone(), WindowProcessStatus::Stopped, None);
+    let mut source = owner.subscribe();
+    owner_fixture_block_on(
+        owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
+            id: probe.id.clone(),
+            incarnation: probe.incarnation,
+            status: WindowProcessStatus::Stopped,
+            detail: None,
+            exit_confirmed: false,
+        }),
+    )
+    .unwrap();
+    let events = relay_approval_owner_events(&mut runtime, &window_id, &mut source);
 
     assert!(events.iter().any(|event| matches!(
         event.event,
@@ -2055,6 +2344,11 @@ fn app_runtime_terminal_state_clears_approval_wait_tracking() {
         }
     )));
     assert!(!runtime.window_approval_waiting.contains_key(&window_id));
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .approval
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -2139,10 +2433,18 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window = runtime.tabs[0].workspace.persisted().windows[0].clone();
     let window_id = combined_window_id("tab-1", &window.id);
+    runtime.register_window("tab-1", &window.id);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
-    let events = runtime.start_window("tab-1", &window.id, window.preset);
+    runtime.start_window("tab-1", &window.id, window.preset);
+    let events = drain_owner_launch_fixtures(&mut runtime, &tasks);
 
-    assert_eq!(events.len(), 2);
     assert!(events.iter().any(|event| matches!(
         &event.event,
         BackendEvent::WindowState { window_id: id, state }
@@ -2164,8 +2466,13 @@ fn app_runtime_start_window_registers_running_process_runtime_and_pty_writer() {
         owner_runtime_probe(&runtime, &window_id).writer.is_some(),
         "only the physical owner retains the current PTY writer"
     );
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .pty
+        .try_wait()
+        .unwrap()
+        .is_none());
 
-    runtime.stop_window_runtime(&window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 // SPEC-2356 安心 Addendum (FR-041): StopWindow tears down the runtime but KEEPS
@@ -2191,11 +2498,25 @@ fn stop_window_events_keeps_window_and_marks_stopped() {
     runtime
         .window_pty_statuses
         .insert(window_id.clone(), WindowProcessStatus::Running);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let before = owner_runtime_probe(&runtime, &window_id);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
 
-    let events = runtime.stop_window_events(&window_id);
+    let mut events = runtime.stop_window_events(&window_id);
+    events.extend(drain_browser_owner_input(&mut runtime));
 
-    // The runtime is gone (PTY killed) but the window record survives.
-    assert!(!runtime.runtimes.contains_key(&window_id));
+    // The physical runtime and writer are gone; the GUI retains its stopped cache.
+    assert!(owner_fixture_block_on(owner.probe(&before.id, before.incarnation)).is_err());
+    assert!(before.pty.tree_exit_confirmed());
+    assert!(!before
+        .writer
+        .unwrap()
+        .current
+        .load(std::sync::atomic::Ordering::Acquire));
     assert!(runtime.window_lookup.contains_key(&window_id));
     assert!(
         runtime.tabs[0].workspace.window(&window.id).is_some(),
@@ -2405,15 +2726,33 @@ fn stop_all_windows_events_stops_every_runtime_keeping_windows() {
             .window_pty_statuses
             .insert(window_id.clone(), WindowProcessStatus::Running);
     }
+    let window_id = combined_window_id("tab-1", &raw_ids[0]);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let before = raw_ids
+        .iter()
+        .map(|raw| owner_runtime_probe(&runtime, &combined_window_id("tab-1", raw)))
+        .collect::<Vec<_>>();
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
 
     runtime.stop_all_windows_events(&runtime.test_context());
+    drain_browser_owner_input(&mut runtime);
 
-    for raw in &raw_ids {
+    for (raw, probe) in raw_ids.iter().zip(before) {
         let window_id = combined_window_id("tab-1", raw);
         assert!(
-            !runtime.runtimes.contains_key(&window_id),
+            owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err(),
             "every agent runtime must be torn down"
         );
+        assert!(probe.pty.tree_exit_confirmed());
+        assert!(!probe
+            .writer
+            .unwrap()
+            .current
+            .load(std::sync::atomic::Ordering::Acquire));
         assert!(
             runtime.tabs[0].workspace.window(raw).is_some(),
             "StopAllWindows must keep all windows on the canvas"
@@ -2444,8 +2783,16 @@ fn restart_window_events_relaunches_stopped_process_window_in_place() {
     let window_id = combined_window_id("tab-1", "shell-1");
     runtime.register_window("tab-1", "shell-1");
     assert!(!runtime.runtimes.contains_key(&window_id));
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
 
-    let events = runtime.restart_window_events(&window_id);
+    let mut events = runtime.restart_window_events(&window_id);
+    events.extend(drain_owner_launch_fixtures(&mut runtime, &tasks));
 
     // Same window id, freshly-running runtime + PTY writer registered.
     assert!(
@@ -2462,8 +2809,15 @@ fn restart_window_events_relaunches_stopped_process_window_in_place() {
         BackendEvent::WindowState { window_id: id, state }
             if id == &window_id && *state == WindowProcessStatus::Running
     )));
+    let actual = owner_runtime_probe(&runtime, &window_id);
+    assert!(actual.pty.try_wait().unwrap().is_none());
+    assert!(actual
+        .writer
+        .unwrap()
+        .current
+        .load(std::sync::atomic::Ordering::Acquire));
 
-    runtime.stop_window_runtime(&window_id);
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 #[test]
@@ -2482,19 +2836,106 @@ fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let window_id = combined_window_id("tab-1", "shell-1");
     runtime.register_window("tab-1", "shell-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    runtime
-        .window_pty_statuses
-        .insert(window_id.clone(), WindowProcessStatus::Running);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let mut source = owner.subscribe();
+    let (command, args) = if cfg!(windows) {
+        ("powershell".into(), vec!["-NoProfile".into(), "-Command".into(),
+            "[Console]::WriteLine('GWT_MANAGED_EXIT_READY'); $null = [Console]::ReadLine(); exit 0".into()])
+    } else {
+        (
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "stty -echo; printf 'GWT_MANAGED_EXIT_READY\\n'; IFS= read -r line; exit 0".into(),
+            ],
+        )
+    };
+    insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 24);
+    let before = owner_runtime_probe(&runtime, &window_id);
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
+    #[cfg(windows)]
+    owner_fixture_block_on(async {
+        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
+        // This plain Shell has no frontend terminal to answer ConPTY's
+        // startup query. Use the actual query to order the normal response.
+        let mut output = Vec::new();
+        // test-hygiene: allow-wall-clock-deadline Bounds the real terminal handshake; raw CPR and READY establish ordering.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                match source.recv().await.expect("actual Shell startup event") {
+                    OwnerEvent::Output {
+                        id,
+                        incarnation,
+                        data,
+                        ..
+                    } if id == before.id && incarnation == before.incarnation => {
+                        output.extend(data);
+                        if output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
+                            break;
+                        }
+                    }
+                    OwnerEvent::Status {
+                        id,
+                        incarnation,
+                        exit_confirmed: true,
+                        detail,
+                        ..
+                    } if id == before.id && incarnation == before.incarnation => {
+                        panic!("actual Shell exited before its terminal handshake: {detail:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("actual Shell cursor-position query");
+        owner
+            .command(OwnerCommand::Input {
+                id: before.id.clone(),
+                incarnation: before.incarnation,
+                data: b"\x1b[1;1R".to_vec(),
+            })
+            .await
+            .expect("normal terminal cursor-position response");
+    });
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline The real READY marker orders input after Shell startup; elapsed time only bounds an OS/IPC hang.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let snapshot = owner
+                    .command(gwt::project_runtime::events::OwnerCommand::Snapshot {
+                        id: before.id.clone(),
+                        incarnation: before.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_MANAGED_EXIT_READY"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual Shell startup output");
+    });
 
-    runtime.handle_runtime_status(window_id.clone(), WindowProcessStatus::Stopped, None);
+    super::managed_launch_tests::finish_managed_exit(&owner, &before, &mut runtime, &mut source);
     assert_eq!(
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Stopped),
         "natural teardown must leave the stored terminal status readable"
     );
 
-    let events = runtime.restart_window_events(&window_id);
+    let mut events = runtime.restart_window_events(&window_id);
+    events.extend(drain_owner_launch_fixtures(&mut runtime, &tasks));
 
     assert!(
         !events.is_empty(),
@@ -2504,7 +2945,10 @@ fn natural_process_exit_keeps_terminal_status_available_to_restart_guard() {
         runtime.window_status(&window_id),
         Some(WindowProcessStatus::Running)
     );
-    runtime.stop_window_runtime(&window_id);
+    let after = owner_runtime_probe(&runtime, &window_id);
+    assert!(after.incarnation > before.incarnation);
+    assert!(after.pty.try_wait().unwrap().is_none());
+    close_test_owner_runtime(&mut runtime, &window_id);
 }
 
 // SPEC-2356 安心 Addendum (FR-044): RestartWindow only acts on stopped/errored
@@ -2549,46 +2993,91 @@ fn restart_window_events_is_noop_when_window_already_running() {
 
 #[test]
 fn account_switch_releases_pane_quota_without_relatching_the_old_notice() {
+    use gwt::project_runtime::events::OwnerEvent;
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let (mut runtime, window_id) = quota_live_runtime(temp.path(), "codex");
+    let _home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, window_id) = runtime_state_hook_fixture(temp.path());
+    runtime_state_hook_events(&mut runtime, &window_id, "Running", 1);
+    let owner = project_owner_fixture(&mut runtime, &window_id);
+    let probe = owner_runtime_probe(&runtime, &window_id);
     let mut old = codex_usage_account(100.0, true);
     old.account_id = Some("account-a".into());
     runtime.set_provider_usage_accounts(vec![old]);
-    runtime.observe_provider_quota_notice(
-        &window_id,
-        Some(CODEX_USAGE_LIMIT_SCREEN),
+    drain_browser_owner_input(&mut runtime);
+    probe
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(format!("\x1b[2J\x1b[H{CODEX_USAGE_LIMIT_SCREEN}").as_bytes());
+    owner_fixture_block_on(owner.observe_runtime_policy(
+        &probe.id,
+        probe.incarnation,
         instant("2026-09-02T09:00:00Z"),
-    );
-    assert!(runtime.provider_quota_holds.contains_key(&window_id));
+        approval_owner_future_anchor(),
+    ))
+    .unwrap();
+    assert!(owner_runtime_probe(&runtime, &window_id)
+        .policy
+        .quota_hold
+        .is_some());
     let mut new = gwt_core::usage::ProviderUsage::degraded(
         gwt_core::usage::UsageProvider::Codex,
         gwt_core::usage::UsageState::NoData,
     );
     new.account_id = Some("account-b".into());
     runtime.handle_provider_usage_snapshot(vec![new], instant("2026-09-02T09:02:00Z"));
-    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
-    runtime.observe_provider_quota_notice(
-        &window_id,
-        Some(CODEX_USAGE_LIMIT_SCREEN),
-        instant("2026-09-02T09:03:00Z"),
-    );
-    runtime.observe_provider_quota_notice(
-        &window_id,
-        Some(CODEX_USAGE_LIMIT_SCREEN),
-        instant("2026-09-02T09:05:00Z"),
-    );
-    assert!(!runtime.provider_quota_holds.contains_key(&window_id));
-    runtime.handle_runtime_status_with_exit_confirmation(
-        window_id.clone(),
-        WindowProcessStatus::Stopped,
-        Some(CODEX_USAGE_LIMIT_SCREEN.to_string()),
-        true,
-    );
+    drain_browser_owner_input(&mut runtime);
+    let released = owner_runtime_probe(&runtime, &window_id).policy;
+    assert!(released.quota_hold.is_none());
+    assert!(released.released_quota_notice.is_some());
+    for at in ["2026-09-02T09:03:00Z", "2026-09-02T09:05:00Z"] {
+        owner_fixture_block_on(owner.observe_runtime_policy(
+            &probe.id,
+            probe.incarnation,
+            instant(at),
+            approval_owner_future_anchor(),
+        ))
+        .unwrap();
+        assert!(owner_runtime_probe(&runtime, &window_id)
+            .policy
+            .quota_hold
+            .is_none());
+    }
+    // Keep the old notice on the final screen and obtain a real OS exit
+    // receipt before checking the exit classifier's no-relatch behavior.
+    let mut source = owner.subscribe();
+    probe.pty.kill().unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds the actual child exit receipt; no elapsed time grants terminal authority.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                match source.recv().await.unwrap() {
+                    OwnerEvent::Status {
+                        id,
+                        incarnation,
+                        exit_confirmed: true,
+                        ..
+                    }
+                    | OwnerEvent::Closed {
+                        id,
+                        incarnation,
+                        error: None,
+                    } if id == probe.id && incarnation == probe.incarnation => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("exact actual owner terminal receipt");
+    });
+    if let Ok(final_runtime) = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)) {
+        assert!(final_runtime.policy.quota_hold.is_none());
+        close_test_owner_runtime(&mut runtime, &window_id);
+    }
+    assert!(probe.pty.tree_exit_confirmed());
     assert!(!runtime.provider_quota_holds.contains_key(&window_id));
 }
 

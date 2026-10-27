@@ -1,6 +1,26 @@
 //! Private project-owner wire data. Never contains capability or GUI authority.
 use serde::{Deserialize, Serialize};
 
+/// Read-only physical input facts; consumers cannot grant input with this snapshot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct OwnerInputObservation {
+    pub revision: u64,
+    pub has_unsent_user_input: bool,
+    pub human_input_elapsed_ms: Option<u64>,
+}
+
+impl OwnerInputObservation {
+    pub(crate) fn capture(pty: &gwt_terminal::PtyHandle) -> Option<Self> {
+        let (revision, has_unsent_user_input, elapsed) = pty.ordinary_input_observation()?;
+        Some(Self {
+            revision,
+            has_unsent_user_input,
+            human_input_elapsed_ms: elapsed
+                .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+        })
+    }
+}
+
 /// Immutable readback of an exact Genesis compensation. This receipt only
 /// invalidates caches; it never grants cleanup or input authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +33,23 @@ pub struct OwnerCompensatedLaunchFailure {
 pub struct OwnerRequest {
     pub project_key: String,
     pub command: OwnerCommand,
+}
+
+/// An observation from the first read-only facts pass, never a claim or a
+/// cleanup permit. The fixed owner revalidates every expected source field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMonitorLaunchRejection {
+    pub operation_id: String,
+    pub expected_delivery: Option<Box<crate::issue_monitor::PendingIssueMonitorLaunchDelivery>>,
+    pub expected_profile: Option<crate::IssueMonitorLaunchProfile>,
+    /// Original saved head and pool; only a pre-command answer refusal uses this readset.
+    pub expected_profile_readset: Option<(
+        Option<crate::IssueMonitorLaunchProfile>,
+        Vec<crate::IssueMonitorLaunchProfile>,
+    )>,
+    pub expected_handoff: Option<Box<crate::autonomous_handoff::AutonomousQuestionHandoff>>,
+    pub expected_session: Option<Box<gwt_agent::Session>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +79,9 @@ pub enum OwnerCommand {
         issue_number: u64,
         delivery_id: Option<String>,
     },
+    RejectMonitorLaunch {
+        rejection: Box<OwnerMonitorLaunchRejection>,
+    },
     AcknowledgeMonitorLaunch {
         id: String,
         incarnation: u64,
@@ -68,6 +108,11 @@ pub enum OwnerCommand {
     PendingCancel {
         id: String,
         operation_id: String,
+    },
+    PendingCancelExact {
+        id: String,
+        operation_id: String,
+        expected_request: serde_json::Value,
     },
     PromoteStandalone,
     LaunchShell {
@@ -223,6 +268,18 @@ pub enum OwnerEvent {
         outcome: super::pm_delivery::PmLifecycleOutcome,
     },
     Invalidated,
+}
+
+/// Wire projection of an exact, uncancelled manual operation that made no OS
+/// spawn attempt. The owner's cached raw Err remains the operation's result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerRetainedManualLaunchFailure {
+    pub id: String,
+    pub operation_id: String,
+    pub incarnation: u64,
+    pub host_pid: u32,
+    pub host_instance_id: String,
+    pub detail: String,
 }
 
 /// A failed manual launch retained as an exact restartable diagnostic row.

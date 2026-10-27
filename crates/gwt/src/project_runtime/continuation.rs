@@ -1498,6 +1498,13 @@ pub fn fresh_execution_readiness_receipt(
     pending: &PendingFreshExecutionLaunch,
     operation_id: String,
 ) -> Result<gwt::AgentExecutionContinuationReceipt, gwt::AgentWorkspaceUpdateError> {
+    if !path_matches(
+        &pending.worktree_path,
+        &pending.session_identity.worktree_path,
+    ) || !worktree_matches_project_state(&pending.worktree_path, &pending.project_root)
+    {
+        return Err(fresh_execution_readiness_conflict());
+    }
     let work_id = gwt_core::workspace_projection::load_workspace_work_items(&pending.project_root)
         .ok()
         .flatten()
@@ -1512,18 +1519,42 @@ pub fn fresh_execution_readiness_receipt(
                 .work_items
                 .iter()
                 .find(|work| {
-                    work.id == work_id
-                        && !work.is_terminal()
-                        && projection_continue_authority_matches(
-                            work,
-                            &pending.project_root,
-                            pending.owner,
-                            &pending.worktree_path,
-                            &pending.session_identity.branch,
-                            &pending.session_identity.agent_id,
-                            Some(&pending.session_identity.session_id),
-                            true,
-                        )
+                    if work.id != work_id || work.is_terminal() {
+                        return false;
+                    }
+                    let owner_matches = projection_only_continue_owner(work).is_ok_and(|owner| {
+                        owner.number == pending.owner.number
+                            && owner
+                                .declared_kind
+                                .is_none_or(|kind| kind == pending.owner.kind)
+                    });
+                    // Fresh activation already proved this local target. Other
+                    // hosts' historical containers need not exist on this host.
+                    let target_matches = work.execution_containers.iter().any(|container| {
+                        container
+                            .worktree_path
+                            .as_deref()
+                            .is_some_and(|path| path_matches(path, &pending.worktree_path))
+                            && container.branch.as_deref().is_some_and(|branch| {
+                                crate::launch_runtime::normalize_branch_name(branch)
+                                    == crate::launch_runtime::normalize_branch_name(
+                                        &pending.session_identity.branch,
+                                    )
+                            })
+                    });
+                    let mut sessions = work
+                        .agents
+                        .iter()
+                        .filter(|agent| agent.session_id == pending.session_identity.session_id);
+                    owner_matches
+                        && target_matches
+                        && sessions.next().is_some_and(|agent| {
+                            work_agent_ref_authenticates_agent(
+                                agent,
+                                &pending.session_identity.agent_id,
+                            )
+                        })
+                        && sessions.next().is_none()
                 })
                 .map(|work| work.id.clone())
         })

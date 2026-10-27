@@ -20,6 +20,32 @@ pub struct PmWakeInput {
     pub wake_id: Option<String>,
     pub prompt: String,
     pub idle: bool,
+    #[serde(default)]
+    pub periodic_input: Option<PmPeriodicWakeInput>,
+}
+
+/// A selection-time physical observation; the owner rechecks every field.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PmPeriodicWakeInput {
+    pub session_id: String,
+    pub incarnation: Option<u64>,
+    pub revision: Option<u64>,
+}
+
+impl PmPeriodicWakeInput {
+    pub(crate) fn matches(
+        &self,
+        session: Option<&str>,
+        incarnation: u64,
+        pty: &gwt_terminal::PtyHandle,
+        interval_secs: u64,
+    ) -> bool {
+        session == Some(self.session_id.as_str())
+            && self.incarnation == Some(incarnation)
+            && self.revision.is_some()
+            && pty.quiet_ordinary_input_revision(Duration::from_secs(interval_secs))
+                == self.revision
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,6 +373,20 @@ pub(crate) fn deliver_pm_wake(
         .is_some_and(|guard| {
             guard.operation_id == delivery.operation_id && guard.retained_input.is_some()
         });
+    if !owns_input {
+        if let Some(input) = &delivery.periodic_input {
+            let prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(root))
+                .map_err(|error| error.to_string())?;
+            if !input.matches(
+                target_session,
+                incarnation,
+                &entry.handle,
+                prefs.settings.loop_interval_secs_clamped(),
+            ) {
+                return Ok(PmWakeWrite::Discarded);
+            }
+        }
+    }
     pm_registry::with_active_pm_loop(&pm_registry::pm_prefs_path_for_repo_path(root), || {
         let loop_state =
             pm_registry::load_pm_loop_state(&pm_registry::pm_loop_state_path_for_repo_path(root))
@@ -356,12 +396,16 @@ pub(crate) fn deliver_pm_wake(
         }
         if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
         {
-            return Ok(PmWakeWrite::Deferred);
-        }
-        let prompt = pm_wake_delivery_prompt(root, &delivery.prompt, delivery.idle);
-        if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
-        {
-            return Ok(PmWakeWrite::Deferred);
+            return Ok(
+                if delivery.periodic_input.is_some()
+                    && !owns_input
+                    && entry.handle.has_unsent_user_input()
+                {
+                    PmWakeWrite::Discarded
+                } else {
+                    PmWakeWrite::Deferred
+                },
+            );
         }
         if !delivery.idle {
             let Some(target_session) = target_session else {
@@ -432,6 +476,12 @@ pub(crate) fn deliver_pm_wake(
             let ordinary_revision = replay
                 .as_ref()
                 .map(|guard| guard.ordinary_revision)
+                .or_else(|| {
+                    delivery
+                        .periodic_input
+                        .as_ref()
+                        .and_then(|input| input.revision)
+                })
                 .or_else(|| entry.handle.ordinary_input_revision())
                 .ok_or("PM wake input revision unavailable")?;
             let retained = replay
@@ -464,6 +514,10 @@ pub(crate) fn deliver_pm_wake(
                 ("\r".to_string(), receipt.body_sha256)
             } else {
                 if pane.lock().map_err(|error| error.to_string())?.output_seq() != output_seq {
+                    return Ok(PmWakeWrite::Deferred);
+                }
+                let prompt = pm_wake_delivery_prompt(root, &delivery.prompt, false);
+                if !permit.load(Ordering::Acquire) || entry.handle.has_unsent_user_input() {
                     return Ok(PmWakeWrite::Deferred);
                 }
                 let body = prompt.trim_end_matches('\r');
@@ -517,11 +571,11 @@ pub(crate) fn deliver_pm_wake(
                                     "PM wake deadline expired before physical commit",
                                 ));
                             }
-                            let current_pm = pm_registry::load_pm_prefs(
+                            let current_prefs = pm_registry::load_pm_prefs(
                                 &pm_registry::pm_prefs_path_for_repo_path(root),
                             )
-                            .map_err(|error| fail(&error.to_string()))?
-                            .registration;
+                            .map_err(|error| fail(&error.to_string()))?;
+                            let current_pm = current_prefs.registration;
                             if busy() || !permit.load(Ordering::Acquire) {
                                 return Err(fail(
                                     "PM wake held by newer activity at physical commit",
@@ -538,9 +592,18 @@ pub(crate) fn deliver_pm_wake(
                             if body_written || continuing {
                                 commit(&mut mark_attempted)
                             } else {
-                                reservation.with_unchanged_ordinary_input(ordinary_revision, || {
-                                    commit(&mut mark_attempted)
-                                })
+                                let quiet_for = if delivery.periodic_input.is_some() {
+                                    Duration::from_secs(
+                                        current_prefs.settings.loop_interval_secs_clamped(),
+                                    )
+                                } else {
+                                    Duration::ZERO
+                                };
+                                reservation.with_quiet_ordinary_input(
+                                    ordinary_revision,
+                                    quiet_for,
+                                    || commit(&mut mark_attempted),
+                                )
                             }
                         })
                         .map_err(|error| error.to_string())?;
@@ -619,6 +682,11 @@ pub(crate) fn deliver_pm_wake(
                 PmWakeWrite::Discarded
             });
         }
+        let prompt = pm_wake_delivery_prompt(root, &delivery.prompt, true);
+        if !permit.load(Ordering::Acquire) || (entry.handle.has_unsent_user_input() && !owns_input)
+        {
+            return Ok(PmWakeWrite::Deferred);
+        }
         // Reuse the canonical paste/reservation/submit implementation and its
         // actual-commit current-generation fence; no GUI physical writer exists.
         super::agent_dispatch::write_current_pane_input(writers, id, entry, &prompt)?;
@@ -683,16 +751,14 @@ pub struct PmWakePromptCapture {
 #[cfg(any(test, feature = "test-gh-guard"))]
 impl PmWakePromptCapture {
     pub fn begin(root: &Path) -> Self {
+        let root = gwt_core::paths::normalize_windows_child_process_path(root);
         let prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         PROMPT_CAPTURES
             .get_or_init(Default::default)
             .lock()
             .unwrap()
-            .insert(root.to_path_buf(), Arc::downgrade(&prompts));
-        Self {
-            root: root.into(),
-            prompts,
-        }
+            .insert(root.clone(), Arc::downgrade(&prompts));
+        Self { root, prompts }
     }
     pub fn prompts(&self) -> Vec<String> {
         self.prompts.lock().unwrap().clone()
@@ -710,11 +776,12 @@ impl Drop for PmWakePromptCapture {
 
 #[cfg(any(test, feature = "test-gh-guard"))]
 fn record_test_wake_prompt(root: &Path, prompt: &str) {
+    let root = gwt_core::paths::normalize_windows_child_process_path(root);
     let capture = PROMPT_CAPTURES.get().and_then(|captures| {
         captures
             .lock()
             .unwrap()
-            .get(root)
+            .get(&root)
             .and_then(std::sync::Weak::upgrade)
     });
     if let Some(prompts) = capture {
@@ -964,6 +1031,7 @@ mod tests {
                         wake_id: None,
                         prompt: "CANCELLED\r".into(),
                         idle: true,
+                        periodic_input: None,
                     },
                 })
                 .await
@@ -991,6 +1059,7 @@ mod tests {
                         wake_id: None,
                         prompt: "BUSY\r".into(),
                         idle: false,
+                        periodic_input: None,
                     },
                 })
                 .await
@@ -1014,6 +1083,7 @@ mod tests {
                         wake_id: None,
                         prompt: "STALE\r".into(),
                         idle: false,
+                        periodic_input: None,
                     },
                 })
                 .await;
@@ -1031,6 +1101,7 @@ mod tests {
                         wake_id: None,
                         prompt: "FRESH\r".into(),
                         idle: true,
+                        periodic_input: None,
                     },
                 })
                 .await

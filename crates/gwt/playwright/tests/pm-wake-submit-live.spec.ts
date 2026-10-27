@@ -100,19 +100,19 @@ test.describe('Windows real PM wake submission', () => {
       let observation: Promise<void> | undefined;
       const evidence: any[] = [];
       const policyAudits: any[] = [];
+      const guiStates: any[] = [];
+      // Observe received state frames without browser API polling: each
+      // evaluate call also records DOM snapshots and unthrottles screencast.
+      page.on('websocket', socket => socket.on('framereceived', frame => {
+        try {
+          const payload = JSON.parse(String(frame.payload));
+          if (payload.kind === 'window_state') guiStates.push({ observedAt: new Date().toISOString(), payload });
+        } catch { /* Only complete JSON state frames are diagnostic evidence. */ }
+      }));
       try {
         expect(spawnSync('git', ['-C', ROOT, 'remote'], { encoding: 'utf8' }).stdout.trim(), 'fixture has no remote').toBe('');
         await gotoLiveGwt(page, BASE, { enableTestBridge: true, suppressProjectSurfaces: true, suppressUpdateApplyStart: true });
         await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-        await page.evaluate(() => {
-          (window as any).__gwtWakeStateHistory = [];
-          for (const socket of (window as any).__gwtPlaywrightSockets ?? []) socket.addEventListener('message', (event: MessageEvent) => {
-            try {
-              const payload = JSON.parse(String(event.data));
-              if (payload.kind === 'window_state') (window as any).__gwtWakeStateHistory.push({ observedAt: new Date().toISOString(), payload });
-            } catch { /* Only complete JSON state frames are diagnostic evidence. */ }
-          });
-        });
         await pause(page, true);
         await sendLiveGwtEvent(page, { kind: 'open_pm_agent' });
         await expect.poll(async () => {
@@ -141,8 +141,7 @@ test.describe('Windows real PM wake submission', () => {
                 previous = runtime;
               } catch { /* Retry an in-progress sidecar write on the next sample. */ }
             }
-            const frames = await page.evaluate(() => (window as any).__gwtWakeStateHistory.splice(0)).catch(() => []);
-            for (const frame of frames) await appendFile(path, JSON.stringify({ kind: 'gui', ...frame }) + '\n');
+            for (const frame of guiStates.splice(0)) await appendFile(path, JSON.stringify({ kind: 'gui', ...frame }) + '\n');
             await new Promise(resolve => setTimeout(resolve, 200));
           }
         })();
@@ -214,6 +213,60 @@ test.describe('Windows real PM wake submission', () => {
           const signalItems = [{ issue: { number: 1, author_login: 'akiojin', title: 'Owned signal fixture',
             labels: [], state: 'open', readiness: 'not_applicable' }, state: 'needs_human',
             claim_id: null, blocked_by_owner: null, claim_expires_at: null, launched_window_id: null }];
+          let cadence: any;
+          if (kind === 'periodic') {
+            // T-91005: exercise human cadence while the actual provider is Idle,
+            // independently of the busy/queue and exact-ACK probes below.
+            const draft = `${token}_UNSENT_CADENCE`;
+            await input(page, id, draft);
+            await expect.poll(() => composer(page, id), { timeout: 30_000 }).toContain(draft);
+            await pause(page, false);
+            const resumed = await json(join(STATE, 'pm-loop.json'));
+            const quietAt = new Date(Date.now() - 60_000).toISOString();
+            await writeFile(join(STATE, 'pm-loop.json'), JSON.stringify({ ...resumed,
+              last_user_prompt_at: quietAt, last_continued_at: quietAt, last_wake_at: quietAt }));
+            const composingAt = Date.now();
+            let composingScan = 0;
+            await expect.poll(async () => {
+              composingScan = Date.parse((await json(join(STATE, 'issue-monitor.json'))).last_scan_at ?? '');
+              return composingScan;
+            }, { timeout: 60_000, message: 'a scheduled scan observes the unsent human draft' }).toBeGreaterThan(composingAt);
+            const unstaged = async () => ({ composer: await composer(page, id),
+              receipts: (await lines(join(STATE, 'pm-delivery-receipts.jsonl')))
+                .filter(receipt => !operationIds.has(receipt.operation_id)) });
+            const duringInput = await unstaged();
+            expect(duringInput.receipts, 'an input-held periodic tick is not prepared').toHaveLength(0);
+            expect(duringInput.composer).toContain(draft);
+            expect(duringInput.composer).not.toMatch(/Scheduled supervision tick|Monitor activity/);
+            const clears: number[] = [];
+            let afterClear: any;
+            let clearScan = 0;
+            // Keep human activity fresh until the next actual scan, regardless
+            // of its cadence. Repeated clear is intentional human input, not
+            // provider stabilization or recovery of an injected wake.
+            await expect.poll(async () => {
+              afterClear = await unstaged();
+              if (afterClear.receipts.length || /Scheduled supervision tick|Monitor activity/.test(afterClear.composer)) return true;
+              clearScan = Date.parse((await json(join(STATE, 'issue-monitor.json'))).last_scan_at ?? '');
+              if (clearScan > composingScan && clears.length) return true;
+              await input(page, id, '\x15');
+              clears.push(Date.now());
+              return false;
+            }, { timeout: 60_000, message: 'the next scan remains silent during continued human clear input' }).toBe(true);
+            afterClear = await unstaged();
+            expect(afterClear.receipts, 'clearing does not catch up the discarded tick').toHaveLength(0);
+            expect(afterClear.composer).not.toMatch(/Scheduled supervision tick|Monitor activity/);
+            expect(afterClear.composer).toContain('Ask Codex');
+            const latestClear = clears.findLast(at => at <= clearScan);
+            expect(latestClear, 'a real human clear precedes the observed scan').toBeDefined();
+            const quietMillis = clearScan - latestClear!;
+            expect(quietMillis).toBeGreaterThanOrEqual(0);
+            expect(quietMillis, 'the negative scan occurs before the full configured interval')
+              .toBeLessThan(pmPrefs.settings.loop_interval_secs * 1000);
+            cadence = { draft, composingScan, duringInput, clears, clearScan, latestClear, quietMillis, afterClear };
+            await writeFile(join(HOME, `wake-cadence-${theme}.json`), JSON.stringify(cadence, null, 2));
+            await pause(page, true);
+          }
           const initial = diagnostic(`3431-busy-${theme}-${kind}`, `Authorized automated terminal transport test, not a human PM request or supervision cycle. Read the explicitly selected .codex/skills/gwt-pm/references/project-policy.md first. Its diagnostic exception applies to this turn only. Then execute only this PowerShell command: Write-Output ('GWT_DIAG_BIN=' + $env:GWT_BIN_PATH); Write-Output ('GWT_DIAG_SESSION=' + $env:GWT_SESSION_ID); Write-Output ('GWT_DIAG_PROJECT=' + $env:GWT_PROJECT_ROOT); Write-Output ('GWT_DIAG_CWD=' + (Get-Location).Path); Write-Output '${token}_BUSY'; Start-Sleep -Seconds 90; Write-Output '${token}_END'. Poll only that command if needed, wait for it to finish, then reply only ${token}_DONE. During this diagnostic turn, do not run PM setup, read unrelated skills/files/environment, discover tools, plan, delegate, contact GitHub, or invoke gwt. Actual scheduled and Monitor wake turns retain the normal PM contract. Input receipt marker: ${token}_BODY_READY`);
           await input(page, id, `\x1b[200~${initial}\x1b[201~`);
           await expect.poll(async () => pastedBodyVisible(await text(page, id), `${token}_BODY_READY`),
@@ -333,7 +386,7 @@ test.describe('Windows real PM wake submission', () => {
           await expect.poll(() => composer(page, id), { timeout: 30_000 }).toContain('Ask Codex');
           const complete = await text(page, id);
           expect(complete.slice(complete.lastIndexOf('›')), 'composer is empty after one acknowledged wake').toContain('Ask Codex');
-          evidence.push({ kind, session, operation_id: verified.operation_id, receipts, busyText, safeBoundary, complete,
+          evidence.push({ kind, session, operation_id: verified.operation_id, receipts, busyText, safeBoundary, complete, cadence,
             nativePromptMatches: await matching(), providerTurn, providerStarted: await providerEvents('task_started'),
             observedAt: new Date().toISOString() });
           await writeFile(join(HOME, `wake-evidence-${theme}.json`), JSON.stringify(evidence, null, 2));

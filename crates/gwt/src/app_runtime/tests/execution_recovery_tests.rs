@@ -2033,12 +2033,12 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         init_managed_workspace_with_develop_worktree(&project_root);
     // The production owner canonicalizes its project root. Capture the same
     // path identity before constructing the exact legacy Prepared receipt.
-    let project_root = project_root.canonicalize().unwrap();
+    let project_root = dunce::canonicalize(&project_root).unwrap();
     let repo = project_root.join("work").join("issue-2359");
     fs::create_dir_all(repo.parent().expect("worktree parent")).expect("create worktree parent");
     let output = gwt_core::process::hidden_command("git")
         .args(["worktree", "add", "-q", "-b", "work/issue-2359"])
-        .arg(&repo)
+        .arg(gwt_core::paths::normalize_windows_child_process_path(&repo))
         .current_dir(&bare_repo)
         .output()
         .expect("add issue worktree");
@@ -2133,13 +2133,25 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         gwt_core::paths::gwt_config_path(),
     )
     .expect("canonical owner profile");
-    #[cfg(not(windows))]
     let runner = temp
         .path()
         .join("fixture-runner-bin")
         .join(if cfg!(windows) { "codex.cmd" } else { "codex" });
     #[cfg(not(windows))]
     fs::write(&runner, "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nexec /bin/cat\n").expect("live provider");
+    #[cfg(windows)]
+    fs::write(&runner, concat!(
+        "@echo off\r\n",
+        "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+        ":probe\r\n",
+        "if \"%~1\"==\"\" goto launch\r\n",
+        "if \"%~1\"==\"--sandbox\" goto launch\r\n",
+        "if \"%~1 %~2\"==\"features list\" exit /b 0\r\n",
+        "shift\r\n",
+        "goto probe\r\n",
+        ":launch\r\n",
+        "powershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; while ($null -ne [Console]::ReadLine()) {}\"\r\n",
+    )).expect("live provider");
     let codex_home = temp.path().join("codex-home");
     let _codex_home = ScopedEnvVar::set("CODEX_HOME", &codex_home);
     persist_owner_continue_conversation(&repo, &codex_home, predecessor_session_id, &project_root);
@@ -2210,7 +2222,7 @@ fn continue_work_authenticated_session_start_commits_stale_takeover_without_new_
         let planned_identity = pending.binding.identity.clone();
         let grant = captured.grant.as_ref().expect("actual Prepared grant");
         assert!(captured.issuer.grant_is_current(grant));
-        checkpoint.release();
+        drop(checkpoint);
         launch.await.expect("takeover worker").expect("physical ACK");
         let mut projected = host.subscribe();
         let mut readiness = runtime_hook_state_for_event("Waiting", "SessionStart", candidate_session_id);
@@ -2281,6 +2293,25 @@ fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
     let repo = temp.path().join("repo");
     fs::create_dir_all(&repo).expect("project directory");
     init_repo_with_initial_commit(&repo);
+    // Windows holds a process's current directory open. Launch in a real
+    // sibling worktree so deleting the captured project tests cleanup rather
+    // than failing first on the gate/child's directory handle.
+    #[cfg(windows)]
+    let child_worktree = {
+        let path = temp.path().join("child-worktree");
+        let output = gwt_core::process::hidden_command("git")
+            .args(["worktree", "add", "--detach", "-q"])
+            .arg(&path)
+            .current_dir(&repo)
+            .output()
+            .expect("add child worktree");
+        assert!(
+            output.status.success(),
+            "child worktree: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        path
+    };
     let executor = tokio::runtime::Runtime::new().expect("fixture executor");
     executor.block_on(async {
         use gwt::project_runtime::events::OwnerCommand;
@@ -2291,6 +2322,14 @@ fn app_runtime_stop_revokes_issue_time_capability_after_project_deletion() {
             "deleted-project",
             "deleted-project-operation",
         );
+        #[cfg(windows)]
+        let command = {
+            let mut command = command;
+            if let OwnerCommand::LaunchAgent { config, .. } = &mut command {
+                config.working_dir = Some(child_worktree.clone());
+            }
+            command
+        };
         let receipt = owner
             .command(command)
             .await

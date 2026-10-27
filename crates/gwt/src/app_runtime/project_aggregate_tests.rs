@@ -494,6 +494,7 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
     assert_eq!(runtime.runtimes["a::agent"].exit_code, Some(0));
     let snapshot = super::RemoteRuntimeSnapshot {
         has_unsent_user_input: false,
+        input_observation: None,
         id: "owner-pane-a".into(),
         incarnation: 7,
         screen: "new snapshot".into(),

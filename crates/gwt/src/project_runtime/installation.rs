@@ -66,6 +66,8 @@ pub(crate) struct OwnerSavedSessionRestore {
     pub origin: gwt_agent::SessionLaunchOrigin,
     pub registry: Arc<std::sync::Mutex<crate::WindowRegistry>>,
     pub placeholders: Vec<crate::PersistedWindowState>,
+    pub worktree_reserved: bool,
+    pub registry_after: Option<Result<crate::PersistedWindowRegistry, String>>,
     pub launch_started: bool,
     pub member_reservation: Option<(String, String)>,
     pub refusal: Option<OwnerRestoreRefusal>,
@@ -159,7 +161,26 @@ pub fn retire_restore_source_after_launch(
 fn remove_restore_placeholders(
     root: &Path,
     restore: &OwnerSavedSessionRestore,
+    empty_only: bool,
 ) -> Result<(), String> {
+    if empty_only {
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        super::agent_frontend::run_owner_agent_cleanup_test_hook(root, &restore.source.id);
+        let mut registry = restore.registry.lock().map_err(|error| error.to_string())?;
+        for expected in &restore.placeholders {
+            if registry
+                .window(&expected.id)
+                .is_some_and(|row| restore_row_is_empty(row, &restore.source.id))
+            {
+                registry.close_window(&expected.id);
+            }
+        }
+        return crate::persistence::save_workspace_state_durable(
+            &crate::persistence::workspace_state_path(root),
+            &registry.persistable_state(),
+        )
+        .map_err(|error| error.to_string());
+    }
     for row in &restore.placeholders {
         super::agent_dispatch::OwnedWindowRecordCleanup {
             registry: restore.registry.clone(),
@@ -189,7 +210,7 @@ pub(crate) fn finish_owner_restore_failure(
             && restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore
         {
             mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
-            remove_restore_placeholders(root, restore)?;
+            remove_restore_placeholders(root, restore, false)?;
             restore
                 .refusal
                 .as_mut()
@@ -246,6 +267,16 @@ pub fn landed_restore_refusal(
     }
 }
 
+fn restore_row_is_empty(row: &crate::PersistedWindowState, source: &str) -> bool {
+    row.session_id.as_deref() == Some(source)
+        && row.linked_issue_number.is_none()
+        && row.status == WindowProcessStatus::Stopped
+        && row
+            .dynamic_title_detail
+            .as_ref()
+            .is_none_or(|detail| detail.trim().is_empty())
+}
+
 fn owner_restore_placeholder_known_empty(restore: &OwnerSavedSessionRestore) -> bool {
     let session = &restore.source;
     if session.linked_issue_number.is_some()
@@ -269,15 +300,9 @@ fn owner_restore_placeholder_known_empty(restore: &OwnerSavedSessionRestore) -> 
         return false;
     };
     restore.placeholders.iter().any(|expected| {
-        registry.window(&expected.id).is_some_and(|row| {
-            row.session_id.as_deref() == Some(session.id.as_str())
-                && row.linked_issue_number.is_none()
-                && row.status == WindowProcessStatus::Stopped
-                && row
-                    .dynamic_title_detail
-                    .as_ref()
-                    .is_none_or(|detail| detail.trim().is_empty())
-        })
+        registry
+            .window(&expected.id)
+            .is_some_and(|row| restore_row_is_empty(row, &session.id))
     })
 }
 
@@ -335,7 +360,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
         )
     {
         mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
-        remove_restore_placeholders(root, restore)?;
+        remove_restore_placeholders(root, restore, false)?;
         let error = restore.refuse(
             "unregistered_pm",
             "The saved Session is not the registered PM",
@@ -354,10 +379,6 @@ pub(crate) fn prepare_owner_saved_session_restore(
             "The saved Session worktree is no longer a directory",
             false,
         ));
-    }
-    if is_pm {
-        crate::pm_registry::refresh_pm_worktree_for_repo_path(root)
-            .map_err(|error| error.to_string())?;
     }
     if restore.origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore {
         if !session.restore_window_on_startup {
@@ -388,7 +409,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             };
             if terminal {
                 mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
-                remove_restore_placeholders(root, restore)?;
+                remove_restore_placeholders(root, restore, false)?;
             }
             let error = restore.refuse(
                 reason,
@@ -410,7 +431,7 @@ pub(crate) fn prepare_owner_saved_session_restore(
             let remove_placeholder = code == "empty_landed_worktree";
             if remove_placeholder {
                 mark_restore_source_completed_exact(sessions_dir, &restore.source)?;
-                remove_restore_placeholders(root, restore)?;
+                remove_restore_placeholders(root, restore, true)?;
             }
             let error = restore.refuse(code, format!("Automatic restore refused: {code}"), false);
             restore
@@ -434,6 +455,17 @@ pub(crate) fn prepare_owner_saved_session_restore(
                 false,
             ));
         }
+    }
+    if restore.worktree_reserved {
+        return Err(restore.refuse(
+            "worktree_already_restoring",
+            "The saved Session worktree already has a live or pending owner pane",
+            true,
+        ));
+    }
+    if is_pm {
+        crate::pm_registry::refresh_pm_worktree_for_repo_path(root)
+            .map_err(|error| error.to_string())?;
     }
     let member_root = (!crate::pm_registry::is_canonical_pm_worktree(&session.worktree_path)
         && !session.review_dispatch)
@@ -550,6 +582,7 @@ pub struct InstallAgentLaunchInput {
     pub auto_resume_source_snapshot: Option<gwt_agent::Session>,
     pub current: Arc<AtomicBool>,
     pub failure_session: Option<(ActiveAgentSession, gwt_agent::Session)>,
+    /// Set only at the actual OS child-spawn call; cleanup never clears it.
     pub physical_spawn_started: bool,
     pub failed_launch: Option<Box<PreparedAgentLaunchSuccess>>,
     pub had_window: bool,
@@ -782,9 +815,15 @@ pub fn install_agent_launch(
             ),
         }
     })?;
+    // Manual Prepared retry needs the actual pre-child snapshot for exact
+    // provisional retirement; fresh diagnostic publication remains excluded.
+    let manual_prepared = input
+        .pending_fresh_execution
+        .as_ref()
+        .is_some_and(|pending| pending.request.principal_id == "gwt-host-manual-launch");
     let failure_snapshot = |session: gwt_agent::Session| {
         (!input.is_continue_work
-            && !is_fresh
+            && (!is_fresh || manual_prepared)
             && genesis.is_none()
             && session.id == session_id
             && session.agent_id == agent_id
@@ -884,9 +923,10 @@ pub fn install_agent_launch(
             .launch_feedback_context
             .as_ref()
             .is_some_and(|context| context.issue_monitor_issue_number.is_some());
+    let spawn_attempted = std::cell::Cell::new(false);
     let spawn_pane = || {
         if let Some(expected) = expected_execution_identity.as_ref() {
-            crate::project_runtime::spawn_bound_pane(
+            crate::project_runtime::spawn_bound_pane_with_attempt_observer(
                 &input.window_id,
                 spawn_config,
                 process_launch.resource_policy,
@@ -894,6 +934,7 @@ pub fn install_agent_launch(
                 incarnation,
                 expected,
                 &mut handshake,
+                || spawn_attempted.set(true),
             )
         } else {
             let policy_gate = process_launch
@@ -902,24 +943,25 @@ pub fn install_agent_launch(
                     pty_gate_launch_parts().map(|(program, args)| (policy, program, args))
                 })
                 .transpose()?;
-            crate::project_runtime::spawn_unbound_pane(
+            crate::project_runtime::spawn_unbound_pane_with_attempt_observer(
                 &input.window_id,
                 spawn_config,
                 policy_gate,
                 incarnation,
                 Some((&input.sessions_dir, &session_id)),
                 monitor_admission,
+                || spawn_attempted.set(true),
             )
         }
     };
     // This function already runs on a blocking worker. Keep the file guard
     // entirely within the physical spawn, never across a GUI event handoff.
-    input.physical_spawn_started = true;
     let spawn = if monitor_admission {
         crate::machine_agent_admission::with_admission(&input.sessions_dir, spawn_pane)
     } else {
         spawn_pane()
     };
+    input.physical_spawn_started |= spawn_attempted.get();
     let pane = match spawn {
         Ok(pane) => pane,
         Err(error) => {

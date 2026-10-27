@@ -35,7 +35,8 @@ use gwt::pm_registry::{
     PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_PERIODIC_WAKE_INSTRUCTION, PM_STEERING_WAKE_CLAUSE,
 };
 use gwt::project_runtime::pm_delivery::{
-    pm_status_from_launch_prefs, pm_wake_runtime_is_busy, PmWakeInput, PmWakeWrite,
+    pm_status_from_launch_prefs, pm_wake_runtime_is_busy, PmPeriodicWakeInput, PmWakeInput,
+    PmWakeWrite,
 };
 
 use crate::UserEvent;
@@ -58,6 +59,7 @@ pub(crate) struct PmWakeDecision {
     idle_notifications: std::collections::BTreeMap<String, String>,
     // Display-only owner outcome. The owner rechecks its exact retained writer.
     unconfirmed: bool,
+    periodic_input: Option<PmPeriodicWakeInput>,
 }
 
 /// Issue #3932: retain pane-scoped edges independently of the single composer
@@ -71,6 +73,22 @@ pub(crate) struct AgentIdleWakes {
 }
 
 impl PmWakeDecision {
+    fn periodic_input_matches(
+        &self,
+        runtime: Option<&super::WindowRuntime>,
+        session: Option<&str>,
+        interval_secs: u64,
+    ) -> bool {
+        self.periodic_input.as_ref().is_none_or(|input| {
+            runtime.is_some_and(|runtime| {
+                session == Some(input.session_id.as_str())
+                    && input.incarnation == Some(runtime.incarnation)
+                    && input.revision.is_some()
+                    && runtime.quiet_input_revision(Duration::from_secs(interval_secs))
+                        == input.revision
+            })
+        })
+    }
     #[cfg(test)]
     pub(crate) fn delivery_prompt(&self) -> String {
         gwt::project_runtime::pm_delivery::pm_wake_delivery_prompt(
@@ -812,6 +830,7 @@ impl AppRuntime {
         let mut reasons = fresh;
         reasons.truncate(5);
         Some(PmWakeDecision {
+            periodic_input: None,
             project_root: project_root.to_path_buf(),
             wake_id,
             window_id,
@@ -1097,6 +1116,7 @@ impl AppRuntime {
         }
         prompt.push_str(". Reconcile pane.list and issue.monitor.status; steer the idle agents.\r");
         Some(PmWakeDecision {
+            periodic_input: None,
             project_root: project_root.to_path_buf(),
             window_id,
             prompt,
@@ -1255,6 +1275,18 @@ impl AppRuntime {
         let registration = prefs.registration?;
         let window_id = self.live_pm_window_id(&registration.session_id)?;
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
+        let periodic_input = match self.runtimes.get(&window_id) {
+            Some(runtime) => PmPeriodicWakeInput {
+                session_id: registration.session_id,
+                incarnation: Some(runtime.incarnation),
+                revision: Some(runtime.quiet_input_revision(Duration::from_secs(interval_secs))?),
+            },
+            None => PmPeriodicWakeInput {
+                session_id: registration.session_id,
+                incarnation: None,
+                revision: None,
+            },
+        };
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
         if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
@@ -1275,6 +1307,7 @@ impl AppRuntime {
             return None;
         }
         Some(PmWakeDecision {
+            periodic_input: Some(periodic_input),
             project_root: project_root.to_path_buf(),
             wake_id,
             window_id,
@@ -1434,6 +1467,23 @@ impl AppRuntime {
             &decision.project_root,
         ))
         .map_err(|error| error.to_string())?;
+        if !decision.unconfirmed
+            && !decision.periodic_input_matches(
+                self.runtimes.get(&decision.window_id),
+                prefs
+                    .registration
+                    .as_ref()
+                    .map(|registration| registration.session_id.as_str()),
+                prefs.settings.loop_interval_secs_clamped(),
+            )
+        {
+            if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                state.pending_pm_wakes.retain(|window, held| {
+                    window != &decision.window_id || held.wake_id != decision.wake_id
+                });
+            }
+            return Ok(PmWakeWrite::Discarded);
+        }
         if prefs.settings.paused && !decision.unconfirmed {
             if let Some(state) = self
                 .project_state_for_root_mut(&decision.project_root)
@@ -1468,6 +1518,14 @@ impl AppRuntime {
         let owner_identity = runtime.owner_identity.clone();
         let composer_hint = runtime.has_unsent_user_input.clone();
         if composer_hint.load(Ordering::Acquire) && !decision.unconfirmed {
+            if decision.periodic_input.is_some() {
+                if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                    state.pending_pm_wakes.retain(|window, held| {
+                        window != &decision.window_id || held.wake_id != decision.wake_id
+                    });
+                }
+                return Ok(PmWakeWrite::Discarded);
+            }
             if !decision.idle_notifications.is_empty() {
                 return Ok(PmWakeWrite::Deferred);
             }
@@ -1532,7 +1590,11 @@ impl AppRuntime {
                     }
                 }
                 if composer_hint.load(Ordering::Acquire) && !worker_decision.unconfirmed {
-                    return Ok(PmWakeWrite::Deferred);
+                    return Ok(if worker_decision.periodic_input.is_some() {
+                        PmWakeWrite::Discarded
+                    } else {
+                        PmWakeWrite::Deferred
+                    });
                 }
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1548,6 +1610,7 @@ impl AppRuntime {
                             wake_id: worker_decision.wake_id.clone(),
                             prompt: worker_decision.prompt.clone(),
                             idle: !worker_decision.idle_notifications.is_empty(),
+                            periodic_input: worker_decision.periodic_input.clone(),
                         },
                     },
                 ))?;
@@ -1735,6 +1798,7 @@ impl AppRuntime {
             window_id: id.into(),
             prompt: prompt.into(),
             unconfirmed: false,
+            periodic_input: None,
             idle_notifications: Default::default(),
         };
         self.project_state_mut(&context)
@@ -2316,6 +2380,7 @@ mod delivery_tests {
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let held = PmWakeDecision {
+            periodic_input: None,
             project_root: repo.clone(),
             window_id: window_id.clone(),
             prompt: "HELD-WAKE\r".into(),
@@ -2329,6 +2394,7 @@ mod delivery_tests {
             .pending_pm_wakes
             .insert(window_id.clone(), held.clone());
         let idle = PmWakeDecision {
+            periodic_input: None,
             prompt: "[gwt] Agent idle: worker\r".into(),
             idle_notifications: [("worker".into(), "worker".into())].into(),
             ..held.clone()
@@ -2362,6 +2428,7 @@ mod delivery_tests {
             "stale idle delivery must preserve the regular slot"
         );
         let idle = PmWakeDecision {
+            periodic_input: None,
             wake_id: pm_registry::load_pm_loop_state(
                 &pm_registry::pm_loop_state_path_for_repo_path(&repo),
             )
@@ -2405,6 +2472,7 @@ mod delivery_tests {
             };
             pm_registry::save_pm_loop_state(&loop_path, &state).unwrap();
             let decision = PmWakeDecision {
+                periodic_input: None,
                 project_root: repo.clone(),
                 window_id,
                 prompt: "[gwt] Agent idle: worker\r".into(),
@@ -2447,6 +2515,7 @@ mod delivery_tests {
         )
         .unwrap();
         PmWakeDecision {
+            periodic_input: None,
             project_root,
             window_id,
             wake_id,
@@ -2474,8 +2543,15 @@ mod delivery_tests {
         runtime.write_pm_wake_prompt(&decision).unwrap();
         let session_id = runtime.active_agent_sessions[&window_id].session_id.clone();
         let path = gwt_agent::runtime_state_path(&runtime.sessions_dir, &session_id);
-        let mut state = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
-        state.runtime_incarnation = Some(runtime.runtimes[&window_id].incarnation);
+        let physical = gwt_agent::SessionRuntimeState::load(&path)
+            .expect("the actual native PM launch owns this runtime proof");
+        assert_eq!(
+            physical.runtime_incarnation,
+            Some(runtime.runtimes[&window_id].incarnation)
+        );
+        let mut state = physical.clone();
+        state.status = gwt_agent::AgentStatus::Running;
+        state.updated_at = chrono::Utc::now();
         state.active_tool_calls = Some(Default::default());
         state.source_event = Some("Stop".into());
         state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
@@ -2501,6 +2577,12 @@ mod delivery_tests {
         state.status = gwt_agent::AgentStatus::Idle;
         state.last_completed_hook_event_at = Some(state.updated_at);
         state.save(&path).unwrap();
+        let ready = gwt_agent::SessionRuntimeState::load(&path).unwrap();
+        assert_eq!(ready.execution_identity, physical.execution_identity);
+        assert_eq!(ready.runtime_incarnation, physical.runtime_incarnation);
+        assert_eq!(ready.host_started_at, physical.host_started_at);
+        assert_eq!(ready.child_pid, physical.child_pid);
+        assert_eq!(ready.child_started_at, physical.child_started_at);
         runtime.flush_pending_pm_wake(&window_id);
         assert_eq!(
             tasks.lock().unwrap().len(),
@@ -2539,7 +2621,6 @@ mod delivery_tests {
         drop(reservation);
         let task = tasks.lock().unwrap().remove(0);
         task();
-        assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
         let event = recorded.lock().unwrap().pop().unwrap();
         let UserEvent::ProjectCompletion { event, .. } = event else {
             panic!("project completion")
@@ -2547,6 +2628,12 @@ mod delivery_tests {
         let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
             panic!("wake completion")
         };
+        assert_eq!(
+            capture.prompts(),
+            vec!["WORKER-WAKE\r"],
+            "actual owner outcome: {:?}",
+            delivery.result
+        );
         assert_eq!(
             delivery.result,
             Ok(PmWakeWrite::Unconfirmed),
@@ -2702,7 +2789,112 @@ mod delivery_tests {
             .is_empty());
         let task = tasks.lock().unwrap().remove(0);
         task();
-        assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
+        let retry = recorded.lock().unwrap().pop().unwrap();
+        let UserEvent::ProjectCompletion { event, .. } = retry else {
+            panic!("retry completion must keep its project generation")
+        };
+        let UserEvent::PmWakeDeliveryComplete(retry) = *event else {
+            panic!("expected actual wake retry completion")
+        };
+        assert_eq!(
+            capture.prompts(),
+            vec!["WORKER-WAKE\r"],
+            "actual retry outcome: {:?}",
+            retry.result
+        );
+    }
+
+    #[test]
+    fn periodic_pm_wake_discards_input_after_decision_even_after_full_quiet() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for clear in ["\r", "\u{0003}"] {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = ScopedGwtHome::set(temp.path());
+            let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+            let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+            let (spawner, tasks) = BlockingTaskSpawner::queued();
+            runtime.blocking_tasks = spawner;
+            let (proxy, recorded) = AppEventProxy::stub();
+            runtime.proxy = proxy;
+            let capture = PromptCapture::begin(&repo);
+            let monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                    .unwrap(),
+            );
+            // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; no real-time ordering assertion, kept behind the production operation budget.
+            let start = std::time::Instant::now() - Duration::from_secs(1000);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+            let owner = runtime.test_project_owners[&repo].clone();
+            crate::app_runtime::tests::owner_fixture_block_on(
+                owner.set_operation_clock(Some(start)),
+            )
+            .unwrap();
+            runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+                &repo,
+                &monitor,
+                "2026-10-10T01:00:00Z",
+                true,
+            );
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+                start + Duration::from_secs(1),
+            );
+            crate::app_runtime::tests::owner_fixture_block_on(
+                owner.set_operation_clock(Some(start + Duration::from_secs(1))),
+            )
+            .unwrap();
+            runtime.terminal_input_events(&window_id, "new human input");
+            runtime.terminal_input_events(&window_id, clear);
+            // Commit the real human input while retaining the old queued wake.
+            finish_input_task(&mut runtime, &tasks, 1);
+            finish_input_task(&mut runtime, &tasks, 1);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+                start + Duration::from_secs(120),
+            );
+            crate::app_runtime::tests::owner_fixture_block_on(
+                owner.set_operation_clock(Some(start + Duration::from_secs(120))),
+            )
+            .unwrap();
+            tasks.lock().unwrap().remove(0)();
+            let event = recorded.lock().unwrap().pop().unwrap();
+            let UserEvent::ProjectCompletion { event, .. } = event else {
+                panic!("project completion");
+            };
+            let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+                panic!("wake completion");
+            };
+            assert_eq!(delivery.result, Ok(PmWakeWrite::Discarded));
+            runtime.pm_wake_delivery_complete(delivery);
+            assert!(
+                capture.prompts().is_empty(),
+                "the old tick must never be staged"
+            );
+            assert!(runtime
+                .project_state(&runtime.test_context())
+                .unwrap()
+                .pending_pm_wakes
+                .is_empty());
+
+            let decision = runtime
+                .pm_periodic_wake_decision_for_monitor_with_standing_work_at(
+                    &repo,
+                    &monitor,
+                    "2026-10-10T01:10:00Z",
+                    Some(true),
+                )
+                .expect("a fresh tick after the full quiet interval");
+            runtime.runtimes.get_mut(&window_id).unwrap().incarnation += 1;
+            assert_eq!(
+                runtime.write_pm_wake_prompt(&decision).unwrap(),
+                PmWakeWrite::Discarded
+            );
+            assert!(
+                tasks.lock().unwrap().is_empty(),
+                "the old incarnation cannot be queued"
+            );
+        }
     }
 
     #[test]

@@ -644,6 +644,8 @@ pub struct WindowRuntime {
     pub(crate) screen_ansi: Vec<u8>,
     pub(crate) screen_seq: u64,
     pub(crate) has_unsent_user_input: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
+    pub(crate) last_human_input_at: Option<Instant>,
     pub(crate) output_seq: u64,
     pub(crate) status_revision: u64,
     pub(crate) raw_status: gwt::WindowProcessStatus,
@@ -672,6 +674,8 @@ impl WindowRuntime {
             screen_ansi: Vec::new(),
             screen_seq: 0,
             has_unsent_user_input: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            input_observation: None,
+            last_human_input_at: None,
             output_seq: 0,
             status_revision: 0,
             raw_status: gwt::WindowProcessStatus::Running,
@@ -681,6 +685,46 @@ impl WindowRuntime {
             exit_confirmed: false,
             exit_code: None,
         }
+    }
+
+    pub(crate) fn observe_input(
+        &mut self,
+        observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
+    ) {
+        let Some(observation) = observation else {
+            return;
+        };
+        if self
+            .input_observation
+            .is_some_and(|old| old.revision > observation.revision)
+        {
+            return;
+        }
+        if self
+            .input_observation
+            .is_none_or(|old| old.revision != observation.revision)
+        {
+            self.last_human_input_at = observation.human_input_elapsed_ms.and_then(|elapsed| {
+                gwt_core::operation_deadline::now().checked_sub(Duration::from_millis(elapsed))
+            });
+        }
+        self.input_observation = Some(observation);
+    }
+
+    pub(crate) fn quiet_input_revision(&self, quiet_for: Duration) -> Option<u64> {
+        let observation = self.input_observation?;
+        if self
+            .has_unsent_user_input
+            .load(std::sync::atomic::Ordering::Acquire)
+            || self.last_human_input_at.is_some_and(|at| {
+                gwt_core::operation_deadline::now()
+                    .checked_duration_since(at)
+                    .is_none_or(|elapsed| elapsed < quiet_for)
+            })
+        {
+            return None;
+        }
+        Some(observation.revision)
     }
 }
 
@@ -700,7 +744,7 @@ pub(crate) struct RemoteRuntimeCommandCompletion {
     pub(crate) incarnation: u64,
     pub(crate) kind: RemoteRuntimeCommandKind,
     pub(crate) approval_resolution_started: bool,
-    pub(crate) result: Result<Option<bool>, String>,
+    pub(crate) result: Result<Option<gwt::project_runtime::events::OwnerInputObservation>, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -715,7 +759,8 @@ pub(crate) struct RemoteOwnerSnapshotCompletion {
     pub(crate) result: Result<RemoteRuntimeSnapshot, String>,
 }
 
-enum RemoteOwnerLaunchRequest {
+#[derive(Clone)]
+pub(crate) enum RemoteOwnerLaunchRequest {
     Agent {
         config: Box<gwt_agent::LaunchConfig>,
         metadata: Box<gwt::project_runtime::launch_payload::OwnerLaunchMetadata>,
@@ -728,11 +773,52 @@ enum RemoteOwnerLaunchRequest {
         origin: gwt_agent::SessionLaunchOrigin,
         placeholder_existed: bool,
     },
+    ColdAutomaticRestore {
+        source_session_id: String,
+        placeholder_existed: bool,
+    },
 }
 
 pub(crate) type RemoteLaunchClientCell =
     Arc<Mutex<Option<Result<gwt::project_runtime::client::ProjectRuntimeClient, String>>>>;
-pub(crate) type RemoteLaunchCancelAck = Arc<tokio::sync::Mutex<Option<Result<(), String>>>>;
+#[derive(Default)]
+enum RemoteLaunchRequestProof {
+    #[default]
+    Unknown,
+    PreparingCold,
+    Captured(serde_json::Value),
+    UnsentByWorker,
+}
+#[derive(Default)]
+pub(crate) struct RemoteLaunchCancellation {
+    request: RemoteLaunchRequestProof,
+    acknowledgement: Option<Result<(), String>>,
+}
+impl RemoteLaunchCancellation {
+    fn captured(expected_request: serde_json::Value) -> Self {
+        Self {
+            request: RemoteLaunchRequestProof::Captured(expected_request),
+            acknowledgement: None,
+        }
+    }
+
+    fn confirm_unsent_by_worker(&mut self) {
+        if matches!(self.request, RemoteLaunchRequestProof::PreparingCold) {
+            self.request = RemoteLaunchRequestProof::UnsentByWorker;
+            self.acknowledgement = Some(Ok(()));
+        }
+    }
+}
+#[cfg(test)]
+impl RemoteLaunchCancellation {
+    pub(crate) fn acknowledged_for_test() -> Self {
+        Self {
+            request: RemoteLaunchRequestProof::Unknown,
+            acknowledgement: Some(Ok(())),
+        }
+    }
+}
+pub(crate) type RemoteLaunchCancelAck = Arc<tokio::sync::Mutex<RemoteLaunchCancellation>>;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub(crate) struct RemoteRestoreRefusal {
@@ -741,10 +827,16 @@ pub(crate) struct RemoteRestoreRefusal {
     pub(crate) remove_placeholder: bool,
     pub(crate) source_session_id: String,
     pub(crate) retryable: bool,
+    #[serde(skip)]
+    canonical_rows: Option<(
+        gwt::daemon_subscriber::ProjectOwnerIdentity,
+        gwt::PersistedWindowRegistry,
+    )>,
 }
 
 #[derive(Clone)]
 pub(crate) enum RemoteOwnerLaunchOutcome {
+    RetainedManualFailure(gwt::project_runtime::events::OwnerRetainedManualLaunchFailure),
     MonitorFailureClosed {
         detail: String,
     },
@@ -769,9 +861,11 @@ pub(crate) enum RemoteOwnerLaunchOutcome {
 
 #[derive(Clone)]
 pub(crate) struct RestoreLaunchFeedback {
-    source: Box<gwt_agent::Session>,
+    source: Option<Box<gwt_agent::Session>>,
+    source_session_id: String,
     origin: startup::RestoreOrigin,
     placeholder_existed: bool,
+    placeholders: Vec<(String, u64)>,
 }
 
 #[derive(Clone)]
@@ -828,6 +922,8 @@ pub(crate) struct RemoteRuntimeSnapshot {
     pub(crate) screen_ansi: Vec<u8>,
     pub(crate) screen_seq: u64,
     pub(crate) has_unsent_user_input: bool,
+    #[serde(default)]
+    pub(crate) input_observation: Option<gwt::project_runtime::events::OwnerInputObservation>,
     pub(crate) child_pid: Option<u32>,
     pub(crate) started_at_ms: u64,
     pub(crate) raw_status: WindowProcessStatus,
@@ -897,7 +993,9 @@ mod title_sync;
 mod ui_trace;
 mod window;
 mod wizard;
-pub(crate) use wizard::{IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared};
+pub(crate) use wizard::{
+    IssueMonitorLaunchFactsPrefetched, IssueMonitorLaunchPrepared, IssueMonitorPreflightRejected,
+};
 mod work_scans;
 mod workspace;
 mod workspace_views;
@@ -935,6 +1033,7 @@ use launch::{
     register_codex_managed_project_trust_for_resolved_launch_with_host_context,
     validate_issue_monitor_managed_codex_worktree, HostEnvKeySemantics, IssueMonitorTrustCandidate,
 };
+#[cfg(test)]
 pub(crate) use launch::{continue_work_readiness_decision, ReadinessDeadlineDecision};
 pub(crate) use workspace_views::{
     run_active_work_projection_refresh, ActiveWorkProjectionJob, ActiveWorkProjectionRefreshed,
@@ -942,12 +1041,12 @@ pub(crate) use workspace_views::{
 // Production callers only ever pass this through from
 // `AppRuntime::readiness_pane_evidence`, so the name itself is needed by the
 // readiness policy tests alone (Issue #3482).
+pub use launch::LaunchWizardMemoryCache;
 #[cfg(test)]
 pub(crate) use launch::ReadinessPaneEvidence;
 use launch::{launch_config_from_persisted_session, IssueBranchLinkStore};
-pub use launch::{
-    AgentLaunchResult, ContinueWorkReadinessWatch, LaunchWizardMemoryCache, ProcessLaunch,
-};
+#[cfg(test)]
+pub use launch::{AgentLaunchResult, ContinueWorkReadinessWatch, ProcessLaunch};
 #[cfg(test)]
 use loaders::{load_log_entries_from_dir, skipped_lines_warning};
 use profile::ProfileSaveRequest;
@@ -1001,11 +1100,13 @@ struct WorkspaceWorktreeReconcileOutcome {
 
 pub use gwt::project_runtime::launch_payload::{ActiveAgentSession, LaunchFeedbackContext};
 pub(crate) use gwt::project_runtime::launch_payload::{
-    PendingContinueWork, PendingContinueWorkExecution, PendingFreshExecutionLaunch,
-    WorkspaceResumeContext,
+    PendingContinueWork, PendingFreshExecutionLaunch, WorkspaceResumeContext,
 };
 
+#[cfg(test)]
 pub(crate) use gwt::project_runtime::continuation::CachedContinueWorkOutcome;
+#[cfg(test)]
+pub(crate) use gwt::project_runtime::launch_payload::PendingContinueWorkExecution;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingStartupAutoResumeSession {
@@ -1289,6 +1390,7 @@ pub(super) struct PreparedIssueMonitorLaunchFailure {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 enum PreparedIssueMonitorAgentFailure {
     Committed {
         monitor: Option<Box<gwt::IssueMonitorState>>,
@@ -1309,12 +1411,14 @@ pub(crate) struct RuntimeHookAgentFailureIdentity {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 struct RuntimeHookAgentFailureSource {
     identity: RuntimeHookAgentFailureIdentity,
     generations: Arc<Mutex<HashMap<String, u64>>>,
     launch: Option<(u64, gwt::IssueMonitorLaunchIdentity)>,
 }
 
+#[cfg(test)]
 impl RuntimeHookAgentFailureSource {
     fn generation_matches(&self, generations: &HashMap<String, u64>) -> bool {
         generations.get(&self.identity.window_id).copied() == self.identity.lifecycle_generation
@@ -1340,6 +1444,7 @@ impl RuntimeHookAgentFailureSource {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(test)]
 pub(crate) struct PreparedRuntimeHookAgentFailure {
     identity: RuntimeHookAgentFailureIdentity,
     message: String,
@@ -1364,6 +1469,9 @@ pub(crate) struct IssueMonitorAnswerDelivery {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum IssueMonitorLaunchDeliveryState {
+    Rejecting {
+        operation_id: String,
+    },
     Materializing {
         window_id: String,
         started_at: std::time::Instant,
@@ -1384,6 +1492,7 @@ pub(crate) enum IssueMonitorLaunchDeliveryState {
 }
 
 /// Immutable GUI observation captured before launch delivery I/O runs on a worker.
+#[cfg(test)]
 pub(super) use gwt::project_runtime::installation::IssueMonitorLaunchClaimInput;
 
 /// Issue #4378 AC-2: one Issue Monitor launch delivery held until the startup
@@ -1573,6 +1682,7 @@ pub(crate) struct ProjectRuntimeState {
     pub(crate) branch_cleanup_operations: Arc<gwt::BranchCleanupOperationStore>,
     pub(crate) recovery_center_handles: HashMap<String, RecoveryCenterAction>,
     pub(crate) recovery_center_generation: u64,
+    #[cfg(test)]
     pub(crate) continue_work_outcomes: HashMap<String, CachedContinueWorkOutcome>,
     pub(crate) update_auto_apply: gwt::update_drain::UpdateAutoApplyPlanner,
     pub(crate) context: ProjectContext,
@@ -1633,6 +1743,7 @@ pub(crate) fn initial_project_states(
                     update_auto_apply: Default::default(),
                     recovery_center_handles: HashMap::new(),
                     recovery_center_generation: 0,
+                    #[cfg(test)]
                     continue_work_outcomes: HashMap::new(),
                 },
             )
@@ -3545,9 +3656,9 @@ fn issue_monitor_prefs_metadata_stamp(path: &Path) -> Option<(u64, std::time::Sy
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
-pub(crate) use gwt::project_runtime::installation::{
-    issue_monitor_prefs_content_digest, IssueMonitorPrefsStamp,
-};
+#[cfg(test)]
+pub(crate) use gwt::project_runtime::installation::issue_monitor_prefs_content_digest;
+pub(crate) use gwt::project_runtime::installation::IssueMonitorPrefsStamp;
 
 fn issue_monitor_prefs_stamp(path: &Path) -> Option<IssueMonitorPrefsStamp> {
     IssueMonitorPrefsStamp::read(path).ok().flatten()
@@ -4480,6 +4591,7 @@ impl AppRuntime {
                     update_auto_apply: Default::default(),
                     recovery_center_handles: HashMap::new(),
                     recovery_center_generation: 0,
+                    #[cfg(test)]
                     continue_work_outcomes: HashMap::new(),
                 });
         }
@@ -5681,6 +5793,7 @@ impl AppRuntime {
             .map(|tab| tab.id.clone())
     }
 
+    #[cfg(test)]
     fn issue_monitor_issue_number_for_window(
         &self,
         project_root: &Path,
@@ -5729,128 +5842,6 @@ impl AppRuntime {
             std::process::id(),
         );
         gwt::daemon_publisher::publish_issue_monitor_control(project_root, payload)
-    }
-
-    fn publish_durable_issue_monitor_control_owned(
-        project_root: &Path,
-        payload: serde_json::Value,
-    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let payload = gwt::runtime_daemon_events::issue_monitor_payload(
-            "control",
-            payload,
-            std::process::id(),
-        );
-        gwt::daemon_publisher::publish_durable_issue_monitor_control(project_root, payload)
-    }
-
-    #[cfg(test)]
-    fn persist_issue_monitor_delivery_workspace(
-        &self,
-        project_root: &Path,
-        window_id: &str,
-    ) -> Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let address = self.window_lookup.get(window_id).ok_or_else(|| {
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                "launch delivery window {window_id} is not registered"
-            ))
-        })?;
-        let tab = self.tab(&address.tab_id).ok_or_else(|| {
-            gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(format!(
-                "launch delivery project tab {} is unavailable",
-                address.tab_id
-            ))
-        })?;
-        if !same_worktree_path(&tab.project_root, project_root) {
-            return Err(
-                gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(format!(
-                    "launch delivery window {window_id} belongs to a different project"
-                )),
-            );
-        }
-        self.persist_dispatcher
-            .flush_workspace_durable(
-                gwt::workspace_state_path(&tab.project_root),
-                self.persistable_workspace_state(tab),
-            )
-            .map_err(|error| {
-                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(
-                    format!("launch delivery workspace persistence failed: {error}"),
-                )
-            })
-    }
-
-    fn mark_issue_monitor_launch_delivery_materialized(
-        project_root: &Path,
-        materializer_id: &str,
-        fallback_timeout: std::time::Duration,
-        issue_number: u64,
-        delivery_id: &str,
-        materializer_window_id: &str,
-    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        let publication = Self::publish_durable_issue_monitor_control_owned(
-            project_root,
-            serde_json::json!({
-                "launch_delivery_materialized": {
-                    "issue_number": issue_number,
-                    "delivery_id": delivery_id,
-                    "materializer_id": materializer_id,
-                    "materializer_window_id": materializer_window_id,
-                }
-            }),
-        );
-        match publication {
-            publication @ (Ok(())
-            | Err(
-                gwt::runtime_daemon_events::IssueMonitorControlPublishError::OutcomeUnknown(_),
-            )) => Self::issue_monitor_delivery_marker_result(
-                project_root,
-                issue_number,
-                delivery_id,
-                materializer_id,
-                materializer_window_id,
-                false,
-                publication,
-            ),
-            Err(error) if error.allows_local_fallback() => {
-                Self::commit_local_issue_monitor_control_with_timeout(
-                    project_root,
-                    fallback_timeout,
-                    |monitor| {
-                        monitor.mark_launch_delivery_materialized(
-                            issue_number,
-                            delivery_id,
-                            materializer_id,
-                            materializer_window_id,
-                        )
-                    },
-                )
-                .map(|(_monitor, accepted)| accepted)
-            }
-            Err(gwt::runtime_daemon_events::IssueMonitorControlPublishError::Rejected(_)) => {
-                Ok(false)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn issue_monitor_delivery_marker_result(
-        project_root: &Path,
-        issue_number: u64,
-        delivery_id: &str,
-        materializer_id: &str,
-        window_id: &str,
-        workspace_durable: bool,
-        publication: Result<(), gwt::runtime_daemon_events::IssueMonitorControlPublishError>,
-    ) -> Result<bool, gwt::runtime_daemon_events::IssueMonitorControlPublishError> {
-        gwt::project_runtime::installation::issue_monitor_delivery_marker_result(
-            project_root,
-            issue_number,
-            delivery_id,
-            materializer_id,
-            window_id,
-            workspace_durable,
-            publication,
-        )
     }
 
     pub(crate) fn issue_monitor_launch_completed_delivery_events(
@@ -6591,6 +6582,7 @@ impl AppRuntime {
             .filter(|stale| stale != fresh_window_id)
     }
 
+    #[cfg(test)]
     fn classify_issue_monitor_termination(
         sessions_dir: &Path,
         session_id: &str,
@@ -6628,6 +6620,7 @@ impl AppRuntime {
         }
     }
 
+    #[cfg(test)]
     fn runtime_hook_agent_failure_identity(
         &self,
         project_root: &Path,
@@ -6663,6 +6656,7 @@ impl AppRuntime {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn handle_runtime_hook_agent_failure_prepared(
         &mut self,
         prepared: PreparedRuntimeHookAgentFailure,
@@ -6699,6 +6693,7 @@ impl AppRuntime {
         )
     }
 
+    #[cfg(test)]
     fn issue_monitor_session_mode_for_window(&self, window_id: &str) -> gwt_agent::SessionMode {
         self.pending_launch_feedback_contexts
             .get(window_id)
@@ -6712,6 +6707,7 @@ impl AppRuntime {
             .unwrap_or(gwt_agent::SessionMode::Normal)
     }
 
+    #[cfg(test)]
     fn issue_monitor_failure_for_window(
         &self,
         window_id: &str,
@@ -6775,6 +6771,7 @@ impl AppRuntime {
         Some(gwt::IssueMonitorFailure::ResumeWriterConflict { holder_window_id })
     }
 
+    #[cfg(test)]
     fn issue_monitor_agent_failed_from_launch_payload(
         window_id: &str,
         message: &str,
@@ -6786,6 +6783,7 @@ impl AppRuntime {
         )
     }
 
+    #[cfg(test)]
     fn issue_monitor_agent_failed_payload_with_failure(
         window_id: &str,
         message: &str,
@@ -6836,6 +6834,7 @@ impl AppRuntime {
         )
     }
 
+    #[cfg(test)]
     fn issue_monitor_agent_failed_result_events_for_project(
         &mut self,
         project_root: &Path,
@@ -6868,6 +6867,7 @@ impl AppRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn prepare_issue_monitor_agent_failure(
         project_root: &Path,
         expected_project_tab_id: Option<&str>,
@@ -6896,6 +6896,7 @@ impl AppRuntime {
             },
             Err(error) if error.allows_local_fallback() => {
                 let _scan_deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+                    // test-hygiene: allow-wall-clock-deadline Bounds the legacy adapter's real Git/cache scan; exact source and claim checks determine the result.
                     std::time::Instant::now() + std::time::Duration::from_secs(60),
                 );
                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -7081,6 +7082,7 @@ impl AppRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn apply_issue_monitor_agent_failure(
         &mut self,
         project_root: &Path,
@@ -7117,6 +7119,7 @@ impl AppRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn finalize_issue_monitor_agent_failed_events(
         &mut self,
         project_root: &Path,
@@ -7241,6 +7244,7 @@ impl AppRuntime {
     /// SPEC-3431 FR-068: minimum gap between heartbeat publications for one
     /// window. Hooks arrive per tool call, which is far more often than a
     /// stall check needs, and each publication is a daemon control round trip.
+    #[cfg(test)]
     const HEARTBEAT_THROTTLE_SECS: i64 = 60;
 
     /// Record one activity arrival for `window_id` at `now` and report whether
@@ -7253,6 +7257,7 @@ impl AppRuntime {
     /// itself counts from the last heartbeat let out (Issue #4608) — counting
     /// from the last arrival never published again for an agent whose hooks
     /// arrive less than a minute apart.
+    #[cfg(test)]
     pub(crate) fn take_issue_monitor_heartbeat_slot(
         &mut self,
         window_id: &str,
@@ -8860,6 +8865,7 @@ impl AppRuntime {
     }
 
     /// Capture the current canvas without resolving Session metadata from disk.
+    #[cfg(test)]
     pub(super) fn issue_monitor_window_snapshot_for_tab_cached(
         &self,
         project_tab_id: &str,
@@ -14056,6 +14062,7 @@ impl AppRuntime {
             snapshot.has_unsent_user_input,
             std::sync::atomic::Ordering::Release,
         );
+        runtime.observe_input(snapshot.input_observation);
         runtime.output_seq = runtime.output_seq.max(snapshot.screen_seq);
         runtime.started_at_ms = snapshot.started_at_ms;
         runtime.child_pid = snapshot.child_pid;
@@ -14364,9 +14371,22 @@ impl AppRuntime {
                 }
                 let runtime = self.runtimes.get_mut(&id).expect("fenced remote runtime");
                 runtime.status_revision = runtime.status_revision.saturating_add(1);
+                let (status, detail) = if runtime.exit_confirmed
+                    && matches!(
+                        runtime.status,
+                        WindowProcessStatus::Error
+                            | WindowProcessStatus::Waiting
+                            | WindowProcessStatus::Stopped
+                    ) {
+                    (runtime.status, runtime.detail.clone())
+                } else {
+                    (WindowProcessStatus::Stopped, None)
+                };
                 runtime.exit_confirmed = true;
-                runtime.status = WindowProcessStatus::Stopped;
-                self.apply_owner_status_projection(&id, WindowProcessStatus::Stopped, None)
+                runtime.status = status;
+                runtime.detail = detail.clone();
+                self.active_agent_sessions.remove(&id);
+                self.apply_owner_status_projection(&id, status, detail)
             }
             OwnerEvent::LaunchProgress {
                 id,
@@ -14478,15 +14498,32 @@ impl AppRuntime {
                 let _ = self.active_work_projection_broadcast_for_tab(&context.tab_id);
                 self.queue_owner_inventory(context, Some(connection_id), None, None)
             }
-            OwnerEvent::Hook { .. } => {
+            OwnerEvent::Hook { event } => {
                 self.invalidate_project_caches(&context.project_root);
+                if event.kind == gwt::RuntimeHookEventKind::CoordinationEvent
+                    && event.source_event.as_deref()
+                        == Some(gwt::daemon_runtime::PM_STATUS_CHANGED_SOURCE_EVENT)
+                    && event.gwt_session_id.as_deref().is_some_and(|session_id| {
+                        gwt::pm_registry::session_is_registered_pm(
+                            &gwt::pm_registry::pm_prefs_path_for_repo_path(&context.project_root),
+                            session_id,
+                        )
+                    })
+                {
+                    self.schedule_runtime_hook_active_work_projection_refresh(
+                        &context.project_root,
+                        "pm_status_changed",
+                        "unchanged",
+                    );
+                    return self.queue_owner_inventory(context, Some(connection_id), None, None);
+                }
                 Vec::new()
             }
         }
     }
 }
 
-/// One captured launch has one cancellation result, even when close races setup.
+/// Close/setup races retain the original request and share its successful ACK.
 async fn cancel_remote_owner_launch(
     owner_pane_id: &str,
     operation_id: &str,
@@ -14495,10 +14532,28 @@ async fn cancel_remote_owner_launch(
 ) -> Result<(), String> {
     // This per-operation lock is acquired only in background workers. Holding it
     // through the RPC makes concurrent close/setup paths share the same exact ACK.
-    let mut acknowledgement = cancel_ack.lock().await;
-    if let Some(result) = acknowledgement.as_ref() {
+    let mut cancellation = cancel_ack.lock().await;
+    if let Some(result @ Ok(())) = cancellation.acknowledgement.as_ref() {
         return result.clone();
     }
+    let expected_request = match &cancellation.request {
+        RemoteLaunchRequestProof::Captured(request) => request.clone(),
+        RemoteLaunchRequestProof::UnsentByWorker => return Ok(()),
+        // A queued cancellation must not wait for the launch worker: test task
+        // queues can run that cancellation first on the same thread. Only the
+        // launch worker can later prove that it never sent the request.
+        RemoteLaunchRequestProof::PreparingCold => {
+            return Err(
+                "launch cancellation awaits the original request capture or worker unsent proof"
+                    .into(),
+            );
+        }
+        RemoteLaunchRequestProof::Unknown => {
+            let result = Err("launch cancellation has no original request proof".to_string());
+            cancellation.acknowledgement = Some(result.clone());
+            return result;
+        }
+    };
     let result = tokio::time::timeout(Duration::from_secs(120), async {
         loop {
             let captured = client_cell
@@ -14508,10 +14563,13 @@ async fn cancel_remote_owner_launch(
             match captured {
                 Some(Ok(client)) => {
                     return client
-                        .command(gwt::project_runtime::events::OwnerCommand::PendingCancel {
-                            id: owner_pane_id.to_string(),
-                            operation_id: operation_id.to_string(),
-                        })
+                        .command(
+                            gwt::project_runtime::events::OwnerCommand::PendingCancelExact {
+                                id: owner_pane_id.to_string(),
+                                operation_id: operation_id.to_string(),
+                                expected_request: expected_request.clone(),
+                            },
+                        )
                         .await
                         .map(|_| ())
                 }
@@ -14523,7 +14581,7 @@ async fn cancel_remote_owner_launch(
     .await
     .map_err(|_| "project launch cancellation timed out".to_string())
     .and_then(|result| result);
-    *acknowledgement = Some(result.clone());
+    cancellation.acknowledgement = Some(result.clone());
     result
 }
 
@@ -14649,6 +14707,26 @@ impl AppRuntime {
         )
     }
 
+    pub(crate) fn queue_project_owner_cold_restore(
+        &mut self,
+        context: &ProjectContext,
+        window_id: String,
+        window_generation: Option<u64>,
+        source_session_id: String,
+        placeholder_existed: bool,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.queue_project_owner_launch_request(
+            context,
+            window_id,
+            window_generation,
+            uuid::Uuid::new_v4().to_string(),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore {
+                source_session_id,
+                placeholder_existed,
+            },
+        )
+    }
+
     fn queue_project_owner_launch_request(
         &mut self,
         context: &ProjectContext,
@@ -14674,7 +14752,129 @@ impl AppRuntime {
         }
         let current = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let client_cell: RemoteLaunchClientCell = Arc::new(Mutex::new(None));
-        let cancel_ack: RemoteLaunchCancelAck = Arc::new(tokio::sync::Mutex::new(None));
+        let manual_request = matches!(&request,
+            RemoteOwnerLaunchRequest::Agent { metadata, .. } if metadata.manual_successor.is_some())
+        .then(|| request.clone());
+        let expects_manual_failure = manual_request.is_some();
+        let restore_source = match &request {
+            RemoteOwnerLaunchRequest::RestoreSavedSession {
+                expected_source, ..
+            } => Some(expected_source.id.clone()),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore {
+                source_session_id, ..
+            } => Some(source_session_id.clone()),
+            _ => None,
+        };
+        let mut restore_feedback = match &request {
+            RemoteOwnerLaunchRequest::RestoreSavedSession {
+                expected_source,
+                origin,
+                placeholder_existed,
+            } => Some((
+                Some(expected_source.clone()),
+                if *origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore {
+                    startup::RestoreOrigin::Automatic
+                } else {
+                    startup::RestoreOrigin::UserRequested
+                },
+                *placeholder_existed,
+            )),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore {
+                placeholder_existed,
+                ..
+            } => Some((
+                None,
+                startup::RestoreOrigin::Automatic,
+                *placeholder_existed,
+            )),
+            _ => None,
+        }
+        .map(|(source, origin, placeholder_existed)| {
+            let source_session_id = restore_source.clone().expect("restore source selector");
+            RestoreLaunchFeedback {
+                source,
+                source_session_id: source_session_id.clone(),
+                origin,
+                placeholder_existed,
+                placeholders: {
+                    let generations = self
+                        .window_lifecycle_generations
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.window_lookup
+                        .iter()
+                        .filter_map(|(id, address)| {
+                            if self.project_key_for_window(id) != Some(&context.project_key) {
+                                return None;
+                            }
+                            let row = self
+                                .tab(&address.tab_id)?
+                                .workspace
+                                .window(&address.raw_id)?;
+                            (row.session_id.as_deref() == Some(source_session_id.as_str()))
+                                .then(|| {
+                                    generations
+                                        .get(id)
+                                        .copied()
+                                        .map(|generation| (id.clone(), generation))
+                                })
+                                .flatten()
+                        })
+                        .collect()
+                },
+            }
+        });
+        let command = match request {
+            RemoteOwnerLaunchRequest::Agent { config, metadata } => {
+                Some(gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+                    id: owner_pane_id.clone(),
+                    operation_id: operation_id.clone(),
+                    tab_id: context.project_key.to_string(),
+                    config,
+                    metadata,
+                    cols: 120,
+                    rows: 32,
+                })
+            }
+            RemoteOwnerLaunchRequest::ConfiguredShell { config } => Some(
+                gwt::project_runtime::events::OwnerCommand::LaunchConfiguredShell {
+                    id: owner_pane_id.clone(),
+                    operation_id: operation_id.clone(),
+                    config,
+                    cols: 120,
+                    rows: 32,
+                },
+            ),
+            RemoteOwnerLaunchRequest::RestoreSavedSession {
+                expected_source,
+                origin,
+                ..
+            } => Some(
+                gwt::project_runtime::events::OwnerCommand::RestoreSavedSession {
+                    id: owner_pane_id.clone(),
+                    operation_id: operation_id.clone(),
+                    source_session_id: expected_source.id.clone(),
+                    expected_source,
+                    origin,
+                    cols: 120,
+                    rows: 32,
+                },
+            ),
+            RemoteOwnerLaunchRequest::ColdAutomaticRestore { .. } => None,
+        };
+        let replay_command = command
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let cancel_ack: RemoteLaunchCancelAck =
+            Arc::new(tokio::sync::Mutex::new(match &replay_command {
+                Some(request) => RemoteLaunchCancellation::captured(request.clone()),
+                None => RemoteLaunchCancellation {
+                    request: RemoteLaunchRequestProof::PreparingCold,
+                    acknowledgement: None,
+                },
+            }));
         self.pending_launch_completions.insert(
             window_id.clone(),
             launch::PendingLaunchCompletion {
@@ -14685,30 +14885,10 @@ impl AppRuntime {
                 owner_pane_id: owner_pane_id.clone(),
                 client_cell: client_cell.clone(),
                 cancel_ack: cancel_ack.clone(),
+                manual_request,
+                manual_wizard: None,
             },
         );
-        let restore_source = match &request {
-            RemoteOwnerLaunchRequest::RestoreSavedSession {
-                expected_source, ..
-            } => Some(expected_source.id.clone()),
-            _ => None,
-        };
-        let restore_feedback = match &request {
-            RemoteOwnerLaunchRequest::RestoreSavedSession {
-                expected_source,
-                origin,
-                placeholder_existed,
-            } => Some(RestoreLaunchFeedback {
-                source: expected_source.clone(),
-                origin: if *origin == gwt_agent::SessionLaunchOrigin::AutomaticRestore {
-                    startup::RestoreOrigin::Automatic
-                } else {
-                    startup::RestoreOrigin::UserRequested
-                },
-                placeholder_existed: *placeholder_existed,
-            }),
-            _ => None,
-        };
         let context = context.clone();
         let supervisor = Arc::clone(&self.daemon_supervisor);
         let sessions_dir = self.sessions_dir.clone();
@@ -14718,22 +14898,69 @@ impl AppRuntime {
         if let Err(error) = self.blocking_tasks.try_spawn(move || {
             let _ = session_cache.sessions();
             let mut restore_refusal = None;
+            let mut launch_sent = false;
             let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string()).and_then(|executor| executor.block_on(async {
                 let attempt = async {
+                if command.is_none() && !current.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("launch cancelled".into());
+                }
                 let connected = gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(context.project_root.clone(), supervisor).await;
                 *client_cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(connected.clone());
                 let client = connected?;
                 if !current.load(std::sync::atomic::Ordering::Acquire) {
-                    cancel_remote_owner_launch(&owner_pane_id, &operation_id, &client_cell, &cancel_ack).await?;
                     return Err("launch cancelled".into());
                 }
-                let command = match request {
-                    RemoteOwnerLaunchRequest::Agent { config, metadata } => gwt::project_runtime::events::OwnerCommand::LaunchAgent { id: owner_pane_id.clone(), operation_id: operation_id.clone(), tab_id: context.project_key.to_string(), config, metadata, cols: 120, rows: 32 },
-                    RemoteOwnerLaunchRequest::ConfiguredShell { config } => gwt::project_runtime::events::OwnerCommand::LaunchConfiguredShell { id: owner_pane_id.clone(), operation_id: operation_id.clone(), config, cols: 120, rows: 32 },
-                    RemoteOwnerLaunchRequest::RestoreSavedSession { expected_source, origin, .. } => gwt::project_runtime::events::OwnerCommand::RestoreSavedSession { id: owner_pane_id.clone(), operation_id: operation_id.clone(), source_session_id: expected_source.id.clone(), expected_source, origin, cols: 120, rows: 32 },
+                let (command, replay_command) = match command {
+                    Some(command) => (command, replay_command.ok_or("original launch request proof is unavailable")?),
+                    None => {
+                        // Cold automatic discovery carries only a routing selector.
+                        // Health completed owner startup/name migration; this is the
+                        // first authoritative source snapshot, not a refresh of one.
+                        let source_session_id = restore_source.as_deref().ok_or("restore source selector is unavailable")?;
+                        let source = gwt_agent::Session::load(&sessions_dir.join(format!("{source_session_id}.toml")))
+                            .map_err(|error| error.to_string())?;
+                        if source.id != source_session_id {
+                            return Err("restore source identity changed before initial capture".into());
+                        }
+                        let expected_source = Box::new(source);
+                        restore_feedback.as_mut().ok_or("restore feedback is unavailable")?.source = Some(expected_source.clone());
+                        let command = gwt::project_runtime::events::OwnerCommand::RestoreSavedSession {
+                            id: owner_pane_id.clone(),
+                            operation_id: operation_id.clone(),
+                            source_session_id: source_session_id.to_string(),
+                            expected_source,
+                            origin: gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+                            cols: 120,
+                            rows: 32,
+                        };
+                        let replay = serde_json::to_value(&command).map_err(|error| error.to_string())?;
+                        let mut cancellation = cancel_ack.lock().await;
+                        if !current.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err("launch cancelled".into());
+                        }
+                        if !matches!(cancellation.request, RemoteLaunchRequestProof::PreparingCold) {
+                            return Err("initial restore request capture is no longer available".into());
+                        }
+                        cancellation.request = RemoteLaunchRequestProof::Captured(replay.clone());
+                        (command, replay)
+                    }
                 };
-                let replay_command = serde_json::to_value(&command).map_err(|error| error.to_string())?;
+                if !current.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("launch cancelled".into());
+                }
+                launch_sent = true;
                 let receipt = client.command(command).await?;
+                if let Some(value) = receipt.get("retained_manual_failure") {
+                    let failure: gwt::project_runtime::events::OwnerRetainedManualLaunchFailure =
+                        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+                    let identity = client.identity().ok_or("authenticated owner identity is unavailable")?;
+                    if !expects_manual_failure || failure.id != owner_pane_id || failure.operation_id != operation_id
+                        || failure.incarnation == 0 || failure.host_pid != identity.pid
+                        || failure.host_instance_id != identity.host_instance_id {
+                        return Err("retained manual failure identity changed".into());
+                    }
+                    return Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(failure));
+                }
                 if let Some(refusal) = receipt.get("restore_refusal") {
                     let refusal: RemoteRestoreRefusal = serde_json::from_value(refusal.clone()).map_err(|error| error.to_string())?;
                     if restore_source.as_deref() != Some(refusal.source_session_id.as_str()) {
@@ -14741,6 +14968,15 @@ impl AppRuntime {
                     }
                     let message = refusal.message.clone();
                     restore_refusal = Some(refusal);
+                    let identity = client.identity().cloned().ok_or("authenticated owner identity is unavailable")?;
+                    let inventory = client.command(gwt::project_runtime::events::OwnerCommand::ListPanes).await?;
+                    let rows: gwt::PersistedWindowRegistry = serde_json::from_value(
+                        inventory.get("canonical_rows").ok_or("owner canonical rows are unavailable")?.clone()
+                    ).map_err(|error| error.to_string())?;
+                    if client.identity() != Some(&identity) {
+                        return Err("owner changed before restore refusal readback".into());
+                    }
+                    restore_refusal.as_mut().expect("captured refusal").canonical_rows = Some((identity, rows));
                     return Err(message);
                 }
                 let identity = client.identity().ok_or("authenticated owner identity is unavailable")?;
@@ -14810,6 +15046,9 @@ impl AppRuntime {
                 let session = read_owner_session(&snapshot, &sessions_dir);
                 Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session))
                 }.await;
+                if !launch_sent {
+                    cancel_ack.lock().await.confirm_unsent_by_worker();
+                }
                 if attempt.is_err() || !current.load(std::sync::atomic::Ordering::Acquire) {
                     if let Err(cleanup) = cancel_remote_owner_launch(&owner_pane_id, &operation_id, &client_cell, &cancel_ack).await {
                         return Err(format!("{}; exact owner cleanup remains pending: {cleanup}", attempt.as_ref().err().map(String::as_str).unwrap_or("launch cancelled")));
@@ -14818,6 +15057,11 @@ impl AppRuntime {
                 }
                 attempt
             }));
+            if !launch_sent {
+                // Runtime construction can fail before the async worker runs.
+                // This worker still knows that it never sent a Launch request.
+                cancel_ack.blocking_lock().confirm_unsent_by_worker();
+            }
             proxy.send(UserEvent::RemoteOwnerLaunchComplete(Box::new(RemoteOwnerLaunchComplete { context, window_id, generation, owner_pane_id, operation_id, client_cell, cancel_ack, restore_refusal, restore_feedback, result })));
         }) {
             self.pending_launch_completions.remove(&failed_window);
@@ -14881,181 +15125,330 @@ impl AppRuntime {
             });
             return Vec::new();
         }
-        self.pending_launch_completions.remove(&window_id);
+        let pending = self
+            .pending_launch_completions
+            .remove(&window_id)
+            .expect("current exact owner completion");
         self.pending_auto_resume_sources.remove(&window_id);
         self.inflight_launches.retain(|_, (id, _)| id != &window_id);
-        match result {
-            Ok(RemoteOwnerLaunchOutcome::MonitorFailureClosed { detail }) => {
-                let mut events =
-                    self.owner_launch_failure_feedback_events(&context, &window_id, &detail);
-                events.extend(self.apply_owner_window_removed_projection(&context, &window_id));
-                events
-            }
-            Ok(RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => self
-                .apply_owner_terminal_launch_projection(
-                    &context,
-                    &window_id,
-                    Some(failure.removed_genesis_session.session_id),
-                    None,
-                    WindowProcessStatus::Error,
-                    Some(failure.error),
-                ),
-            Ok(RemoteOwnerLaunchOutcome::Failed { failure, session }) => {
-                self.record_restore_window_outcome(
-                    &window_id,
-                    Err(startup::RestoreRefusal::LaunchNotStarted),
-                );
-                self.restore_launch_windows.remove(&window_id);
-                let mut events = self.apply_owner_terminal_launch_projection(
-                    &context,
-                    &window_id,
-                    Some(failure.session_id),
-                    session,
-                    WindowProcessStatus::Error,
-                    Some(failure.detail),
-                );
-                for event in &mut events {
-                    if let BackendEvent::TerminalStatus {
-                        id,
-                        error_code,
-                        retryable,
-                        ..
-                    } = &mut event.event
-                    {
-                        if id == &window_id {
-                            *error_code = Some(failure.error_code.clone());
-                            *retryable = Some(failure.retryable);
-                        }
-                    }
+        let mut wizard_events = Vec::new();
+        if let Some(session) = pending.manual_wizard.clone() {
+            let owns_visible_slot = self
+                .launch_wizard_for(&context)
+                .is_some_and(|visible| visible.wizard_id == session.wizard_id);
+            let error = match &result {
+                Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(failure)) => {
+                    Some(failure.detail.clone())
                 }
-                events
+                Err(error) => Some(error.clone()),
+                Ok(RemoteOwnerLaunchOutcome::Failed { failure, .. }) => {
+                    Some(failure.detail.clone())
+                }
+                Ok(RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => {
+                    Some(failure.error.clone())
+                }
+                _ => None,
+            };
+            if owns_visible_slot {
+                self.take_launch_wizard(&context);
             }
-            Ok(RemoteOwnerLaunchOutcome::DiagnosticClosed {
-                incarnation,
-                status,
-                detail,
-                session_id,
+            let requested_agent = match pending.manual_request.as_ref() {
+                Some(RemoteOwnerLaunchRequest::Agent { config, .. }) => {
+                    config.agent_id.command().to_string()
+                }
+                _ => String::new(),
+            };
+            wizard_events = self.finish_launch_wizard_agent_spawn(
                 session,
-            }) => {
-                tracing::debug!(%owner_pane_id, incarnation, "owner finalized diagnostic exit before GUI install");
-                self.record_restore_window_outcome(
-                    &window_id,
-                    Err(startup::RestoreRefusal::LaunchNotStarted),
-                );
-                self.restore_launch_windows.remove(&window_id);
-                self.apply_owner_terminal_launch_projection(
-                    &context, &window_id, session_id, session, status, detail,
-                )
-            }
-            Ok(RemoteOwnerLaunchOutcome::NaturallyClosed {
-                incarnation,
-                session_id,
-            }) => {
-                tracing::debug!(%owner_pane_id, incarnation, ?session_id, "owner already finalized natural exit before GUI install");
-                self.apply_owner_window_removed_projection(&context, &window_id)
-            }
-            Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) => {
-                self.pending_launch_feedback_contexts.remove(&window_id);
-                let client = client_cell
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .and_then(|value| value.as_ref().ok())
-                    .cloned();
-                let Some(client) = client else {
-                    return self.status_events(
-                        window_id,
-                        WindowProcessStatus::Error,
-                        Some("owner connection is unavailable".into()),
-                    );
-                };
-                if self.runtimes.get(&window_id).is_some_and(|runtime| {
-                    runtime.owner_pane_id == snapshot.id
-                        && runtime.incarnation == snapshot.incarnation
-                        && client.identity() == Some(&runtime.owner_identity)
-                }) {
-                    // Inventory may have installed this same owner before the HTTP launch reply.
-                    // A fresh post-install snapshot repairs it without replaying older status/data.
-                    return self.request_owner_snapshot(&window_id, None);
-                }
-                self.record_restore_window_outcome(&window_id, Ok(()));
-                self.restore_launch_windows.remove(&window_id);
-                self.install_remote_owner_projection(
-                    &context, &window_id, client, snapshot, session,
-                )
-            }
-            Err(error) => {
-                let mut notification = if restore_refusal
-                    .as_ref()
-                    .is_none_or(|refusal| refusal.code == "restore_launch_failed")
-                {
-                    restore_feedback
-                        .as_ref()
-                        .map(|feedback| {
-                            self.restore_launch_failure_notification_events(
-                                &context.tab_id,
-                                &feedback.source,
-                                feedback.origin,
-                                feedback.placeholder_existed,
-                                Self::user_facing_launch_error_detail(&error),
-                            )
-                        })
-                        .unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let refusal_reason = restore_refusal
-                    .as_ref()
-                    .map(|refusal| startup::RestoreRefusal::from_owner_code(&refusal.code))
-                    .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
-                self.record_restore_window_outcome(&window_id, Err(refusal_reason));
-                self.restore_launch_windows.remove(&window_id);
-                if let Some(refusal) = restore_refusal.filter(|refusal| refusal.remove_placeholder)
-                {
-                    // The authenticated owner has already committed the exact source CAS.
-                    // Only this current-generation local layout is removed here.
-                    if let Some(address) = self.window_lookup.get(&window_id).cloned() {
-                        if let Some(tab) = self.tab_mut(&address.tab_id) {
-                            tab.workspace.close_window(&address.raw_id);
-                        }
-                        self.window_lookup.remove(&window_id);
-                        self.window_details.remove(&window_id);
-                        self.window_pty_statuses.remove(&window_id);
-                        tracing::info!(source_session_id = %refusal.source_session_id,
-                            code = %refusal.code, retryable = refusal.retryable,
-                            "owner refused saved Session restore");
-                        notification.push(self.workspace_state_broadcast(&context));
-                        return notification;
-                    }
-                }
-                let session_id = self
-                    .window_lookup
-                    .get(&window_id)
-                    .and_then(|address| {
-                        self.tab(&address.tab_id)
-                            .and_then(|tab| tab.workspace.window(&address.raw_id))
-                    })
-                    .and_then(|window| window.session_id.clone());
-                let (status, detail) = if refusal_reason == startup::RestoreRefusal::NoResumeSession
-                {
-                    (
-                        WindowProcessStatus::Stopped,
-                        Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
-                    )
-                } else {
-                    (WindowProcessStatus::Error, error)
-                };
-                notification.extend(self.apply_owner_terminal_launch_projection(
-                    &context,
-                    &window_id,
-                    session_id,
-                    None,
-                    status,
-                    Some(detail),
-                ));
-                notification
+                owns_visible_slot,
+                &requested_agent,
+                error.map_or_else(|| Ok(Vec::new()), Err),
+            );
+            if matches!(
+                &result,
+                Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(_))
+            ) && owns_visible_slot
+            {
+                self.pending_launch_completions
+                    .insert(window_id.clone(), pending);
             }
         }
+        let owner_events = (|| {
+            match result {
+                Ok(RemoteOwnerLaunchOutcome::RetainedManualFailure(failure)) => self
+                    .apply_owner_terminal_launch_projection(
+                        &context,
+                        &window_id,
+                        None,
+                        None,
+                        WindowProcessStatus::Error,
+                        Some(failure.detail),
+                    ),
+                Ok(RemoteOwnerLaunchOutcome::MonitorFailureClosed { detail }) => {
+                    let mut events =
+                        self.owner_launch_failure_feedback_events(&context, &window_id, &detail);
+                    events.extend(self.apply_owner_window_removed_projection(&context, &window_id));
+                    events
+                }
+                Ok(RemoteOwnerLaunchOutcome::CompensatedFailure(failure)) => self
+                    .apply_owner_terminal_launch_projection(
+                        &context,
+                        &window_id,
+                        Some(failure.removed_genesis_session.session_id),
+                        None,
+                        WindowProcessStatus::Error,
+                        Some(failure.error),
+                    ),
+                Ok(RemoteOwnerLaunchOutcome::Failed { failure, session }) => {
+                    self.record_restore_window_outcome(
+                        &window_id,
+                        Err(startup::RestoreRefusal::LaunchNotStarted),
+                    );
+                    self.restore_launch_windows.remove(&window_id);
+                    let mut events = self.apply_owner_terminal_launch_projection(
+                        &context,
+                        &window_id,
+                        Some(failure.session_id),
+                        session,
+                        WindowProcessStatus::Error,
+                        Some(failure.detail),
+                    );
+                    for event in &mut events {
+                        if let BackendEvent::TerminalStatus {
+                            id,
+                            error_code,
+                            retryable,
+                            ..
+                        } = &mut event.event
+                        {
+                            if id == &window_id {
+                                *error_code = Some(failure.error_code.clone());
+                                *retryable = Some(failure.retryable);
+                            }
+                        }
+                    }
+                    events
+                }
+                Ok(RemoteOwnerLaunchOutcome::DiagnosticClosed {
+                    incarnation,
+                    status,
+                    detail,
+                    session_id,
+                    session,
+                }) => {
+                    tracing::debug!(%owner_pane_id, incarnation, "owner finalized diagnostic exit before GUI install");
+                    self.record_restore_window_outcome(
+                        &window_id,
+                        Err(startup::RestoreRefusal::LaunchNotStarted),
+                    );
+                    self.restore_launch_windows.remove(&window_id);
+                    self.apply_owner_terminal_launch_projection(
+                        &context, &window_id, session_id, session, status, detail,
+                    )
+                }
+                Ok(RemoteOwnerLaunchOutcome::NaturallyClosed {
+                    incarnation,
+                    session_id,
+                }) => {
+                    tracing::debug!(%owner_pane_id, incarnation, ?session_id, "owner already finalized natural exit before GUI install");
+                    self.apply_owner_window_removed_projection(&context, &window_id)
+                }
+                Ok(RemoteOwnerLaunchOutcome::Runtime(snapshot, session)) => {
+                    self.pending_launch_feedback_contexts.remove(&window_id);
+                    let client = client_cell
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(|value| value.as_ref().ok())
+                        .cloned();
+                    let Some(client) = client else {
+                        return self.status_events(
+                            window_id,
+                            WindowProcessStatus::Error,
+                            Some("owner connection is unavailable".into()),
+                        );
+                    };
+                    if self.runtimes.get(&window_id).is_some_and(|runtime| {
+                        runtime.owner_pane_id == snapshot.id
+                            && runtime.incarnation == snapshot.incarnation
+                            && client.identity() == Some(&runtime.owner_identity)
+                    }) {
+                        // Inventory may have installed this same owner before the HTTP launch reply.
+                        // A fresh post-install snapshot repairs it without replaying older status/data.
+                        return self.request_owner_snapshot(&window_id, None);
+                    }
+                    self.record_restore_window_outcome(&window_id, Ok(()));
+                    self.restore_launch_windows.remove(&window_id);
+                    self.install_remote_owner_projection(
+                        &context, &window_id, client, snapshot, session,
+                    )
+                }
+                Err(error) => {
+                    let mut notification = if restore_refusal
+                        .as_ref()
+                        .is_none_or(|refusal| refusal.code == "restore_launch_failed")
+                    {
+                        restore_feedback
+                            .as_ref()
+                            .and_then(|feedback| {
+                                feedback.source.as_ref().map(|source| (feedback, source))
+                            })
+                            .map(|(feedback, source)| {
+                                self.restore_launch_failure_notification_events(
+                                    &context.tab_id,
+                                    source,
+                                    feedback.origin,
+                                    feedback.placeholder_existed,
+                                    Self::user_facing_launch_error_detail(&error),
+                                )
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let refusal_reason = restore_refusal
+                        .as_ref()
+                        .map(|refusal| startup::RestoreRefusal::from_owner_code(&refusal.code))
+                        .unwrap_or(startup::RestoreRefusal::LaunchNotStarted);
+                    self.record_restore_window_outcome(&window_id, Err(refusal_reason));
+                    self.restore_launch_windows.remove(&window_id);
+                    if restore_feedback.as_ref().is_some_and(|feedback| {
+                        self.window_lookup
+                            .get(&window_id)
+                            .and_then(|address| {
+                                self.tab(&address.tab_id)?.workspace.window(&address.raw_id)
+                            })
+                            .is_none_or(|row| {
+                                row.session_id.as_deref()
+                                    != Some(feedback.source_session_id.as_str())
+                            })
+                    }) {
+                        return notification;
+                    }
+                    if let (Some(refusal), Some(feedback)) = (
+                        restore_refusal
+                            .as_ref()
+                            .filter(|refusal| refusal.remove_placeholder),
+                        restore_feedback.as_ref(),
+                    ) {
+                        if let Some((identity, rows)) = &refusal.canonical_rows {
+                            let client_identity = client_cell
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                                .and_then(|client| client.as_ref().ok())
+                                .and_then(|client| client.identity().cloned());
+                            if client_identity.as_ref() != Some(identity)
+                                || self
+                                    .project_state(&context)
+                                    .and_then(|state| state.project_owner_identity.as_ref())
+                                    .is_some_and(|accepted| accepted != identity)
+                                || feedback.source_session_id != refusal.source_session_id
+                            {
+                                return notification;
+                            }
+                            tracing::info!(source_session_id = %refusal.source_session_id,
+                                code = %refusal.code, retryable = refusal.retryable,
+                                "owner refused saved Session restore");
+                            for (alias, generation) in &feedback.placeholders {
+                                if self.project_key_for_window(alias) != Some(&context.project_key)
+                                    || self
+                                        .window_lifecycle_generations
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .get(alias)
+                                        .copied()
+                                        != Some(*generation)
+                                    || self.pending_launch_completions.contains_key(alias)
+                                {
+                                    continue;
+                                }
+                                let Some(address) = self.window_lookup.get(alias).cloned() else {
+                                    continue;
+                                };
+                                let exact_source = self
+                                    .tab(&address.tab_id)
+                                    .and_then(|tab| tab.workspace.window(&address.raw_id))
+                                    .is_some_and(|row| {
+                                        row.session_id.as_deref()
+                                            == Some(feedback.source_session_id.as_str())
+                                    });
+                                if !exact_source
+                                    || rows.windows.iter().any(|row| row.id == address.raw_id)
+                                {
+                                    continue;
+                                }
+                                notification.extend(
+                                    self.apply_owner_window_removed_projection(&context, alias),
+                                );
+                            }
+                            return notification;
+                        }
+                    }
+                    let retained_diagnostic = restore_feedback.as_ref().is_some_and(|feedback| {
+                        feedback.placeholder_existed
+                            && (self
+                                .window_details
+                                .get(&window_id)
+                                .is_some_and(|detail| !detail.trim().is_empty())
+                                || self
+                                    .launch_error_terminal_details
+                                    .get(&window_id)
+                                    .is_some_and(|detail| !detail.trim().is_empty())
+                                || self.runtimes.get(&window_id).is_some_and(|runtime| {
+                                    !runtime.screen.is_empty() || !runtime.screen_ansi.is_empty()
+                                })
+                                || self
+                                    .window_lookup
+                                    .get(&window_id)
+                                    .and_then(|address| {
+                                        self.tab(&address.tab_id)?.workspace.window(&address.raw_id)
+                                    })
+                                    .is_some_and(|row| {
+                                        matches!(
+                                            row.status,
+                                            WindowProcessStatus::Error
+                                                | WindowProcessStatus::Waiting
+                                        ) || row
+                                            .dynamic_title_detail
+                                            .as_ref()
+                                            .is_some_and(|detail| !detail.trim().is_empty())
+                                    }))
+                    });
+                    if retained_diagnostic {
+                        return notification;
+                    }
+                    let session_id = self
+                        .window_lookup
+                        .get(&window_id)
+                        .and_then(|address| {
+                            self.tab(&address.tab_id)
+                                .and_then(|tab| tab.workspace.window(&address.raw_id))
+                        })
+                        .and_then(|window| window.session_id.clone());
+                    let (status, detail) =
+                        if refusal_reason == startup::RestoreRefusal::NoResumeSession {
+                            (
+                                WindowProcessStatus::Stopped,
+                                Self::EXACT_SESSION_RESTORE_UNAVAILABLE_DETAIL.to_string(),
+                            )
+                        } else {
+                            (WindowProcessStatus::Error, error)
+                        };
+                    notification.extend(self.apply_owner_terminal_launch_projection(
+                        &context,
+                        &window_id,
+                        session_id,
+                        None,
+                        status,
+                        Some(detail),
+                    ));
+                    notification
+                }
+            }
+        })();
+        wizard_events.extend(owner_events);
+        wizard_events
     }
 
     /// The pending immutable feedback is consumed once, whether the owner
@@ -15271,7 +15664,13 @@ impl AppRuntime {
                     && runtime.incarnation == snapshot.incarnation
                     && runtime.owner_identity == identity
             })
-            .map(|runtime| runtime.has_unsent_user_input.clone());
+            .map(|runtime| {
+                (
+                    runtime.has_unsent_user_input.clone(),
+                    runtime.input_observation,
+                    runtime.last_human_input_at,
+                )
+            });
         let mut runtime = WindowRuntime::remote(
             snapshot.id.clone(),
             snapshot.incarnation,
@@ -15279,8 +15678,10 @@ impl AppRuntime {
             client,
             identity,
         );
-        if let Some(hint) = composer_hint {
+        if let Some((hint, observation, last_human_input_at)) = composer_hint {
             runtime.has_unsent_user_input = hint;
+            runtime.input_observation = observation;
+            runtime.last_human_input_at = last_human_input_at;
         }
         runtime.status_revision = status_revision;
         runtime.child_pid = snapshot.child_pid;
@@ -15292,6 +15693,7 @@ impl AppRuntime {
             std::sync::atomic::Ordering::Release,
         );
         runtime.output_seq = snapshot.screen_seq;
+        runtime.observe_input(snapshot.input_observation);
         runtime.raw_status = snapshot.raw_status;
         runtime.status = snapshot.status;
         runtime.detail = snapshot

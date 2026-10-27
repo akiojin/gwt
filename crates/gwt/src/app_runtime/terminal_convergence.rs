@@ -27,9 +27,11 @@ use super::*;
 use std::time::Duration;
 
 pub(crate) use gwt::project_runtime::installation::{
-    classify_terminal_window, restore_admission_for_facts, ExecutionTerminalFacts,
-    MonitorTerminalFacts, RestoreAdmission, TerminalCloseEligibility, TerminalCloseReason,
-    TerminalWindowFacts,
+    classify_terminal_window, RestoreAdmission, TerminalCloseEligibility, TerminalCloseReason,
+};
+#[cfg(test)]
+pub(crate) use gwt::project_runtime::installation::{
+    restore_admission_for_facts, ExecutionTerminalFacts, MonitorTerminalFacts, TerminalWindowFacts,
 };
 
 /// Immutable facts about one Issue-linked Agent window captured on the Tao
@@ -486,6 +488,7 @@ impl AppRuntime {
     /// Monitor binding, so only the identity-free facts — a closed Issue or
     /// a settled execution — can refuse it; `RevokedLaunch` needs the exact
     /// window and is never inferred from a missing one.
+    #[cfg(test)]
     pub(crate) fn restore_work_terminality(
         &self,
         session: &gwt_agent::Session,

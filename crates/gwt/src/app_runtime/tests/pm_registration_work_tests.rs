@@ -14,7 +14,24 @@ fn pm_restore_owner_fixture(
     )
     .expect("persist the original restore canvas for the physical owner");
     let (command, args) = if cfg!(windows) {
-        long_running_test_command()
+        let runner = gwt_core::paths::normalize_windows_child_process_path(
+            &runtime
+                .sessions_dir
+                .parent()
+                .unwrap()
+                .join("pm-restore-fixture.cmd"),
+        );
+        fs::create_dir_all(runner.parent().unwrap()).expect("restore runner directory");
+        fs::write(
+            &runner,
+            concat!(
+                "@echo off\r\n",
+                "if \"%~1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\n",
+                "powershell -NoProfile -Command \"[Console]::TreatControlCAsInput = $true; [Console]::WriteLine('GWT_PM_RESTORE_READY'); while ($true) { [void][Console]::ReadKey($true) }\"\r\n",
+            ),
+        )
+        .expect("persistent provider accepts the appended PM bootstrap prompt");
+        (runner.display().to_string(), Vec::new())
     } else {
         // Restoring the PM appends its bootstrap prompt. A provider accepts
         // that argument; direct cat would treat it as a missing input file.
@@ -48,6 +65,32 @@ fn drain_pm_owner_restore(
         )
     }) {
         let completion = take_remote_owner_launch_completion(recorded);
+        match &completion.result {
+            Ok(super::super::RemoteOwnerLaunchOutcome::NaturallyClosed {
+                incarnation,
+                session_id,
+            }) => eprintln!(
+                "actual PM restore naturally closed: pane={}; incarnation={incarnation}; Session={session_id:?}",
+                completion.owner_pane_id,
+            ),
+            Ok(super::super::RemoteOwnerLaunchOutcome::DiagnosticClosed {
+                incarnation,
+                status,
+                detail,
+                session_id,
+                ..
+            }) => eprintln!(
+                "actual PM restore diagnostic closed: pane={}; incarnation={incarnation}; Session={session_id:?}; status={status:?}; detail={detail:?}",
+                completion.owner_pane_id,
+            ),
+            Err(error) => eprintln!(
+                "actual PM restore failed: {error}; pane={}; operation={}; refusal={:?}",
+                completion.owner_pane_id,
+                completion.operation_id,
+                completion.restore_refusal,
+            ),
+            _ => {}
+        }
         events.extend(runtime.handle_remote_owner_launch_complete(completion));
     }
     events
@@ -380,7 +423,13 @@ fn restore_still_resumes_the_stores_own_pm_worktree() {
         !events.is_empty(),
         "the store's own PM must still restore through the shared primitive"
     );
-    assert_eq!(runtime.runtimes.len(), 1, "exactly one real PM runtime");
+    assert_eq!(
+        runtime.runtimes.len(),
+        1,
+        "exactly one real PM runtime; details={:?}; actual inventory={:?}",
+        runtime.window_details,
+        executor.block_on(owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)),
+    );
     let id = runtime.runtimes.keys().next().unwrap().clone();
     let projection = &runtime.runtimes[&id];
     let probe = executor
@@ -492,8 +541,9 @@ fn restore_brings_back_only_the_registered_pm_of_the_stores_pm_worktree() {
             })
             .collect::<Vec<_>>(),
         vec![registered.to_string()],
-        "only the registered PM may be resumed; events={events:?}; details={:?}",
-        runtime.window_details
+        "only the registered PM may be resumed; events={events:?}; details={:?}; actual inventory={:?}",
+        runtime.window_details,
+        executor.block_on(owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)),
     );
     for orphan in orphans {
         let session = gwt_agent::Session::load_and_migrate(
@@ -2860,11 +2910,6 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let runner_bin = write_fixture_runners(temp.path(), &["codex", "npx", "bunx"]);
-
-    #[cfg(not(windows))]
-    fs::write(runner_bin.join("codex"), "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nexec /bin/cat\n").expect("keep the actual restored provider alive through projection");
-
     for (origin, expected_route) in [
         (
             super::super::startup::RestoreOrigin::Automatic,
@@ -2883,6 +2928,10 @@ fn restored_autonomous_session_uses_manual_route_only_for_user_requested_restart
         let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
         let (mut runtime, _recorded_events) =
             sample_runtime_with_events(&case_root, vec![tab], Some("tab-1"));
+        pin_live_pm_fixture_agents(&runtime, &case_root);
+        let runner_bin = gwt_core::paths::normalize_windows_child_process_path(
+            &case_root.join("fixture-runner-bin"),
+        );
         let mut settings = Settings::default();
         pin_launch_agents(&mut settings, &runner_bin);
         settings
@@ -3071,7 +3120,13 @@ fn generic_pm_session_resume_refreshes_before_spawning_the_process() {
         commit_b,
         "generic startup/restart resume must refresh before process spawn"
     );
-    assert_eq!(runtime.runtimes.len(), 1, "exactly one real PM runtime");
+    assert_eq!(
+        runtime.runtimes.len(),
+        1,
+        "exactly one real PM runtime; details={:?}; actual inventory={:?}",
+        runtime.window_details,
+        executor.block_on(owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)),
+    );
     let id = runtime.runtimes.keys().next().unwrap().clone();
     let projection = &runtime.runtimes[&id];
     let probe = executor

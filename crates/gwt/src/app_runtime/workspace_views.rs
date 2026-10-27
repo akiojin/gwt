@@ -3113,6 +3113,7 @@ pub(super) fn active_agent_session_matches_work(
     branch_matches || worktree_matches
 }
 
+#[cfg(test)]
 pub(super) use gwt::project_runtime::installation::agent_launch_purpose_title;
 
 fn prepare_active_work_projection(
@@ -5125,6 +5126,7 @@ impl AppRuntime {
     /// without touching disk. Durable WorkItems/Session reconciliation follows
     /// on the background close finalizer, but the immediate cache replay must
     /// never advertise the detached agent as still active.
+    #[cfg(test)]
     pub(crate) fn mark_cached_active_work_session_stopped(
         &self,
         tab_id: &str,

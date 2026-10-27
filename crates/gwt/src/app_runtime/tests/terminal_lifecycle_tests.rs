@@ -2882,11 +2882,7 @@ fn client_pane_snapshot_repair_replies_with_snapshots_for_known_panes_only() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let shell_id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &shell_id);
-    owner_runtime_probe(&runtime, &shell_id)
-        .pane
-        .lock()
-        .expect("pane lock")
-        .process_bytes(b"hello-repair");
+    process_test_owner_output(&mut runtime, &shell_id, b"hello-repair");
 
     let events = runtime.client_pane_snapshot_repair_events(
         "client-9",
@@ -3028,8 +3024,8 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         let target_root = case_root.join("target");
         fs::create_dir_all(&drain_root).unwrap();
         fs::create_dir_all(&target_root).unwrap();
-        init_repo(&drain_root);
-        init_repo(&target_root);
+        init_repo_with_initial_commit(&drain_root);
+        init_repo_with_initial_commit(&target_root);
         let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&drain_root);
         let tabs = vec![
             sample_project_tab("drain", "drain", drain_root, ProjectKind::Git, &[]),
@@ -3047,14 +3043,14 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
         };
         gwt::save_issue_monitor_prefs(&prefs_path, &prefs).unwrap();
         let mut runtime = sample_runtime(&case_root, tabs, Some("target"));
+        persist_lifecycle_host_catalog(&runtime);
         let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
             .branch("work/issue-5351-test")
             .build();
-        runtime
-            .spawn_agent_window("target", config, None)
-            .expect("an applied drain must not hold another project's launch");
+        let id = spawn_owner_codex_fixture(&mut runtime, "target", config, None);
         prefs.update_drain = None;
         assert_eq!(gwt::load_issue_monitor_prefs(&prefs_path).unwrap(), prefs);
+        close_test_owner_runtime(&mut runtime, &id);
 
         // Next-scan reconciliation also works without a resume marker or daemon.
         prefs.update_drain = Some(gwt::IssueMonitorUpdateDrain {
@@ -3072,6 +3068,26 @@ fn issue_5351_applied_update_drains_are_cleared_before_cross_project_launch_and_
             .update_drain
             .is_none());
     }
+}
+
+fn persist_lifecycle_host_catalog(runtime: &AppRuntime) {
+    // The owner discovers cross-project holds through the canonical UI catalog.
+    // This is tab persistence, never a replacement Agent Session registry.
+    let state = gwt::PersistedSessionState {
+        tabs: runtime
+            .tabs
+            .iter()
+            .map(|tab| gwt::PersistedSessionTabState {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                project_root: tab.project_root.clone(),
+                kind: tab.kind,
+            })
+            .collect(),
+        legacy_active_tab_id: None,
+        recent_projects: Vec::new(),
+    };
+    gwt::save_session_state(&gwt_core::paths::gwt_session_state_path(), &state).unwrap();
 }
 
 fn stage_host_drain_update(temp: &Path, version: &str) {
@@ -3138,8 +3154,8 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     let target_root = temp.path().join("target");
     fs::create_dir_all(&drain_root).expect("drain project");
     fs::create_dir_all(&target_root).expect("target project");
-    init_repo(&drain_root);
-    init_repo(&target_root);
+    init_repo_with_initial_commit(&drain_root);
+    init_repo_with_initial_commit(&target_root);
     let mut prefs = gwt::IssueMonitorPrefs {
         update_drain: Some(gwt::IssueMonitorUpdateDrain {
             version: "99.0.0".to_string(),
@@ -3154,21 +3170,32 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("seed drain");
     let tabs = vec![
         sample_project_tab("drain", "gwt", drain_root, ProjectKind::Git, &[]),
-        sample_project_tab("target", "llmlb", target_root, ProjectKind::Git, &[]),
+        sample_project_tab(
+            "target",
+            "llmlb",
+            target_root.clone(),
+            ProjectKind::Git,
+            &[],
+        ),
     ];
     let mut runtime = sample_runtime(temp.path(), tabs, Some("target"));
+    persist_lifecycle_host_catalog(&runtime);
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&target_root, 8);
+    let owner = Arc::new(owner_fixture_block_on(production_owner_fixture(
+        &target_root,
+    )));
+    runtime
+        .test_project_owners
+        .insert(target_root.clone(), owner.clone());
     let config = || {
         gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&target_root)
             .branch("work/issue-5062-test")
             .build()
     };
-    let result = runtime.spawn_agent_window("target", config(), None);
-    assert!(
-        result
-            .as_ref()
-            .is_err_and(|error| error.contains("update_drain")),
-        "{result:?}"
-    );
+    let result = owner_monitor_admission_error(&owner, config(), None, None);
+    assert!(result.contains("update_drain"), "{result:?}");
     assert!(runtime
         .tab("target")
         .expect("tab")
@@ -3179,9 +3206,7 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
 
     prefs.update_drain = None;
     gwt::save_issue_monitor_prefs(&prefs_path, &prefs).expect("release drain");
-    runtime
-        .spawn_agent_window("target", config(), None)
-        .expect("spawn after release");
+    let id = spawn_owner_codex_fixture(&mut runtime, "target", config(), None);
     assert_eq!(
         runtime
             .tab("target")
@@ -3192,6 +3217,12 @@ fn issue_5062_update_drain_prevents_new_agent_windows_in_other_projects() {
             .len(),
         1
     );
+    assert!(owner_runtime_probe(&runtime, &id)
+        .pty
+        .try_wait()
+        .unwrap()
+        .is_none());
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3366,62 +3397,57 @@ fn stop_window_runtime_records_paused_work_off_the_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _gwt_home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
-    fs::create_dir_all(&repo).expect("create repo");
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        repo.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
+    let (owner, pane) = pane_control_tests::control_owner_agent(&repo, "agent-1", 42);
+    let session_id = pane.session.as_ref().unwrap().id.clone();
+    let mut runtime = managed_launch_tests::managed_project_owner_projection(
+        temp.path(),
+        &repo,
+        &owner,
+        &[&pane],
     );
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
     let window_id = combined_window_id("tab-1", "agent-1");
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: "session-paused-offloop".to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "work/paused-offloop".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: repo.clone(),
-            agent_project_root: repo.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: "tab-1".to_string(),
-        },
-    );
-
+    let (spawner, tasks) = BlockingTaskSpawner::queued();
+    runtime.blocking_tasks = spawner;
     let started = Instant::now();
     runtime.stop_window_runtime(&window_id);
     let stop_call = started.elapsed();
-    // The stop call itself returns promptly (no synchronous multi-MB IO).
     assert!(
         stop_call < Duration::from_secs(2),
         "stop_window_runtime blocked for {stop_call:?}"
     );
-
-    // The Paused Work record still lands (background write).
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut recorded = false;
-    while Instant::now() < deadline {
-        let works = gwt_core::workspace_projection::load_or_synthesize_workspace_work_items(&repo)
-            .unwrap_or_else(|_| gwt_core::workspace_projection::WorkItemsProjection {
-                updated_at: chrono::Utc::now(),
-                work_items: Vec::new(),
-            });
-        recorded = works.work_items.iter().any(|item| {
-            item.id == "work-session-session-paused-offloop"
-                && item.status_category
-                    == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
-        });
-        if recorded {
-            break;
-        }
-        // test-hygiene: allow-short-duration bounded polling of worker-persisted Work state; no completion event is exposed by this fixture
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(recorded, "Paused Work record must land in works.json");
+    assert!(
+        pane.pty.try_wait().unwrap().is_none(),
+        "the GUI acknowledgement only queues the physical stop"
+    );
+    assert_eq!(
+        tasks.lock().unwrap().len(),
+        1,
+        "the exact close runs off the event loop"
+    );
+    drain_queued_blocking_tasks(&tasks);
+    assert!(
+        pane.pty.try_wait().unwrap().is_some(),
+        "the owner reaps its captured child"
+    );
+    let works = gwt_core::workspace_projection::load_workspace_work_items(&repo)
+        .unwrap()
+        .expect("owner-persisted Work");
+    assert!(
+        works.work_items.iter().any(|item| {
+            item.status_category == gwt_core::workspace_projection::WorkspaceStatusCategory::Idle
+                && item
+                    .events
+                    .iter()
+                    .any(|event| event.agent_session_id.as_deref() == Some(&session_id))
+        }),
+        "the exact stopped Session still records its Paused Work"
+    );
 }
 
 /// SPEC-2359 W-16 (FR-387): the tab-change ingest trigger is throttled to
@@ -3554,15 +3580,13 @@ fn runtime_output_batch_does_not_wait_for_the_pane_mutex() {
 fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &id);
+    let (mut runtime, id) = terminal_approval_tests::runtime_state_hook_fixture(temp.path());
+    let owner = project_owner_fixture(&mut runtime, &id);
+    let probe = owner_runtime_probe(&runtime, &id);
+    let hook = owner_runtime_status_event(&owner, &probe, "running", "PreToolUse");
+    let context = runtime.test_context();
+    runtime.handle_project_owner_event(&context, 1, owner.client().identity().unwrap(), hook);
+    let mut owner_events = owner.subscribe();
     let incarnation = runtime.runtimes[&id].incarnation;
     let chunks: [&[u8]; 2] = [
         b"Would you like to run the following command?\r\n\r\ncargo test\r\n",
@@ -3577,14 +3601,15 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
             pane.process_bytes(chunk);
             (pane.output_seq(), pane.screen().contents())
         };
+        owner_fixture_block_on(owner.observe_runtime_policy(
+            &probe.id,
+            probe.incarnation,
+            Utc::now(),
+            Instant::now(),
+        ))
+        .unwrap();
         bytes.extend_from_slice(chunk);
-        let events = runtime.handle_runtime_output_event(
-            id.clone(),
-            incarnation,
-            chunk.to_vec(),
-            seq,
-            Some(screen),
-        );
+        let events = runtime.handle_owner_runtime_output(id.clone(), chunk.to_vec(), seq, screen);
         assert_eq!(events.len(), 1, "only raw output is immediate");
         assert_eq!(events[0].terminal_stream_seq, Some(seq));
         assert!(
@@ -3605,7 +3630,10 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline - Duration::from_millis(100))
         .is_empty());
-    assert!(!runtime.window_approval_waiting.contains_key(&id));
+    assert!(
+        owner_runtime_probe(&runtime, &id).policy.approval.is_some(),
+        "the owner classifies the same latest rendered screen"
+    );
     let events = runtime.flush_runtime_output_batches(deadline);
     assert_eq!(
         events
@@ -3614,8 +3642,9 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
             .count(),
         1
     );
+    relay_approval_owner_events(&mut runtime, &id, &mut owner_events);
     assert!(
-        runtime.window_approval_waiting.contains_key(&id),
+        runtime.window_status(&id) == Some(WindowProcessStatus::Waiting),
         "the same latest screen detects approval"
     );
     assert!(
@@ -3625,12 +3654,11 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     assert!(runtime
         .flush_runtime_output_batches(deadline + Duration::from_secs(1))
         .is_empty());
-    let events = runtime.handle_runtime_output_event(
-        id,
-        incarnation,
+    let events = runtime.handle_owner_runtime_output(
+        id.clone(),
         vec![b'x'; gwt::pane_runtime::OUTPUT_BATCH_MAX_BYTES],
         100,
-        Some("large burst".into()),
+        "large burst".into(),
     );
     assert!(
         runtime.next_runtime_output_deadline().is_none(),
@@ -3638,6 +3666,8 @@ fn runtime_output_batch_keeps_stream_immediate_and_shares_latest_screen() {
     );
     assert!(events.iter().any(|event| matches!(&event.event,
         BackendEvent::TerminalPreview { text, .. } if text == "large burst")));
+    assert_eq!(runtime.runtimes[&id].incarnation, incarnation);
+    close_test_owner_runtime(&mut runtime, &id);
 }
 
 #[test]
@@ -3655,15 +3685,18 @@ fn runtime_output_batch_rejects_stale_incarnation_and_flushes_before_status() {
     insert_test_pane_runtime(&mut runtime, &id);
     let old = runtime.runtimes[&id].incarnation;
     runtime.handle_runtime_output_event(id.clone(), old, b"old".to_vec(), 1, Some("old".into()));
-    runtime.runtimes.get_mut(&id).unwrap().incarnation += 1;
+    let old_pane = owner_runtime_probe(&runtime, &id);
+    close_test_owner_runtime(&mut runtime, &id);
+    assert!(old_pane.pty.try_wait().unwrap().is_some());
+    insert_test_pane_runtime(&mut runtime, &id);
     let deadline = runtime.next_runtime_output_deadline().unwrap();
     assert!(runtime.flush_runtime_output_batches(deadline).is_empty());
     let current = runtime.runtimes[&id].incarnation;
-    owner_runtime_probe(&runtime, &id)
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"final output");
+    assert_ne!(
+        current, old,
+        "replacement is an actual new owner incarnation"
+    );
+    process_test_owner_output(&mut runtime, &id, b"final output");
     runtime.handle_runtime_output_event(
         id.clone(),
         current,
@@ -3697,11 +3730,7 @@ fn terminal_preview_preserves_three_screen_rows_for_live_and_reconnect() {
     let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
     let id = combined_window_id("tab-1", "shell-1");
     insert_test_pane_runtime(&mut runtime, &id);
-    owner_runtime_probe(&runtime, &id)
-        .pane
-        .lock()
-        .unwrap()
-        .process_bytes(b"old\r\n  indented\r\n\r\nlast\r\n");
+    process_test_owner_output(&mut runtime, &id, b"old\r\n  indented\r\n\r\nlast\r\n");
     let live = runtime.handle_runtime_output(id.clone(), b"last".to_vec());
     let sync = runtime.frontend_project_sync_events("client-preview", &runtime.test_context());
     for events in [live, sync] {
@@ -4086,17 +4115,18 @@ fn issue3165_spawn_admission_restores_cached_blockers_and_revalidates_them() {
     let mut feedback = issue_monitor_feedback(42);
     feedback.issue_monitor_project_root = Some(repo.clone());
     feedback.issue_monitor_session_mode = Some(gwt_agent::SessionMode::Normal);
-    let rejected = runtime.spawn_agent_window_with_prepared_monitor_admission(
-        "tab-1",
-        config,
-        None,
-        feedback,
-        prepared.clone(),
+    pin_live_pm_fixture_agents(&runtime, temp.path());
+    seed_owner_fixture_roster(&repo, 8);
+    configure_owner_fixture_tools(&repo, &["claude"]);
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let rejected = owner_monitor_admission_error(&owner, config, Some(feedback), None);
+    assert!(
+        rejected.contains("dependency admission refused Issue #42: Blocked by #43")
+            && !rejected.contains("(hold)"),
+        "actual owner admission: {rejected}"
     );
-    assert!(rejected.is_err_and(|reason| reason
-        .contains("dependency admission refused Issue #42: Blocked by #43")
-        && !reason.contains("(hold)")));
     assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+    owner_fixture_block_on(owner.shutdown());
     fs::write(cache_root.join("43/body.md"), "Blocked-by: #42").unwrap();
     assert!(
         !prepared.is_current(&input.host_project_roots),

@@ -4,6 +4,7 @@ pub fn combined_window_id(tab_id: &str, raw_id: &str) -> String {
     format!("{tab_id}::{raw_id}")
 }
 
+#[cfg(test)]
 pub fn should_auto_close_agent_window(
     active_agent_sessions: &HashMap<String, ActiveAgentSession>,
     window_id: &str,

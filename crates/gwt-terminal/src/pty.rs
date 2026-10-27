@@ -381,6 +381,7 @@ struct SpawnDiagnostic {
 struct PtyInputState {
     protected: bool,
     ordinary_input_revision: u64,
+    last_human_input_at: Option<Instant>,
     protected_transaction_revision: u64,
     queued: VecDeque<Vec<u8>>,
     /// Ordinary (unprotected) keystrokes that have not been submitted or
@@ -581,6 +582,23 @@ fn wait_for_child_exit(pid: u32) -> Result<(), String> {
     }
 }
 
+/// A cursor report produced by the terminal parser for an observed DSR.
+/// Coordinates are private so this path cannot carry arbitrary input bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorPositionReport {
+    row: u16,
+    col: u16,
+}
+
+impl CursorPositionReport {
+    pub(crate) fn from_screen_position(row: u16, col: u16) -> Self {
+        Self {
+            row: row.saturating_add(1),
+            col: col.saturating_add(1),
+        }
+    }
+}
+
 pub struct PtyHandle {
     /// `None` once [`PtyHandle::release_descriptors`] has run. The master and
     /// the writer clone `portable-pty` dups out of it are two of the three
@@ -593,6 +611,9 @@ pub struct PtyHandle {
     writer: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     input_state: Mutex<PtyInputState>,
     generation_active: AtomicBool,
+    // The existing Windows start gate answers ConPTY before its reader can
+    // start. Consume that same native query once when the parser observes it.
+    startup_cursor_report_sent: AtomicBool,
     /// Issue #4909: the child has bracketed-paste mode on (`CSI ? 2004 h`
     /// seen, no `CSI ? 2004 l` since). Published by the pane's output parser,
     /// read by prompt injection off any thread that holds the handle, so a
@@ -615,9 +636,17 @@ pub struct PtyHandle {
 
 impl PtyHandle {
     /// Spawn a child process with a PTY.
-    #[instrument(skip_all, fields(cmd = %config.command))]
     pub fn spawn(config: SpawnConfig) -> Result<Self, TerminalError> {
-        Self::spawn_inner(config, SpawnTestFailure::None, None)
+        Self::spawn_with_attempt_observer(config, || {})
+    }
+
+    /// Observe the exact OS child-spawn boundary, after all PTY preparation.
+    #[instrument(name = "spawn", skip_all, fields(cmd = %config.command))]
+    pub fn spawn_with_attempt_observer(
+        config: SpawnConfig,
+        on_attempt: impl FnOnce(),
+    ) -> Result<Self, TerminalError> {
+        Self::spawn_inner(config, SpawnTestFailure::None, None, on_attempt)
     }
 
     /// Spawn a trusted gate helper in the PTY and wait until it proves that it
@@ -629,6 +658,24 @@ impl PtyHandle {
         gate_program: PathBuf,
         gate_args_prefix: Vec<String>,
         nonce: impl Into<String>,
+    ) -> Result<PendingPty, TerminalError> {
+        Self::spawn_pending_with_attempt_observer(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            || {},
+        )
+    }
+
+    /// Observe the gate's OS spawn attempt without treating preparation errors
+    /// or unconfirmed cleanup as evidence that a child was never created.
+    pub fn spawn_pending_with_attempt_observer(
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        on_attempt: impl FnOnce(),
     ) -> Result<PendingPty, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
@@ -677,7 +724,7 @@ impl PtyHandle {
             .env
             .insert(START_GATE_TARGET_ENV.to_string(), target);
 
-        let handle = Self::spawn(gate_config)?;
+        let handle = Self::spawn_with_attempt_observer(gate_config, on_attempt)?;
         // Windows ConPTY parks a freshly attached console client inside its
         // startup handshake until the terminal answers the cursor-position
         // query the pseudoconsole emitted on creation. A gated launch only
@@ -686,7 +733,11 @@ impl PtyHandle {
         // Answering here is what a real terminal does anyway; conhost consumes
         // the report instead of forwarding it to the released target.
         #[cfg(windows)]
-        let _ = handle.write_input(CURSOR_POSITION_REPORT);
+        if handle.write_input(CURSOR_POSITION_REPORT).is_ok() {
+            handle
+                .startup_cursor_report_sent
+                .store(true, Ordering::Release);
+        }
         if handle.process_id().is_none() {
             return Err(pending_spawn_error(
                 handle,
@@ -770,6 +821,7 @@ impl PtyHandle {
         config: SpawnConfig,
         failure: SpawnTestFailure,
         observe_pid: Option<&mut dyn FnMut(u32)>,
+        on_attempt: impl FnOnce(),
     ) -> Result<Self, TerminalError> {
         let config =
             normalize_spawn_config(config).map_err(|reason| TerminalError::PtyCreationFailed {
@@ -801,6 +853,7 @@ impl PtyHandle {
             cmd.env(key, value);
         }
 
+        on_attempt();
         let child = match pair.slave.spawn_command(cmd) {
             Ok(child) => child,
             Err(error) => {
@@ -865,6 +918,7 @@ impl PtyHandle {
             writer: Arc::new(Mutex::new(Some(writer))),
             input_state: Mutex::new(PtyInputState::default()),
             generation_active: AtomicBool::new(true),
+            startup_cursor_report_sent: AtomicBool::new(false),
             bracketed_paste: AtomicBool::new(false),
             transcript_overlay: AtomicBool::new(false),
             tree_exit_confirmed: AtomicBool::new(false),
@@ -909,12 +963,72 @@ impl PtyHandle {
         config: SpawnConfig,
         failure: SpawnTestFailure,
         mut observe_pid: impl FnMut(u32),
+        on_attempt: impl FnOnce(),
     ) -> Result<Self, TerminalError> {
-        Self::spawn_inner(config, failure, Some(&mut observe_pid))
+        Self::spawn_inner(config, failure, Some(&mut observe_pid), on_attempt)
     }
 
     /// Send bytes to the PTY stdin.
     pub fn write_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, true)
+    }
+
+    /// Preserve ordinary input ordering/composer protection without treating
+    /// an automated write as human activity.
+    pub fn write_machine_input(&self, data: &[u8]) -> Result<(), TerminalError> {
+        self.write_ordinary_input(data, false)
+    }
+
+    pub(crate) fn discard_startup_cursor_preanswer(&self) {
+        self.startup_cursor_report_sent
+            .store(false, Ordering::Release);
+    }
+
+    /// Answer an observed terminal query in this captured runtime generation.
+    /// Protocol replies share the physical writer, but must not wait behind a
+    /// prompt reservation whose ACK may itself require this reply. They do not
+    /// change ordinary input, composer, human quiet time, or transaction revisions.
+    pub fn write_cursor_position_report(
+        &self,
+        report: CursorPositionReport,
+        current: &AtomicBool,
+    ) -> Result<(), TerminalError> {
+        let active =
+            || current.load(Ordering::Acquire) && self.generation_active.load(Ordering::Acquire);
+        if !active() {
+            return Err(TerminalError::PtyIoError {
+                details: "terminal response generation is no longer active".into(),
+            });
+        }
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|error| TerminalError::PtyIoError {
+                details: format!("lock poisoned: {error}"),
+            })?;
+        if !active() {
+            return Err(TerminalError::PtyIoError {
+                details: "terminal response generation is no longer active".into(),
+            });
+        }
+        let writer = writer.as_mut().ok_or_else(|| TerminalError::PtyIoError {
+            details: RELEASED_DESCRIPTORS.into(),
+        })?;
+        // The existing gate preanswered only the initial 1;1 native query.
+        // Consume stale eligibility too, but never suppress a progressed query.
+        if self
+            .startup_cursor_report_sent
+            .swap(false, Ordering::AcqRel)
+            && report.row == 1
+            && report.col == 1
+        {
+            return Ok(());
+        }
+        let bytes = format!("\x1b[{};{}R", report.row, report.col);
+        Self::write_with_locked_writer(&mut **writer, bytes.as_bytes(), 0)
+    }
+
+    fn write_ordinary_input(&self, data: &[u8], human: bool) -> Result<(), TerminalError> {
         let mut state = self
             .input_state
             .lock()
@@ -928,6 +1042,16 @@ impl PtyHandle {
         }
         if !data.is_empty() {
             state.ordinary_input_revision = state.ordinary_input_revision.saturating_add(1);
+        }
+        // Escape-only terminal responses must not postpone supervision. The
+        // existing content classifier also covers paste payloads and edits.
+        if human
+            && (chunk_has_prompt_content(data)
+                || data
+                    .iter()
+                    .any(|byte| matches!(byte, b'\r' | b'\n' | 0x03 | 0x15)))
+        {
+            state.last_human_input_at = Some(gwt_core::operation_deadline::now());
         }
         state.note_user_input(data);
         if state.protected {
@@ -969,6 +1093,28 @@ impl PtyHandle {
             .lock()
             .ok()
             .map(|state| state.ordinary_input_revision)
+    }
+
+    /// Read-only input facts for a remote owner projection, under one input lock.
+    /// A clock preceding the last human input is conservatively not quiet.
+    pub fn ordinary_input_observation(&self) -> Option<(u64, bool, Option<Duration>)> {
+        let state = self.input_state.lock().ok()?;
+        Some((
+            state.ordinary_input_revision,
+            state.unsent_user_input,
+            state.last_human_input_at.map(|at| {
+                gwt_core::operation_deadline::now()
+                    .checked_duration_since(at)
+                    .unwrap_or(Duration::ZERO)
+            }),
+        ))
+    }
+
+    /// Atomically observe an empty composer after a full human quiet interval.
+    pub fn quiet_ordinary_input_revision(&self, quiet_for: Duration) -> Option<u64> {
+        let state = self.input_state.lock().ok()?;
+        (!state.unsent_user_input && state.human_input_is_quiet(quiet_for))
+            .then_some(state.ordinary_input_revision)
     }
 
     /// Reserve pane-wide input ordering across a multi-write submit. Ordinary
@@ -1551,6 +1697,14 @@ pub fn run_start_gate_from_env() -> Result<i32, TerminalError> {
 }
 
 impl PtyInputState {
+    fn human_input_is_quiet(&self, quiet_for: Duration) -> bool {
+        self.last_human_input_at.is_none_or(|at| {
+            gwt_core::operation_deadline::now()
+                .checked_duration_since(at)
+                .is_some_and(|elapsed| elapsed >= quiet_for)
+        })
+    }
+
     fn note_user_input(&mut self, data: &[u8]) {
         self.unsent_user_input = next_unsent_user_input(self.unsent_user_input, data);
     }
@@ -1718,6 +1872,17 @@ impl PtyInputReservation {
         expected: u64,
         operation: impl FnOnce() -> Result<T, TerminalError>,
     ) -> Result<T, TerminalError> {
+        self.with_quiet_ordinary_input(expected, Duration::ZERO, operation)
+    }
+
+    /// Keep revision, composer and quiet-time checks in the same body commit
+    /// critical section. The callback must not acquire input state again.
+    pub fn with_quiet_ordinary_input<T>(
+        &self,
+        expected: u64,
+        quiet_for: Duration,
+        operation: impl FnOnce() -> Result<T, TerminalError>,
+    ) -> Result<T, TerminalError> {
         let state = self
             .handle
             .input_state
@@ -1725,7 +1890,10 @@ impl PtyInputReservation {
             .map_err(|error| TerminalError::PtyIoError {
                 details: format!("input state lock poisoned: {error}"),
             })?;
-        if state.ordinary_input_revision != expected || state.unsent_user_input {
+        if state.ordinary_input_revision != expected
+            || state.unsent_user_input
+            || (!quiet_for.is_zero() && !state.human_input_is_quiet(quiet_for))
+        {
             return Err(TerminalError::PtyIoError {
                 details: "ordinary input changed before protected body commit".into(),
             });
@@ -2270,14 +2438,20 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let observed_pid = Arc::new(AtomicU32::new(0));
         let pid = Arc::clone(&observed_pid);
+        let attempted = std::cell::Cell::new(false);
         let error = match PtyHandle::spawn_with_test_failure(
             sleep_config("60"),
             SpawnTestFailure::TakeWriter,
             move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+            || attempted.set(true),
         ) {
             Ok(_) => panic!("injected writer failure must fail spawn"),
             Err(error) => error,
         };
+        assert!(
+            attempted.get(),
+            "writer failure follows an OS spawn attempt"
+        );
         assert!(error.to_string().contains("take_writer"));
 
         let pid = observed_pid.load(Ordering::SeqCst);
@@ -2293,14 +2467,20 @@ mod tests {
         let _pty_guard = lock_pty_test();
         let observed_pid = Arc::new(AtomicU32::new(0));
         let pid = Arc::clone(&observed_pid);
+        let attempted = std::cell::Cell::new(false);
         let error = match PtyHandle::spawn_with_test_failure(
             sleep_config("60"),
             SpawnTestFailure::ProcessGroupAttach,
             move |child_pid| pid.store(child_pid, Ordering::SeqCst),
+            || attempted.set(true),
         ) {
             Ok(_) => panic!("injected attach failure must fail spawn"),
             Err(error) => error,
         };
+        assert!(
+            attempted.get(),
+            "group attach failure follows an OS spawn attempt"
+        );
         assert!(error.to_string().contains("process group"));
 
         let pid = observed_pid.load(Ordering::SeqCst);
@@ -2862,8 +3042,14 @@ mod tests {
             remove_env: Vec::new(),
             cwd: None,
         };
-        let result = PtyHandle::spawn(config);
+        let attempted = std::cell::Cell::new(false);
+        let result = PtyHandle::spawn_with_attempt_observer(config, || attempted.set(true));
         assert!(result.is_err());
+        #[cfg(windows)]
+        assert!(
+            !attempted.get(),
+            "command resolution fails before an OS spawn attempt"
+        );
     }
 
     #[test]
@@ -2941,11 +3127,19 @@ mod tests {
         handle.write_input(b"user prompt\r").unwrap();
         assert!(!handle.has_unsent_user_input());
         assert!(handle.ordinary_input_revision().unwrap() > before);
+        let human_time = handle.input_state.lock().unwrap().last_human_input_at;
+        assert!(human_time.is_some());
+        handle.write_machine_input(b"automated prompt\r").unwrap();
+        handle.write_input(b"\x1b[1;1R").unwrap();
         let revision = handle.ordinary_input_revision();
         let reservation = Arc::clone(&handle).reserve_input_transaction().unwrap();
         reservation.write_input(b"protected body").unwrap();
         reservation.write_input(b"\r").unwrap();
         assert_eq!(handle.ordinary_input_revision(), revision);
+        assert_eq!(
+            handle.input_state.lock().unwrap().last_human_input_at,
+            human_time
+        );
     }
 
     #[test]
@@ -2961,6 +3155,132 @@ mod tests {
         let second = handle.reserve_input_transaction().unwrap();
         assert_eq!(second.previous_transaction_revision(), 1);
         assert_eq!(second.transaction_revision(), 2);
+    }
+
+    #[test]
+    fn cursor_reports_preserve_reserved_input_and_reject_retired_generations() {
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let mut pane =
+            crate::Pane::new_with_spawn_config("cursor-report-proof".into(), sleep_config("60"))
+                .expect("spawn sleeper");
+        let handle = pane.shared_pty();
+        assert!(!handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let _physical_writer = handle
+            .writer
+            .lock()
+            .unwrap()
+            .replace(Box::new(Capture(bytes.clone())));
+        handle.write_input(b"human").unwrap();
+        let reservation = handle.reserve_input_transaction().unwrap();
+        handle.write_input(b"queued").unwrap();
+        let before = {
+            let state = handle.input_state.lock().unwrap();
+            (
+                state.ordinary_input_revision,
+                state.last_human_input_at,
+                state.protected_transaction_revision,
+                state.unsent_user_input,
+                state.queued.clone(),
+            )
+        };
+        let current = AtomicBool::new(true);
+        let report = CursorPositionReport::from_screen_position(2, 6);
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
+        {
+            let state = handle.input_state.lock().unwrap();
+            assert!(state.protected);
+            assert_eq!(
+                before,
+                (
+                    state.ordinary_input_revision,
+                    state.last_human_input_at,
+                    state.protected_transaction_revision,
+                    state.unsent_user_input,
+                    state.queued.clone(),
+                )
+            );
+        }
+
+        // This is a source-level reconciliation test, not evidence that a
+        // native gate emitted a particular ordering. Only its initial 1;1
+        // query matches the existing successful preanswer on this same PTY.
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        let initial = pane.process_owner_output(b"\x1b[6nchild output");
+        assert_eq!(initial.data, b"\x18child output");
+        assert_eq!(initial.cursor_reports.len(), 1);
+        handle
+            .write_cursor_position_report(initial.cursor_reports[0], &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R");
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        assert_eq!(&*bytes.lock().unwrap(), b"human\x1b[3;7R\x1b[3;7R");
+
+        // A progressed query must be written even if stale eligibility was
+        // retained. Returning to 1;1 after public cursor movement is likewise
+        // a new query, not the initial native query already answered.
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        handle
+            .write_cursor_position_report(report, &current)
+            .unwrap();
+        let progressed_written = &*bytes.lock().unwrap() == b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R";
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        let returned = pane.process_owner_output(b"\x1b[4;8H\x1b[H\x1b[6n");
+        assert_eq!(returned.data, b"\x1b[4;8H\x1b[H\x18");
+        assert_eq!(
+            returned.cursor_reports,
+            vec![CursorPositionReport::from_screen_position(0, 0)]
+        );
+        handle
+            .write_cursor_position_report(returned.cursor_reports[0], &current)
+            .unwrap();
+        let expected = b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R\x1b[1;1R";
+        let returned_written = &*bytes.lock().unwrap() == expected;
+        assert_eq!(
+            (progressed_written, returned_written),
+            (true, true),
+            "startup eligibility suppressed a progressed or later origin query"
+        );
+
+        handle
+            .startup_cursor_report_sent
+            .store(true, Ordering::Release);
+        current.store(false, Ordering::Release);
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
+        assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        current.store(true, Ordering::Release);
+        handle.revoke_input_generation();
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
+        assert!(handle.startup_cursor_report_sent.load(Ordering::Acquire));
+        drop(reservation);
+        assert_eq!(&*bytes.lock().unwrap(), expected);
+        assert!(handle.input_state.lock().unwrap().queued.is_empty());
     }
 
     #[test]
@@ -3003,9 +3323,48 @@ mod tests {
 
     #[test]
     fn generation_invalidation_waits_for_the_physical_write_commit_point() {
+        struct BlockingWrite {
+            entered: std::sync::mpsc::Sender<Vec<u8>>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+        impl Write for BlockingWrite {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.entered.send(bytes.to_vec()).unwrap();
+                self.release.recv().unwrap();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let _pty_guard = lock_pty_test();
         let handle = Arc::new(PtyHandle::spawn(sleep_config("2")).expect("spawn sleeper"));
-        let writer = handle.writer.lock().expect("hold physical writer");
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let _physical_writer = handle
+            .writer
+            .lock()
+            .unwrap()
+            .replace(Box::new(BlockingWrite {
+                entered: entered_tx,
+                release: release_rx,
+            }));
+        let current = Arc::new(AtomicBool::new(true));
+        let reporting_handle = handle.clone();
+        let reporting_current = current.clone();
+        let report = CursorPositionReport::from_screen_position(2, 6);
+        let reporter = std::thread::spawn(move || {
+            reporting_handle.write_cursor_position_report(report, &reporting_current)
+        });
+        assert_eq!(
+            // test-hygiene: allow-wall-clock-deadline Bounds actual typed-write entry; the channel proves both generation checks and writer acquisition happened before logical close.
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            b"\x1b[3;7R"
+        );
+        current.store(false, Ordering::Release);
+        handle.revoke_input_generation();
+        assert!(handle.reserve_input_transaction().is_err());
         let (invalidated_tx, invalidated_rx) = std::sync::mpsc::channel();
         let invalidating_handle = Arc::clone(&handle);
         let invalidator = std::thread::spawn(move || {
@@ -3019,13 +3378,20 @@ mod tests {
                 .is_err(),
             "invalidation must wait behind an already-authorized physical write"
         );
-        drop(writer);
+        release_tx.send(()).unwrap();
+        reporter
+            .join()
+            .unwrap()
+            .expect("an already admitted typed write may finish");
         invalidated_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("invalidation completes after the physical write commit point");
         invalidator.join().expect("invalidation thread");
 
         assert!(handle.write_input(b"late input").is_err());
+        assert!(handle
+            .write_cursor_position_report(report, &current)
+            .is_err());
     }
 
     #[test]

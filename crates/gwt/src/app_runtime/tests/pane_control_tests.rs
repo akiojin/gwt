@@ -4054,7 +4054,7 @@ fn agent_name_keeps_bound_session_independent_of_roster_readback() {
     );
     assert_eq!(
         gwt::cli::execution_state::diagnose_owner(&session.worktree_path, execution_owner)
-            .current_effective_status(),
+            .ecr_status,
         Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
     );
     assert!(pane.has_capability_bearer(pane.grant.as_ref().unwrap()));

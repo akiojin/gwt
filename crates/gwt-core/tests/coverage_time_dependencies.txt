@@ -189,14 +189,11 @@ crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_defunct_
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_exact_terminal_holder_materializes_only_the_terminal_successor_intent|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_origin_isolation_and_genesis_keep_automatic_intent|wait_for_recorded_event(,&recorded_events,|events||2
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_replays_existing_prepared_owner_successor_after_response_loss|wait_for_recorded_event(,&recorded_events,|events||1
-crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_stop_action_proves_the_exact_local_runtime_terminal_before_materialization|wait_for_recorded_event(,&recorded_events,|events||1
-crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|manual_launch_stop_materialization_survives_wizard_replacement_exactly_once|wait_for_recorded_event(,&recorded_events,|events||2
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|letspawned=matchspawn_returned_rx.recv_timeout(Duration::from_secs(2))|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|release_rx.recv_timeout(Duration::from_secs(5)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|started_rx.recv_timeout(Duration::from_secs(1)).expect()|1
 crates/gwt/src/app_runtime/tests/frontend_launch_tests.rs|project_index_bootstrap_runs_in_background_without_blocking_launch|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_failed_control_commit_never_renders_volatile_kill_switch_state|assert!(started.elapsed()<Duration::from_secs(1))|1
-crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_issue_monitor_auto_launch_uses_last_settings_runtime_target|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|app_runtime_local_driver_slow_persist_does_not_silently_drop_prepared_proposal|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(Instant::now()+Duration::from_secs(5),)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_it_stops|*started_at=Instant::now()-Duration::from_secs(61)|1
 crates/gwt/src/app_runtime/tests/issue_monitor_claim_tests.rs|local_fallback_transaction_preserves_the_background_worker_deadline|letbackground_deadline=Instant::now()+Duration::from_secs(5)|1
@@ -252,8 +249,6 @@ crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_st
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|spawn_work_merge_status_scan_treats_gwt_runtime_writes_as_clean|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|startup_orphan_intake_prune_dispatch_returns_before_inspection_finishes|assert_eq!(started_rx.recv_timeout(Duration::from_secs(1)).expect(),repo)|1
 crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|assert!(stop_call<Duration::from_secs(2),)|1
-crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|letdeadline=Instant::now()+Duration::from_secs(5)|1
-crates/gwt/src/app_runtime/tests/terminal_lifecycle_tests.rs|stop_window_runtime_records_paused_work_off_the_event_loop|whileInstant::now()<deadline|1
 crates/gwt/src/app_runtime/tests/work_projection_tests.rs|file_attachment_operation_dispatches_failed_progress_without_prompt_on_stage_failure|wait_for_recorded_event(,&recorded_events,|events||1
 crates/gwt/src/app_runtime/tests/workspace_resume_tests.rs|workspace_cleanup_failure_does_not_emit_done_work_item|wait_for_recorded_event(,&events,|events||1
 crates/gwt/src/board_read_receipts.rs|issue_3713_corrupt_receipt_and_expired_prompt_budget_warn_without_false_zero_or_denial|let_deadline=gwt_core::operation_deadline::ScopedOperationDeadline::enter(std::time::Instant::now()-std::time::Duration::from_secs(1),)|1

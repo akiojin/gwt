@@ -148,7 +148,8 @@ pub fn write_pane_input_then_submit(pane: &Arc<Mutex<Pane>>, text: &str) -> Resu
         } else {
             pane.lock()
                 .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
+                .shared_pty()
+                .write_machine_input(body.as_bytes())
                 .map_err(|error| error.to_string())
         };
     };
@@ -191,7 +192,8 @@ pub fn write_pane_input_and_submit_blocking(
         } else {
             pane.lock()
                 .map_err(|error| error.to_string())?
-                .write_input(body.as_bytes())
+                .shared_pty()
+                .write_machine_input(body.as_bytes())
                 .map_err(|error| error.to_string())
         };
     };
@@ -1253,6 +1255,7 @@ fn prepare_pane_name_for_window(
     }
     let member_name = if let Some(member_id) = session
         .as_ref()
+        .filter(|session| session.agent_name.is_none())
         .and_then(|session| session.agent_member_id.as_deref())
     {
         let roster = crate::agent_names::read_project_roster(&pane.project_root, sessions_dir)?;
@@ -1269,12 +1272,10 @@ fn prepare_pane_name_for_window(
     } else {
         None
     };
-    let existing = member_name
-        .or_else(|| {
-            session
-                .as_ref()
-                .and_then(|session| session.agent_name.clone())
-        })
+    let existing = session
+        .as_ref()
+        .and_then(|session| session.agent_name.clone())
+        .or(member_name)
         .or_else(|| pane.window.agent_name.clone());
     let name = match existing {
         Some(name) => name,
@@ -1452,6 +1453,7 @@ fn assign_prepared_name_inner(
             }
         }
         if !is_pm
+            && session.agent_member_id.is_none()
             && !matches!(
                 session.status,
                 gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted

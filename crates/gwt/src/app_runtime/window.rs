@@ -62,6 +62,7 @@ fn shares_work_surface_singleton(preset: WindowPreset) -> bool {
 /// workspace record was actually removed, so callers can answer the requester
 /// instead of treating an empty event list as success.
 pub(crate) struct CloseWindowOutcome {
+    #[cfg(test)]
     pub(crate) closed: bool,
     pub(crate) events: Vec<OutboundEvent>,
 }
@@ -522,6 +523,7 @@ impl AppRuntime {
             })
         else {
             return CloseWindowOutcome {
+                #[cfg(test)]
                 closed: false,
                 events: Vec::new(),
             };
@@ -550,6 +552,7 @@ impl AppRuntime {
             id,
         ) {
             return CloseWindowOutcome {
+                #[cfg(test)]
                 closed: false,
                 events: Vec::new(),
             };
@@ -583,6 +586,7 @@ impl AppRuntime {
             events.push(event);
         }
         CloseWindowOutcome {
+            #[cfg(test)]
             closed: true,
             events,
         }
@@ -600,7 +604,6 @@ impl AppRuntime {
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
         self.invalidate_launch_delivery_ack(id);
-        self.pending_launch_completions.remove(id);
         // SPEC-3431 FR-013: snapshot the closing window's session while the
         // active entry still exists — an explicit close of the PM pane is an
         // intentional stop and clears the durable PM registration below.
