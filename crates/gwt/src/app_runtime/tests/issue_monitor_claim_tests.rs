@@ -6716,8 +6716,7 @@ fn durable_delivery_fallback_commit_budget_is_an_explicit_runtime_dependency() {
                 gwt::process::is_host_process_alive,
             )
         })
-        .err()
-        .expect("the runtime's exhausted commit budget must reject its claim");
+        .expect_err("the runtime's exhausted commit budget must reject its claim");
     assert!(
         error
             .to_string()

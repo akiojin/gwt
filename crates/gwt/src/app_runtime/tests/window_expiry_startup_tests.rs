@@ -1782,7 +1782,7 @@ fn startup_restore_refuses_landed_worktree_before_launch() {
     ));
     save_workspace_state(
         &workspace_state_path(&repo),
-        &runtime.tabs[0].workspace.persisted(),
+        runtime.tabs[0].workspace.persisted(),
     )
     .expect("persist the actual landed placeholder");
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
@@ -1879,7 +1879,7 @@ fn startup_restore_removes_empty_unlinked_landed_windows_but_keeps_diagnostics()
     );
     save_workspace_state(
         &workspace_state_path(&repo),
-        &runtime.tabs[0].workspace.persisted(),
+        runtime.tabs[0].workspace.persisted(),
     )
     .expect("persist empty and diagnostic rows for the actual owner");
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
@@ -1981,7 +1981,7 @@ fn open_project_empty_landed_cleanup_preserves_same_session_diagnostic_window() 
     );
     save_workspace_state(
         &workspace_state_path(&repo),
-        &runtime.tabs[0].workspace.persisted(),
+        runtime.tabs[0].workspace.persisted(),
     )
     .expect("persist both exact aliases of the same source Session");
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));
@@ -2062,7 +2062,7 @@ fn startup_restore_queues_only_one_session_per_worktree() {
     }
     save_workspace_state(
         &workspace_state_path(&repo),
-        &runtime.tabs[0].workspace.persisted(),
+        runtime.tabs[0].workspace.persisted(),
     )
     .expect("persist both saved-source placeholders");
     let owner = owner_fixture_block_on(production_owner_fixture(&repo));

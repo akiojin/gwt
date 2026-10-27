@@ -2061,6 +2061,42 @@ impl AppRuntime {
         }
     }
 
+    /// A resume can reuse its saved diagnostic row. Track the accepted routing
+    /// intent rather than requiring a newly allocated workspace row.
+    fn mark_pm_resume_launches(
+        &mut self,
+        tab_id: &str,
+        before: &HashSet<String>,
+        source_session_id: &str,
+    ) {
+        let Some(context) = self.project_context(tab_id) else {
+            return;
+        };
+        let accepted: Vec<_> = self
+            .pending_auto_resume_sources
+            .iter()
+            .filter(|(window, source)| {
+                !before.contains(*window)
+                    && source.as_str() == source_session_id
+                    && self
+                        .pending_launch_completions
+                        .get(*window)
+                        .is_some_and(|pending| {
+                            pending.current.load(std::sync::atomic::Ordering::Acquire)
+                                && pending.context.as_ref() == Some(&context)
+                        })
+            })
+            .map(|(window, _)| window.clone())
+            .collect();
+        if let Some(state) = self.project_state_mut(&context) {
+            for window in accepted {
+                state
+                    .pending_pm_launches
+                    .insert(window, context.project_root.clone());
+            }
+        }
+    }
+
     /// Resume the registered PM's own conversation (FR-003), recording the
     /// successor pane so launch completion rewrites `pm.json`.
     ///
@@ -2084,10 +2120,11 @@ impl AppRuntime {
                 register_pm_launch: true,
             });
         }
-        let before = self.pm_window_ids(tab_id);
+        let before = self.pending_auto_resume_sources.keys().cloned().collect();
+        let source_session_id = session.id.clone();
         let events =
             self.spawn_restored_agent_session(tab_id, session, None, RestoreOrigin::Automatic);
-        self.mark_new_pm_windows(tab_id, &before, project_root);
+        self.mark_pm_resume_launches(tab_id, &before, &source_session_id);
         events
     }
 
@@ -2171,13 +2208,15 @@ impl AppRuntime {
                 } => self.spawn_prepared_pm_agent(&tab_id, &project_root, &worktree),
                 PmWorktreeContinuation::ResumeSession {
                     tab_id,
-                    project_root,
+                    project_root: _,
                     session,
                     workspace_resume_context,
                     origin,
                     register_pm_launch,
                 } => {
-                    let before = register_pm_launch.then(|| self.pm_window_ids(&tab_id));
+                    let before = register_pm_launch
+                        .then(|| self.pending_auto_resume_sources.keys().cloned().collect());
+                    let source_session_id = session.id.clone();
                     let spawned = self.spawn_prepared_restored_agent_session(
                         &tab_id,
                         *session,
@@ -2185,7 +2224,7 @@ impl AppRuntime {
                         origin,
                     );
                     if let Some(before) = before {
-                        self.mark_new_pm_windows(&tab_id, &before, &project_root);
+                        self.mark_pm_resume_launches(&tab_id, &before, &source_session_id);
                     }
                     spawned
                 }

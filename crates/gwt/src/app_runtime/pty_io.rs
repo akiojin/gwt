@@ -514,8 +514,6 @@ impl AppRuntime {
         close_project_root: Option<std::path::PathBuf>,
         closing_session_id: Option<String>,
         pm_close: bool,
-        _notify_issue_monitor: bool,
-        _self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         closing_window_generation: Option<u64>,
         peer_reply: Option<PeerPaneCloseReply>,
     ) {

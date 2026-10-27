@@ -10,7 +10,7 @@ fn pm_restore_owner_fixture(
     let tab = runtime.tab(&runtime.test_context().tab_id).unwrap();
     save_workspace_state(
         &workspace_state_path(&tab.project_root),
-        &tab.workspace.persisted(),
+        tab.workspace.persisted(),
     )
     .expect("persist the original restore canvas for the physical owner");
     let (command, args) = if cfg!(windows) {

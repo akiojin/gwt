@@ -64,7 +64,7 @@ pub struct PmLifecycleOutcome {
     pub session_id: String,
     pub deregistered: bool,
     pub respawn: bool,
-    pub prefs: pm_registry::PmPrefs,
+    pub prefs: Box<pm_registry::PmPrefs>,
 }
 
 pub(crate) enum PmLifecycleCause {
@@ -77,7 +77,7 @@ pub(crate) enum PmLifecycleCause {
 /// retry the captured registration change rather than count another crash.
 pub(crate) enum PmLifecycleCommit {
     Pending {
-        expected: PmRegistration,
+        expected: Box<PmRegistration>,
         desired: Option<PmRegistration>,
         respawn: bool,
     },
@@ -121,7 +121,7 @@ pub(crate) fn finish_pm_lifecycle(
             PmLifecycleCause::Preserve => unreachable!(),
         };
         *completion = Some(PmLifecycleCommit::Pending {
-            expected,
+            expected: Box::new(expected),
             desired,
             respawn,
         });
@@ -140,7 +140,7 @@ pub(crate) fn finish_pm_lifecycle(
         if prefs.registration == *desired {
             return true;
         }
-        if prefs.registration.as_ref() != Some(expected) {
+        if prefs.registration.as_ref() != Some(expected.as_ref()) {
             return false;
         }
         prefs.registration.clone_from(desired);
@@ -179,7 +179,7 @@ pub(crate) fn finish_pm_lifecycle(
         session_id: session_id.into(),
         deregistered,
         respawn,
-        prefs,
+        prefs: Box::new(prefs),
     })));
     Ok(())
 }

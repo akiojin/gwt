@@ -599,8 +599,8 @@ impl AppRuntime {
         &mut self,
         id: &str,
         project_root: Option<std::path::PathBuf>,
-        notify_issue_monitor: bool,
-        self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
+        _notify_issue_monitor: bool,
+        _self_close_ticket: Option<crate::AgentSelfCloseCapabilityTicket>,
         peer_reply: Option<PeerPaneCloseReply>,
     ) {
         self.invalidate_launch_delivery_ack(id);
@@ -643,8 +643,6 @@ impl AppRuntime {
             project_root,
             closing_session_id,
             closing_pm_session,
-            notify_issue_monitor,
-            self_close_ticket,
             closing_window_generation,
             peer_reply,
         );

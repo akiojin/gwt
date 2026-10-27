@@ -666,6 +666,18 @@ impl AppRuntime {
 }
 
 #[cfg(test)]
+pub(super) use gwt::project_runtime::workspace::save_workspace_launch_projection;
+pub(super) use gwt::project_runtime::workspace::{
+    active_agent_summary_from_session, workspace_owner_label,
+};
+#[cfg(test)]
+pub(super) use gwt::project_runtime::workspace::{
+    apply_workspace_launch_for_current_work, apply_workspace_launch_transition,
+    invalid_successor_supersession_event, SuccessorSupersessionAuthority,
+    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
+};
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use fs2::FileExt;
@@ -741,15 +753,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-pub(super) use gwt::project_runtime::workspace::save_workspace_launch_projection;
-pub(super) use gwt::project_runtime::workspace::{
-    active_agent_summary_from_session, workspace_owner_label,
-};
-#[cfg(test)]
-pub(super) use gwt::project_runtime::workspace::{
-    apply_workspace_launch_for_current_work, apply_workspace_launch_transition,
-    invalid_successor_supersession_event, SuccessorSupersessionAuthority,
-    WorkspaceLaunchProjectionKind, WorkspaceLaunchTransition,
-};

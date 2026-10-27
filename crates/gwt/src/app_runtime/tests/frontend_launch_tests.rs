@@ -1,14 +1,14 @@
 use super::*;
 
-fn actual_manual_holder_fixture(
-    temp: &Path,
-) -> (
+type ActualManualHolderFixture = (
     AppRuntime,
     Arc<Mutex<Vec<UserEvent>>>,
     Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
     gwt::project_runtime::test_support::OwnerRuntimeProbe,
     String,
-) {
+);
+
+fn actual_manual_holder_fixture(temp: &Path) -> ActualManualHolderFixture {
     let root = temp.join("repo");
     pane_control_tests::control_init_repo(&root);
     seed_owner_fixture_roster(&root, 8);

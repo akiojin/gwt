@@ -2975,14 +2975,12 @@ fn restart_window_events_is_noop_when_window_already_running() {
     runtime
         .window_pty_statuses
         .insert(window_id.clone(), WindowProcessStatus::Running);
-    let original_pane = Some(Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize)
-        .expect("runtime present");
+    let original_pane = Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize;
 
     let events = runtime.restart_window_events(&window_id);
 
     assert!(events.is_empty(), "restarting a running window is a no-op");
-    let after_pane = Some(Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize)
-        .expect("runtime still present");
+    let after_pane = Arc::as_ptr(&owner_runtime_probe(&runtime, &window_id).pane) as usize;
     assert_eq!(
         original_pane, after_pane,
         "running window's runtime must not be replaced"

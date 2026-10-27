@@ -13386,13 +13386,6 @@ impl AppRuntime {
             composed,
             self.provider_api_error_holds.contains_key(window_id),
         );
-        if self.window_approval_waiting.contains_key(window_id)
-            || self.provider_quota_holds.contains_key(window_id)
-            || matches!(
-                composed,
-                WindowProcessStatus::Stopped | WindowProcessStatus::Error
-            )
-        {}
         let address = self.window_lookup.get(window_id)?.clone();
         if let Some(tab) = self.tab_mut(&address.tab_id) {
             let _ = tab.workspace.set_status(&address.raw_id, composed);
@@ -15642,7 +15635,6 @@ impl AppRuntime {
                     agent_project_root: context.project_root.to_string_lossy().into_owned(),
                     runtime_target: snapshot
                         .runtime_target
-                        .clone()
                         .or_else(|| session.as_ref().map(|session| session.runtime_target))
                         .unwrap_or(gwt_agent::LaunchRuntimeTarget::Host),
                     tab_id: context.tab_id.clone(),

@@ -303,7 +303,20 @@ fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
     };
     assert_eq!(tasks.lock().unwrap().len(), 1);
     let tasks = Arc::clone(tasks);
+    let previous = owner_runtime_probe(&runtime, &pm_id);
+    let owner = project_owner_fixture(&mut runtime, &pm_id);
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: previous.id.clone(),
+            incarnation: previous.incarnation,
+        }),
+    )
+    .expect("retire the actual PM before replacing it at the same GUI id");
+    assert!(previous.pty.tree_exit_confirmed());
     let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
+    let successor = owner_runtime_probe(&runtime, &pm_id);
+    assert_ne!(successor.incarnation, previous.incarnation);
+    assert!(!Arc::ptr_eq(&successor.pty, &previous.pty));
     runtime.blocking_tasks = BlockingTaskSpawner::Queued(tasks);
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(gwt::pm_registry::load_pm_loop_state(

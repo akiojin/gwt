@@ -6181,6 +6181,12 @@ fn agent_names_for_tab(tab: &ProjectTabRuntime) -> HashMap<String, String> {
         .collect()
 }
 
+pub(super) use gwt::project_runtime::workspace::non_empty_workspace_text;
+#[cfg(test)]
+pub(super) use gwt::project_runtime::workspace::{
+    save_resumed_workspace_projection, save_start_work_workspace_projection,
+};
+
 #[cfg(test)]
 mod bounded_cache_merge_tests {
     use super::*;
@@ -7166,9 +7172,3 @@ mod bounded_cache_merge_tests {
         assert_eq!(history_git_identity_conflict_checks(), 0);
     }
 }
-
-pub(super) use gwt::project_runtime::workspace::non_empty_workspace_text;
-#[cfg(test)]
-pub(super) use gwt::project_runtime::workspace::{
-    save_resumed_workspace_projection, save_start_work_workspace_projection,
-};

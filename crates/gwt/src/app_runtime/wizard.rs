@@ -7282,7 +7282,7 @@ impl AppRuntime {
             }
             pending.manual_wizard.as_ref().filter(|original| {
                 original.wizard_id == wizard_id && original.project_context == context
-            }).and_then(|_| pending.manual_request.as_ref()).and_then(|request| match (request, &config) {
+            }).and(pending.manual_request.as_ref()).and_then(|request| match (request, &config) {
                 (super::RemoteOwnerLaunchRequest::Agent { config: original, .. }, LaunchWizardLaunchRequest::Agent(current))
                     if matches!((serde_json::to_value(original), serde_json::to_value(current)),
                         (Ok(original), Ok(current)) if original == current) => Some(window.clone()),
@@ -7440,26 +7440,28 @@ impl AppRuntime {
             }
             _ => None,
         };
-        let spawn_result = spawn(self, &session, config);
-        if spawn_result.is_ok() {
-            if let Some(pending) = manual_operation.as_deref().and_then(|operation| {
-                self.pending_launch_completions
-                    .values_mut()
-                    .find(|pending| {
-                        pending.operation_id == operation
-                            && pending.context.as_ref() == Some(&context)
-                            && pending.manual_request.is_some()
-                    })
-            }) {
-                pending.manual_wizard = Some(session.clone());
-                let mut events = spawn_result.unwrap();
-                if owns_visible_slot {
-                    self.store_launch_wizard(session);
-                    events.push(self.launch_wizard_state_outbound(&context));
+        let spawn_result = match spawn(self, &session, config) {
+            Ok(mut events) => {
+                if let Some(pending) = manual_operation.as_deref().and_then(|operation| {
+                    self.pending_launch_completions
+                        .values_mut()
+                        .find(|pending| {
+                            pending.operation_id == operation
+                                && pending.context.as_ref() == Some(&context)
+                                && pending.manual_request.is_some()
+                        })
+                }) {
+                    pending.manual_wizard = Some(session.clone());
+                    if owns_visible_slot {
+                        self.store_launch_wizard(session);
+                        events.push(self.launch_wizard_state_outbound(&context));
+                    }
+                    return events;
                 }
-                return events;
+                Ok(events)
             }
-        }
+            Err(error) => Err(error),
+        };
         self.finish_launch_wizard_agent_spawn(
             session,
             owns_visible_slot,

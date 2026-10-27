@@ -2875,7 +2875,7 @@ fn fresh_execution_generic_close_preserves_activated_or_replaced_candidate() {
             &fixture.pending,
         );
         if activated {
-            assert_eq!(outcome.unwrap(), false);
+            assert!(!outcome.unwrap());
         } else {
             assert!(outcome.is_err());
         }

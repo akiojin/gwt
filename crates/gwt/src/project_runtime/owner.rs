@@ -338,14 +338,19 @@ pub(crate) enum CloseCause {
     ExplicitClose,
     NaturalExit,
     DiagnosticExit,
+    PmGenericCrash,
     GuiLifetime,
 }
 impl CloseCause {
     fn restore_policy(self) -> Option<bool> {
         match self {
             Self::ExplicitClose | Self::NaturalExit | Self::DiagnosticExit => Some(false),
-            Self::GuiLifetime => None,
+            Self::PmGenericCrash | Self::GuiLifetime => None,
         }
+    }
+
+    fn is_diagnostic(self) -> bool {
+        matches!(self, Self::DiagnosticExit | Self::PmGenericCrash)
     }
 }
 
@@ -5924,7 +5929,7 @@ impl OwnerState {
         }
     }
     fn spawn_close(&self, id: String, mut runtime: WindowRuntime, cause: CloseCause) {
-        if cause.restore_policy() == Some(false) {
+        if cause.restore_policy() == Some(false) || cause.is_diagnostic() {
             self.capture_close_monitor_snapshot(&id, &mut runtime);
         } else {
             runtime.close_monitor_snapshot = None;
@@ -5966,7 +5971,7 @@ impl OwnerState {
         } else {
             self.closing.remove(&id);
             let result = result.and_then(|()| {
-                if matches!(cause, CloseCause::DiagnosticExit) {
+                if cause.is_diagnostic() {
                     self.persist_registry_status(
                         &id,
                         runtime
@@ -5979,11 +5984,11 @@ impl OwnerState {
                 Ok(())
             });
 
-            let natural_terminal =
-                matches!(cause, CloseCause::NaturalExit | CloseCause::DiagnosticExit)
-                    && result.is_ok();
+            let natural_terminal = (matches!(cause, CloseCause::NaturalExit)
+                || cause.is_diagnostic())
+                && result.is_ok();
             if natural_terminal {
-                let diagnostic_exit = matches!(cause, CloseCause::DiagnosticExit);
+                let diagnostic_exit = cause.is_diagnostic();
                 let status = Self::runtime_status(&runtime);
                 // Capture this proof while the successful finalizer still owns
                 // the exact reaped PTY. Later historical cleanup must not fill
@@ -8751,6 +8756,27 @@ impl OwnerState {
         if self.exact(&id, incarnation).is_err() {
             return;
         }
+        // Capture current ownership before terminal status revokes its writer.
+        // Only the registered PM's actual nonzero exit can bypass the generic
+        // Agent recovery latch; a read error or replacement grants no such cause.
+        let pm_crash_candidate = exit_confirmed
+            && raw_status == crate::WindowProcessStatus::Error
+            && self.runtimes.get(&id).is_some_and(|runtime| {
+                runtime.current.load(Ordering::Acquire)
+                    && runtime
+                        .pty
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|exit| exit.exit_code() != 0)
+                    && runtime.agent.as_ref().is_some_and(|agent| {
+                        crate::pm_registry::registered_pm_worktree_authority(
+                            &runtime.project_root,
+                            &agent.snapshot.id,
+                            &agent.snapshot.worktree_path,
+                        )
+                    })
+            });
         if matches!(
             raw_status,
             crate::WindowProcessStatus::Error | crate::WindowProcessStatus::Stopped
@@ -8783,6 +8809,21 @@ impl OwnerState {
             .agent
             .as_ref()
             .map(|agent| agent.active.agent_id.clone());
+        // Preserve explicit recovery policy and provider prompts before the
+        // shared classifier clears approval/hook state on terminal output.
+        let pm_generic_crash = pm_crash_candidate
+            && runtime.policy.approval.is_none()
+            && runtime.policy.api_error.is_none()
+            && screen.as_deref().is_some_and(|screen| {
+                let evidence = format!("{}\n{screen}", detail.as_deref().unwrap_or_default());
+                let provider = super::runtime_events::approval_provider(agent_id.as_deref());
+                crate::window_state::approval_prompt_fingerprint(provider, &evidence).is_none()
+                    && crate::window_state::directory_trust_prompt_fingerprint(provider, &evidence)
+                        .is_none()
+                    && gwt_core::usage::limit_notice::detect_provider_auth_notice(&evidence)
+                        .is_none()
+                    && gwt_core::usage::detect_provider_api_error(&evidence).is_none()
+            });
         let preset = Self::policy_preset(runtime);
         let outcome = super::runtime_events::classify_exit(
             &mut runtime.policy,
@@ -8809,7 +8850,9 @@ impl OwnerState {
             runtime._initial_prompt_file = None;
         }
         runtime.detail = outcome.detail.clone();
-        let retire = outcome.auto_close
+        let pm_generic_crash = pm_generic_crash && outcome.quota_hold.is_none();
+        let retire = pm_generic_crash
+            || outcome.auto_close
             || (exit_confirmed
                 && outcome.quota_hold.is_some()
                 && matches!(
@@ -8869,7 +8912,9 @@ impl OwnerState {
                 .remove(&id)
                 .expect("exact terminal owner runtime");
             let (reply, _) = oneshot::channel();
-            let cause = if outcome.auto_close {
+            let cause = if pm_generic_crash {
+                CloseCause::PmGenericCrash
+            } else if outcome.auto_close {
                 CloseCause::NaturalExit
             } else {
                 CloseCause::DiagnosticExit
@@ -10263,6 +10308,7 @@ pub(crate) fn close_runtime(
     }
     if let Some(agent) = runtime.agent.as_ref() {
         let pm_cause = match cause {
+            CloseCause::PmGenericCrash => super::pm_delivery::PmLifecycleCause::Crash,
             CloseCause::ExplicitClose | CloseCause::NaturalExit => {
                 super::pm_delivery::PmLifecycleCause::Deregister
             }

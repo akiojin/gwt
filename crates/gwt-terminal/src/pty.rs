@@ -3257,7 +3257,7 @@ mod tests {
             .write_cursor_position_report(returned.cursor_reports[0], &current)
             .unwrap();
         let expected = b"human\x1b[3;7R\x1b[3;7R\x1b[3;7R\x1b[1;1R";
-        let returned_written = &*bytes.lock().unwrap() == expected;
+        let returned_written = *bytes.lock().unwrap() == expected;
         assert_eq!(
             (progressed_written, returned_written),
             (true, true),

@@ -6502,7 +6502,7 @@ fn owner_fresh_launch_seed(
     };
     let predecessor_id = format!("predecessor-{operation_id}");
     gwt::cli::execution_state::materialize_at_launch(
-        &repo,
+        repo,
         owner_kind,
         number,
         &predecessor_id,
@@ -6511,7 +6511,7 @@ fn owner_fresh_launch_seed(
     )
     .expect("historical producing execution");
     gwt::cli::execution_state::settle(
-        &repo,
+        repo,
         &predecessor_id,
         if completed {
             gwt::cli::execution_state::ExecutionSettlement::Completed
@@ -6524,17 +6524,16 @@ fn owner_fresh_launch_seed(
     )
     .expect("terminal predecessor");
     gwt::cli::execution_state::ensure_generation_ledger(
-        &repo,
+        repo,
         authority,
         gwt::cli::execution_state::LegacyActiveDisposition::Unknown,
     )
     .expect("historical generation ledger");
-    let predecessor_binding =
-        gwt::cli::execution_state::current_execution_binding(&repo, authority)
-            .expect("predecessor binding")
-            .expect("binding");
+    let predecessor_binding = gwt::cli::execution_state::current_execution_binding(repo, authority)
+        .expect("predecessor binding")
+        .expect("binding");
     let mut predecessor =
-        gwt_agent::Session::new(&repo, &branch, gwt_agent::AgentId::Custom("fixture".into()));
+        gwt_agent::Session::new(repo, &branch, gwt_agent::AgentId::Custom("fixture".into()));
     predecessor.id = predecessor_id;
     predecessor.project_state_root = Some(repo.to_path_buf());
     predecessor.linked_issue_number = Some(number);
@@ -6542,7 +6541,7 @@ fn owner_fresh_launch_seed(
         .set_execution_binding(Some(gwt_agent::SessionExecutionBinding {
             schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
             session_id: predecessor.id.clone(),
-            repo_hash: gwt_core::paths::project_scope_hash(&repo).to_string(),
+            repo_hash: gwt_core::paths::project_scope_hash(repo).to_string(),
             owner_kind: owner_kind.as_str().into(),
             owner_number: number,
             identity: predecessor_binding.clone(),
@@ -6594,7 +6593,7 @@ fn owner_fresh_agent_command(
         cols,
         rows,
         ..
-    } = owner_fixture_agent_command(&owner, &repo, &operation_id, &operation_id)
+    } = owner_fixture_agent_command(owner, repo, &operation_id, &operation_id)
     else {
         unreachable!("agent intent")
     };
@@ -7286,9 +7285,11 @@ fn owner_monitor_fixture_with_prefs(
     fs::create_dir_all(&root).unwrap();
     init_repo_with_initial_commit(&root);
     let now = Utc::now().to_rfc3339();
-    let mut prefs = gwt::IssueMonitorPrefs::default();
-    prefs.enabled = true;
-    prefs.max_active_agents = 8;
+    let mut prefs = gwt::IssueMonitorPrefs {
+        enabled: true,
+        max_active_agents: 8,
+        ..Default::default()
+    };
     prefs.set_launch_profile_pool(
         agent_ids
             .iter()
@@ -7310,7 +7311,7 @@ fn owner_monitor_fixture_with_prefs(
     if delivery {
         assert!(monitor.apply_confirmed_claim(
             issue,
-            &format!("claim-{issue}"),
+            format!("claim-{issue}"),
             "fixture-pm/session",
             &format!("effect-{issue}"),
             &now
@@ -8216,7 +8217,7 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
     };
     // A prepared worker may mint its runtime before ACK enqueue, then install
     // it later. Numeric runtime age alone cannot authorize stale-pane cleanup.
-    let prepared_replacement = restart_existing_id.then(&launch_replacement);
+    let prepared_replacement = restart_existing_id.then(launch_replacement);
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
     runtime.issue_monitor_launch_succeeded_delivery_events(&repo, 3165, &launched_id, None);

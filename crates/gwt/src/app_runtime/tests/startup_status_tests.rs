@@ -3258,7 +3258,7 @@ fn startup_reaper_reaps_stale_owner_but_preserves_selected_restore_holder() {
 
     save_workspace_state(
         &workspace_state_path(&repo),
-        &runtime.tabs[0].workspace.persisted(),
+        runtime.tabs[0].workspace.persisted(),
     )
     .expect("owner reads the exact terminal restore placeholder");
     let physical_owner = owner_fixture_block_on(production_owner_fixture(&repo));
