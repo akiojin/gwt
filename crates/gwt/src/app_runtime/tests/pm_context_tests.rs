@@ -1447,13 +1447,14 @@ fn pm_crash_records_backoff_and_respawns() {
         "crash is recorded on the backoff ladder"
     );
     assert_eq!(
-        runtime
-            .project_state(&runtime.test_context())
-            .unwrap()
-            .pending_pm_launches
-            .len(),
+        runtime.pending_launch_completions.len(),
         1,
         "immediate respawn resumes the PM conversation"
+    );
+    assert_eq!(
+        runtime.pending_auto_resume_sources.get(&window_id),
+        Some(&session_id),
+        "the single owner restore intent resumes the original PM Session"
     );
 }
 

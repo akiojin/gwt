@@ -8784,7 +8784,7 @@ impl OwnerState {
             .as_ref()
             .map(|agent| agent.active.agent_id.clone());
         let preset = Self::policy_preset(runtime);
-        let outcome = super::runtime_events::classify_exit(
+        let mut outcome = super::runtime_events::classify_exit(
             &mut runtime.policy,
             super::runtime_events::ExitPolicyInput {
                 window_id: &id,
@@ -8809,6 +8809,22 @@ impl OwnerState {
             runtime._initial_prompt_file = None;
         }
         runtime.detail = outcome.detail.clone();
+        if exit_confirmed
+            && raw_status == crate::WindowProcessStatus::Error
+            && outcome.quota_hold.is_none()
+            && runtime.agent.as_ref().is_some_and(|agent| {
+                crate::pm_registry::registered_pm_worktree_authority(
+                    &runtime.project_root,
+                    &agent.snapshot.id,
+                    &agent.snapshot.worktree_path,
+                )
+            })
+        {
+            // A registered PM resumes through its crash backoff after reap;
+            // the generic Agent diagnostic latch must not strand its owner.
+            runtime.policy.recoverable_error = false;
+            outcome.keep_recovery = false;
+        }
         let retire = outcome.auto_close
             || (exit_confirmed
                 && outcome.quota_hold.is_some()

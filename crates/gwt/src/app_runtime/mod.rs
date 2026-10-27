@@ -14348,6 +14348,9 @@ impl AppRuntime {
                 {
                     return Vec::new();
                 }
+                // Successful physical cleanup releases the restore reservation
+                // before preparation can finish ahead of the later Closed event.
+                self.active_agent_sessions.remove(&id);
                 self.owner_pm_lifecycle_events(context, outcome)
             }
             OwnerEvent::Closed {
