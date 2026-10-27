@@ -1,0 +1,720 @@
+//! Transport-independent mobile device authorization (Issue #6476).
+//!
+//! This module does not open a listener or enable remote access. Its owner must
+//! keep approval/revocation on the trusted PC control plane, persist device
+//! snapshots securely, and use an authenticated encrypted transport. Browser
+//! keys use WebCrypto ECDSA P-256/SHA-256 with raw SEC1 public keys and r||s
+//! signatures; the Host never receives a device's private key.
+
+use std::collections::{HashMap, HashSet};
+
+use gwt_core::repo_hash::ProjectKey;
+use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+const PAIRING_TTL_SECS: u64 = 300;
+const CHALLENGE_TTL_SECS: u64 = 60;
+const SESSION_TTL_SECS: u64 = 300;
+const DEVICE_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+const MAX_PENDING_PAIRINGS: usize = 8;
+const MAX_CHALLENGES: usize = 64;
+const MAX_DEVICES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizationError {
+    #[error("mobile access is disabled")]
+    Disabled,
+    #[error("unknown pairing request or authentication challenge")]
+    UnknownRequest,
+    #[error("unknown paired device")]
+    UnknownDevice,
+    #[error("invalid device record")]
+    InvalidDevice,
+    #[error("public key is already paired")]
+    DuplicateKey,
+    #[error("mobile authorization capacity reached")]
+    Capacity,
+    #[error("credential expired or clock moved before issuance")]
+    Expired,
+    #[error("device revoked")]
+    Revoked,
+    #[error("device is not authorized for this project")]
+    WrongProject,
+    #[error("invalid device signature")]
+    InvalidSignature,
+    #[error("session belongs to a previous Host epoch")]
+    StaleSession,
+    #[error("command sequence is repeated or out of order")]
+    Replay,
+}
+
+/// Durable public metadata only. Revocation tombstones survive snapshot restore.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceRecord {
+    id: String,
+    name: String,
+    public_key: Vec<u8>,
+    project: String,
+    issued_at: u64,
+    expires_at: u64,
+    revoked: bool,
+}
+
+impl DeviceRecord {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+    pub fn is_revoked(&self) -> bool {
+        self.revoked
+    }
+
+    fn check(&self, project: &ProjectKey, now: u64) -> Result<(), AuthorizationError> {
+        if self.revoked {
+            return Err(AuthorizationError::Revoked);
+        }
+        check_time(self.issued_at, self.expires_at, now)?;
+        if self.project != project.as_str() {
+            return Err(AuthorizationError::WrongProject);
+        }
+        Ok(())
+    }
+}
+
+/// A request identifier is not a device credential or permission to connect.
+#[derive(Debug, Clone)]
+pub struct PendingPairing {
+    pub id: String,
+    pub name: String,
+    pub project: ProjectKey,
+    pub expires_at: u64,
+}
+
+struct Pairing {
+    request: PendingPairing,
+    public_key: Vec<u8>,
+    issued_at: u64,
+}
+
+/// Sign these exact bytes, without reserializing them on the client.
+#[derive(Debug)]
+pub struct AuthenticationChallenge {
+    pub id: String,
+    pub signing_payload: Vec<u8>,
+}
+
+struct Challenge {
+    public: AuthenticationChallenge,
+    device_id: String,
+    project: ProjectKey,
+    issued_at: u64,
+    expires_at: u64,
+}
+
+/// Host-only, non-cloneable session. Never deserialize client-supplied sessions.
+#[derive(Debug)]
+pub struct AuthenticatedSession {
+    host_epoch: Uuid,
+    device_id: String,
+    project: ProjectKey,
+    issued_at: u64,
+    expires_at: u64,
+    next_sequence: u64,
+}
+
+/// A single authority per Host, shared behind its owner's synchronization fence.
+/// Cloning it would fork replay/revocation state, so it deliberately has no Clone.
+pub struct MobileAuthorization {
+    enabled: bool,
+    host_epoch: Uuid,
+    devices: HashMap<String, DeviceRecord>,
+    pending: HashMap<String, Pairing>,
+    challenges: HashMap<String, Challenge>,
+}
+
+impl Default for MobileAuthorization {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host_epoch: Uuid::new_v4(),
+            devices: HashMap::new(),
+            pending: HashMap::new(),
+            challenges: HashMap::new(),
+        }
+    }
+}
+
+impl MobileAuthorization {
+    /// Only the trusted PC control plane may enable access or approve devices.
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.host_epoch = Uuid::new_v4();
+        self.pending.clear();
+        self.challenges.clear();
+    }
+
+    pub fn devices(&self) -> Vec<&DeviceRecord> {
+        let mut devices: Vec<_> = self.devices.values().collect();
+        devices.sort_by(|a, b| a.id.cmp(&b.id));
+        devices
+    }
+
+    pub fn request_pairing(
+        &mut self,
+        name: &str,
+        public_key: &[u8],
+        project: ProjectKey,
+        now: u64,
+    ) -> Result<PendingPairing, AuthorizationError> {
+        self.check_enabled()?;
+        validate_identity(name, public_key)?;
+        if self.devices.values().any(|d| d.public_key == public_key) {
+            return Err(AuthorizationError::DuplicateKey);
+        }
+        self.pending.retain(|_, p| now < p.request.expires_at);
+        if self.pending.len() >= MAX_PENDING_PAIRINGS {
+            return Err(AuthorizationError::Capacity);
+        }
+        let request = PendingPairing {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            project,
+            expires_at: deadline(now, PAIRING_TTL_SECS)?,
+        };
+        self.pending.insert(
+            request.id.clone(),
+            Pairing {
+                request: request.clone(),
+                public_key: public_key.to_vec(),
+                issued_at: now,
+            },
+        );
+        Ok(request)
+    }
+
+    /// Call only after the PC user explicitly approves this exact request/key.
+    pub fn approve(
+        &mut self,
+        request_id: &str,
+        now: u64,
+    ) -> Result<DeviceRecord, AuthorizationError> {
+        self.check_enabled()?;
+        let pending = self
+            .pending
+            .remove(request_id)
+            .ok_or(AuthorizationError::UnknownRequest)?;
+        check_time(pending.issued_at, pending.request.expires_at, now)?;
+        if self.devices.len() >= MAX_DEVICES {
+            return Err(AuthorizationError::Capacity);
+        }
+        if self
+            .devices
+            .values()
+            .any(|d| d.public_key == pending.public_key)
+        {
+            return Err(AuthorizationError::DuplicateKey);
+        }
+        let device = DeviceRecord {
+            id: Uuid::new_v4().to_string(),
+            name: pending.request.name,
+            public_key: pending.public_key,
+            project: pending.request.project.to_string(),
+            issued_at: now,
+            expires_at: deadline(now, DEVICE_TTL_SECS)?,
+            revoked: false,
+        };
+        self.devices.insert(device.id.clone(), device.clone());
+        Ok(device)
+    }
+
+    /// The trusted owner must durably save the snapshot before acknowledging revocation.
+    pub fn revoke(&mut self, device_id: &str) -> Result<(), AuthorizationError> {
+        self.devices
+            .get_mut(device_id)
+            .ok_or(AuthorizationError::UnknownDevice)?
+            .revoked = true;
+        self.challenges
+            .retain(|_, challenge| challenge.device_id != device_id);
+        Ok(())
+    }
+
+    pub fn challenge(
+        &mut self,
+        device_id: &str,
+        project: &ProjectKey,
+        now: u64,
+    ) -> Result<AuthenticationChallenge, AuthorizationError> {
+        self.check_enabled()?;
+        let device = self
+            .devices
+            .get(device_id)
+            .ok_or(AuthorizationError::UnknownDevice)?;
+        device.check(project, now)?;
+        let expires_at = deadline(now, CHALLENGE_TTL_SECS)?.min(device.expires_at);
+        self.challenges.retain(|_, c| now < c.expires_at);
+        if self.challenges.len() >= MAX_CHALLENGES {
+            return Err(AuthorizationError::Capacity);
+        }
+        let id = Uuid::new_v4().to_string();
+        // JSON tuple gives unambiguous UTF-8 encoding and explicit protocol/Host binding.
+        let signing_payload = serde_json::to_vec(&(
+            "gwt-mobile-auth-v1",
+            self.host_epoch.to_string(),
+            device_id,
+            project.as_str(),
+            &id,
+            now,
+            expires_at,
+        ))
+        .expect("string/integer tuple is serializable");
+        self.challenges.insert(
+            id.clone(),
+            Challenge {
+                public: AuthenticationChallenge {
+                    id: id.clone(),
+                    signing_payload: signing_payload.clone(),
+                },
+                device_id: device_id.to_string(),
+                project: project.clone(),
+                issued_at: now,
+                expires_at,
+            },
+        );
+        Ok(AuthenticationChallenge {
+            id,
+            signing_payload,
+        })
+    }
+
+    /// A challenge is consumed even on failure. Transport adapters must keep its
+    /// issue/response bound to the same authenticated encrypted connection.
+    pub fn authenticate(
+        &mut self,
+        challenge_id: &str,
+        signature: &[u8],
+        now: u64,
+    ) -> Result<AuthenticatedSession, AuthorizationError> {
+        self.check_enabled()?;
+        let challenge = self
+            .challenges
+            .remove(challenge_id)
+            .ok_or(AuthorizationError::UnknownRequest)?;
+        check_time(challenge.issued_at, challenge.expires_at, now)?;
+        let device = self
+            .devices
+            .get(&challenge.device_id)
+            .ok_or(AuthorizationError::UnknownDevice)?;
+        device.check(&challenge.project, now)?;
+        UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &device.public_key)
+            .verify(&challenge.public.signing_payload, signature)
+            .map_err(|_| AuthorizationError::InvalidSignature)?;
+        Ok(AuthenticatedSession {
+            host_epoch: self.host_epoch,
+            device_id: device.id.clone(),
+            project: challenge.project,
+            issued_at: now,
+            expires_at: deadline(now, SESSION_TTL_SECS)?.min(device.expires_at),
+            next_sequence: 0,
+        })
+    }
+
+    /// Recheck at the actual effect, including commands previously queued.
+    ///
+    /// Hold the owner's read lock throughout this call; revocation takes its
+    /// write lock. Complete the effect synchronously inside `effect`: returning
+    /// a future or enqueueing more work does not authorize that later effect.
+    /// The transport must not clone/fan out sessions or reuse one across sockets.
+    pub fn dispatch<T>(
+        &self,
+        session: &mut AuthenticatedSession,
+        project: &ProjectKey,
+        sequence: u64,
+        now: u64,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, AuthorizationError> {
+        self.check_enabled()?;
+        if session.host_epoch != self.host_epoch {
+            return Err(AuthorizationError::StaleSession);
+        }
+        let device = self
+            .devices
+            .get(&session.device_id)
+            .ok_or(AuthorizationError::UnknownDevice)?;
+        device.check(project, now)?;
+        if &session.project != project {
+            return Err(AuthorizationError::WrongProject);
+        }
+        check_time(session.issued_at, session.expires_at, now)?;
+        if sequence != session.next_sequence {
+            return Err(AuthorizationError::Replay);
+        }
+        session.next_sequence = sequence.checked_add(1).ok_or(AuthorizationError::Replay)?;
+        Ok(effect())
+    }
+
+    pub fn snapshot(&self) -> Vec<DeviceRecord> {
+        self.devices().into_iter().cloned().collect()
+    }
+
+    /// Restores public credentials, never pending approvals or active sessions.
+    /// Access remains disabled until the trusted PC owner explicitly enables it.
+    pub fn restore(devices: Vec<DeviceRecord>) -> Result<Self, AuthorizationError> {
+        if devices.len() > MAX_DEVICES {
+            return Err(AuthorizationError::Capacity);
+        }
+        let mut authority = Self::default();
+        let mut keys = HashSet::new();
+        for device in devices {
+            validate_identity(&device.name, &device.public_key)?;
+            ProjectKey::parse(&device.project).map_err(|_| AuthorizationError::InvalidDevice)?;
+            if Uuid::parse_str(&device.id)
+                .map(|id| id.to_string() != device.id)
+                .unwrap_or(true)
+                || device.expires_at != deadline(device.issued_at, DEVICE_TTL_SECS)?
+                || authority.devices.contains_key(&device.id)
+            {
+                return Err(AuthorizationError::InvalidDevice);
+            }
+            if !keys.insert(device.public_key.clone()) {
+                return Err(AuthorizationError::DuplicateKey);
+            }
+            authority.devices.insert(device.id.clone(), device);
+        }
+        Ok(authority)
+    }
+
+    fn check_enabled(&self) -> Result<(), AuthorizationError> {
+        if self.enabled {
+            Ok(())
+        } else {
+            Err(AuthorizationError::Disabled)
+        }
+    }
+}
+
+fn validate_identity(name: &str, public_key: &[u8]) -> Result<(), AuthorizationError> {
+    // ring verifies curve membership together with the signature. Malformed or
+    // off-curve points can never authenticate, even if a PC approved their shape.
+    if name.trim().is_empty()
+        || name.chars().count() > 64
+        || name.chars().any(char::is_control)
+        || public_key.len() != 65
+        || public_key[0] != 4
+    {
+        return Err(AuthorizationError::InvalidDevice);
+    }
+    Ok(())
+}
+
+fn deadline(now: u64, ttl: u64) -> Result<u64, AuthorizationError> {
+    now.checked_add(ttl).ok_or(AuthorizationError::Expired)
+}
+
+fn check_time(issued_at: u64, expires_at: u64, now: u64) -> Result<(), AuthorizationError> {
+    if now < issued_at || now >= expires_at {
+        return Err(AuthorizationError::Expired);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::{
+        rand::SystemRandom,
+        signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_FIXED_SIGNING},
+    };
+
+    const NOW: u64 = 1_000_000;
+
+    fn project() -> ProjectKey {
+        ProjectKey::parse("0123456789abcdef").unwrap()
+    }
+    fn other_project() -> ProjectKey {
+        ProjectKey::parse("fedcba9876543210").unwrap()
+    }
+    fn key() -> EcdsaKeyPair {
+        let rng = SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
+        EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng).unwrap()
+    }
+    fn paired(auth: &mut MobileAuthorization, key: &EcdsaKeyPair) -> DeviceRecord {
+        let pending = auth
+            .request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+            .unwrap();
+        auth.approve(&pending.id, NOW).unwrap()
+    }
+    fn session(
+        auth: &mut MobileAuthorization,
+        device: &DeviceRecord,
+        key: &EcdsaKeyPair,
+    ) -> AuthenticatedSession {
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        auth.authenticate(&challenge.id, signature.as_ref(), NOW)
+            .unwrap()
+    }
+
+    #[test]
+    fn pairing_requires_enable_and_explicit_single_use_pc_approval() {
+        let mut auth = MobileAuthorization::default();
+        let key = key();
+        assert_eq!(
+            auth.request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        auth.enable();
+        let pending = auth
+            .request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+            .unwrap();
+        assert!(auth.devices().is_empty());
+        assert_eq!(
+            auth.challenge(&pending.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::UnknownDevice
+        );
+        let device = auth.approve(&pending.id, NOW).unwrap();
+        assert_eq!(device.project, project().as_str());
+        assert_eq!(
+            auth.approve(&pending.id, NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let second = paired(&mut auth, &self::key());
+        assert_ne!(device.id, second.id);
+        assert_eq!(device.name, second.name);
+        assert_eq!(
+            auth.request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::DuplicateKey
+        );
+    }
+
+    #[test]
+    fn pending_requests_expire_and_are_bounded_without_wall_clock_waits() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        for _ in 0..MAX_PENDING_PAIRINGS {
+            auth.request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+                .unwrap();
+        }
+        assert_eq!(
+            auth.request_pairing("Phone", key.public_key().as_ref(), project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::Capacity
+        );
+        let pending = auth
+            .request_pairing(
+                "Phone",
+                key.public_key().as_ref(),
+                project(),
+                NOW + PAIRING_TTL_SECS,
+            )
+            .unwrap();
+        assert_eq!(
+            auth.approve(&pending.id, NOW + 2 * PAIRING_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+    }
+
+    #[test]
+    fn webcrypto_fixed_signature_is_project_bound_and_not_replayable() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        assert_eq!(
+            auth.challenge(&device.id, &other_project(), NOW)
+                .unwrap_err(),
+            AuthorizationError::WrongProject
+        );
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        let mut session = auth
+            .authenticate(&challenge.id, signature.as_ref(), NOW)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate(&challenge.id, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let mut dispatched = 0;
+        auth.dispatch(&mut session, &project(), 0, NOW, || dispatched += 1)
+            .unwrap();
+        assert_eq!(
+            auth.dispatch(&mut session, &project(), 0, NOW, || dispatched += 1),
+            Err(AuthorizationError::Replay)
+        );
+        assert_eq!(
+            auth.dispatch(&mut session, &other_project(), 1, NOW, || dispatched += 1),
+            Err(AuthorizationError::WrongProject)
+        );
+        auth.dispatch(&mut session, &project(), 1, NOW, || dispatched += 1)
+            .unwrap();
+        assert_eq!(dispatched, 2);
+    }
+
+    #[test]
+    fn bad_signatures_and_expired_challenges_never_authenticate() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        assert_eq!(
+            auth.authenticate(&challenge.id, &[0; 64], NOW).unwrap_err(),
+            AuthorizationError::InvalidSignature
+        );
+        assert_eq!(
+            auth.authenticate(&challenge.id, &[0; 64], NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate(&challenge.id, signature.as_ref(), NOW + CHALLENGE_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+    }
+
+    #[test]
+    fn revocation_rejects_live_sessions_queued_operations_and_reconnection() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut session = session(&mut auth, &device, &key);
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        auth.revoke(&device.id).unwrap();
+        assert_eq!(
+            auth.dispatch(&mut session, &project(), 0, NOW, || panic!(
+                "revoked effect ran"
+            )),
+            Err(AuthorizationError::Revoked)
+        );
+        assert_eq!(
+            auth.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        assert_eq!(
+            auth.authenticate(&challenge.id, &[0; 64], NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+    }
+
+    #[test]
+    fn expiry_disable_and_host_restart_invalidate_sessions() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut old = session(&mut auth, &device, &key);
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW + SESSION_TTL_SECS, || ()),
+            Err(AuthorizationError::Expired)
+        );
+        let mut old = session(&mut auth, &device, &key);
+        auth.disable();
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::Disabled)
+        );
+        auth.enable();
+        assert_eq!(
+            auth.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        let mut old = session(&mut auth, &device, &key);
+        auth.dispatch(&mut old, &project(), 0, NOW, || ()).unwrap();
+        let encoded = serde_json::to_string(&auth.snapshot()).unwrap();
+        let mut restored =
+            MobileAuthorization::restore(serde_json::from_str(&encoded).unwrap()).unwrap();
+        assert_eq!(
+            restored.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Disabled
+        );
+        restored.enable();
+        assert_eq!(
+            restored.dispatch(&mut old, &project(), 1, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        let mut fresh = session(&mut restored, &device, &key);
+        restored
+            .dispatch(&mut fresh, &project(), 0, NOW, || ())
+            .unwrap();
+        assert_eq!(
+            restored
+                .challenge(&device.id, &project(), NOW + DEVICE_TTL_SECS)
+                .unwrap_err(),
+            AuthorizationError::Expired
+        );
+        restored.revoke(&device.id).unwrap();
+        let mut restored = MobileAuthorization::restore(restored.snapshot()).unwrap();
+        restored.enable();
+        assert_eq!(
+            restored.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Revoked
+        );
+    }
+
+    #[test]
+    fn snapshot_restore_rejects_corrupt_and_duplicate_credentials() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let device = paired(&mut auth, &key());
+        assert!(matches!(
+            MobileAuthorization::restore(vec![device.clone(); MAX_DEVICES + 1]),
+            Err(AuthorizationError::Capacity)
+        ));
+        assert!(matches!(
+            MobileAuthorization::restore(vec![device.clone(), device.clone()]),
+            Err(AuthorizationError::InvalidDevice)
+        ));
+        let mut duplicate_key = device.clone();
+        duplicate_key.id = Uuid::new_v4().to_string();
+        assert!(matches!(
+            MobileAuthorization::restore(vec![device.clone(), duplicate_key]),
+            Err(AuthorizationError::DuplicateKey)
+        ));
+        let mut invalid_project = device.clone();
+        invalid_project.project = "../other-project".into();
+        assert!(matches!(
+            MobileAuthorization::restore(vec![invalid_project]),
+            Err(AuthorizationError::InvalidDevice)
+        ));
+        let mut invalid_expiry = device.clone();
+        invalid_expiry.expires_at += 1;
+        assert!(matches!(
+            MobileAuthorization::restore(vec![invalid_expiry]),
+            Err(AuthorizationError::InvalidDevice)
+        ));
+        let mut invalid_key = device;
+        invalid_key.public_key.clear();
+        assert!(matches!(
+            MobileAuthorization::restore(vec![invalid_key]),
+            Err(AuthorizationError::InvalidDevice)
+        ));
+    }
+}
