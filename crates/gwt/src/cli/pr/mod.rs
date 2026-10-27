@@ -4780,6 +4780,14 @@ fn main() -> ExitCode {
         eprintln!("injected local inventory {fail} failure");
         return ExitCode::from(1);
     }
+    if matches!(fail.as_str(), "no-stdin" | "no-stdin-localized") && args.iter().any(|a| a == "merge-tree") && args.iter().any(|a| a == "--stdin") {
+        if fail == "no-stdin-localized" {
+            eprintln!("Fehler: unbekannte Option `stdin'");
+        } else {
+            eprintln!("error: unknown option `stdin'");
+        }
+        return ExitCode::from(129);
+    }
     let mut command = Command::new(REAL_GIT);
     #[cfg(windows)] {
         use std::os::windows::process::CommandExt;
@@ -4849,12 +4857,26 @@ fn main() -> ExitCode {
             assert_eq!(recovered["source"], "cache");
             assert_eq!(recovered["unlanded_branches"][0]["owner_issue"], 5390);
             assert_eq!(recovered["unlanded_branch_count"], 1);
+            let single_candidate_calls = fs::read_to_string(bin.join("calls"))
+                .unwrap()
+                .lines()
+                .count();
             let (code, unknown) = observe("merge-tree", serde_json::json!({"include":[]}));
             assert_eq!(code, 0, "{unknown}");
             let unknown: serde_json::Value =
                 serde_json::from_str(unknown["output"].as_str().unwrap()).unwrap();
             assert_eq!(unknown["unlanded_branch_count"], 1);
             assert!(unknown["unlanded_branches"][0]["has_non_gwt_changes"].is_null());
+            for stage in ["no-stdin", "no-stdin-localized"] {
+                let (code, compatible) = observe(stage, serde_json::json!({"include":[]}));
+                assert_eq!(code, 0, "{compatible}");
+                let compatible: serde_json::Value =
+                    serde_json::from_str(compatible["output"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    compatible["unlanded_branches"][0]["has_non_gwt_changes"], true,
+                    "{stage}"
+                );
+            }
             // Only a complete successful enumeration may render an empty stocktake.
             fs::remove_file(repo.join(".git/refs/remotes/origin/work/issue-5390")).unwrap();
             let (code, empty) = observe("", serde_json::json!({"include":[]}));
@@ -4891,6 +4913,35 @@ fn main() -> ExitCode {
                     "{response}"
                 );
             }
+            // Issue #5390 B: count processes, not wall time. Repeating local
+            // history and merge walks for every candidate caused native stalls.
+            for number in 1..=8 {
+                assert!(gwt_core::process::hidden_command(&real_git_path)
+                    .args([
+                        "update-ref",
+                        &format!("refs/remotes/origin/work/issue-{number}"),
+                        "HEAD"
+                    ])
+                    .current_dir(repo)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let (code, batched) = observe("", serde_json::json!({"include":[]}));
+            assert_eq!(code, 0, "{batched}");
+            let batched: serde_json::Value =
+                serde_json::from_str(batched["output"].as_str().unwrap()).unwrap();
+            assert_eq!(batched["unlanded_branch_count"], 8);
+            assert!(batched["unlanded_branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["ahead"] == 1 && row["has_non_gwt_changes"] == true));
+            let calls = fs::read_to_string(bin.join("calls")).unwrap();
+            assert!(
+                calls.lines().count() <= single_candidate_calls + 1,
+                "batch local inventory reads: {calls}"
+            );
         });
     }
 

@@ -253,8 +253,22 @@ pub fn run_git_logged_with_stdin(
         .stderr(std::process::Stdio::piped());
     let result = (|| {
         let mut child = command.spawn()?;
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(stdin)?;
+        let written = match child.stdin.take() {
+            Some(mut pipe) => pipe.write_all(stdin),
+            None => Ok(()),
+        };
+        if let Err(error) = written {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(error);
+            }
+            // An early argument rejection can close stdin before our write.
+            // Keep its exit status/stderr so callers can handle that refusal.
+            let output = child.wait_with_output()?;
+            return if output.status.success() {
+                Err(error)
+            } else {
+                Ok(output)
+            };
         }
         child.wait_with_output()
     })();
@@ -619,6 +633,22 @@ pub fn get_command_version(cmd: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_stdin_keeps_failed_child_diagnostics_after_broken_pipe() {
+        let _lock = crate::test_support::env_lock().lock().unwrap();
+        // Both commands exit without consuming stdin. Exceed pipe capacity so
+        // the write fails regardless of which process the scheduler runs first.
+        let input = vec![b'x'; 8 * 1024 * 1024];
+        let output = run_git_logged_with_stdin(&["--gwt-pr-list-unsupported-option"], None, &input)
+            .expect("retain the failed child's diagnostic after its stdin closes");
+        assert_eq!(output.status.code(), Some(129));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("gwt-pr-list-unsupported-option"));
+
+        // A successful early exit cannot excuse failing to deliver its input.
+        let error = run_git_logged_with_stdin(&["--version"], None, &input).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
 
     #[test]
     fn test_commands_disable_git_credentials_and_preserve_inherited_config() {

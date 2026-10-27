@@ -1504,6 +1504,9 @@ mod tests {
         // Board request and unreachable hook-live notification.
         {
             let _profile_disabled = ScopedEnvVar::unset("GWT_HOOK_PROFILE_PATH");
+            // This fixture gates thread CPU, not cold materialization wall time.
+            // Transport timeouts still use the real clock.
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
             handle_with_input("UserPromptSubmit", &input, &worktree, Some(&session.id))
                 .expect("warm local prompt state");
         }
@@ -1522,6 +1525,7 @@ mod tests {
         let mut result = None;
         let (cpu, wall) = measure_hook_work(|| {
             std::thread::sleep(scheduler_pause);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(Instant::now());
             result = Some(handle_with_input(
                 "UserPromptSubmit",
                 &input,
