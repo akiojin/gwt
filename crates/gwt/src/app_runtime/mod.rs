@@ -14369,6 +14369,8 @@ impl AppRuntime {
                 if let Some(error) = error {
                     return self.status_events(id, WindowProcessStatus::Error, Some(error));
                 }
+                // A diagnostic row keeps its read-only screen for new clients;
+                // the owner has already retired the exact physical runtime.
                 let runtime = self.runtimes.get_mut(&id).expect("fenced remote runtime");
                 runtime.status_revision = runtime.status_revision.saturating_add(1);
                 let (status, detail) = if runtime.exit_confirmed

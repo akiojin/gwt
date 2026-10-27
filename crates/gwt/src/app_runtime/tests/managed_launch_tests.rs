@@ -3623,6 +3623,19 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
     );
     let projected = finish_managed_exit(&owner, &probe, &mut runtime, &mut observed);
     assert_eq!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 1);
+    let owner_detail = projected
+        .iter()
+        .find_map(|event| match &event.event {
+            BackendEvent::TerminalStatus {
+                status: WindowProcessStatus::Error,
+                detail: Some(detail),
+                ..
+            } => Some(detail),
+            _ => None,
+        })
+        .expect("the actual owner emits the terminal error diagnostic");
+    assert!(owner_detail.contains("Exact session restore failed"));
+    assert!(!owner_detail.contains("resume-target-1"));
 
     let detail = runtime
         .window_details
@@ -3640,6 +3653,10 @@ fn app_runtime_agent_error_exit_promotes_exact_resume_failure_diagnostic() {
     assert!(
         !detail.contains("resume-target-1"),
         "diagnostic must not persist the provider conversation id, got: {detail}"
+    );
+    assert_eq!(
+        runtime.window_status(&window_id),
+        Some(WindowProcessStatus::Error)
     );
     let inventory = owner_fixture_block_on(
         owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
@@ -3722,51 +3739,6 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
         shell.session.is_none(),
         "the plain process has no Agent Session"
     );
-    #[cfg(windows)]
-    owner_fixture_block_on(async {
-        use gwt::project_runtime::events::{OwnerCommand, OwnerEvent};
-        // This ungated Shell has no frontend terminal to answer ConPTY's
-        // startup query. Observe that query before sending the normal reply.
-        let mut output = Vec::new();
-        // test-hygiene: allow-wall-clock-deadline Bounds the native terminal handshake; the actual query and READY establish order.
-        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
-            loop {
-                match observed.recv().await.expect("actual Shell startup event") {
-                    OwnerEvent::Output {
-                        id,
-                        incarnation,
-                        data,
-                        ..
-                    } if id == shell.id && incarnation == shell.incarnation => {
-                        output.extend(data);
-                        if output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
-                            break;
-                        }
-                    }
-                    OwnerEvent::Status {
-                        id,
-                        incarnation,
-                        exit_confirmed: true,
-                        detail,
-                        ..
-                    } if id == shell.id && incarnation == shell.incarnation => {
-                        panic!("actual Shell exited before its terminal handshake: {detail:?}");
-                    }
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .expect("actual Shell cursor-position query");
-        owner
-            .command(OwnerCommand::Input {
-                id: shell.id.clone(),
-                incarnation: shell.incarnation,
-                data: b"\x1b[1;1R".to_vec(),
-            })
-            .await
-            .expect("normal terminal cursor-position response");
-    });
     owner_fixture_block_on(wait_managed_exit_ready(&owner, &shell));
     let mut runtime = managed_project_owner_projection(
         temp.path(),
@@ -3781,6 +3753,10 @@ fn app_runtime_agent_error_exit_keeps_last_output_in_window_detail() {
     let agent_window_id = combined_window_id("tab-1", "exit-agent");
     let shell_window_id = combined_window_id("tab-1", "shell-1");
     let mut projected = finish_managed_exit(&owner, &agent, &mut runtime, &mut observed);
+    assert!(
+        shell.pty.try_wait().unwrap().is_none(),
+        "the Agent exit must leave the Shell control alive"
+    );
     projected.extend(finish_managed_exit(
         &owner,
         &shell,

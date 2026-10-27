@@ -4122,13 +4122,14 @@ fn agent_name_keeps_bound_session_independent_of_roster_readback() {
 
 #[test]
 fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
-    use gwt::project_runtime::events::OwnerCommand;
+    use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
 
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
     control_init_repo(&root);
     seed_owner_fixture_roster(&root, 1);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&root),
         |prefs| {
@@ -4137,6 +4138,7 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     )
     .unwrap();
     let history = gwt_core::paths::gwt_project_dir_for_repo_path(&root).join("agent-names.jsonl");
+    // The explicitly seeded fixture member has already received this name.
     gwt::agent_names::remember(&history, &HashSet::from(["Falcon".into()])).unwrap();
     let owner = owner_fixture_block_on(
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
@@ -4146,35 +4148,32 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     config.linked_issue_number = None;
     config.explicit_follow_up = false;
     let source = control_owner_launch(&owner, "agent", config);
-    let session = source.session.as_ref().unwrap();
-    let mut waiting = runtime_hook_state_for_event("Waiting", "RuntimeState", &session.id);
-    waiting.project_root = Some(root.display().to_string());
-    waiting.branch = Some(session.branch.clone());
-    waiting
-        .agent_session_id
-        .clone_from(&session.agent_session_id);
-    waiting.occurred_at = Utc::now().to_rfc3339();
-    assert!(owner_fixture_block_on(source.runtime_hook(&waiting))
-        .unwrap()
-        .is_success());
-    owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap();
-    let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+    let source_id = source.session.as_ref().unwrap().id.clone();
+    owner_runtime_status_event(&owner, &source, "Waiting", "PermissionRequest");
+    let live = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
         id: source.id.clone(),
         incarnation: source.incarnation,
     }))
     .unwrap();
-    assert_eq!(snapshot["session_id"], session.id);
-    assert_eq!(snapshot["child_pid"], source.pty.process_id().unwrap());
-    assert_eq!(snapshot["status"], "waiting");
-    assert_eq!(snapshot["agent_name"], "Falcon");
+    assert_eq!(live["agent_name"], "Falcon");
+    assert_eq!(live["session_id"], source_id);
+    assert_eq!(live["child_pid"], source.pty.process_id().unwrap());
+    assert_eq!(
+        live["status"],
+        serde_json::json!(WindowProcessStatus::Waiting)
+    );
     assert!(source.pty.try_wait().unwrap().is_none());
     let mut row =
         gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
             .unwrap()
             .windows
             .into_iter()
-            .find(|row| row.session_id.as_deref() == Some(session.id.as_str()))
+            .find(|row| row.session_id.as_deref() == Some(source_id.as_str()))
             .unwrap();
+    let history_before = fs::read(&history).unwrap();
+
+    // Review inherited names still use the original global allocator layer;
+    // registered member UUID/tool reservation is not this negative's oracle.
     let mut config = control_launch_config(&root, 43);
     config.linked_issue_number = None;
     config.explicit_follow_up = false;
@@ -4182,36 +4181,51 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
     config
         .env_vars
         .insert("GWT_REVIEW_DISPATCH".into(), "1".into());
-    let conflicting_id = owner.pane_id("conflicting-initial");
+    let target_id = owner.pane_id("conflicting-initial");
     let rejected = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
-        id: conflicting_id.clone(),
+        id: target_id.clone(),
         operation_id: "retained-initial-conflict".into(),
-        tab_id: owner.pane_id("unused").split_once("::").unwrap().0.into(),
+        tab_id: target_id.split_once("::").unwrap().0.into(),
         config: Box::new(config),
-        metadata: Box::new(gwt::project_runtime::launch_payload::OwnerLaunchMetadata {
+        metadata: Box::new(OwnerLaunchMetadata {
             inherited_agent_name: Some("Flora".into()),
             ..Default::default()
         }),
         cols: 80,
         rows: 24,
     }));
-    // Drain every actual child before asserting the negative, including the
-    // buggy accepted candidate in the RED run.
-    if let Ok(receipt) = &rejected {
-        let candidate = owner_fixture_block_on(
-            owner.probe(&conflicting_id, receipt["incarnation"].as_u64().unwrap()),
+    // A RED run may expose a real conflicting child. Drain that exact owned
+    // candidate and source normally before the required negative assertion.
+    let unexpected = rejected
+        .as_ref()
+        .ok()
+        .and_then(|receipt| receipt["incarnation"].as_u64())
+        .and_then(|incarnation| owner_fixture_block_on(owner.probe(&target_id, incarnation)).ok());
+    let unexpected_identity = unexpected.as_ref().map(|candidate| {
+        (
+            candidate.id.clone(),
+            candidate.incarnation,
+            candidate.pty.process_id(),
+            candidate
+                .session
+                .as_ref()
+                .and_then(|session| session.agent_name.clone()),
         )
-        .unwrap();
+    });
+    if let Some(candidate) = unexpected {
         control_close(&owner, &candidate);
         assert!(candidate.pty.try_wait().unwrap().is_some());
     }
+    let retained = owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).unwrap();
+    assert!(Arc::ptr_eq(&retained.pty, &source.pty));
+    assert!(retained.pty.try_wait().unwrap().is_none());
+    assert_eq!(retained.status, WindowProcessStatus::Waiting);
     control_close(&owner, &source);
     assert!(source.pty.try_wait().unwrap().is_some());
     assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
-    assert!(
-        rejected.is_err(),
-        "another inherited Agent name must not duplicate the live initial"
-    );
+    owner_fixture_block_on(owner.shutdown());
+    assert!(rejected.is_err(),
+        "another inherited Agent name must not duplicate the retained live initial; actual candidate: {unexpected_identity:?}; response: {rejected:?}");
     assert!(
         rejected
             .unwrap_err()
@@ -4219,20 +4233,26 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
             .contains("initial"),
         "refusal must be the global name reservation"
     );
+    assert_eq!(
+        fs::read(&history).unwrap(),
+        history_before,
+        "a rejected inherited name must preserve the existing name history"
+    );
     let sessions = gwt_core::paths::gwt_sessions_dir();
     let mut stopped =
-        gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id))).unwrap();
+        gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
     assert_eq!(stopped.status, gwt_agent::AgentStatus::Stopped);
     assert_eq!(stopped.agent_name.as_deref(), Some("Falcon"));
     assert!(fs::read_to_string(&history)
         .unwrap()
         .lines()
         .any(|line| line == "\"Falcon\""));
-    owner_fixture_block_on(owner.shutdown());
-    // Emulate only the optional metadata missing from a stopped legacy Session;
-    // its real identity and retained row still name the same drained child.
+
+    // Replay the same drained Session and actual owner row in the old optional
+    // metadata format, retaining their physical source identity.
     stopped.agent_name = None;
     stopped.agent_member_id = None;
+    stopped.restore_window_on_startup = true;
     stopped.save(&sessions).unwrap();
     row.status = gwt::persistence::WindowState::Stopped;
     save_legacy_name_rows(&root, vec![row]);
@@ -4240,26 +4260,26 @@ fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
         gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
     )
     .unwrap();
+    let saved = gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
+    assert_eq!(saved.agent_name.as_deref(), Some("Falcon"));
     let layout =
         gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
             .unwrap();
     let mut events = owner.subscribe();
-    owner_fixture_block_on(
-        owner.command(gwt::project_runtime::events::OwnerCommand::UpdateLayout { layout }),
-    )
-    .unwrap();
+    owner_fixture_block_on(owner.command(OwnerCommand::UpdateLayout { layout })).unwrap();
     assert!(
         !std::iter::from_fn(|| events.try_recv().ok())
             .any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated)),
         "Session backfill needs no UI repaint"
     );
     assert_eq!(
-        gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id)))
+        gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml")))
             .unwrap()
             .agent_name
             .as_deref(),
         Some("Falcon")
     );
+    assert_eq!(fs::read(&history).unwrap(), history_before);
     owner_fixture_block_on(owner.shutdown());
 }
 
