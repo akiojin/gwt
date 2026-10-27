@@ -1742,8 +1742,12 @@ fn unlanded_source_batch(
     // --write-tree predates --stdin by one Git release. Keep the established
     // singleton contract on Git 2.38 without hiding ordinary projection errors.
     let stderr = String::from_utf8_lossy(&merge.stderr);
-    // parse-options translates the diagnostic prose, but retains the option.
-    if merge.status.code() == Some(129) && stderr.contains("stdin") {
+    // A fatal head aborts the whole batch. Preserve the singleton's per-head
+    // isolation so healthy neighbors keep their source classification.
+    // parse-options translates unsupported-option prose, but retains stdin.
+    if merge.status.code() == Some(128)
+        || (merge.status.code() == Some(129) && stderr.contains("stdin"))
+    {
         return heads
             .iter()
             .map(|head| branch_has_non_gwt_changes(repo, base, head).ok())
@@ -7084,13 +7088,38 @@ mod tests {
             tmp.path(),
             &["update-ref", "refs/remotes/origin/pm/resident", "HEAD"],
         );
-
         let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
             .expect("collect PM bookkeeping");
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].branch, "pm/resident");
         assert_eq!(rows[0].ahead, 1);
         assert_eq!(rows[0].has_non_gwt_changes, Some(false));
+
+        let unrelated = gwt_core::process::run_git_logged(
+            &["commit-tree", "HEAD^{tree}", "-m", "unrelated root"],
+            Some(tmp.path()),
+        )
+        .expect("create unrelated candidate");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        git(
+            tmp.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/work/issue-5390",
+                unrelated.trim(),
+            ],
+        );
+
+        let rows = collect_unlanded_work_branches(tmp.path(), UNLANDED_BRANCH_BASE_REF)
+            .expect("isolate unrelated history from PM bookkeeping");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].branch, "pm/resident");
+        assert_eq!(rows[0].ahead, 1);
+        assert_eq!(rows[0].has_non_gwt_changes, Some(false));
+        assert_eq!(rows[1].branch, "work/issue-5390");
+        assert_eq!(rows[1].ahead, 1);
+        assert_eq!(rows[1].has_non_gwt_changes, None);
     }
 
     #[test]
