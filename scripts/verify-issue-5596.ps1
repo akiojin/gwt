@@ -6,12 +6,14 @@ param(
   [switch]$Sequential,
   [ValidateRange(1,10)][int]$LaunchCount = 10,
   [switch]$CargoLoad,
+  [switch]$PostAckDiagnostics,
   [Parameter(ValueFromRemainingArguments = $true)][string[]]$PlaywrightArgs
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This harness requires Windows and PowerShell 7.' }
 if (($CargoLoad -or $PSBoundParameters.ContainsKey('LaunchCount')) -and -not $Sequential) { throw 'LaunchCount and CargoLoad require Sequential.' }
+if ($PostAckDiagnostics -and (-not $Sequential -or -not $CargoLoad -or $LaunchCount -ne 2)) { throw 'PostAckDiagnostics requires Sequential, CargoLoad and LaunchCount 2; run each theme in a fresh fixture.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gwt = Join-Path $repoRoot 'target/debug/gwt.exe'
 $gwtd = Join-Path $repoRoot 'target/debug/gwtd.exe'
@@ -107,6 +109,7 @@ $gui = $null
 $github = $null
 $runner = $null
 $cargoLoadProcess = $null
+$observer = $null
 $anchor = $null
 $state = $null
 $exitCode = 1
@@ -301,9 +304,14 @@ server.listen(0,'127.0.0.1',()=>fs.writeFileSync(path.join(home,'github-url'),'h
   $streams.guiOut = $gui.StandardOutput.ReadToEndAsync()
   $streams.guiErr = $gui.StandardError.ReadToEndAsync()
   $sourceRevision = (& $realGit -C $repoRoot rev-parse HEAD).Trim()
-  $sourceSnapshot = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/launch_runtime/base_freshness.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/paths.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
+  $sourcePaths = @('crates/gwt/src/main.rs','crates/gwt/src/app_runtime/mod.rs','crates/gwt/src/app_runtime/wizard.rs','crates/gwt/src/app_runtime/launch.rs','crates/gwt/src/launch_runtime.rs','crates/gwt/src/launch_runtime/base_freshness.rs','crates/gwt/src/cli/gwtd_resolver.rs','crates/gwt/src/issue_monitor_worker.rs','crates/gwt-config/src/home.rs','crates/gwt-core/src/paths.rs','crates/gwt-core/src/logging/writer.rs','crates/gwt/src/perf/dispatch.rs',
     'crates/gwt/web/app.js','crates/gwt/web/terminal-viewport-reflow.js',
-    'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs') | ForEach-Object {
+    'scripts/verify-issue-5596.ps1','crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts','crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs')
+  if ($PostAckDiagnostics) {
+    $sourcePaths += @('scripts/diagnostics/issue-6422-processes.ps1','crates/gwt/playwright/tests/issue-6422-post-ack-live.spec.ts',
+      'crates/gwt-terminal/src/pty.rs','crates/gwt-terminal/src/pty/process_group.rs','crates/gwt-core/src/process_tree.rs','crates/gwt-core/src/process_tree/job_cpu.rs')
+  }
+  $sourceSnapshot = $sourcePaths | ForEach-Object {
     $fromCommit = $Phase -eq 'baseline' -and ($_.StartsWith('crates/gwt/src/') -or $_.StartsWith('crates/gwt-core/src/') -or $_.StartsWith('crates/gwt/web/'))
     $blobSha = if ($fromCommit) { (& $realGit -C $repoRoot rev-parse "${sourceRevision}:$_").Trim() } else { (& $realGit -C $repoRoot hash-object -- $_).Trim() }
     @{path=$_;blob_sha=$blobSha;source= $(if ($fromCommit) { $sourceRevision } else { 'working-tree' })}
@@ -413,6 +421,21 @@ fn main() -> std::io::Result<()> {
     [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
     [IO.File]::WriteAllText("$EvidenceDirectory/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
   }
+  if ($PostAckDiagnostics) {
+    $fixture.post_ack_diagnostics = $true
+    [IO.File]::WriteAllText("$checkHome/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
+    [IO.File]::WriteAllText("$EvidenceDirectory/fixture.json", ($fixture | ConvertTo-Json -Depth 5))
+    # Start outside the Agent's policy Job, before either measured delivery.
+    $observerStart = New-OwnedProcess (Get-Process -Id $PID).Path @('-NoProfile','-NonInteractive','-File',"$repoRoot/scripts/diagnostics/issue-6422-processes.ps1",'-FixtureHome',$checkHome,'-OutputDirectory',$EvidenceDirectory)
+    $observer = [Diagnostics.Process]::Start($observerStart)
+    $streams.observerOut = $observer.StandardOutput.ReadToEndAsync()
+    $streams.observerErr = $observer.StandardError.ReadToEndAsync()
+    $observerDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-Path -LiteralPath "$EvidenceDirectory/observer-ready.json")) {
+      if ($observer.HasExited -or [DateTime]::UtcNow -gt $observerDeadline) { throw 'Post-ACK observer did not become ready.' }
+      Start-Sleep -Milliseconds 100
+    }
+  }
   $version = [IO.File]::ReadAllText("$repoRoot/scripts/playwright-version.txt").Trim()
   $depsRoot = if ($env:GWT_PLAYWRIGHT_DEPS_DIR) { $env:GWT_PLAYWRIGHT_DEPS_DIR } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Temp/gwt-playwright-$version" }
   $cli = Join-Path $depsRoot 'node_modules/playwright/cli.js'
@@ -421,7 +444,8 @@ fn main() -> std::io::Result<()> {
   # An absent remaining argument must not become an empty test filter: an
   # empty filter matches the whole suite instead of only the named file.
   $extraPlaywrightArgs = @($PlaywrightArgs | Where-Object { -not [string]::IsNullOrEmpty($_) })
-  $start = New-OwnedProcess $node (@($cli,'test','--config',"$repoRoot/crates/gwt/playwright/playwright.config.ts",'--workers=1','--retries=0','--timeout','600000','--output',"$EvidenceDirectory/playwright",'issue-monitor-launch-perf-live.spec.ts') + $extraPlaywrightArgs) $repoRoot
+  $testFile = if ($PostAckDiagnostics) { 'issue-6422-post-ack-live.spec.ts' } else { 'issue-monitor-launch-perf-live.spec.ts' }
+  $start = New-OwnedProcess $node (@($cli,'test','--config',"$repoRoot/crates/gwt/playwright/playwright.config.ts",'--workers=1','--retries=0','--timeout','600000','--output',"$EvidenceDirectory/playwright",$testFile) + $extraPlaywrightArgs) $repoRoot
   $start.Environment['GWT_PLAYWRIGHT_BASE_URL'] = $url
   $start.Environment['GWT5596_HOME'] = $checkHome
   if ($Sequential) { $start.Environment['GWT5596_SEQUENTIAL'] = '1' }
@@ -430,6 +454,7 @@ fn main() -> std::io::Result<()> {
   $start.Environment['NODE_OPTIONS'] = "--require `"$($resolver.Replace('\','/'))`""
   if ($env:GWT_HEADED_E2E_REPORT) { $start.Environment['GWT_HEADED_E2E_REPORT'] = $env:GWT_HEADED_E2E_REPORT }
   $runner = [Diagnostics.Process]::Start($start)
+  if ($PostAckDiagnostics) { [IO.File]::WriteAllText("$checkHome/observer-runner-pid", [string]$runner.Id) }
   $streams.runnerOut = $runner.StandardOutput.ReadToEndAsync()
   $streams.runnerErr = $runner.StandardError.ReadToEndAsync()
   $runner.WaitForExit()
@@ -438,6 +463,20 @@ fn main() -> std::io::Result<()> {
   Write-Output $streams.runnerErr.GetAwaiter().GetResult()
 } finally {
   $cleanupErrors = [Collections.Generic.List[string]]::new()
+  if ($observer) {
+    try {
+      [IO.File]::WriteAllText("$checkHome/observer-stop", 'stop')
+      if (-not $observer.WaitForExit(10000)) { $observer.Kill($true); [void]$observer.WaitForExit(10000); $cleanupErrors.Add('Observer did not stop normally.') }
+      [IO.File]::WriteAllText("$EvidenceDirectory/observer-Out.log", $streams.observerOut.GetAwaiter().GetResult())
+      [IO.File]::WriteAllText("$EvidenceDirectory/observer-Err.log", $streams.observerErr.GetAwaiter().GetResult())
+      if ($observer.ExitCode) { $cleanupErrors.Add('Observer failed; retain partial samples and inspect observer-Err.log.') }
+    } catch { $cleanupErrors.Add("Owned observer cleanup failed: $($_.Exception.Message)") }
+    finally {
+      try { if (-not $observer.HasExited) { $observer.Kill($true); [void]$observer.WaitForExit(10000) } }
+      catch { $cleanupErrors.Add('Owned observer fallback termination failed.') }
+      $observer.Dispose()
+    }
+  }
   $logSources = @("$checkHome/.gwt/logs")
   if ($state) { $logSources += Join-Path (Split-Path $state -Parent) 'logs' }
   foreach ($logSource in $logSources) {
