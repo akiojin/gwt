@@ -3248,56 +3248,35 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let tab = sample_project_tab_with_window(
-        "tab-1",
-        "codex-1",
-        WindowPreset::Codex,
-        WindowProcessStatus::Running,
+    let (owner, probe, mut runtime, mut events) =
+        managed_exit_fixture(temp.path(), 0, "provider finished");
+    let raw_id = probe.id.split_once("::").unwrap().1;
+    let window_id = combined_window_id("tab-1", raw_id);
+    let pty = probe.pty.clone();
+    let mut finalizers = owner.subscribe();
+    assert!(runtime.tabs[0].workspace.window(raw_id).is_some());
+    assert_eq!(
+        runtime.active_agent_sessions[&window_id].session_id,
+        probe.session.as_ref().unwrap().id,
     );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "codex-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
-    let incarnation = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("current runtime")
-        .incarnation;
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        sample_active_agent_session("tab-1", &window_id),
-    );
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-
-    let events = runtime.handle_runtime_status_event(
-        window_id.clone(),
-        incarnation,
-        WindowProcessStatus::Stopped,
-        Some("Process exited".to_string()),
-        true,
-    );
+    let events = finish_managed_exit(&owner, &probe, &mut runtime, &mut events);
 
     assert!(events
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(!runtime.window_lookup.contains_key(&window_id));
-    assert!(runtime.tabs[0].workspace.window("codex-1").is_none());
+    assert!(runtime.tabs[0].workspace.window(raw_id).is_none());
     assert!(!runtime.active_agent_sessions.contains_key(&window_id));
     assert!(!runtime.runtimes.contains_key(&window_id));
     assert_eq!(
-        finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
+        std::iter::from_fn(|| finalizers.try_recv().ok())
+            .filter(|event| matches!(event,
+                gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None }
+                    if id == &probe.id && *incarnation == probe.incarnation))
+            .count(),
         1,
-        "the exact current exit queues one detached close finalizer"
+        "the exact current exit completes one detached owner finalizer"
     );
-    finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("current runtime close finalizer")();
     assert!(
         pty.try_wait().expect("probe reaped child").is_some(),
         "the detached finalizer reaps the exact exited generation"
