@@ -54,11 +54,7 @@ pub(crate) fn spawn(pty_writers: PtyWriterRegistry) -> Option<VerificationCapRel
             let _home = home
                 .as_ref()
                 .map(gwt_core::test_support::ScopedGwtHome::set);
-            loop {
-                match stopped.recv_timeout(TICK) {
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    _ => break,
-                }
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(TICK) {
                 let started = Instant::now();
                 let holders = verification_holder_pids(verification_statuses());
                 relieve(&pty_writers, &holders);
