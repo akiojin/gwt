@@ -1439,6 +1439,13 @@ mod tests {
             .open(runtime_dir.join(PROBE_LOCK_FILE))
             .expect("open held probe lock");
         held.lock_exclusive().expect("hold probe lock");
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its notification is lost; never decides success.
+            let requested = released.recv_timeout(crate::deadline_budget::HANG_GUARD);
+            FileExt::unlock(&held).expect("release probe lock");
+            requested
+        });
         let start = std::time::Instant::now();
         let _clock = ScopedOperationClock::set(start);
         // test-hygiene: allow-short-duration Logical expiry is advanced only after real lock contention.
@@ -1471,6 +1478,10 @@ mod tests {
             !message.contains("lock_contention=not_observed"),
             "{message}"
         );
-        FileExt::unlock(&held).expect("release probe lock");
+        release.send(()).expect("request probe lock release");
+        holder
+            .join()
+            .expect("probe lock watchdog")
+            .expect("probe lock released before hang guard");
     }
 }

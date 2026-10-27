@@ -2955,6 +2955,13 @@ mod tests {
             "pm.refresh",
         )
         .expect("hold the Work items lock");
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its notification is lost; never decides success.
+            let requested = released.recv_timeout(gwt_core::deadline_budget::HANG_GUARD);
+            holder.unlock().expect("release the Work items lock");
+            requested
+        });
         let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
         let on_contention = expired_clock.clone();
         let _contention = gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
@@ -3017,7 +3024,11 @@ mod tests {
             None,
             "nothing was recorded while the lock was held"
         );
-        holder.unlock().expect("release the Work items lock");
+        release.send(()).expect("request Work items lock release");
+        holder
+            .join()
+            .expect("Work items lock watchdog")
+            .expect("Work items lock released before hang guard");
 
         // Lock free: the same edit records the PR on the Work as today.
         env.pr_edit_call_log.clear();
