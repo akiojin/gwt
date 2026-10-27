@@ -2874,6 +2874,8 @@ pub(crate) fn prepare_owner_agent_admission(
     if is_pm || is_review {
         config.env_vars.remove("GWT_AGENT_MEMBER_ID");
         config.env_vars.remove("GWT_AGENT_RESERVATION_ID");
+        let history = gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
+            .join("agent-names.jsonl");
         let inherited = inherited_agent_name.or_else(|| {
             name_predecessor_session_id
                 .as_ref()
@@ -2883,14 +2885,21 @@ pub(crate) fn prepare_owner_agent_admission(
                 .and_then(|session| session.agent_name)
         });
         let name = match inherited {
-            Some(name) => name,
+            Some(name) => {
+                let mut known = std::collections::HashSet::from([name.clone()]);
+                if is_review && !is_pm {
+                    crate::agent_names::ensure_available_initial(&name, input.known_names)?;
+                    known.extend(input.known_names.iter().cloned());
+                }
+                crate::agent_names::remember(&history, &known)?;
+                name
+            }
             None => {
                 let language = gwt_config::Settings::load()
                     .map(|settings| settings.ai.effective_language())
                     .unwrap_or("en");
                 crate::agent_names::allocate(
-                    &gwt_core::paths::gwt_project_dir_for_repo_path(input.project_root)
-                        .join("agent-names.jsonl"),
+                    &history,
                     language,
                     input.known_names,
                     input.known_names,
