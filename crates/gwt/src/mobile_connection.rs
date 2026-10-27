@@ -6,7 +6,12 @@
 //! keys use WebCrypto ECDSA P-256/SHA-256 with raw SEC1 public keys and r||s
 //! signatures; the Host never receives a device's private key.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{self, Read},
+    path::Path,
+};
 
 use gwt_core::repo_hash::ProjectKey;
 use ring::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
@@ -21,6 +26,14 @@ const MAX_PENDING_PAIRINGS: usize = 8;
 const MAX_CHALLENGES: usize = 64;
 const MAX_CHALLENGES_PER_DEVICE: usize = 4;
 const MAX_DEVICES: usize = 64;
+const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredDevices {
+    schema_version: u32,
+    devices: Vec<DeviceRecord>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AuthorizationError {
@@ -376,6 +389,67 @@ impl MobileAuthorization {
 
     pub fn snapshot(&self) -> Vec<DeviceRecord> {
         self.devices().into_iter().cloned().collect()
+    }
+
+    /// Load public device records, disabled and with a fresh Host epoch.
+    /// Only a missing file starts empty; corrupt or unreadable state fails closed.
+    /// The owner supplies a path in its private, trusted directory.
+    pub fn load(path: &Path) -> io::Result<Self> {
+        gwt_config::home::assert_test_path(path);
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take(MAX_SNAPSHOT_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "mobile device snapshot exceeds size limit",
+            ));
+        }
+        let stored: StoredDevices = serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if stored.schema_version != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported mobile device snapshot schema",
+            ));
+        }
+        Self::restore(stored.devices)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    /// Atomically replace the public device snapshot, including revoked records.
+    ///
+    /// The owner must hold its single-writer fence through mutation and save,
+    /// and must not acknowledge approval/revocation until this succeeds. On
+    /// error, keep access disabled rather than restoring older credentials.
+    /// This method does not change the in-memory authority or create directories.
+    /// The parent must be private and trusted (Windows inherits its ACL).
+    /// The file is synced before replacement; Unix also syncs the directory.
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        gwt_config::home::assert_test_path(path);
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        // NamedTempFile creates with mode 0600 on Unix, before writing any data.
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        serde_json::to_writer(
+            &mut temp,
+            &StoredDevices {
+                schema_version: 1,
+                devices: self.snapshot(),
+            },
+        )
+        .map_err(io::Error::other)?;
+        temp.as_file().sync_all()?;
+        temp.persist(path).map_err(|error| error.error)?;
+        #[cfg(unix)]
+        File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     /// Restores public credentials, never pending approvals or active sessions.
@@ -783,5 +857,116 @@ mod tests {
             MobileAuthorization::restore(vec![invalid_key]),
             Err(AuthorizationError::InvalidDevice)
         ));
+    }
+
+    #[test]
+    fn disk_roundtrip_restores_devices_disabled_without_transient_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::load(&path).unwrap();
+        assert!(auth.devices().is_empty());
+        assert_eq!(auth.check_enabled(), Err(AuthorizationError::Disabled));
+        assert!(!path.exists());
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let mut old = session(&mut auth, &device, &key);
+        let pending = auth
+            .request_pairing("Tablet", self::key().public_key().as_ref(), project(), NOW)
+            .unwrap();
+        let challenge = auth.challenge(&device.id, &project(), NOW).unwrap();
+        let signature = key
+            .sign(&SystemRandom::new(), &challenge.signing_payload)
+            .unwrap();
+        auth.save(&path).unwrap();
+
+        let mut restored = MobileAuthorization::load(&path).unwrap();
+        assert_eq!(restored.check_enabled(), Err(AuthorizationError::Disabled));
+        restored.enable();
+        assert_eq!(
+            restored.dispatch(&mut old, &project(), 0, NOW, || ()),
+            Err(AuthorizationError::StaleSession)
+        );
+        assert_eq!(
+            restored.approve(&pending.id, NOW).unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        assert_eq!(
+            restored
+                .authenticate(&challenge.id, signature.as_ref(), NOW)
+                .unwrap_err(),
+            AuthorizationError::UnknownRequest
+        );
+        let mut fresh = session(&mut restored, &device, &key);
+        restored
+            .dispatch(&mut fresh, &project(), 0, NOW, || ())
+            .unwrap();
+    }
+
+    #[test]
+    fn disk_replacement_preserves_revocation_and_private_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let device = paired(&mut auth, &key());
+        auth.save(&path).unwrap();
+        auth.revoke(&device.id).unwrap();
+        auth.save(&path).unwrap();
+        let mut restored = MobileAuthorization::load(&path).unwrap();
+        restored.enable();
+        assert_eq!(
+            restored.challenge(&device.id, &project(), NOW).unwrap_err(),
+            AuthorizationError::Revoked
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn disk_load_rejects_corruption_unknown_schema_oversize_and_invalid_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        paired(&mut auth, &key());
+        auth.save(&path).unwrap();
+        let valid = std::fs::read_to_string(&path).unwrap();
+        let mut invalid_device: serde_json::Value = serde_json::from_str(&valid).unwrap();
+        invalid_device["devices"][0]["project"] = "../other-project".into();
+        for invalid in [
+            "{".into(),
+            r#"{"schema_version":2,"devices":[]}"#.into(),
+            r#"{"schema_version":1,"devices":[],"enabled":true}"#.into(),
+            format!("{valid}{}", " ".repeat(128 * 1024)),
+            invalid_device.to_string(),
+        ] {
+            std::fs::write(&path, &invalid).unwrap();
+            assert!(matches!(
+                MobileAuthorization::load(&path),
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData
+            ));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        }
+    }
+
+    #[test]
+    fn disk_io_failures_are_returned_without_leaving_temporary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        std::fs::create_dir(&path).unwrap();
+        let auth = MobileAuthorization::default();
+        assert!(MobileAuthorization::load(&path).is_err());
+        assert!(auth.save(&path).is_err());
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(auth.save(&path.join("missing/devices.json")).is_err());
     }
 }
