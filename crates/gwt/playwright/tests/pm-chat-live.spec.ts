@@ -456,6 +456,9 @@ test.describe('PM reports', () => {
           if (!socket) throw new Error('Missing live project socket');
           const originalSocket = window.WebSocket;
           const observedSockets = new Set([socket]);
+          const interceptedSockets = new Set<WebSocket>();
+          const heldHydration: Array<() => void> = [];
+          let holdHydration = snapshot;
           const originalFrame = window.requestAnimationFrame;
           const originalCancel = window.cancelAnimationFrame;
           const captured = new Map<number, FrameRequestCallback>();
@@ -463,7 +466,8 @@ test.describe('PM reports', () => {
           let focusEvents = 0;
           let receivedAt: number | null = null;
           let before: (string | undefined)[] = [];
-          const state: any = { result: null, snapshot, receivedSnapshot: null, replacementSocket: false };
+          const state: any = { result: null, snapshot, receivedSnapshot: null, replacementSocket: false,
+            heldRequests: 0, forceHeld: false };
           const check = () => {
             if (receivedAt === null || state.result) return;
             const after = versions();
@@ -473,6 +477,7 @@ test.describe('PM reports', () => {
             if (updated || elapsed_ms >= 1_000) state.result = {
               before, after, elapsed_ms, updated, requestedFrames, focusEvents,
               snapshot: state.receivedSnapshot, replacementSocket: state.replacementSocket,
+              heldRequests: state.heldRequests, forceHeld: state.forceHeld,
               nodesConnected: pane.isConnected && report.isConnected && log.isConnected,
               documentHidden: document.hidden, windowFocused: pane.contains(document.activeElement),
             };
@@ -499,6 +504,19 @@ test.describe('PM reports', () => {
               if (new URL(replacement.url).searchParams.has('repo_hash')) {
                 observedSockets.add(replacement);
                 replacement.addEventListener('message', onMessage);
+                const originalSend = replacement.send;
+                interceptedSockets.add(replacement);
+                replacement.send = data => {
+                  let request: any;
+                  try { request = JSON.parse(String(data)); } catch { /* forward non-JSON unchanged */ }
+                  if (holdHydration && request?.kind === 'load_pm_reports' && request.id === id) {
+                    heldHydration.push(() => originalSend.call(replacement, data));
+                    state.heldRequests += 1;
+                    if (request.version === null) state.forceHeld = true;
+                    return;
+                  }
+                  originalSend.call(replacement, data);
+                };
               }
               return replacement;
             },
@@ -507,6 +525,10 @@ test.describe('PM reports', () => {
             socket.addEventListener('close', () => resolve(), { once: true });
             socket.close();
           });
+          state.releaseHydration = () => {
+            holdHydration = false;
+            for (const send of heldHydration.splice(0)) send();
+          };
           pane.addEventListener('focusin', onFocus);
           window.requestAnimationFrame = callback => {
             const handle = -(++requestedFrames);
@@ -520,6 +542,8 @@ test.describe('PM reports', () => {
           state.restore = () => {
             clearInterval(timer);
             observer.disconnect();
+            heldHydration.length = 0;
+            for (const candidate of interceptedSockets) delete (candidate as any).send;
             for (const candidate of observedSockets) candidate.removeEventListener('message', onMessage);
             window.WebSocket = originalSocket;
             pane.removeEventListener('focusin', onFocus);
@@ -531,10 +555,17 @@ test.describe('PM reports', () => {
         }, { id, marker, snapshot });
         let evidence: any;
         try {
-          if (snapshot) await page.evaluate(() => (window as any).__inactiveReportsPoll.disconnect());
+          if (snapshot) {
+            await page.evaluate(() => (window as any).__inactiveReportsPoll.disconnect());
+            // Observe the app's forced hydration before writing, then release
+            // its unchanged request only after the marker is durable.
+            await page.waitForFunction(() => (window as any).__inactiveReportsPoll.forceHeld,
+              undefined, { polling: 100, timeout: 20_000 });
+          }
           appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
             id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
           })}\n`);
+          if (snapshot) await page.evaluate(() => (window as any).__inactiveReportsPoll.releaseHydration());
           await page.waitForFunction(() => (window as any).__inactiveReportsPoll.result,
             undefined, { polling: 100, timeout: 20_000 });
           evidence = await page.evaluate(() => (window as any).__inactiveReportsPoll.result);
@@ -548,6 +579,8 @@ test.describe('PM reports', () => {
         expect(evidence.snapshot).toBe(snapshot);
         expect(evidence.replacementSocket).toBe(snapshot);
         expect(evidence.nodesConnected).toBe(true);
+        expect(evidence.forceHeld).toBe(snapshot);
+        if (snapshot) expect(evidence.heldRequests).toBeGreaterThan(0);
         expect(evidence.elapsed_ms).toBeLessThanOrEqual(1_000);
         expect(evidence.before[0]).toMatch(/^\d+$/);
         expect(evidence.before[1]).toBe(evidence.before[0]);
