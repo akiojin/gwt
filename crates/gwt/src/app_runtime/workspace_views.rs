@@ -3934,6 +3934,18 @@ fn merge_workspace_projection_membership_cache_only(
     cached.active_work_count = cached.active_works.len();
 }
 
+fn saved_manual_profile_revision(profile: &gwt::IssueMonitorLaunchProfile) -> String {
+    use sha2::{Digest, Sha256};
+    let mut tuning = serde_json::to_value(profile).expect("saved profile serializes");
+    // Routing belongs to pool policy, independent of this person's tuning.
+    tuning
+        .as_object_mut()
+        .expect("profile object")
+        .remove("prefer_for");
+    let bytes = serde_json::to_vec(&tuning).expect("saved tuning serializes");
+    format!("manual-profile-v1:{:x}", Sha256::digest(bytes))
+}
+
 fn agent_roster_view(
     context: &ProjectContext,
     prefs: &gwt::IssueMonitorPrefs,
@@ -4014,17 +4026,21 @@ fn agent_roster_view(
                 .iter()
                 .filter_map(|session| session.linked_issue_number)
                 .collect();
+            let saved_manual_profile = saved_profiles
+                .iter()
+                .find(|profile| {
+                    profile.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+                        && member.agent_id.as_deref() == Some(profile.agent_id.as_str())
+                })
+                .cloned();
             gwt::AgentRosterMemberView {
                 member: member.clone(),
                 provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
-                saved_manual_profile: saved_profiles
-                    .iter()
-                    .find(|profile| {
-                        profile.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
-                            && member.agent_id.as_deref() == Some(profile.agent_id.as_str())
-                    })
-                    .cloned(),
+                saved_manual_revision: saved_manual_profile
+                    .as_ref()
+                    .map(saved_manual_profile_revision),
+                saved_manual_profile,
                 history: assigned
                     .iter()
                     .map(|session| history_for(session))
@@ -6280,6 +6296,47 @@ mod bounded_cache_merge_tests {
             member_payload["saved_manual_profile"],
             serde_json::to_value(&saved).unwrap()
         );
+        let revision = member_payload["saved_manual_revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(revision.starts_with("manual-profile-v1:"));
+        assert_eq!(revision.len(), "manual-profile-v1:".len() + 64);
+        let mut changed = prefs.clone();
+        let member = &mut changed.agent_roster.as_mut().unwrap().members[0];
+        member.name = "Renamed".into();
+        changed.agent_roster.as_mut().unwrap().revision += 1;
+        changed.launch_profiles[0].prefer_for = vec!["bug".into()];
+        changed.launch_tiers[0][0].model = Some("other-tier-model".into());
+        let projected_revision = |prefs: &gwt::IssueMonitorPrefs| {
+            serde_json::to_value(
+                agent_roster_view(
+                    &context,
+                    prefs,
+                    &sessions,
+                    &[],
+                    true,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                )
+                .members
+                .remove(0),
+            )
+            .unwrap()["saved_manual_revision"]
+                .clone()
+        };
+        assert_eq!(projected_revision(&changed), revision);
+        changed.launch_profiles[0].reasoning = Some("medium".into());
+        assert_ne!(projected_revision(&changed), revision);
+        changed.launch_profiles[0].reasoning = saved.reasoning.clone();
+        assert_eq!(
+            projected_revision(&changed),
+            revision,
+            "content identity, not chronological order"
+        );
+        member_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("saved_manual_revision");
         member_payload
             .as_object_mut()
             .unwrap()
@@ -6287,6 +6344,7 @@ mod bounded_cache_merge_tests {
         let legacy_member: gwt::AgentRosterMemberView =
             serde_json::from_value(member_payload).unwrap();
         assert!(legacy_member.saved_manual_profile.is_none());
+        assert!(serde_json::to_value(legacy_member).unwrap()["saved_manual_revision"].is_null());
         // Missing legacy facts stay unknown, never borrow the current member.
         let mut unknown = sessions[0].as_ref().clone();
         unknown.agent_name = None;
@@ -6304,6 +6362,10 @@ mod bounded_cache_merge_tests {
         assert!(history["name"].is_null());
         assert!(history["model"].is_null());
         assert!(unknown_view.members[0].saved_manual_profile.is_none());
+        assert!(
+            serde_json::to_value(&unknown_view.members[0]).unwrap()["saved_manual_revision"]
+                .is_null()
+        );
         let legacy = view
             .past_contributors
             .iter()

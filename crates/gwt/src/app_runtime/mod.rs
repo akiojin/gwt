@@ -1,8 +1,9 @@
 use super::*;
 
-mod mobile_input;
 use std::time::Instant;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+mod mobile_input;
 
 #[derive(Default)]
 pub(crate) struct AppEventQueue {
@@ -3736,6 +3737,7 @@ fn local_probe_batch<'a>(
     owner: &str,
     repo: &str,
     issues: impl Iterator<Item = &'a gwt::IssueMonitorIssue>,
+    linked_prs: &std::collections::BTreeMap<u64, Vec<gwt::cli::LinkedPrSummary>>,
 ) -> gwt::issue_monitor_worker::LinkedPrProbeBatch {
     #[cfg(test)]
     {
@@ -3747,7 +3749,7 @@ fn local_probe_batch<'a>(
             return gwt::issue_monitor_worker::LinkedPrProbeBatch::default();
         }
     }
-    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues)
+    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues, linked_prs)
 }
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
@@ -3804,6 +3806,7 @@ fn observe_local_claim_candidates(
             .issues
             .iter()
             .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
+        &loaded.linked_prs,
     );
     let mut dependency_observations = std::collections::BTreeMap::new();
     for issue_number in dependencies {
@@ -4275,6 +4278,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                             project_root,
                             &owner,
                             &repo,
+                            &loaded.linked_prs,
                         )
                         .err()
                         .map(|error| {
@@ -8427,6 +8431,7 @@ impl AppRuntime {
                                 &project_root,
                                 &owner,
                                 &repo,
+                                &loaded.linked_prs,
                             )
                             .err()
                             .map(|error| {

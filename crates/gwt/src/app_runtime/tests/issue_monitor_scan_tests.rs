@@ -728,6 +728,7 @@ fn dependency_completion_fixture() -> (
         .collect::<Vec<_>>();
     gwt::scan_issue_monitor_candidates(&mut monitor, &issues, "2026-10-23T00:00:00Z");
     let loaded = gwt::issue_monitor_worker::LoadedIssueMonitorCandidates {
+        linked_prs: Default::default(),
         open_pr_observations: BTreeMap::new(),
         open_pr_observed_at: None,
         issues,

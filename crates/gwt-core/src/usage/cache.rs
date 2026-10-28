@@ -221,21 +221,7 @@ impl UsageCache {
         now: DateTime<Utc>,
     ) -> Option<SessionUsage> {
         let mut usage = self.codex_session(home, session_id)?;
-        let path = self
-            .paths(home, UsageProvider::Codex)
-            .iter()
-            .find(|path| codex::rollout_matches_session(path, session_id))?
-            .clone();
-        let summary = self.codex.read(&path, CodexTranscript::apply)?;
-        if usage.state == UsageState::Ok || !summary.events.is_empty() {
-            usage.telemetry = Some(consumption::session_telemetry(
-                UsageProvider::Codex,
-                &summary.events,
-                summary.observed_at,
-                summary.incomplete,
-                now,
-            ));
-        }
+        self.project_session_telemetry_at(home, &mut usage, now);
         Some(usage)
     }
 
@@ -267,26 +253,65 @@ impl UsageCache {
         now: DateTime<Utc>,
     ) -> Option<SessionUsage> {
         let mut usage = self.claude_session(home, session_id)?;
-        let filename = format!("{session_id}.jsonl");
-        let path = self
-            .paths(home, UsageProvider::ClaudeCode)
-            .iter()
-            .find(|path| {
-                path.file_name()
-                    .is_some_and(|name| name == filename.as_str())
-            })?
-            .clone();
-        let summary = self.claude.read(&path, ClaudeTranscript::apply)?;
-        if usage.state == UsageState::Ok {
-            usage.telemetry = Some(consumption::session_telemetry(
-                UsageProvider::ClaudeCode,
-                &summary.events,
-                summary.observed_at,
-                summary.incomplete,
-                now,
-            ));
-        }
+        self.project_session_telemetry_at(home, &mut usage, now);
         Some(usage)
+    }
+
+    /// Project a previously read conversation at a shared observation boundary.
+    /// No filesystem reads may occur after that clock is captured: newly appended
+    /// events belong to the next observation, not to a falsely future-dated one.
+    pub fn project_session_telemetry_at(
+        &self,
+        home: &Path,
+        usage: &mut SessionUsage,
+        now: DateTime<Utc>,
+    ) {
+        let Some(session_id) = usage.provider_session_id.as_deref() else {
+            return;
+        };
+        usage.telemetry = match usage.provider {
+            UsageProvider::Codex => self
+                .codex_paths
+                .get(home)
+                .and_then(|paths| {
+                    paths
+                        .iter()
+                        .find(|path| codex::rollout_matches_session(path, session_id))
+                })
+                .and_then(|path| self.codex.cached(path))
+                .filter(|summary| usage.state == UsageState::Ok || !summary.events.is_empty())
+                .map(|summary| {
+                    consumption::session_telemetry(
+                        usage.provider,
+                        &summary.events,
+                        summary.observed_at,
+                        summary.incomplete,
+                        now,
+                    )
+                }),
+            UsageProvider::ClaudeCode => {
+                let filename = format!("{session_id}.jsonl");
+                self.claude_paths
+                    .get(home)
+                    .and_then(|paths| {
+                        paths.iter().find(|path| {
+                            path.file_name()
+                                .is_some_and(|name| name == filename.as_str())
+                        })
+                    })
+                    .and_then(|path| self.claude.cached(path))
+                    .filter(|_| usage.state == UsageState::Ok)
+                    .map(|summary| {
+                        consumption::session_telemetry(
+                            usage.provider,
+                            &summary.events,
+                            summary.observed_at,
+                            summary.incomplete,
+                            now,
+                        )
+                    })
+            }
+        };
     }
 
     pub fn codex_account_since(

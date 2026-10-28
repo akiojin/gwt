@@ -231,6 +231,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-metric="today-output"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-cost"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-landed"]')).toHaveText("—");
+    await expect(works(page).locator('[data-availability="today"]')).toContainText("No data");
+    await expect(works(page).locator('[data-availability="fleet"]')).toContainText("No data");
+    await expect(works(page).locator(".works-source-note")).toContainText("per-session USD");
+    await expect(works(page).locator(".works-source-note")).toContainText("daily merge data");
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("aria-label", /last 30 minutes/);
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
     await expect(workRow(page, "agent-one").locator(".work-stats")).toContainText("Context remaining");
@@ -328,7 +332,18 @@ test.describe("Works and Agents approved baseline", () => {
         .toBe(await workRow(page, "agent-two").locator(".work-state").evaluate(node => getComputedStyle(node).color));
       await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText("1");
     }
+    for (const state of ["unavailable", "partial"]) {
+      await page.evaluate(state => (window as any).__worksAgentsFixture.usage(state), state);
+      await expect(works(page).locator('[data-availability="today"]')).toHaveAttribute("data-state", state);
+      await expect(works(page).locator('[data-availability="fleet"]')).toHaveAttribute("data-state", state);
+      await expect(works(page).locator('[data-availability="today"]')).toContainText(state === "unavailable"
+        ? "Fixture transcript cannot be read" : "incomplete");
+      await expect(works(page).locator('[data-metric="today-total"]')).toHaveText("—");
+      await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("—");
+    }
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
+    await expect(works(page).locator('[data-availability="today"]')).toHaveAttribute("data-state", "measured");
+    await expect(works(page).locator('[data-availability="fleet"]')).toHaveAttribute("data-state", "measured");
     await expect(works(page).locator('[data-metric="today-input"]')).toHaveText("0");
     await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("0");
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "30");
@@ -494,6 +509,9 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator(".work-row")).toHaveCount(2);
     await expectNoHorizontalOverflow(page, ".works-surface:not([hidden]):not(.works-surface--preview)");
     await page.screenshot({ path: info.outputPath("works-approved-400.png") });
+    await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
+    await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
+    await expect(works(page).locator(".works-source-note")).toBeVisible();
   });
 
   test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
@@ -809,7 +827,24 @@ async function installWorksAgentsBackend(page: Page) {
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
-      usage() { socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({ session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`, provider: agent.is_pm || agent.session_id === "s-two" ? "claude_code" : "codex", project_path: "/fixture", model: "Fixture model", active: true, input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, output_tokens: 0, total_tokens: 0, reported_context_left_pct: 0, context_used_tokens: null, context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true, state: { kind: "ok" }, telemetry: { source: "fixture-reported", quality: "measured", observed_at: "2026-10-25T00:00:00Z", today_tokens: 0, today_input_tokens: 0, today_cache_read_tokens: 0, today_cache_creation_tokens: 0, today_output_tokens: 0, minute_buckets: Array.from({ length: 30 }, (_, index) => ({ started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: 0 })) } })) }); },
+      usage(quality = "measured") {
+        const measured = quality === "measured", value = measured ? 0 : null;
+        socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
+          session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`,
+          provider: agent.is_pm || agent.session_id === "s-two" ? "claude_code" : "codex", project_path: "/fixture",
+          model: "Fixture model", active: true, input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+          output_tokens: 0, total_tokens: 0, reported_context_left_pct: 0, context_used_tokens: null,
+          context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true,
+          state: quality === "unavailable" ? { kind: "unavailable", reason: "Fixture transcript cannot be read" } : { kind: "ok" },
+          telemetry: quality === "unavailable" ? null : { source: "fixture-reported", quality,
+            observed_at: "2026-10-25T00:00:00Z", today_tokens: value, today_input_tokens: value,
+            today_cache_read_tokens: value, today_cache_creation_tokens: value, today_output_tokens: value,
+            minute_buckets: Array.from({ length: 30 }, (_, index) => ({
+              started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: value,
+            })),
+          },
+        })) });
+      },
     };
   }, { projectKey: APP_PROJECT_KEY });
 }

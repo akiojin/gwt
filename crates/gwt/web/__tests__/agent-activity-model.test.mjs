@@ -180,12 +180,33 @@ test("Works telemetry sums measured project conversations once, preserves missin
   assert.equal(incompleteClaude.today.cache_tokens, null);
   assert.equal(result.today.output_tokens, 0);
   assert.equal(result.today.cost_usd, null);
+  assert.equal(result.today.landed_pr_count, null);
+  assert.ok(result.availability, "Works must explain the availability of Today and Fleet");
+  assert.equal(result.availability.today.state, "measured");
+  assert.equal(result.availability.fleet.state, "measured");
   assert.equal(result.by_window.w1.verification, "Passed");
   assert.equal(result.by_window.w1.context_remaining_percent, null, "estimated context is never presented as reported");
   assert.equal(result.fleet_tokens_per_minute[29], 0);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [{ ...usage, telemetry: null }] }).today.input_tokens, null);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [usage, usage] }).today.input_tokens, 20);
   assert.equal(selectWorksTelemetry({ ...params, sessions: [{ ...usage, state: { kind: "no_data" }, telemetry: null }] }).by_window.w1.input_tokens, null);
+  const noData = { ...usage, state: { kind: "no_data" }, telemetry: null };
+  const absent = selectWorksTelemetry({ ...params, sessions: [noData] });
+  assert.equal(absent.availability.today.state, "no_data");
+  assert.equal(absent.availability.fleet.state, "no_data");
+  const partial = selectWorksTelemetry({ ...params, sessions: [usage, { ...noData, provider_session_id: "history" }] });
+  assert.equal(partial.today.input_tokens, null, "a partial subtotal must not become a Today total");
+  assert.equal(partial.availability.today.state, "partial");
+  const failed = selectWorksTelemetry({ ...params, sessions: [{ ...noData, state: { kind: "unavailable", reason: "Transcript cannot be read" } }] });
+  assert.equal(failed.availability.today.state, "unavailable");
+  assert.match(failed.availability.today.detail, /Transcript cannot be read/);
+  assert.equal(failed.availability.fleet.state, "unavailable");
+  const incomplete = selectWorksTelemetry({ ...params, sessions: [{ ...usage, telemetry: { ...usage.telemetry,
+    quality: "partial", today_input_tokens: null, today_output_tokens: null,
+    minute_buckets: usage.telemetry.minute_buckets.map(bucket => ({ ...bucket, tokens: null })) } }] });
+  assert.equal(incomplete.availability.today.state, "partial");
+  assert.equal(incomplete.availability.fleet.state, "partial");
+  assert.ok(incomplete.fleet_tokens_per_minute.every(value => value === null));
 });
 
 const agent = (id, issue_number = null, is_pm = false) => ({

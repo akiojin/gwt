@@ -936,15 +936,19 @@ fn pm_git_metadata_failure_waits_for_repair_then_starts_normally() {
     let first = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
         .unwrap_err()
         .to_string();
+    assert!(first.contains("Git needs attention"), "{first}");
+    assert!(first.contains(".git:1"), "{first}");
+    assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
     let after_first = gwt_core::process::thread_git_spawn_count();
     let second = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo)
         .unwrap_err()
         .to_string();
-    assert_eq!(gwt_core::process::thread_git_spawn_count(), after_first);
+    assert_eq!(
+        gwt_core::process::thread_git_spawn_count(),
+        after_first,
+        "first: {first}\nsecond: {second}"
+    );
     assert_eq!(first, second);
-    assert!(first.contains("Git needs attention"), "{first}");
-    assert!(first.contains(".git:1"), "{first}");
-    assert!(first.contains("E:/gwt/worktrees/develop"), "{first}");
     fs::remove_file(repo.join(".git")).unwrap();
     fs::rename(temp.path().join("saved-git"), repo.join(".git")).unwrap();
     let prepared = gwt::pm_registry::refresh_pm_worktree_for_repo_path(&repo).unwrap();

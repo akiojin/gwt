@@ -3462,12 +3462,21 @@ pub(crate) fn run_gh_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOut
 
 /// Reuse only Monitor list reads; callers of per-PR evidence stay live.
 pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result<GhCliOutput> {
+    run_cached_list_command_with_observed_at(repo_path, args).map(|(_, output)| output)
+}
+
+/// Keep the original acquisition time when a Monitor list page is reused.
+pub(crate) fn run_cached_list_command_with_observed_at(
+    repo_path: &Path,
+    args: &[&str],
+) -> Result<(DateTime<Utc>, GhCliOutput)> {
     let cache_dir =
         gwt_core::paths::gwt_project_dir_for_repo_path(repo_path).join("rest-list-pages");
-    let stdout = crate::gh_rest::cached_list_response_with(
+    let (observed_at, stdout) = crate::gh_rest::cached_list_response_at_with(
         &cache_dir,
         &args.join(" "),
         chrono::Utc::now(),
+        crate::gh_rest::LIST_CACHE_TTL_SECS,
         || {
             let output = run_gh_command(repo_path, args).map_err(|error| error.to_string())?;
             if output.success {
@@ -3478,11 +3487,14 @@ pub(crate) fn run_cached_list_command(repo_path: &Path, args: &[&str]) -> Result
         },
     )
     .map_err(GwtError::Git)?;
-    Ok(GhCliOutput {
-        success: true,
-        stdout,
-        stderr: String::new(),
-    })
+    Ok((
+        observed_at,
+        GhCliOutput {
+            success: true,
+            stdout,
+            stderr: String::new(),
+        },
+    ))
 }
 
 fn run_gh_command_with<F>(repo_path: &Path, args: &[&str], mut spawn_gh: F) -> Result<GhCliOutput>
@@ -3953,6 +3965,69 @@ pub struct PrCompletionSnapshot {
     pub state: PrState,
     pub head_sha: String,
     pub inventory: PrInventoryItem,
+}
+
+/// Delivery facts for a future active-launch watch (SPEC #3431 T235).
+/// These observations never authorize completion, cleanup or a retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrDeliveryStatus {
+    Merged,
+    ClosedUnmerged,
+    /// No observed recovery reason; includes running CI, not Ready approval.
+    Waiting,
+    RecoveryRequired(&'static str),
+    Unknown(&'static str),
+}
+
+impl PrCompletionSnapshot {
+    /// Classify fresh facts without applying completion/promotion predicates.
+    /// Known blockers outrank incomplete or pending observations. Callers must
+    /// still bind this snapshot to their exact launch and lifecycle authority.
+    pub fn delivery_status(&self) -> PrDeliveryStatus {
+        use PrDeliveryStatus::{RecoveryRequired, Unknown, Waiting};
+        match self.state {
+            PrState::Merged => return PrDeliveryStatus::Merged,
+            PrState::Closed => return PrDeliveryStatus::ClosedUnmerged,
+            PrState::Open => {}
+        }
+        let item = &self.inventory;
+        if item.check_counts.is_some_and(|counts| counts.failure > 0) {
+            return RecoveryRequired("checks_failing");
+        }
+        if item.review_status.eq_ignore_ascii_case("CHANGES_REQUESTED") {
+            return RecoveryRequired("changes_requested");
+        }
+        if item
+            .unresolved_review_threads
+            .is_some_and(|count| count > 0)
+        {
+            return RecoveryRequired("unresolved_review_threads");
+        }
+        if item.mergeable.eq_ignore_ascii_case("CONFLICTING")
+            || item.merge_state_status.eq_ignore_ascii_case("DIRTY")
+        {
+            return RecoveryRequired("merge_conflict");
+        }
+        if item.merge_state_status.eq_ignore_ascii_case("BEHIND")
+            && item.required_status_checks_strict != Some(false)
+            && !merge_queue_owns_base_sync(&item.fields())
+        {
+            return RecoveryRequired("behind_base");
+        }
+        if item.check_counts.is_none_or(|counts| counts.total == 0) {
+            return Unknown("checks_unknown");
+        }
+        if item.unresolved_review_threads.is_none() {
+            return Unknown("review_threads_unknown");
+        }
+        if !item.mergeable.eq_ignore_ascii_case("MERGEABLE")
+            || item.merge_state_status.is_empty()
+            || item.merge_state_status.eq_ignore_ascii_case("UNKNOWN")
+        {
+            return Unknown("mergeability_unknown");
+        }
+        Waiting
+    }
 }
 
 pub fn fetch_pr_completion_snapshot(repo_path: &Path, number: u64) -> Result<PrCompletionSnapshot> {
@@ -6312,6 +6387,108 @@ mod tests {
         );
         fields.required_status_checks_strict = Some(false);
         assert_eq!(row(fields).completion_blocker(), None);
+    }
+
+    fn delivery_snapshot(fields: PrInventoryFields) -> PrCompletionSnapshot {
+        PrCompletionSnapshot {
+            state: PrState::Open,
+            head_sha: "observed-head".into(),
+            inventory: inventory_item_from_fields(
+                fields,
+                Utc::now(),
+                &PrInventoryOptions::default(),
+            ),
+        }
+    }
+
+    #[test]
+    fn delivery_status_keeps_pending_and_unknown_distinct_from_known_failures() {
+        use PrDeliveryStatus::{RecoveryRequired, Unknown, Waiting};
+        let mut snapshot = delivery_snapshot(promotable_fields());
+        snapshot.inventory.body.clear();
+        snapshot.inventory.coderabbit_review_complete = None;
+        snapshot.inventory.review_status = "UNKNOWN".into();
+        snapshot.inventory.lifecycle = "held-obsolete-class".into();
+        let before = serde_json::to_value(&snapshot.inventory).unwrap();
+        assert_eq!(snapshot.delivery_status(), Waiting);
+        assert_eq!(serde_json::to_value(&snapshot.inventory).unwrap(), before);
+        assert_eq!(snapshot.head_sha, "observed-head");
+
+        snapshot.inventory.check_counts = check_counts_from_rollup(Some(&serde_json::json!([
+            {"status":"IN_PROGRESS"}
+        ])));
+        assert_eq!(snapshot.delivery_status(), Waiting);
+        for conclusion in ["FAILURE", "CANCELLED", "TIMED_OUT"] {
+            snapshot.inventory.check_counts = check_counts_from_rollup(Some(&serde_json::json!([
+                {"status":"COMPLETED", "conclusion":conclusion}, {"status":"IN_PROGRESS"}
+            ])));
+            snapshot.inventory.unresolved_review_threads = None;
+            assert_eq!(
+                snapshot.delivery_status(),
+                RecoveryRequired("checks_failing")
+            );
+        }
+        snapshot.inventory.check_counts = None;
+        snapshot.inventory.review_status = "CHANGES_REQUESTED".into();
+        assert_eq!(
+            snapshot.delivery_status(),
+            RecoveryRequired("changes_requested")
+        );
+        snapshot.inventory.review_status = "UNKNOWN".into();
+        snapshot.inventory.unresolved_review_threads = Some(1);
+        assert_eq!(
+            snapshot.delivery_status(),
+            RecoveryRequired("unresolved_review_threads")
+        );
+        snapshot.inventory.unresolved_review_threads = None;
+        snapshot.inventory.mergeable = "CONFLICTING".into();
+        assert_eq!(
+            snapshot.delivery_status(),
+            RecoveryRequired("merge_conflict")
+        );
+        snapshot.inventory.mergeable = "MERGEABLE".into();
+        assert_eq!(snapshot.delivery_status(), Unknown("checks_unknown"));
+        snapshot.inventory.check_counts = promotable_fields().check_counts;
+        assert_eq!(
+            snapshot.delivery_status(),
+            Unknown("review_threads_unknown")
+        );
+        snapshot.inventory.unresolved_review_threads = Some(0);
+        snapshot.inventory.mergeable = "UNKNOWN".into();
+        assert_eq!(snapshot.delivery_status(), Unknown("mergeability_unknown"));
+        snapshot.inventory.mergeable = "MERGEABLE".into();
+        snapshot.inventory.merge_state_status = "UNKNOWN".into();
+        assert_eq!(snapshot.delivery_status(), Unknown("mergeability_unknown"));
+        snapshot.state = PrState::Merged;
+        assert_eq!(snapshot.delivery_status(), PrDeliveryStatus::Merged);
+        snapshot.state = PrState::Closed;
+        assert_eq!(snapshot.delivery_status(), PrDeliveryStatus::ClosedUnmerged);
+    }
+
+    #[test]
+    fn delivery_status_preserves_non_strict_and_merge_queue_behind_policy() {
+        use PrDeliveryStatus::{RecoveryRequired, Waiting};
+        let mut fields = promotable_fields();
+        fields.is_draft = false;
+        fields.merge_state_status = "BEHIND".into();
+        let mut snapshot = delivery_snapshot(fields);
+        assert_eq!(snapshot.delivery_status(), RecoveryRequired("behind_base"));
+        snapshot.inventory.required_status_checks_strict = Some(true);
+        assert_eq!(snapshot.delivery_status(), RecoveryRequired("behind_base"));
+        snapshot.inventory.required_status_checks_strict = Some(false);
+        assert_eq!(snapshot.delivery_status(), Waiting);
+        snapshot.inventory.required_status_checks_strict = None;
+        snapshot.inventory.merge_queue = Some(PrMergeQueueState {
+            enabled: true,
+            position: None,
+            state: None,
+        });
+        assert_eq!(snapshot.delivery_status(), Waiting);
+        snapshot.inventory.is_draft = true;
+        assert_eq!(snapshot.delivery_status(), RecoveryRequired("behind_base"));
+        snapshot.inventory.is_draft = false;
+        snapshot.inventory.merge_queue.as_mut().unwrap().enabled = false;
+        assert_eq!(snapshot.delivery_status(), RecoveryRequired("behind_base"));
     }
 
     #[test]

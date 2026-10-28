@@ -311,3 +311,65 @@ strict-load/diagnosis latency, whole-GUI or release CPU, real eight-Agent
 sixty-minute budgets, PM-prompt failure rates or long-duration memory. Parent
 AC-1/2/3 remain unchecked. Fresh canonical and isolated checkout debug headed
 dark/light evidence belongs to the delivery record.
+
+## Reuse complete linked-PR reads within one Monitor scan
+
+The installed PID 33132 observation in `same-scan-linked-pr.json` used the
+same older executable identified by its SHA256 and start time. Over
+30.1424617 seconds it consumed 62.328125 CPU seconds, averaging 2.067785
+logical cores. Several Tokio workers dominated the surviving-thread deltas.
+This active shared-host interval is diagnostic, not controlled idle or a
+causal measurement of this change. Exited workers are absent from the
+endpoint thread accounting.
+
+The bounded process/stage log shows recent `open-pr-readback` failures in
+serial GraphQL timeline reads, after successful REST/cache inventory reads.
+For example, the 01:19:35+09 scan spent 5,381 / 2,199 / 1,370 / 4,073ms on
+successful timeline commands, then timed out its next command at 1,390ms.
+The stage failed at 14,571.43ms under its existing budget. A later discovery
+retained 30 completed Issues before failing; merge reconciliation then made
+another bulk read and consumed 10.301 seconds. Those 30 Issue IDs and their
+intersection with the later request are unobserved. The entire 10.301 seconds
+is not claimed removable, and the Tokio CPU observation is not attributed
+to this network fanout.
+
+The source previously discarded complete timeline results after building
+launch holds. Merge and claim completion then fetched their own timelines.
+Carry only the existing observer's fully acquired results in the scan input,
+and select missing Issues for subsequent bulk reads. Both daemon and GUI
+local scan drivers pass that input. These read/proposal stages dispatch no
+PR/Issue mutations; the existing effect executor applies those later.
+Existing delivered-branch pruning between merge and claim remains separate
+and unchanged. It does not change the already merged PR completion fact.
+Each new candidate load starts a new map,
+and cache fallback starts empty. This adds no persistent cache or freshness
+policy.
+
+The existing completion batch regression first failed because complete
+Issues 1 and 2 were requested again: `[1, 2, 3]` instead of only missing
+Issue `[3]`. After the repair it also verifies that a failed missing read
+retains the complete merged and empty results, preserves the original failure
+for the missing Issue without a single-Issue retry, excludes an unrequested
+seed row, and performs zero fetches when every requested timeline is complete.
+The existing readiness, merge intent, timestamp and deadline predicates are
+used unchanged. These are same-input request-count results, not measured
+network latency or shipping CPU improvements.
+
+A separate in-process probe uses the same final debug library for both paths:
+an empty-seed control reproduces the former data flow, and a complete-seed
+variant reuses identical merged/empty results. After warmup, twelve alternating
+pairs of 1,000 calls all produced the same two completion results. Fetch
+callbacks fell from 1,000 to zero. Median elapsed times were 3.091600ms and
+2.594200ms; overlapping samples do not establish a material latency improvement.
+This is a data-flow control, not a pre-change-binary speed comparison, and
+excludes startup, real network, GitHub parsing and the rest of the scan.
+The complete probe source, executable/library hashes and raw pairs are in
+the artifact. Merge-stage missing rows are not written into the initial map,
+so those rows can still be read again during claim completion.
+
+The artifact retains the RED source and executable hashes, raw failure and
+GREEN evidence, the fixed input and final source hashes. Final canonical
+verification, headed dark/light checks, required CI and base inclusion belong
+to the delivery record. The initial discovery fanout timeout, installed
+rollout, PM20s availability, parent CPU/RSS and real fleet 60-minute/four-hour
+acceptance remain unproven.
