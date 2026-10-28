@@ -413,7 +413,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('unchanged polls are silent, changed reports arrive and reconnect hydrates', async ({ page }, info) => {
+  test('unchanged polls are silent, inactive Reports receive live deltas and reconnect hydrates', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -441,11 +441,97 @@ test.describe('PM reports', () => {
 
       const marker = `Changed report ${info.project.name}`;
       const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
-      appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
-        id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
-      })}\n`);
-      await refreshPmReports(page);
+      await page.locator('#op-pm-entry').focus();
+      await expect(page.locator('#op-pm-entry')).toBeFocused();
+      await page.evaluate(({ id, marker }) => {
+        const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+        const report = pane.querySelector<HTMLElement>('.pm-chat')!;
+        const log = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+        const versions = () => [report.dataset.stateVersion, log.dataset.stateVersion];
+        const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+          candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+        if (!socket) throw new Error('Missing live project socket');
+        const originalFrame = window.requestAnimationFrame;
+        const originalCancel = window.cancelAnimationFrame;
+        const captured = new Map<number, FrameRequestCallback>();
+        let requestedFrames = 0;
+        let focusEvents = 0;
+        let receivedAt: number | null = null;
+        let before: (string | undefined)[] = [];
+        const state: any = { result: null };
+        const check = () => {
+          if (receivedAt === null || state.result) return;
+          const after = versions();
+          const elapsed_ms = performance.now() - receivedAt;
+          const updated = report.textContent!.includes(marker) && after[0] === after[1]
+            && Number(after[0]) > Number(before[0]);
+          if (updated || elapsed_ms >= 1_000) state.result = {
+            before, after, elapsed_ms, updated, requestedFrames, focusEvents,
+            documentHidden: document.hidden, windowFocused: pane.contains(document.activeElement),
+          };
+        };
+        const onMessage = (event: MessageEvent) => {
+          const payload = JSON.parse(String(event.data));
+          // Measure a real backend's ordinary delta, excluding poll/network wait
+          // and force snapshots. No visibility or focus event requests this update.
+          if (receivedAt === null && payload.kind === 'pm_reports' && payload.id === id && payload.snapshot === false
+            && payload.reports.some((entry: any) => entry.body === `# ${marker}`)) {
+            before = versions();
+            receivedAt = performance.now();
+          }
+        };
+        const onFocus = () => { focusEvents += 1; };
+        const observer = new MutationObserver(check);
+        observer.observe(report, { attributes: true, childList: true, subtree: true });
+        socket.addEventListener('message', onMessage);
+        pane.addEventListener('focusin', onFocus);
+        window.requestAnimationFrame = callback => {
+          const handle = -(++requestedFrames);
+          captured.set(handle, callback);
+          return handle;
+        };
+        window.cancelAnimationFrame = handle => {
+          if (!captured.delete(handle)) originalCancel.call(window, handle);
+        };
+        const timer = setInterval(check, 100);
+        state.restore = () => {
+          clearInterval(timer);
+          observer.disconnect();
+          socket.removeEventListener('message', onMessage);
+          pane.removeEventListener('focusin', onFocus);
+          window.requestAnimationFrame = originalFrame;
+          window.cancelAnimationFrame = originalCancel;
+          for (const callback of captured.values()) originalFrame.call(window, callback);
+        };
+        (window as any).__inactiveReportsPoll = state;
+      }, { id, marker });
+      let evidence: any;
+      try {
+        appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
+          id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
+        })}\n`);
+        await page.waitForFunction(() => (window as any).__inactiveReportsPoll.result,
+          undefined, { polling: 100, timeout: 20_000 });
+        evidence = await page.evaluate(() => (window as any).__inactiveReportsPoll.result);
+      } finally {
+        await page.evaluate(() => { (window as any).__inactiveReportsPoll.restore(); delete (window as any).__inactiveReportsPoll; });
+      }
+      const evidenceFile = info.outputPath(`inactive-reports-delta-${theme}.json`);
+      writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2));
+      await info.attach('Real backend delta to joint DOM (rAF withheld)', { path: evidenceFile, contentType: 'application/json' });
+      expect(evidence.updated, 'ordinary backend delta updates joint DOM within one second without focus or frames').toBe(true);
+      expect(evidence.elapsed_ms).toBeLessThanOrEqual(1_000);
+      expect(evidence.before[0]).toMatch(/^\d+$/);
+      expect(evidence.before[1]).toBe(evidence.before[0]);
+      expect(evidence.after[1]).toBe(evidence.after[0]);
+      expect(evidence.requestedFrames).toBeGreaterThan(0);
+      expect(evidence.documentHidden).toBe(false);
+      expect(evidence.windowFocused).toBe(false);
+      expect(evidence.focusEvents).toBe(0);
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      const screenshot = info.outputPath(`inactive-reports-delta-${theme}.png`);
+      await pane.screenshot({ path: screenshot });
+      await info.attach('Inactive Reports after ordinary delta', { path: screenshot, contentType: 'image/png' });
       await page.reload();
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
       expect(errors).toEqual([]);
