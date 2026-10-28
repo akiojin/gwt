@@ -1971,6 +1971,46 @@ impl PtyInputReservation {
         };
         authorize_and_commit(&mut commit)
     }
+
+    /// Use the same reserved physical writer for an ordinary human input.
+    /// Preparation consumes no ordinary facts; record them only at the actual
+    /// write attempt, never when the protected ordinary queue accepts bytes.
+    #[doc(hidden)]
+    pub fn write_ordinary_input_authorized(
+        &self,
+        data: &[u8],
+        authorize_and_commit: impl FnOnce(
+            &mut dyn FnMut(&mut dyn FnMut()) -> Result<(), TerminalError>,
+        ) -> Result<(), TerminalError>,
+    ) -> Result<(), TerminalError> {
+        self.write_input_authorized(data, |commit| {
+            authorize_and_commit(&mut |mark_attempted| {
+                let state =
+                    self.handle
+                        .input_state
+                        .lock()
+                        .map_err(|error| TerminalError::PtyIoError {
+                            details: format!("input state lock poisoned: {error}"),
+                        })?;
+                let mut state = Some(state);
+                commit(&mut || {
+                    let mut state = state.take().expect("one physical write attempt");
+                    if !data.is_empty() {
+                        state.ordinary_input_revision =
+                            state.ordinary_input_revision.saturating_add(1);
+                    }
+                    if chunk_has_prompt_content(data)
+                        || data.iter().any(|b| matches!(b, b'\r' | b'\n' | 3 | 21))
+                    {
+                        state.last_human_input_at = Some(gwt_core::operation_deadline::now());
+                    }
+                    state.note_user_input(data);
+                    drop(state);
+                    mark_attempted();
+                })
+            })
+        })
+    }
 }
 
 impl Drop for PtyInputReservation {

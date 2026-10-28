@@ -29,6 +29,52 @@ pub struct OwnerCompensatedLaunchFailure {
     pub removed_genesis_session: gwt_agent::SessionExecutionIdentity,
 }
 
+/// Private input identity, never a mobile credential or an authorization grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMobileInputIdentity {
+    pub operation_id: String,
+    pub host_instance_id: String,
+    pub id: String,
+    pub incarnation: u64,
+    pub session_id: Option<String>,
+    pub data_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerMobileInputReady {
+    pub identity: OwnerMobileInputIdentity,
+    pub nonce: String,
+    /// Relative to this native process's monotonic epoch, not Host wall time.
+    pub expires_at_mono_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnerMobileInputPhase {
+    Preparing,
+    Ready,
+    Committing,
+    Prevented,
+    Written,
+    WriteFailed,
+}
+
+impl OwnerMobileInputPhase {
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Prevented | Self::Written | Self::WriteFailed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerMobileInputOutcome {
+    pub ready: OwnerMobileInputReady,
+    pub phase: OwnerMobileInputPhase,
+    pub observation: Option<OwnerInputObservation>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OwnerRequest {
     pub project_key: String,
@@ -55,6 +101,22 @@ pub struct OwnerMonitorLaunchRejection {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerCommand {
+    PrepareMobileInput {
+        identity: OwnerMobileInputIdentity,
+        data: Vec<u8>,
+    },
+    CommitMobileInput {
+        ready: OwnerMobileInputReady,
+    },
+    CancelMobileInput {
+        identity: OwnerMobileInputIdentity,
+    },
+    MobileInputOutcome {
+        identity: OwnerMobileInputIdentity,
+    },
+    SettleMobileInput {
+        ready: OwnerMobileInputReady,
+    },
     NotifyBoardDecision {
         entry_id: String,
         session_id: String,

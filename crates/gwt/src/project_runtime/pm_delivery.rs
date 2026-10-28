@@ -5,7 +5,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -193,6 +193,7 @@ struct PmWakePermit {
     incarnation: u64,
     permitted: Arc<AtomicBool>,
     started: bool,
+    mobile: Option<Arc<MobileInputTransaction>>,
 }
 impl PmWakePermits {
     pub(crate) fn finish(&mut self, operation: &str) {
@@ -215,8 +216,9 @@ impl PmWakePermits {
                 incarnation,
                 permitted: Arc::new(AtomicBool::new(false)),
                 started: false,
+                mobile: None,
             });
-        if entry.id != id || entry.incarnation != incarnation {
+        if entry.id != id || entry.incarnation != incarnation || entry.mobile.is_some() {
             return Err("PM wake delivery identity changed".into());
         }
         entry.permitted.store(false, Ordering::Release);
@@ -240,12 +242,346 @@ impl PmWakePermits {
                 incarnation,
                 permitted: Arc::new(AtomicBool::new(true)),
                 started: false,
+                mobile: None,
             });
-        if entry.id != id || entry.incarnation != incarnation || entry.started {
+        if entry.id != id
+            || entry.incarnation != incarnation
+            || entry.started
+            || entry.mobile.is_some()
+        {
             return Err("PM wake delivery is stale or already started".into());
         }
         entry.started = true;
         Ok(entry.permitted.clone())
+    }
+}
+
+use super::events::{
+    OwnerMobileInputIdentity, OwnerMobileInputOutcome, OwnerMobileInputPhase, OwnerMobileInputReady,
+};
+
+const MOBILE_INPUT_PREPARE_LIFETIME: Duration = Duration::from_secs(30);
+const MAX_UNSETTLED_MOBILE_INPUTS: usize = 32;
+
+#[derive(Default)]
+struct MobileInputReplies {
+    ready: Option<tokio::sync::oneshot::Sender<super::events::OwnerReply>>,
+    finished: Option<tokio::sync::oneshot::Sender<super::events::OwnerReply>>,
+}
+
+/// One private transaction in the existing owner permit map. Its nonce proves
+/// identity only; only the Host may authorize a Commit while holding its fences.
+pub(crate) struct MobileInputTransaction {
+    ready: OwnerMobileInputReady,
+    deadline: Instant,
+    permitted: Arc<AtomicBool>,
+    outcome: Mutex<OwnerMobileInputOutcome>,
+    replies: Mutex<MobileInputReplies>,
+    changed: Condvar,
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    drop_commit_reply: AtomicBool,
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    commit_reply_lost: Arc<AtomicBool>,
+}
+
+impl MobileInputTransaction {
+    fn new(identity: OwnerMobileInputIdentity, permitted: Arc<AtomicBool>) -> Self {
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        let now = gwt_core::operation_deadline::now();
+        let expires_at_mono_ms = u64::try_from(
+            now.duration_since(*EPOCH.get_or_init(|| now)).as_millis()
+                + MOBILE_INPUT_PREPARE_LIFETIME.as_millis(),
+        )
+        .expect("native monotonic input deadline fits u64");
+        let ready = OwnerMobileInputReady {
+            identity,
+            nonce: uuid::Uuid::new_v4().to_string(),
+            expires_at_mono_ms,
+        };
+        Self {
+            outcome: Mutex::new(OwnerMobileInputOutcome {
+                ready: ready.clone(),
+                phase: OwnerMobileInputPhase::Preparing,
+                observation: None,
+                error: None,
+            }),
+            ready,
+            replies: Mutex::default(),
+            deadline: now + MOBILE_INPUT_PREPARE_LIFETIME,
+            permitted,
+            changed: Condvar::new(),
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            drop_commit_reply: AtomicBool::new(false),
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            commit_reply_lost: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn outcome(&self) -> Result<OwnerMobileInputOutcome, String> {
+        self.outcome
+            .lock()
+            .map(|outcome| outcome.clone())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn reply_when_observed(
+        &self,
+        reply: tokio::sync::oneshot::Sender<super::events::OwnerReply>,
+        preparing: bool,
+    ) {
+        let outcome = match self.outcome.lock() {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+                return;
+            }
+        };
+        let wait = if preparing {
+            outcome.phase == OwnerMobileInputPhase::Preparing
+        } else {
+            outcome.phase == OwnerMobileInputPhase::Committing
+        };
+        if !wait {
+            Self::send_outcome(reply, &outcome);
+            return;
+        }
+        match self.replies.lock() {
+            Ok(mut replies) => {
+                let slot = if preparing {
+                    &mut replies.ready
+                } else {
+                    &mut replies.finished
+                };
+                if let Some(previous) = slot.replace(reply) {
+                    // An overtaken HTTP observation gets its exact pending
+                    // phase, never a duplicate effect or a false finished ACK.
+                    Self::send_outcome(previous, &outcome);
+                }
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+            }
+        }
+    }
+
+    fn send_outcome(
+        reply: tokio::sync::oneshot::Sender<super::events::OwnerReply>,
+        outcome: &OwnerMobileInputOutcome,
+    ) {
+        let _ = reply.send(serde_json::to_value(outcome).map_err(|error| error.to_string()));
+    }
+
+    pub(crate) fn matches(&self, ready: &OwnerMobileInputReady) -> bool {
+        &self.ready == ready
+    }
+
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    pub(crate) fn suppress_commit_reply(
+        &self,
+        ready: &OwnerMobileInputReady,
+    ) -> Result<Arc<AtomicBool>, String> {
+        if !self.matches(ready) || self.outcome()?.phase != OwnerMobileInputPhase::Ready {
+            return Err("test receipt boundary is not this exact Ready input".into());
+        }
+        self.drop_commit_reply.store(true, Ordering::Release);
+        Ok(self.commit_reply_lost.clone())
+    }
+
+    pub(crate) fn can_write(&self) -> bool {
+        self.permitted.load(Ordering::Acquire)
+            && gwt_core::operation_deadline::now() < self.deadline
+    }
+
+    pub(crate) fn commit(&self, ready: &OwnerMobileInputReady) -> Result<(), String> {
+        let mut outcome = self.outcome.lock().map_err(|error| error.to_string())?;
+        if !self.matches(ready) {
+            return Err("native input readiness identity changed".into());
+        }
+        if outcome.phase == OwnerMobileInputPhase::Ready
+            && self.permitted.load(Ordering::Acquire)
+            && gwt_core::operation_deadline::now() < self.deadline
+        {
+            outcome.phase = OwnerMobileInputPhase::Committing;
+            self.changed.notify_all();
+            return Ok(());
+        }
+        // Duplicate Commit observes the existing outcome; it never writes again.
+        if outcome.phase == OwnerMobileInputPhase::Committing || outcome.phase.is_finished() {
+            return Ok(());
+        }
+        Err("native input is not ready or has expired".into())
+    }
+
+    fn cancel(&self) {
+        self.permitted.store(false, Ordering::Release);
+        self.changed.notify_all();
+    }
+
+    /// Called with the actual physical writer held, without input_state locks.
+    pub(crate) fn wait_for_commit(&self) -> Result<(), String> {
+        let mut outcome = self.outcome.lock().map_err(|error| error.to_string())?;
+        if !self.permitted.load(Ordering::Acquire)
+            || gwt_core::operation_deadline::now() >= self.deadline
+        {
+            return Err("native prepared input was cancelled or expired".into());
+        }
+        outcome.phase = OwnerMobileInputPhase::Ready;
+        if let Ok(mut replies) = self.replies.lock() {
+            if let Some(reply) = replies.ready.take() {
+                Self::send_outcome(reply, &outcome);
+            }
+        }
+        self.changed.notify_all();
+        loop {
+            if !self.permitted.load(Ordering::Acquire)
+                || gwt_core::operation_deadline::now() >= self.deadline
+            {
+                return Err("native prepared input was cancelled or expired".into());
+            }
+            if outcome.phase == OwnerMobileInputPhase::Committing {
+                return Ok(());
+            }
+            let remaining = self
+                .deadline
+                .saturating_duration_since(gwt_core::operation_deadline::now());
+            outcome = self
+                .changed
+                .wait_timeout(outcome, remaining)
+                .map_err(|error| error.to_string())?
+                .0;
+        }
+    }
+
+    /// A finished result is published only after the reservation/writer was
+    /// released. Cancel responses before this point are observations, not ACKs.
+    pub(crate) fn finish(
+        &self,
+        attempted: bool,
+        result: Result<(), String>,
+        observation: Option<super::events::OwnerInputObservation>,
+    ) {
+        if let Ok(mut outcome) = self.outcome.lock() {
+            outcome.phase = match (attempted, result.is_ok()) {
+                (_, true) => OwnerMobileInputPhase::Written,
+                (true, false) => OwnerMobileInputPhase::WriteFailed,
+                (false, false) => OwnerMobileInputPhase::Prevented,
+            };
+            outcome.observation = observation;
+            outcome.error = result.err();
+            if let Ok(mut replies) = self.replies.lock() {
+                if let Some(reply) = replies.ready.take() {
+                    Self::send_outcome(reply, &outcome);
+                }
+                if let Some(reply) = replies.finished.take() {
+                    #[cfg(any(test, feature = "test-gh-guard"))]
+                    if self.drop_commit_reply.load(Ordering::Acquire) {
+                        drop(reply);
+                        self.commit_reply_lost.store(true, Ordering::Release);
+                        self.changed.notify_all();
+                        return;
+                    }
+                    Self::send_outcome(reply, &outcome);
+                }
+            }
+            self.changed.notify_all();
+        }
+    }
+}
+
+impl PmWakePermits {
+    pub(crate) fn prepare_mobile(
+        &mut self,
+        identity: &OwnerMobileInputIdentity,
+    ) -> Result<(Arc<MobileInputTransaction>, bool), String> {
+        if identity.operation_id.trim().is_empty() {
+            return Err("native input operation id is empty".into());
+        }
+        if let Some(entry) = self.0.get(&identity.operation_id) {
+            let mobile = entry
+                .mobile
+                .as_ref()
+                .ok_or("input operation kind changed")?;
+            if &mobile.ready.identity != identity {
+                return Err("native input operation identity changed".into());
+            }
+            return Ok((mobile.clone(), false));
+        }
+        if self
+            .0
+            .values()
+            .filter(|entry| entry.mobile.is_some())
+            .count()
+            >= MAX_UNSETTLED_MOBILE_INPUTS
+        {
+            return Err("native prepared input capacity reached".into());
+        }
+        let permitted = Arc::new(AtomicBool::new(true));
+        let mobile = Arc::new(MobileInputTransaction::new(
+            identity.clone(),
+            permitted.clone(),
+        ));
+        self.0.insert(
+            identity.operation_id.clone(),
+            PmWakePermit {
+                id: identity.id.clone(),
+                incarnation: identity.incarnation,
+                permitted,
+                started: true,
+                mobile: Some(mobile.clone()),
+            },
+        );
+        Ok((mobile, true))
+    }
+
+    pub(crate) fn mobile(
+        &self,
+        identity: &OwnerMobileInputIdentity,
+    ) -> Result<Arc<MobileInputTransaction>, String> {
+        let mobile = self
+            .0
+            .get(&identity.operation_id)
+            .and_then(|entry| entry.mobile.as_ref())
+            .ok_or("native input operation is absent")?;
+        if &mobile.ready.identity != identity {
+            return Err("native input operation identity changed".into());
+        }
+        Ok(mobile.clone())
+    }
+
+    pub(crate) fn cancel_mobile(
+        &mut self,
+        identity: &OwnerMobileInputIdentity,
+    ) -> Result<OwnerMobileInputOutcome, String> {
+        let (mobile, created) = self.prepare_mobile(identity)?;
+        mobile.cancel();
+        if created {
+            mobile.finish(
+                false,
+                Err("cancelled before native preparation".into()),
+                None,
+            );
+        }
+        mobile.outcome()
+    }
+
+    pub(crate) fn settle_mobile(&mut self, ready: &OwnerMobileInputReady) -> Result<(), String> {
+        if !self.0.contains_key(&ready.identity.operation_id) {
+            return Ok(());
+        }
+        let mobile = self.mobile(&ready.identity)?;
+        if !mobile.matches(ready) || !mobile.outcome()?.phase.is_finished() {
+            return Err("native input is not physically settled".into());
+        }
+        self.0.remove(&ready.identity.operation_id);
+        Ok(())
+    }
+
+    pub(crate) fn cancel_mobile_for_pane(&self, id: Option<&str>) {
+        for mobile in self.0.values().filter_map(|entry| entry.mobile.as_ref()) {
+            if id.is_none_or(|id| mobile.ready.identity.id == id) {
+                mobile.cancel();
+            }
+        }
     }
 }
 

@@ -100,6 +100,7 @@ quick-xml = "0.42.0"
 rfd = "0.17"
 reqwest.workspace = true
 sha2.workspace = true
+ring = "0.17"
 hex.workspace = true
 notify.workspace = true
 notify-debouncer-mini.workspace = true

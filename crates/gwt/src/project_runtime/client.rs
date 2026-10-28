@@ -186,11 +186,38 @@ impl ProjectRuntimeClient {
         }))
     }
     pub async fn command(&self, command: OwnerCommand) -> OwnerReply {
+        self.command_with_timeout(command, std::time::Duration::from_secs(120))
+            .await
+    }
+
+    /// Private transaction frames have bounded observation calls. A timeout
+    /// never cancels a frame and is never evidence that physical input stopped.
+    #[doc(hidden)]
+    pub async fn mobile_input_command(&self, command: OwnerCommand) -> OwnerReply {
+        if !matches!(
+            command,
+            OwnerCommand::PrepareMobileInput { .. }
+                | OwnerCommand::CommitMobileInput { .. }
+                | OwnerCommand::CancelMobileInput { .. }
+                | OwnerCommand::MobileInputOutcome { .. }
+                | OwnerCommand::SettleMobileInput { .. }
+        ) {
+            return Err("not a private prepared input frame".into());
+        }
+        self.command_with_timeout(command, std::time::Duration::from_secs(2))
+            .await
+    }
+
+    async fn command_with_timeout(
+        &self,
+        command: OwnerCommand,
+        timeout: std::time::Duration,
+    ) -> OwnerReply {
         let response = self
             .http
             .post(format!("{}/private/project/command", self.url))
             .bearer_auth(&self.token)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(timeout)
             .json(&OwnerRequest {
                 project_key: self.project_key.clone(),
                 command,

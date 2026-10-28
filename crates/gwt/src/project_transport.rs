@@ -261,8 +261,15 @@ impl TransportState {
     fn send(&self, event: TransportEvent) {
         (self.sink)(event);
     }
+
+    /// Host-only handoff from an authenticated encrypted mobile transport.
+    /// Queueing does not authorize, consume a sequence, or use browser fast paths.
+    pub fn send_mobile_input(&self, request: Arc<crate::mobile_connection::MobileInputRequest>) {
+        self.send(TransportEvent::MobileInput(request));
+    }
 }
 pub enum TransportEvent {
+    MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
         request: crate::AgentExecutionContinuationRequest,
@@ -672,16 +679,31 @@ pub enum DrainStep {
 /// bounded mpsc channel whose overflow disconnected the client — under an
 /// agent-startup output flood that evicted the very client that initiated
 /// the launch and lost its lossless replies.
-#[derive(Default)]
 pub struct ClientQueue {
     state: Mutex<ClientQueueState>,
     notify: tokio::sync::Notify,
+    input_liveness: std::sync::RwLock<bool>,
+    input_close_requested: std::sync::atomic::AtomicBool,
+}
+
+impl Default for ClientQueue {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            notify: tokio::sync::Notify::new(),
+            input_liveness: std::sync::RwLock::new(true),
+            input_close_requested: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 impl ClientQueue {
     /// Enqueue one prepared event. Returns `true` when the client crossed
     /// the lossless hard cap and must be unregistered by the caller.
     pub fn enqueue(&self, message: &PreparedOutbound) -> bool {
+        if self.input_close_requested.load(Ordering::Acquire) {
+            return true;
+        }
         let mut state = self
             .state
             .lock()
@@ -725,9 +747,8 @@ impl ClientQueue {
                     entry.stream_seq = message.stream_seq;
                 } else {
                     if state.entries.len() >= LOSSLESS_HARD_CAP {
-                        state.dead = true;
                         drop(state);
-                        self.notify.notify_one();
+                        self.close();
                         return true;
                     }
                     state.entries.push_back(Self::queued(message));
@@ -749,9 +770,8 @@ impl ClientQueue {
             }
             QueueClass::Lossless => {
                 if state.entries.len() >= LOSSLESS_HARD_CAP {
-                    state.dead = true;
                     drop(state);
-                    self.notify.notify_one();
+                    self.close();
                     return true;
                 }
                 state.entries.push_back(Self::queued(message));
@@ -887,13 +907,33 @@ impl ClientQueue {
     }
 
     fn close_with_frame(&self, close_frame: Option<ClientCloseFrame>) {
+        self.input_close_requested.store(true, Ordering::Release);
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.dead = true;
         state.close_frame = close_frame;
         drop(state);
+        self.finish_input_close();
+    }
+
+    fn finish_input_close(&self) {
+        if !self.input_close_requested.load(Ordering::Acquire) {
+            return;
+        }
+        // The GUI's outbound dispatch must never wait for a native input ACK.
+        // Its existing queue publishes Closed after the last accepted lease
+        // ends; closing immediately refuses every new input lease.
+        let mut live = match self.input_liveness.try_write() {
+            Ok(live) => live,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return,
+        };
+        *live = false;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .dead = true;
         self.notify.notify_one();
     }
 
@@ -974,6 +1014,47 @@ struct ClientRegistration {
     scope: ClientScope,
 }
 
+/// An immutable registration snapshot, sharing the existing queue lifetime.
+/// It cannot authorize mobile input; the Host authority still owns that check.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ClientProjectBinding {
+    queue: Arc<ClientQueue>,
+    scope: ClientScope,
+}
+
+impl ClientProjectBinding {
+    pub fn while_current<T>(
+        &self,
+        project: &gwt_core::repo_hash::ProjectKey,
+        effect: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let live = self.queue.input_liveness.read().ok()?;
+        let is_live = *live;
+        struct Lease<'a> {
+            queue: &'a ClientQueue,
+            live: Option<std::sync::RwLockReadGuard<'a, bool>>,
+        }
+        impl Drop for Lease<'_> {
+            fn drop(&mut self) {
+                self.live.take();
+                self.queue.finish_input_close();
+            }
+        }
+        let _lease = Lease {
+            queue: &self.queue,
+            live: Some(live),
+        };
+        if !is_live
+            || self.queue.input_close_requested.load(Ordering::Acquire)
+            || !matches!(&self.scope, ClientScope::Project(key) if key == project)
+        {
+            return None;
+        }
+        Some(effect())
+    }
+}
+
 fn target_selects(
     target: &DispatchTarget,
     client_id: &str,
@@ -992,6 +1073,15 @@ fn target_selects(
 }
 
 impl ClientHub {
+    #[doc(hidden)]
+    pub fn capture_project_binding(&self, client_id: &str) -> Option<ClientProjectBinding> {
+        let clients = self.clients.lock().ok()?;
+        let registration = clients.get(client_id)?;
+        Some(ClientProjectBinding {
+            queue: registration.queue.clone(),
+            scope: registration.scope.clone(),
+        })
+    }
     #[cfg(test)]
     fn set_before_dispatch_enqueue_hook(&self, hook: ClientHubDispatchHook) {
         *self
@@ -1056,7 +1146,8 @@ impl ClientHub {
         if receives_broadcasts {
             self.browser_generation.fetch_add(1, Ordering::Relaxed);
         }
-        self.clients
+        let previous = self
+            .clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -1067,6 +1158,9 @@ impl ClientHub {
                     scope,
                 },
             );
+        if let Some(previous) = previous {
+            previous.queue.close();
+        }
         queue
     }
 
@@ -1237,14 +1331,18 @@ impl ClientHub {
                 dead_clients = ?dead_clients,
                 "disconnecting websocket clients stuck past the lossless hard cap; reconnect will replay latest state"
             );
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }
@@ -1289,14 +1387,18 @@ impl ClientHub {
             }
         }
         if !dead_clients.is_empty() {
-            let mut clients = self
-                .clients
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for client_id in dead_clients {
-                if let Some(registration) = clients.remove(&client_id) {
-                    registration.queue.close();
-                }
+            let removed: Vec<_> = {
+                let mut clients = self
+                    .clients
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                dead_clients
+                    .into_iter()
+                    .filter_map(|id| clients.remove(&id))
+                    .collect()
+            };
+            for registration in removed {
+                registration.queue.close();
             }
         }
     }

@@ -1,4 +1,6 @@
 use super::*;
+
+mod mobile_input;
 use std::time::Instant;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
@@ -148,7 +150,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
             | FrontendEvent::CheckKnowledgeRevision { .. } => AppEventPriority::Background,
             _ => AppEventPriority::Foreground,
         },
-        UserEvent::AgentFrontend { .. }
+        UserEvent::MobileInput(_)
+        | UserEvent::AgentFrontend { .. }
         | UserEvent::PmConversationLoaded { .. }
         | UserEvent::MenuEvent(_)
         | UserEvent::QuitApp { .. }

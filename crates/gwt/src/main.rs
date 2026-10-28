@@ -1973,6 +1973,7 @@ fn browser_project_input_allowed(
 )]
 #[derive(Debug, Clone)]
 enum UserEvent {
+    MobileInput(Arc<gwt::mobile_connection::MobileInputRequest>),
     RemoteOwnerLaunchComplete(Box<app_runtime::RemoteOwnerLaunchComplete>),
     RemoteOwnerInventoryComplete(Box<app_runtime::RemoteOwnerInventoryComplete>),
     RemoteRuntimeCommandComplete(Box<app_runtime::RemoteRuntimeCommandCompletion>),
@@ -10927,6 +10928,17 @@ fn main() -> std::io::Result<()> {
                         }
                     }
 
+                }
+            }
+            Event::UserEvent(UserEvent::MobileInput(request)) => {
+                match app.handle_mobile_input(request, &clients, || {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                }) {
+                    Ok(()) => {}
+                    Err(error) => tracing::warn!(%error, "mobile terminal input rejected"),
                 }
             }
             Event::UserEvent(UserEvent::AgentFrontend { client_id, grant, request }) => {

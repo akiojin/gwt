@@ -423,6 +423,11 @@ pub(crate) struct LegacyFocusPublication {
 pub(crate) enum OwnerMessage {
     #[cfg(any(test, feature = "test-gh-guard"))]
     SetOperationClock(Option<std::time::Instant>, oneshot::Sender<()>),
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    SuppressMobileCommitReply {
+        ready: super::events::OwnerMobileInputReady,
+        reply: oneshot::Sender<Result<Arc<AtomicBool>, String>>,
+    },
     AgentSwitchFinished {
         drove: bool,
         result: OwnerReply,
@@ -604,6 +609,14 @@ pub(crate) enum OwnerMessage {
         reply: oneshot::Sender<OwnerReply>,
         result: Result<Option<super::events::OwnerInputObservation>, String>,
     },
+    MobileInputWritten {
+        identity: super::events::OwnerMobileInputIdentity,
+        data: Vec<u8>,
+        transaction: Arc<super::pm_delivery::MobileInputTransaction>,
+        attempted: bool,
+        result: Result<(), String>,
+        observation: Option<super::events::OwnerInputObservation>,
+    },
     PmWakeWritten {
         operation_id: String,
         reply: oneshot::Sender<OwnerReply>,
@@ -725,6 +738,19 @@ impl OwnerHandle {
         receive
             .await
             .map_err(|_| "project owner stopped before clock observation".to_string())
+    }
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    pub async fn test_suppress_mobile_commit_reply(
+        &self,
+        ready: super::events::OwnerMobileInputReady,
+    ) -> Result<Arc<AtomicBool>, String> {
+        let (reply, receive) = oneshot::channel();
+        self.sender
+            .send(OwnerMessage::SuppressMobileCommitReply { ready, reply })
+            .map_err(|_| "project owner unavailable".to_string())?;
+        receive
+            .await
+            .map_err(|_| "project owner stopped before receipt boundary".to_string())?
     }
     #[cfg(any(test, feature = "test-gh-guard"))]
     #[doc(hidden)]
@@ -1141,6 +1167,14 @@ impl OwnerState {
                 OwnerMessage::SetOperationClock(clock, reply) => {
                     self.test_operation_clock = clock;
                     let _ = reply.send(());
+                }
+                #[cfg(any(test, feature = "test-gh-guard"))]
+                OwnerMessage::SuppressMobileCommitReply { ready, reply } => {
+                    let result = self
+                        .pm_wake_permits
+                        .mobile(&ready.identity)
+                        .and_then(|transaction| transaction.suppress_commit_reply(&ready));
+                    let _ = reply.send(result);
                 }
                 OwnerMessage::AgentSwitchFinished {
                     drove,
@@ -1820,6 +1854,21 @@ impl OwnerState {
                             "input_observation":observation})),
                     );
                 }
+                OwnerMessage::MobileInputWritten {
+                    identity,
+                    data,
+                    transaction,
+                    attempted,
+                    result,
+                    observation,
+                } => {
+                    self.input_jobs -= 1;
+                    if attempted && self.exact(&identity.id, identity.incarnation).is_ok() {
+                        self.begin_policy_input(&identity.id, &data);
+                    }
+                    self.pm_wake_permits.finish(&identity.operation_id);
+                    transaction.finish(attempted, result, observation);
+                }
                 OwnerMessage::PmWakeWritten {
                     operation_id,
                     reply,
@@ -1863,6 +1912,7 @@ impl OwnerState {
     }
     fn begin_shutdown(&mut self, reply: Option<oneshot::Sender<()>>) {
         self.stopping = true;
+        self.pm_wake_permits.cancel_mobile_for_pane(None);
         self.residency.send_replace(ResidencySnapshot {
             startup_intent: self.gui_presence.intent(),
             exit_started: true,
@@ -2178,6 +2228,31 @@ impl OwnerState {
     fn request(&mut self, request: OwnerRequest, reply: oneshot::Sender<OwnerReply>) {
         if request.project_key != self.project_key {
             let _ = reply.send(Err("project key mismatch".into()));
+            return;
+        }
+        if matches!(
+            request.command,
+            OwnerCommand::PrepareMobileInput { .. }
+                | OwnerCommand::CommitMobileInput { .. }
+                | OwnerCommand::CancelMobileInput { .. }
+                | OwnerCommand::MobileInputOutcome { .. }
+                | OwnerCommand::SettleMobileInput { .. }
+        ) {
+            let deferred_reply = match &request.command {
+                OwnerCommand::PrepareMobileInput { identity, .. } => Some((identity.clone(), true)),
+                OwnerCommand::CommitMobileInput { ready } => Some((ready.identity.clone(), false)),
+                _ => None,
+            };
+            let result = self.mobile_input_command(request.command);
+            if result.is_ok() {
+                if let Some((identity, preparing)) = deferred_reply {
+                    if let Ok(transaction) = self.pm_wake_permits.mobile(&identity) {
+                        transaction.reply_when_observed(reply, preparing);
+                        return;
+                    }
+                }
+            }
+            let _ = reply.send(result);
             return;
         }
         if matches!(
@@ -2671,6 +2746,11 @@ impl OwnerState {
             | OwnerCommand::RestoreSavedSession { .. }
             | OwnerCommand::LaunchAgent { .. }
             | OwnerCommand::Input { .. }
+            | OwnerCommand::PrepareMobileInput { .. }
+            | OwnerCommand::CommitMobileInput { .. }
+            | OwnerCommand::CancelMobileInput { .. }
+            | OwnerCommand::MobileInputOutcome { .. }
+            | OwnerCommand::SettleMobileInput { .. }
             | OwnerCommand::SendInput { .. }
             | OwnerCommand::PmWakeInput { .. }
             | OwnerCommand::CancelPmWake { .. }
@@ -2679,6 +2759,121 @@ impl OwnerState {
             | OwnerCommand::ContinueWork { .. } => unreachable!(),
         };
         let _ = reply.send(result);
+    }
+
+    fn mobile_input_command(&mut self, command: OwnerCommand) -> OwnerReply {
+        use super::events::OwnerMobileInputIdentity;
+        let check_owner = |identity: &OwnerMobileInputIdentity| {
+            if identity.host_instance_id != self.host_instance_id
+                || !identity.id.starts_with(&format!("{}::", self.project_key))
+            {
+                return Err("native mobile input owner identity changed".to_string());
+            }
+            Ok(())
+        };
+        match command {
+            OwnerCommand::PrepareMobileInput { identity, data } => {
+                use sha2::{Digest, Sha256};
+                check_owner(&identity)?;
+                if self.stopping || hex::encode(Sha256::digest(&data)) != identity.data_sha256 {
+                    return Err("native mobile input preparation is unavailable".into());
+                }
+                let runtime = self.exact(&identity.id, identity.incarnation)?;
+                if runtime.agent.as_ref().map(|agent| &agent.active.session_id)
+                    != identity.session_id.as_ref()
+                {
+                    return Err("native mobile input Session changed".into());
+                }
+                let entry = self
+                    .pty_writers
+                    .read()
+                    .map_err(|error| error.to_string())?
+                    .get(&identity.id)
+                    .filter(|entry| {
+                        Arc::ptr_eq(&entry.current, &runtime.current)
+                            && Arc::ptr_eq(&entry.handle, &runtime.pty)
+                            && entry.current.load(Ordering::Acquire)
+                    })
+                    .cloned()
+                    .ok_or("native mobile input has no current physical writer")?;
+                let (transaction, created) = self.pm_wake_permits.prepare_mobile(&identity)?;
+                if created {
+                    self.input_jobs += 1;
+                    let transaction = transaction.clone();
+                    let sender = self.sender.clone();
+                    spawn_owner_worker(move || {
+                        let mut attempted = false;
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let reservation = entry
+                                .handle
+                                .reserve_input_transaction()
+                                .map_err(|error| error.to_string())?;
+                            reservation
+                                .write_ordinary_input_authorized(&data, |commit| {
+                                    let refused = |details| {
+                                        gwt_terminal::TerminalError::PtyIoError { details }
+                                    };
+                                    transaction.wait_for_commit().map_err(refused)?;
+                                    if !entry.current.load(Ordering::Acquire)
+                                        || !transaction.can_write()
+                                    {
+                                        return Err(refused(
+                                            "native prepared input is no longer current".into(),
+                                        ));
+                                    }
+                                    commit(&mut || attempted = true)
+                                })
+                                .map_err(|error| error.to_string())
+                            // Reservation Drop releases the physical writer before completion.
+                        }))
+                        .unwrap_or_else(|_| Err("native prepared input worker panicked".into()));
+                        let observation =
+                            super::events::OwnerInputObservation::capture(&entry.handle);
+                        let _ = sender.send(OwnerMessage::MobileInputWritten {
+                            identity,
+                            data,
+                            transaction,
+                            attempted,
+                            result,
+                            observation,
+                        });
+                    });
+                }
+                serde_json::to_value(transaction.outcome()?).map_err(|error| error.to_string())
+            }
+            OwnerCommand::CommitMobileInput { ready } => {
+                check_owner(&ready.identity)?;
+                let transaction = self.pm_wake_permits.mobile(&ready.identity)?;
+                let current = self
+                    .exact(&ready.identity.id, ready.identity.incarnation)
+                    .is_ok_and(|runtime| {
+                        runtime.agent.as_ref().map(|agent| &agent.active.session_id)
+                            == ready.identity.session_id.as_ref()
+                    });
+                if self.stopping || !current {
+                    self.pm_wake_permits.cancel_mobile(&ready.identity)?;
+                    return Err("native prepared input Session or pane changed".into());
+                }
+                transaction.commit(&ready)?;
+                serde_json::to_value(transaction.outcome()?).map_err(|error| error.to_string())
+            }
+            OwnerCommand::CancelMobileInput { identity } => {
+                check_owner(&identity)?;
+                serde_json::to_value(self.pm_wake_permits.cancel_mobile(&identity)?)
+                    .map_err(|error| error.to_string())
+            }
+            OwnerCommand::MobileInputOutcome { identity } => {
+                check_owner(&identity)?;
+                serde_json::to_value(self.pm_wake_permits.mobile(&identity)?.outcome()?)
+                    .map_err(|error| error.to_string())
+            }
+            OwnerCommand::SettleMobileInput { ready } => {
+                check_owner(&ready.identity)?;
+                self.pm_wake_permits.settle_mobile(&ready)?;
+                Ok(json!({"ok":true}))
+            }
+            _ => unreachable!("private mobile transaction command"),
+        }
     }
     fn pane_snapshot(&self, id: &str, incarnation: u64) -> OwnerReply {
         self.runtimes.get(id).filter(|runtime| runtime.incarnation == incarnation)
@@ -5806,6 +6001,7 @@ impl OwnerState {
         cause: CloseCause,
         reply: oneshot::Sender<OwnerReply>,
     ) {
+        self.pm_wake_permits.cancel_mobile_for_pane(Some(&id));
         let incarnation = runtime.incarnation;
         self.close_replies
             .entry((id.clone(), incarnation))

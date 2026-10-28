@@ -362,6 +362,15 @@ impl ProjectOwnerHarness {
         self.owner.test_set_operation_clock(clock).await
     }
 
+    /// Lose only the exact operation's Commit response after its actual write
+    /// and physical worker completion. The returned flag observes that loss.
+    pub async fn suppress_mobile_commit_reply(
+        &self,
+        ready: super::events::OwnerMobileInputReady,
+    ) -> Result<Arc<AtomicBool>, String> {
+        self.owner.test_suppress_mobile_commit_reply(ready).await
+    }
+
     pub async fn agent_switch_source_exited(
         &self,
         proof: crate::issue_monitor::IssueMonitorRuntimeStopRequest,
