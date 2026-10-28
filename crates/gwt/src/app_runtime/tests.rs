@@ -3613,7 +3613,7 @@ fn issue_monitor_final_spawn_rejects_a_saturated_cap_without_delivery() {
     .unwrap();
     relay(&mut runtime, &mut source);
     let snapshot = runtime
-        .issue_monitor_window_snapshot_for_tab("tab-1", &Utc::now().to_rfc3339())
+        .issue_monitor_window_snapshot_for_tab_cached("tab-1", &Utc::now().to_rfc3339())
         .unwrap();
     assert_eq!(
         snapshot.windows.len(),
