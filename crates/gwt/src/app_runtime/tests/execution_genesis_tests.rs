@@ -291,6 +291,15 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
 
 #[test]
 fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry() {
+    assert_genesis_pty_failure_recovers_member(false);
+}
+
+#[test]
+fn genesis_roster_failure_retains_receipt_until_startup_retry_recovers() {
+    assert_genesis_pty_failure_recovers_member(true);
+}
+
+fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
     let _env_guard = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -383,6 +392,13 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
     runtime
         .window_hook_states
         .insert(window_id.clone(), WindowProcessStatus::Running);
+    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
+    let prefs_backup = temp.path().join("genesis-roster-backup.json");
+    if roster_read_fails {
+        fs::rename(&prefs_path, &prefs_backup).expect("save exact roster bytes");
+        fs::create_dir(&prefs_path).expect("block roster reads with a directory");
+        assert!(gwt::load_issue_monitor_prefs(&prefs_path).is_err());
+    }
 
     let events = runtime.handle_launch_complete_and_drain(
         window_id.clone(),
@@ -436,6 +452,20 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             .exists(),
         "the exact failed genesis Session must be removed",
     );
+    if roster_read_fails {
+        assert!(durable_launch_recovery_exists(
+            &runtime.sessions_dir,
+            session_id
+        ));
+        runtime.reconcile_durable_fresh_execution_launches();
+        assert!(
+            durable_launch_recovery_exists(&runtime.sessions_dir, session_id),
+            "roster recovery failure must retain its durable retry receipt"
+        );
+        fs::remove_dir(&prefs_path).expect("remove roster read blocker");
+        fs::rename(&prefs_backup, &prefs_path).expect("restore exact roster bytes");
+        runtime.reconcile_durable_fresh_execution_launches();
+    }
     let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
         .expect("read persisted member assignment without triggering recovery");
     let retained = prefs
