@@ -90,6 +90,9 @@ impl ServerState {
             self.agent_capabilities.clone(),
             self.host_instance_id.clone(),
             Arc::new(move |event| match event {
+                TransportEvent::MobileInput(request) => {
+                    state.proxy.send(UserEvent::MobileInput(request))
+                }
                 TransportEvent::FreshExecutionReadyResend {
                     grant,
                     request,

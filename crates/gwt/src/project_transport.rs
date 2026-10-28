@@ -261,8 +261,15 @@ impl TransportState {
     fn send(&self, event: TransportEvent) {
         (self.sink)(event);
     }
+
+    /// Host-only handoff from an authenticated encrypted mobile transport.
+    /// Queueing does not authorize, consume a sequence, or use browser fast paths.
+    pub fn send_mobile_input(&self, request: Arc<crate::mobile_connection::MobileInputRequest>) {
+        self.send(TransportEvent::MobileInput(request));
+    }
 }
 pub enum TransportEvent {
+    MobileInput(Arc<crate::mobile_connection::MobileInputRequest>),
     FreshExecutionReadyResend {
         grant: AgentCapabilityGrant,
         request: crate::AgentExecutionContinuationRequest,

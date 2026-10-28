@@ -206,6 +206,74 @@ impl MobileConnection {
     }
 }
 
+/// Host-only terminal input; never deserialize a connection from wire data.
+/// Share this immutable request with `Arc` so queueing cannot replace its
+/// payload or fork the session sequence. It deliberately cannot carry generic
+/// Frontend events or the asynchronously submitted PaneSendInput command.
+pub struct MobileInputRequest {
+    connection: Arc<MobileConnection>,
+    client_id: String,
+    project: ProjectKey,
+    sequence: u64,
+    window_id: String,
+    data: String,
+}
+
+impl std::fmt::Debug for MobileInputRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MobileInputRequest").finish_non_exhaustive()
+    }
+}
+
+impl MobileInputRequest {
+    /// The trusted encrypted transport supplies its authenticated connection
+    /// and unique live client registration, with the command's wire sequence.
+    pub fn new(
+        connection: Arc<MobileConnection>,
+        client_id: String,
+        project: ProjectKey,
+        sequence: u64,
+        window_id: String,
+        data: String,
+    ) -> Self {
+        Self {
+            connection,
+            client_id,
+            project,
+            sequence,
+            window_id,
+            data,
+        }
+    }
+
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+    pub fn project(&self) -> &ProjectKey {
+        &self.project
+    }
+
+    /// Accept an operation at final synchronous dispatch, using current time
+    /// after the authorization locks. Retain those locks until the effect ends.
+    /// Recheck the live client here, and the current window owner in `effect`.
+    /// Neither callback may reenter this connection or its Host writer.
+    /// A rejected live binding also consumes this attempted command sequence.
+    pub fn dispatch<T>(
+        &self,
+        current_project: impl FnOnce() -> Option<ProjectKey>,
+        now: impl FnOnce() -> u64,
+        effect: impl FnOnce(&str, &str) -> Result<T, AuthorizationError>,
+    ) -> Result<T, AuthorizationError> {
+        self.connection
+            .dispatch(&self.project, self.sequence, now, || {
+                if current_project().as_ref() != Some(&self.project) {
+                    return Err(AuthorizationError::WrongProject);
+                }
+                effect(&self.window_id, &self.data)
+            })?
+    }
+}
+
 /// A single authority per Host, shared behind its owner's synchronization fence.
 /// Cloning it would fork replay/revocation state, so it deliberately has no Clone.
 pub struct MobileAuthorization {
@@ -651,6 +719,113 @@ mod tests {
             .unwrap();
         auth.authenticate(&challenge.id, signature.as_ref(), NOW)
             .unwrap()
+    }
+
+    #[test]
+    fn mobile_input_transport_preserves_payload_and_authorizes_only_at_dispatch() {
+        use crate::project_transport::{ClientHub, TransportEvent, TransportState};
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = session(&mut auth, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        let request = Arc::new(MobileInputRequest::new(
+            connection.clone(),
+            "phone".into(),
+            project(),
+            0,
+            "pane".into(),
+            "secret input".into(),
+        ));
+        assert!(!format!("{request:?}").contains("secret input"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let transport = TransportState::new(
+            ClientHub::default(),
+            Default::default(),
+            "host".into(),
+            Arc::new(move |event| tx.send(event).unwrap()),
+        );
+        transport.send_mobile_input(request.clone());
+        let TransportEvent::MobileInput(queued) = rx.recv().unwrap() else {
+            panic!("mobile event")
+        };
+        assert!(Arc::ptr_eq(&queued, &request));
+        assert_eq!(queued.client_id(), "phone");
+        assert_eq!(queued.project(), &project());
+        queued
+            .dispatch(
+                || Some(project()),
+                || NOW,
+                |id, data| {
+                    assert!(
+                        auth.try_write().is_err(),
+                        "retain revocation fence through the actual effect"
+                    );
+                    assert_eq!((id, data), ("pane", "secret input"));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            request.dispatch(|| Some(project()), || NOW, |_, _| panic!("replay")),
+            Err::<(), _>(AuthorizationError::Replay)
+        );
+        let next = MobileInputRequest::new(
+            connection,
+            "phone".into(),
+            project(),
+            1,
+            "pane".into(),
+            "submit".into(),
+        );
+        auth.write().unwrap().revoke(&device.id).unwrap();
+        assert_eq!(
+            next.dispatch(|| Some(project()), || NOW, |_, _| panic!("revoked")),
+            Err::<(), _>(AuthorizationError::Revoked)
+        );
+    }
+
+    #[test]
+    fn mobile_input_rechecks_live_scope_and_time_after_queueing() {
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = session(&mut auth, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth, session));
+        for (sequence, scope) in [None, Some(other_project())].into_iter().enumerate() {
+            let request = MobileInputRequest::new(
+                connection.clone(),
+                "phone".into(),
+                project(),
+                sequence as u64,
+                "pane".into(),
+                "input".into(),
+            );
+            assert_eq!(
+                request.dispatch(|| scope, || NOW, |_, _| panic!("unbound client")),
+                Err::<(), _>(AuthorizationError::WrongProject)
+            );
+        }
+        let request = MobileInputRequest::new(
+            connection,
+            "phone".into(),
+            project(),
+            2,
+            "pane".into(),
+            "input".into(),
+        );
+        assert_eq!(
+            request.dispatch(
+                || Some(project()),
+                || NOW + SESSION_TTL_SECS,
+                |_, _| panic!("expired")
+            ),
+            Err::<(), _>(AuthorizationError::Expired)
+        );
     }
 
     #[test]

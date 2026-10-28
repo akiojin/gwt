@@ -2,6 +2,8 @@ use super::*;
 use std::time::Instant;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+mod mobile_input;
+
 #[derive(Default)]
 pub(crate) struct AppEventQueue {
     foreground: std::collections::VecDeque<UserEvent>,
@@ -131,7 +133,8 @@ fn user_event_priority(event: &UserEvent) -> AppEventPriority {
             | FrontendEvent::CheckKnowledgeRevision { .. } => AppEventPriority::Background,
             _ => AppEventPriority::Foreground,
         },
-        UserEvent::AgentFrontend { .. }
+        UserEvent::MobileInput(_)
+        | UserEvent::AgentFrontend { .. }
         | UserEvent::FreshExecutionReadyResend { .. }
         | UserEvent::CommitAgentSelfClose { .. }
         | UserEvent::AgentSwitchSourceExited(_)
