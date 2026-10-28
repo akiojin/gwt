@@ -8849,6 +8849,15 @@ impl AppRuntime {
         project_tab_id: &str,
         now: &str,
     ) -> Option<gwt::IssueMonitorWindowSnapshot> {
+        // After native handoff the GUI is a read model, not another physical
+        // host. Its tab-qualified aliases would double-count the owner's panes.
+        // Keep that boundary when degraded; only the native owner publishes.
+        if self.project_context(project_tab_id).is_some_and(|context| {
+            self.project_state(&context)
+                .is_some_and(|state| state.project_owner_connection_id > 0)
+        }) {
+            return None;
+        }
         self.issue_monitor_window_snapshot_with_session_metadata(
             project_tab_id,
             now,

@@ -537,7 +537,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
     };
     if bookkeeping_warning {
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
             .unwrap();
         assert_eq!(snapshot.windows.len(), 1);
         assert_eq!(
@@ -687,7 +687,7 @@ fn completed_restore_reaches_exact_close(bookkeeping_warning: bool) {
         let accounting =
             gwt::IssueMonitorState::with_prefs(gwt::IssueMonitorConfig::default(), closed_prefs);
         let snapshot = runtime
-            .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
+            .issue_monitor_window_snapshot_for_tab_cached("tab-1", &chrono::Utc::now().to_rfc3339())
             .unwrap();
         assert!(snapshot.windows.is_empty());
         assert_eq!(accounting.agent_status().occupied_slot_count, Some(0));

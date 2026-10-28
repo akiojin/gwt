@@ -372,6 +372,16 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         .unwrap()
         .owner_health
         .is_none());
+    let now = chrono::Utc::now().to_rfc3339();
+    assert!(runtime
+        .issue_monitor_window_snapshot_for_tab("b", &now)
+        .is_some());
+    assert!(
+        runtime
+            .issue_monitor_window_snapshot_for_tab("a", &now)
+            .is_none(),
+        "a native-managed project's GUI must not publish a second physical canvas, even when degraded"
+    );
     let mut stale_health = health.clone();
     stale_health.detail = Some("Stale connection failure".into());
     assert!(runtime
