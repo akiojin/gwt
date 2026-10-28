@@ -161,7 +161,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('Reports and Execution log render the same window version for every receive', async ({ page }, info) => {
+  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -177,9 +177,17 @@ test.describe('PM reports', () => {
       expect(id).toBeTruthy();
       const terminal = await pane.locator('.terminal-root').elementHandle();
       const marker = `Shared version ${theme}`;
+      // Complete the normal first-fit handshake before measuring an inactive
+      // terminal. A never-revealed log intentionally defers its initial bytes.
+      await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.metrics(id!).isReady, id)).toBe(true);
+      await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+      await expect(reports).toBeVisible();
+      await page.locator('#op-pm-entry').focus();
+      await expect(page.locator('#op-pm-entry')).toBeFocused();
 
       // Controlled inbound frames exercise the real checkout receive/model/view
-      // path. These are functional observations, not a real PTY or latency run.
+      // deadline with rAF withheld, not real PTY throughput or OS background paint.
       const evidence = await page.evaluate(async ({ id, marker }) => {
         const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
         const reportRoot = pane.querySelector<HTMLElement>('.pm-chat')!;
@@ -190,23 +198,38 @@ test.describe('PM reports', () => {
         const original = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
           .findLast((event: any) => event.kind === 'pm_reports' && event.id === id);
         if (!socket || !original) throw new Error('Missing live project socket or hydrated Reports');
-        const dispatch = (...events: object[]) => new Promise<{ before: (string | undefined)[]; after: (string | undefined)[] }>((resolve, reject) => {
+        const dispatch = (raw: string, reportText: string, ...events: object[]) => new Promise<{
+          before: (string | undefined)[]; after: (string | undefined)[]; elapsed_ms: number;
+        }>((resolve, reject) => {
           const before = versions();
+          const startedAt = performance.now();
+          let after: (string | undefined)[] | undefined;
+          const check = () => {
+            const elapsed_ms = performance.now() - startedAt;
+            if (after && reportRoot.textContent!.includes(reportText)
+              && window.__gwtTerminalTestApi!.bufferText(id!).includes(raw)) {
+              resolve({ before, after, elapsed_ms });
+            } else if (elapsed_ms >= 1_000) {
+              observer.disconnect();
+              reject(new Error(`Receive did not update both views and RAW buffer within one second: ${JSON.stringify({
+                before, after, reportMatched: reportRoot.textContent!.includes(reportText),
+                rawMatched: window.__gwtTerminalTestApi!.bufferText(id!).includes(raw),
+                terminal: window.__gwtTerminalTestApi!.metrics(id!),
+              })}`));
+            } else timer = setTimeout(check, 100);
+          };
           const observer = new MutationObserver(() => {
             observer.disconnect();
-            clearTimeout(timeout);
-            resolve({ before, after: versions() });
+            after = versions();
+            clearTimeout(timer);
+            check();
           });
-          const timeout = setTimeout(() => {
-            observer.disconnect();
-            reject(new Error('Receive did not advance the Reports window version'));
-          }, 5_000);
+          let timer = setTimeout(check, 100);
           observer.observe(reportRoot, { attributes: true, attributeFilter: ['data-state-version'] });
           for (const event of events) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
         });
-        const snapshot = await dispatch({ kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
         // Obtain a real model-issued force token without sending this controlled
-        // request to the backend; its response is injected below.
+        // request to the backend, before withholding animation callbacks.
         let request: any;
         const originalSend = socket.send;
         socket.send = function (data: string) {
@@ -217,23 +240,50 @@ test.describe('PM reports', () => {
         try { document.dispatchEvent(new Event('visibilitychange')); }
         finally { socket.send = originalSend; }
         if (!request) throw new Error('Missing model-issued Reports request');
-        const report = await dispatch({ ...original, request_id: request.request_id, snapshot: true,
-          version: { epoch: original.version.epoch, revision: original.version.revision + 1 }, reports: [...original.reports, {
-          id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
-          body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
-        }] });
-        const reportNodes = [...reportRoot.querySelectorAll('article')];
-        const output = await dispatch({ kind: 'terminal_output', id, data_base64: btoa('PAIR RAW appended\r\n') });
-        const reportsRetainedOnOutput = reportNodes.every((node, index) => node === reportRoot.querySelectorAll('article')[index]);
-        const reportText = reportRoot.textContent;
-        // The following valid packet fences dispatcher processing of the stale
-        // frame: only that valid packet may advance the shared version.
-        const stale = await dispatch(
-          { ...original, session_id: 'stale-session', reports: [], error: 'STALE REPORT ERROR' },
-          { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW fence\r\n') },
-        );
-        return { snapshot, report, output, stale, reportsRetainedOnOutput,
-          reportsRetainedOnStale: reportRoot.textContent === reportText };
+        const originalFrame = window.requestAnimationFrame;
+        const originalCancel = window.cancelAnimationFrame;
+        const captured = new Map<number, FrameRequestCallback>();
+        let requestedFrames = 0;
+        let focusEvents = 0;
+        const onFocus = () => { focusEvents += 1; };
+        pane.addEventListener('focusin', onFocus);
+        window.requestAnimationFrame = callback => {
+          const handle = -(++requestedFrames);
+          captured.set(handle, callback);
+          return handle;
+        };
+        window.cancelAnimationFrame = handle => {
+          if (!captured.delete(handle)) originalCancel.call(window, handle);
+        };
+        try {
+          const snapshot = await dispatch('PAIR RAW snapshot', 'Persisted before restart',
+            { kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
+          const report = await dispatch('PAIR RAW snapshot', marker, { ...original, request_id: request.request_id, snapshot: true,
+            version: { epoch: original.version.epoch, revision: original.version.revision + 1 }, reports: [...original.reports, {
+            id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
+            body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
+          }] });
+          const reportNodes = [...reportRoot.querySelectorAll('article')];
+          const output = await dispatch('PAIR RAW appended', marker,
+            { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW appended\r\n') });
+          const reportsRetainedOnOutput = reportNodes.every((node, index) => node === reportRoot.querySelectorAll('article')[index]);
+          const reportText = reportRoot.textContent;
+          // The following valid packet fences dispatcher processing of the stale
+          // frame: only that valid packet may advance the shared version.
+          const stale = await dispatch('PAIR RAW fence', marker,
+            { ...original, session_id: 'stale-session', reports: [], error: 'STALE REPORT ERROR' },
+            { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW fence\r\n') },
+          );
+          return { snapshot, report, output, stale, reportsRetainedOnOutput,
+            reportsRetainedOnStale: reportRoot.textContent === reportText,
+            requestedFrames, capturedFrames: captured.size, focusEvents,
+            windowFocused: pane.contains(document.activeElement) };
+        } finally {
+          window.requestAnimationFrame = originalFrame;
+          window.cancelAnimationFrame = originalCancel;
+          pane.removeEventListener('focusin', onFocus);
+          for (const callback of captured.values()) originalFrame.call(window, callback);
+        }
       }, { id, marker });
       for (const step of [evidence.snapshot, evidence.report, evidence.output, evidence.stale]) {
         expect(step.before[0]).toMatch(/^\d+$/);
@@ -242,7 +292,12 @@ test.describe('PM reports', () => {
         expect(step.after, 'each receive advances both views together').toEqual([
           String(Number(step.before[0]) + 1), String(Number(step.before[0]) + 1),
         ]);
+        expect(step.elapsed_ms, 'joint DOM and RAW buffer advance within one second').toBeLessThanOrEqual(1_000);
       }
+      expect(evidence.requestedFrames, 'animation callbacks were withheld').toBeGreaterThan(0);
+      expect(evidence.capturedFrames).toBeGreaterThan(0);
+      expect(evidence.windowFocused).toBe(false);
+      expect(evidence.focusEvents, 'no target focus restored updates').toBe(0);
       expect(evidence.reportsRetainedOnOutput).toBe(true);
       expect(evidence.reportsRetainedOnStale).toBe(true);
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
