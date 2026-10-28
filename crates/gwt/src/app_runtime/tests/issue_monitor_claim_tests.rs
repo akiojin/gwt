@@ -5824,6 +5824,7 @@ fn assert_expired_launch_ack_cleanup(
     preserve_successor: bool,
     conflicting_owner: bool,
     startup_timeout: bool,
+    disabled_monitor: bool,
 ) {
     use gwt::project_runtime::{
         events::{OwnerCommand, OwnerEvent},
@@ -5963,7 +5964,21 @@ fn assert_expired_launch_ack_cleanup(
             .unwrap()
     });
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&root);
-    let expired = if conflicting_owner {
+    let expired = if disabled_monitor {
+        gwt::daemon_publisher::publish_durable_issue_monitor_control(
+            &root,
+            gwt::runtime_daemon_events::issue_monitor_payload(
+                "control",
+                serde_json::json!({"config_set":{"enabled":false}}),
+                std::process::id(),
+            ),
+        )
+        .unwrap();
+        let disabled = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert!(!disabled.enabled);
+        assert!(disabled.pending_launch_deliveries.is_empty());
+        Some(disabled)
+    } else if conflicting_owner {
         gwt::daemon_publisher::publish_durable_issue_monitor_control(
             &root,
             gwt::runtime_daemon_events::issue_monitor_payload(
@@ -6016,16 +6031,17 @@ fn assert_expired_launch_ack_cleanup(
     let receipt = launch.join().unwrap().unwrap();
     let incarnation = receipt["incarnation"].as_u64().unwrap();
     assert_eq!(incarnation, captured.incarnation);
-    assert!(
+    let acknowledgement =
         owner_fixture_block_on(owner.command(OwnerCommand::AcknowledgeMonitorLaunch {
             id: id.clone(),
             incarnation,
             issue_number: 42,
-            delivery_id
-        }))
-        .is_err()
-    );
-    if !conflicting_owner {
+            delivery_id,
+        }));
+    if !disabled_monitor {
+        assert!(acknowledgement.is_err());
+    }
+    if !conflicting_owner && !disabled_monitor {
         let _ = owner_fixture_block_on(async {
             // test-hygiene: allow-wall-clock-deadline Bound actual late-ACK physical cleanup after the canonical daemon has already committed delivery expiry.
             tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
@@ -6046,22 +6062,42 @@ fn assert_expired_launch_ack_cleanup(
         });
     }
     let remaining = owner_fixture_block_on(owner.probe(&id, incarnation)).ok();
+    let physical_alive = disabled_monitor
+        && remaining
+            .as_ref()
+            .is_some_and(|pane| pane.pty.try_wait().unwrap().is_none());
     let finalized = gwt_agent::Session::load(
         &gwt_core::paths::gwt_sessions_dir()
             .join(format!("{}.toml", captured.session.as_ref().unwrap().id)),
     )
     .unwrap();
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
-    if let Some(pane) = &remaining {
+    if disabled_monitor {
+        owner_fixture_block_on(owner.command(OwnerCommand::Close {
+            id: id.clone(),
+            incarnation,
+        }))
+        .expect("the exact materialized fixture is closed before its Monitor driver drains");
+    } else if let Some(pane) = &remaining {
         super::pane_control_tests::control_close(&owner, pane);
     }
     owner_fixture_block_on(owner.shutdown());
     assert_eq!(
         remaining.is_some(),
-        conflicting_owner,
-        "expired ACK must clean only its exact own window/runtime/Session"
+        conflicting_owner || disabled_monitor,
+        "expiry alone cleans the exact owner; Monitor OFF retains its physical pane: {acknowledgement:?}"
     );
-    if conflicting_owner {
+    if disabled_monitor {
+        assert!(acknowledgement.is_ok(), "{acknowledgement:?}");
+        assert!(
+            physical_alive,
+            "Monitor OFF must not stop the materialized PTY"
+        );
+        assert_ne!(finalized.status, gwt_agent::AgentStatus::Stopped);
+        assert!(!prefs.enabled);
+        assert!(prefs.pending_launch_deliveries.is_empty());
+        assert!(prefs.launched_issues.is_empty());
+    } else if conflicting_owner {
         assert_eq!(
             prefs.pending_launch_deliveries.len(),
             1,
@@ -6091,22 +6127,27 @@ fn assert_expired_launch_ack_cleanup(
 
 #[test]
 fn issue_5289_expired_launch_ack_closes_late_window_and_session() {
-    assert_expired_launch_ack_cleanup(false, false, false);
+    assert_expired_launch_ack_cleanup(false, false, false, false);
 }
 
 #[test]
 fn issue_5289_expired_launch_ack_preserves_successor_runtime() {
-    assert_expired_launch_ack_cleanup(true, false, false);
+    assert_expired_launch_ack_cleanup(true, false, false, false);
 }
 
 #[test]
 fn issue_5415_refused_duplicate_ack_preserves_the_bound_window() {
-    assert_expired_launch_ack_cleanup(false, true, false);
+    assert_expired_launch_ack_cleanup(false, true, false, false);
 }
 
 #[test]
 fn issue_5415_post_ack_startup_timeout_requeues_the_exact_window_without_reusing_delivery_id() {
-    assert_expired_launch_ack_cleanup(false, false, true);
+    assert_expired_launch_ack_cleanup(false, false, true, false);
+}
+
+#[test]
+fn issue_4735_monitor_off_before_ack_preserves_the_materialized_owner() {
+    assert_expired_launch_ack_cleanup(false, false, false, true);
 }
 
 #[test]

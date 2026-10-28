@@ -544,6 +544,12 @@ impl MonitorLaunch {
         self.check_current()?;
         let issue = self.issue()?;
         let before = self.read_monitor()?;
+        // OFF releases Monitor tracking, not the already materialized owner.
+        // Its removed delivery cannot authorize an ACK or physical teardown.
+        if !before.prefs().enabled {
+            self.check_current()?;
+            return Ok(None);
+        }
         if ready {
             if let Some(source) = self.confirmed_source(&before) {
                 return Ok(Some(source));
@@ -942,7 +948,8 @@ impl MonitorLaunch {
         };
         let monitor = self.read_monitor()?;
         let issue = self.issue()?;
-        Ok(self.confirmed_source(&monitor).is_none()
+        Ok(monitor.prefs().enabled
+            && self.confirmed_source(&monitor).is_none()
             && !monitor
                 .prefs()
                 .pending_launch_deliveries
