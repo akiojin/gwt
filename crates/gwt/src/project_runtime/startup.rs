@@ -6,9 +6,9 @@ use super::continuation::{
 };
 use super::launch_finalization::{
     compensate_genesis_workspace_projection, durable_fresh_execution_candidate,
-    genesis_initial_execution_binding_matches, path_matches, reject_continue_work_workspace_commit,
-    resolve_split_workspace_state_external_commit, DurableFreshExecutionCandidate,
-    GenesisCompensationAuthority,
+    genesis_initial_execution_binding_matches, path_matches, reconcile_genesis_roster,
+    reject_continue_work_workspace_commit, resolve_split_workspace_state_external_commit,
+    DurableFreshExecutionCandidate, GenesisCompensationAuthority,
 };
 use crate::session_launch::recovery::{
     clear_durable_launch_recovery, durable_launch_recovery_records, DurableLaunchRecoveryKind,
@@ -735,6 +735,10 @@ impl StartupLaunchRecovery<'_> {
             }
         }
         self.cleaned_sessions.push(receipt.session_id.clone());
+        if let Err(error) = reconcile_genesis_roster(&receipt.project_root, self.sessions_dir) {
+            tracing::warn!(session_id = %receipt.session_id, error = %error, "genesis roster recovery remains pending");
+            return;
+        }
         let _ = clear_durable_launch_recovery(self.sessions_dir, &receipt.session_id);
     }
 

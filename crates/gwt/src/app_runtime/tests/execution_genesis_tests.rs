@@ -357,6 +357,15 @@ fn review_dispatch_launch_completion_keeps_the_implementation_binding() {
 
 #[test]
 fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry() {
+    assert_genesis_pty_failure_recovers_member(false);
+}
+
+#[test]
+fn genesis_roster_failure_retains_receipt_until_startup_retry_recovers() {
+    assert_genesis_pty_failure_recovers_member(true);
+}
+
+fn assert_genesis_pty_failure_recovers_member(roster_read_fails: bool) {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -397,11 +406,27 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             .unwrap();
         let source = captured.session.as_ref().unwrap();
         let binding = source.execution_binding.as_ref().unwrap();
+        let member_id = source.agent_member_id.as_ref().unwrap();
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        let member_before = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .agent_roster
+            .unwrap()
+            .members
+            .into_iter()
+            .find(|member| &member.agent_member_id == member_id)
+            .unwrap();
         let authority = gwt::cli::execution_state::ExecutionOwnerKey {
             kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
             number: 2359,
         };
         assert!(captured.pty.is_none());
+        let prefs_backup = temp.path().join("genesis-roster-backup.json");
+        if roster_read_fails {
+            fs::rename(&prefs_path, &prefs_backup).unwrap();
+            fs::create_dir(&prefs_path).unwrap();
+            assert!(gwt::load_issue_monitor_prefs(&prefs_path).is_err());
+        }
         checkpoint.release();
         let result = launch.await.unwrap();
         let inventory = owner.command(OwnerCommand::ListPanes).await.unwrap();
@@ -428,7 +453,28 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
         );
         let sessions = gwt_core::paths::gwt_sessions_dir();
         assert!(!sessions.join(format!("{}.toml", source.id)).exists());
-        assert!(!durable_launch_recovery_exists(&sessions, &source.id));
+        let retained_after_failure = durable_launch_recovery_exists(&sessions, &source.id);
+        owner.shutdown().await;
+        let mut retained_during_startup_fault = None;
+        if roster_read_fails {
+            let failed_retry = production_owner_fixture(&project).await;
+            retained_during_startup_fault =
+                Some(durable_launch_recovery_exists(&sessions, &source.id));
+            failed_retry.shutdown().await;
+            fs::remove_dir(&prefs_path).unwrap();
+            fs::rename(&prefs_backup, &prefs_path).unwrap();
+            let normal_retry = production_owner_fixture(&project).await;
+            normal_retry.shutdown().await;
+        }
+        // Read persisted prefs directly: roster recovery must not repair the result.
+        let member_after = gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .agent_roster
+            .unwrap()
+            .members
+            .into_iter()
+            .find(|member| &member.agent_member_id == member_id)
+            .unwrap();
         assert!(
             gwt_core::workspace_projection::load_workspace_work_items(&project)
                 .unwrap()
@@ -464,7 +510,25 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
                 .unwrap(),
             Some(terminal_binding)
         );
-        owner.shutdown().await;
+        assert_eq!(retained_after_failure, roster_read_fails);
+        if roster_read_fails {
+            assert_eq!(
+                retained_during_startup_fault,
+                Some(true),
+                "roster recovery failure must retain its durable retry receipt"
+            );
+        }
+        assert!(!durable_launch_recovery_exists(&sessions, &source.id));
+        let assignment = member_before.assignment.as_ref().unwrap();
+        assert!(!assignment.reservation_id.is_empty());
+        assert_eq!(assignment.session_id.as_deref(), Some(source.id.as_str()));
+        assert!(
+            member_after.assignment.is_none(),
+            "failed genesis must not strand its member assignment"
+        );
+        assert_eq!(member_after.name, member_before.name);
+        assert_eq!(member_after.enabled, member_before.enabled);
+        assert_eq!(member_after.agent_id, member_before.agent_id);
     });
 }
 
