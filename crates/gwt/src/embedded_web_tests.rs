@@ -2076,9 +2076,9 @@ fn embedded_web_knowledge_bridge_surface_uses_cache_backed_contract() {
     );
     assert!(
         html.contains(
-            "[\"settings\", \"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
+            "[\"issue\", \"issue_monitor\", \"spec\", \"work\", \"workspace\", \"branches\"].includes(preset)",
         ) && html.contains("return \"issue\";"),
-        "expected Settings and legacy aliases to share Issue knowledge contracts",
+        "expected Issue and legacy aliases to share Issue knowledge contracts",
     );
 }
 

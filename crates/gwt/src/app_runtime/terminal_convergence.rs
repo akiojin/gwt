@@ -24,6 +24,7 @@
 //! closed window never respawns at startup or Open Project.
 
 use super::*;
+use gwt::cli::execution_state::ExecutionControlRecord;
 use std::time::Duration;
 
 /// Facts read from the exact Worktree's execution diagnosis.
@@ -36,6 +37,8 @@ pub(crate) struct ExecutionTerminalFacts {
     pub(crate) session_matches_execution: bool,
     /// `settlement_severity == "clear"`.
     pub(crate) settlement_clear: bool,
+    /// Warning-only bookkeeping with authenticated current-generation provenance.
+    pub(crate) settlement_warning_authorized: bool,
     pub(crate) settlement_obligation_open: bool,
     pub(crate) open_obligations: usize,
     /// Issue #4783 AC-1: the generation was Blocked by a revoked-launch
@@ -56,6 +59,8 @@ impl ExecutionTerminalFacts {
             owner_number: diagnosis.owner_number,
             session_matches_execution: false,
             settlement_clear: diagnosis.settlement_severity == "clear",
+            settlement_warning_authorized: diagnosis.settlement_severity == "warning"
+                && diagnosis.work_event_receipt_matches_current_generation == Some(true),
             settlement_obligation_open: diagnosis.settlement_obligation_open,
             open_obligations: diagnosis.open_obligations.len(),
             launch_revoked: diagnosis.ecr_status
@@ -63,6 +68,27 @@ impl ExecutionTerminalFacts {
                 && diagnosis.missing_verification.as_deref()
                     == Some(gwt::cli::execution_state::REVOKED_LAUNCH_MISSING_VERIFICATION),
         }
+    }
+
+    fn matches_completed_session(
+        &self,
+        session: &gwt_agent::Session,
+        read_record: impl FnOnce(&Path) -> std::io::Result<Option<ExecutionControlRecord>>,
+    ) -> bool {
+        // Only Completed uses this identity fence. Other diagnoses already
+        // loaded and validated the record and cannot close through this path.
+        if self.status != gwt::cli::execution_state::ExecutionDiagnosisState::Completed {
+            return false;
+        }
+        read_record(&session.worktree_path)
+            .ok()
+            .flatten()
+            .is_some_and(|record| {
+                gwt::cli::execution_state::integrity_ok(&record)
+                    && record.primary_session_id == session.id
+                    && Some(record.owner_number) == self.owner_number
+                    && record.status == gwt::cli::execution_state::ExecutionControlStatus::Completed
+            })
     }
 }
 
@@ -123,6 +149,8 @@ pub(crate) enum TerminalCloseReason {
     SettledExecution,
     /// FR-044 (b): durable closed / completed Issue record.
     ClosedIssue,
+    /// A completed idle writer of a closed Issue retains only bookkeeping warnings.
+    ClosedIssueBookkeepingWarning,
     /// FR-044 (c): the Monitor durably replaced this launch with another
     /// window and this one is no longer running.
     RevokedLaunch,
@@ -140,6 +168,7 @@ impl TerminalCloseReason {
         match self {
             Self::SettledExecution => "settled_execution",
             Self::ClosedIssue => "closed_issue",
+            Self::ClosedIssueBookkeepingWarning => "closed_issue_bookkeeping_warning",
             Self::RevokedLaunch => "revoked_launch",
             Self::LostOwnership => "lost_ownership",
             Self::MonitorStopped => "monitor_stopped",
@@ -156,7 +185,7 @@ pub(crate) enum TerminalCloseEligibility {
 
 /// FR-044: decide whether one Issue-linked Agent window may be closed by the
 /// runtime. Missing, stale, corrupt, or unreadable facts fail closed; so do
-/// NeedsHuman, Error / Interrupted / Blocked, open obligations, and windows
+/// NeedsHuman, Error / Interrupted / Blocked, open action obligations, and windows
 /// the Monitor still tracks without a terminal fact.
 pub(crate) fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalCloseEligibility {
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
@@ -201,6 +230,26 @@ pub(crate) fn classify_terminal_window(facts: &TerminalWindowFacts) -> TerminalC
     ) || execution.binding == ExecutionBindingState::Corrupt
     {
         return Ineligible("execution_blocked_or_corrupt");
+    }
+    // Issue #3590 / T-050: retain the warning and its original receipt, but
+    // let this exact completed idle writer return its physical Monitor slot.
+    if monitor.issue_closed
+        && execution.status == ExecutionDiagnosisState::Completed
+        && execution.binding == ExecutionBindingState::Terminal
+        && execution.owner_number == Some(issue_number)
+        && execution.session_matches_execution
+        && execution.settlement_warning_authorized
+        && execution.open_obligations == 0
+        && matches!(
+            facts.window_status,
+            WindowProcessStatus::Idle | WindowProcessStatus::Stopped
+        )
+        && matches!(
+            session_status,
+            gwt_agent::AgentStatus::Idle | gwt_agent::AgentStatus::Stopped
+        )
+    {
+        return Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning);
     }
     if execution.settlement_obligation_open || execution.open_obligations > 0 {
         return Ineligible("obligation_open");
@@ -528,15 +577,8 @@ fn read_terminal_window_facts_with_monitor(
             Some(session),
         ),
     );
-    execution.session_matches_execution = gwt::cli::execution_state::load(&session.worktree_path)
-        .ok()
-        .flatten()
-        .is_some_and(|record| {
-            gwt::cli::execution_state::integrity_ok(&record)
-                && record.primary_session_id == session.id
-                && Some(record.owner_number) == execution.owner_number
-                && record.status == gwt::cli::execution_state::ExecutionControlStatus::Completed
-        });
+    execution.session_matches_execution =
+        execution.matches_completed_session(session, gwt::cli::execution_state::load);
     let execution = Some(execution);
     let monitor =
         monitor.map(|monitor| MonitorTerminalFacts::from_monitor(monitor, issue_number, window_id));
@@ -854,6 +896,7 @@ impl AppRuntime {
                         .get(&observation.window_id)
                         .is_some_and(|candidate| {
                             candidate.session_id == observation.session_id
+                                && candidate.reason == reason
                                 && candidate.lifecycle_generation
                                     == observation.lifecycle_generation
                         });
@@ -882,7 +925,7 @@ impl AppRuntime {
                 }
             }
         }
-        self.close_expired_terminal_window_candidates_at(now)
+        self.close_expired_terminal_window_candidates(now, true)
     }
 
     /// FR-046: close every candidate whose grace elapsed, after revalidating
@@ -891,6 +934,14 @@ impl AppRuntime {
     pub(crate) fn close_expired_terminal_window_candidates_at(
         &mut self,
         now: Instant,
+    ) -> Vec<OutboundEvent> {
+        self.close_expired_terminal_window_candidates(now, false)
+    }
+
+    fn close_expired_terminal_window_candidates(
+        &mut self,
+        now: Instant,
+        fresh_observations: bool,
     ) -> Vec<OutboundEvent> {
         let grace = self.terminal_close_grace;
         let expired: Vec<(String, TerminalCloseCandidate)> = self
@@ -901,7 +952,15 @@ impl AppRuntime {
             .collect();
         let mut events = Vec::new();
         for (window_id, candidate) in expired {
-            self.terminal_close_candidates.remove(&window_id);
+            if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
+                && !matches!(
+                    self.window_status(&window_id),
+                    Some(WindowProcessStatus::Idle | WindowProcessStatus::Stopped)
+                )
+            {
+                self.terminal_close_candidates.remove(&window_id);
+                continue;
+            }
             let session_matches = self
                 .active_agent_sessions
                 .get(&window_id)
@@ -917,6 +976,7 @@ impl AppRuntime {
                 || !session_matches
                 || !generation_matches
             {
+                self.terminal_close_candidates.remove(&window_id);
                 tracing::info!(
                     target: "gwt.pane.teardown",
                     window_id = %window_id,
@@ -926,6 +986,15 @@ impl AppRuntime {
                 );
                 continue;
             }
+            // Warning cleanup needs this scan's classification, applied above
+            // after background Session/ledger reads. A timer retains the grace
+            // candidate until then, without adding disk IO to the Tao thread.
+            if candidate.reason == TerminalCloseReason::ClosedIssueBookkeepingWarning
+                && !fresh_observations
+            {
+                continue;
+            }
+            self.terminal_close_candidates.remove(&window_id);
             tracing::info!(
                 target: "gwt.pane.teardown",
                 window_id = %window_id,
@@ -1021,6 +1090,33 @@ impl AppRuntime {
 mod tests {
     use super::*;
     use gwt::cli::execution_state::{ExecutionBindingState, ExecutionDiagnosisState};
+
+    #[test]
+    fn non_completed_diagnoses_skip_the_additional_identity_read() {
+        let session = gwt_agent::Session::new(
+            Path::new("unused"),
+            "work/issue-42",
+            gwt_agent::AgentId::Codex,
+        );
+        for status in [
+            ExecutionDiagnosisState::Active,
+            ExecutionDiagnosisState::Blocked,
+            ExecutionDiagnosisState::Missing,
+            ExecutionDiagnosisState::Corrupt,
+        ] {
+            let mut execution = active_execution(42);
+            execution.status = status;
+            let mut reads = 0;
+            assert!(!execution.matches_completed_session(&session, |_| {
+                reads += 1;
+                Ok(None)
+            }));
+            assert_eq!(
+                reads, 0,
+                "{status:?} never uses the Completed identity fence"
+            );
+        }
+    }
 
     #[test]
     fn observer_reads_each_monitor_path_once_per_tick_including_failures() {
@@ -1244,6 +1340,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: true,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 0,
             launch_revoked: false,
@@ -1257,6 +1354,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: false,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 1,
             launch_revoked: false,
@@ -1272,6 +1370,7 @@ mod tests {
             owner_number: Some(owner),
             session_matches_execution: true,
             settlement_clear: false,
+            settlement_warning_authorized: false,
             settlement_obligation_open: false,
             open_obligations: 0,
             launch_revoked: true,
@@ -1361,6 +1460,54 @@ mod tests {
             classify_terminal_window(&facts(Some(execution), Some(monitor))),
             TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssue)
         );
+    }
+
+    #[test]
+    fn closed_bookkeeping_warning_preserves_live_and_untrusted_panes() {
+        let mut execution = settled_execution(42);
+        execution.settlement_clear = false;
+        execution.settlement_warning_authorized = true;
+        execution.settlement_obligation_open = true;
+        let original = idle_pane(
+            execution,
+            MonitorTerminalFacts {
+                issue_closed: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            classify_terminal_window(&original),
+            TerminalCloseEligibility::Eligible(TerminalCloseReason::ClosedIssueBookkeepingWarning)
+        );
+
+        let invalid: [fn(&mut TerminalWindowFacts); 9] = [
+            |facts| facts.monitor.as_mut().unwrap().issue_closed = false,
+            |facts| facts.window_status = WindowProcessStatus::Running,
+            |facts| facts.session_status = Some(gwt_agent::AgentStatus::Running),
+            |facts| facts.execution.as_mut().unwrap().session_matches_execution = false,
+            |facts| facts.execution.as_mut().unwrap().owner_number = Some(7),
+            |facts| {
+                facts
+                    .execution
+                    .as_mut()
+                    .unwrap()
+                    .settlement_warning_authorized = false
+            },
+            |facts| facts.execution.as_mut().unwrap().open_obligations = 1,
+            |facts| facts.execution.as_mut().unwrap().status = ExecutionDiagnosisState::Active,
+            |facts| facts.execution.as_mut().unwrap().binding = ExecutionBindingState::Corrupt,
+        ];
+        for invalidate in invalid {
+            let mut facts = original.clone();
+            invalidate(&mut facts);
+            assert!(
+                matches!(
+                    classify_terminal_window(&facts),
+                    TerminalCloseEligibility::Ineligible(_)
+                ),
+                "{facts:?}"
+            );
+        }
     }
 
     #[test]

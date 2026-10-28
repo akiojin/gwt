@@ -1,0 +1,12 @@
+{
+  "pid": 33132,
+  "started_at": "2026-10-26T01:37:09.7582637Z",
+  "captured_at": "2026-10-26T15:36:01.0949243Z",
+  "uptime_seconds": 50331.3384291,
+  "working_set_bytes": 6468210688,
+  "private_bytes": 7182286848,
+  "handle_count": 2136,
+  "binary_sha256": "BC04B97D65070C187EF2F617278B9015C21B8B7BAC179EB11D8FA9A638F52CCB",
+  "version": null,
+  "note": "Existing production process; no stop/restart/debugger attach. Child compiler CPU is excluded. Current agent is active; this is observed normal load, not controlled idle."
+}

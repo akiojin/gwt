@@ -258,6 +258,36 @@ twice for the same user makes the second invocation print the
 existing URL to stderr and exit 0 instead of starting a second
 server.
 
+### Mobile access (in development)
+
+Safe access from iOS Safari and Android Chrome is being developed in
+[SPEC #6476](https://github.com/akiojin/gwt/issues/6476). Device authorization
+and device-record persistence are implemented as internal foundations, but are
+not connected to the running server. Mobile pairing, encrypted remote transport,
+automatic Direct/Relay selection, and validation on physical phones are not available yet.
+`--bind` changes the listening address; it does not enable these protections.
+Keep the existing browser server on loopback or a trusted network.
+
+The planned self-hosted connection has these prerequisites:
+
+- A mobile-reachable HTTPS origin with a browser-trusted certificate to load
+  the client and exchange connection information. The PC's loopback HTTP URL
+  is not a remote bootstrap URL; serving a private LAN IP over HTTP does not
+  provide the secure context required by the planned browser authentication.
+- Explicit approval on the PC before a phone can operate its paired project.
+  The PC continues to run CLI/Git/agents and enforce authorization.
+- A reachable self-hosted relay when a direct path cannot be established.
+  NAT traversal cannot guarantee a direct connection on every network; an
+  absent or unreachable relay must leave the client disconnected.
+- No required Tailscale account/app or paid service subscription. Existing
+  operator-controlled hardware and connectivity may be used, but hosting,
+  bandwidth, a suitable hostname, and certificate management still need to
+  be provided. Free public relay capacity is not included.
+
+The SPEC records the planned deployment, HTTPS bootstrap, network conditions,
+and failure behavior. Runnable mobile setup instructions will follow transport
+integration and validation; the existing LAN bind example is not that setup.
+
 ### `gwt serve` removal
 
 The legacy `gwt serve` / `gwt --headless` verbs were removed in
@@ -474,8 +504,8 @@ Common windows include:
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
-  `Issues` for Autonomous, Max active, queue refill and allowed labels, or
-  the same Issues section to edit launch profiles and candidate order/preferences.
+  `Issues execution settings` for Autonomous, Max active, queue refill, allowed
+  labels, launch profiles, and candidate order/preferences.
   Candidate edits save automatically when committed; text fields save when focus
   leaves the field. Rejected values stay visible with an inline error.
   Settings has grouped Application/Project navigation and names the target project.
@@ -519,7 +549,7 @@ Linux, `Ctrl+Shift+C` also copies the current terminal selection.
 
 ## Issue surface and Issue Monitor
 
-Open **Settings → Project → Issues**, or use the **Issues** rail shortcut, to browse cached GitHub Issues in four columns:
+Open **Issues** from the rail to browse cached GitHub Issues in four columns:
 Backlog, Queued, Active, and Done. Each row preserves its execution state and
 actions. Drag Backlog items into Queued to schedule them, drag them back to remove
 them, or reorder items within Queued. Selecting multiple items sends one queue
@@ -547,10 +577,11 @@ Running, Waiting (Full, Hold or Empty), Stopped, or Error, plus Active/Queue cou
 a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
 **Issues settings**. The switches show the server-confirmed On / Off state.
 Only current failures appear red; error details and history stay in the notification center.
-Use **Issues settings** to
-expand **Launch control** (Autonomous, Max active, Start / Stop), **Refill**
+Use **Issues settings** to open **Settings → Project → Issues execution settings**.
+It contains **Launch control** (Autonomous, Max active, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
-profiles. The summary switches remain available when settings are collapsed.
+profiles. Issues and Settings have independent views and can appear side by side
+in Split view, preserving Issue search/selection and unfinished settings edits.
 Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
 edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
 Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
@@ -609,7 +640,7 @@ and the shared `agent_capacity` measurement. Roster projects also report
 `max_active_last_change` records the last explicit setting change with `changed_at`
 and `source` (`gui` or `json_operation`); automatic capacity updates preserve this record.
 
-**Allowed labels** in Settings → Issues accepts a comma-separated list; an Issue needs any label in the saved list. Matching
+**Allowed labels** in Settings → Issues execution settings accepts a comma-separated list; an Issue needs any label in the saved list. Matching
 ignores case and surrounding whitespace. An empty list allows all labels and
 preserves the existing admission rules. Changes apply on the next scan without
 cancelling running agents. Automation can set the same list with `issue.monitor.config.set`
@@ -988,6 +1019,17 @@ supplied snapshots with no blocker edges yield []. Degraded or aborted snapshots
 these facts with the enclosing Monitor provenance and coverage limits. This partial inverse
 does not prove no impact, current blockage, importance, transitive delay or critical path,
 and does not authorize priority, readiness or launch changes.
+`policy.dependency_reachability` follows the union of those supplied edges to list distinct
+direct and indirect dependents in numeric order, excluding the root even in cycles or
+self-loops. Cycle and bundle declarations alone do not create edges. Goal, milestone and
+roadmap diagnostics expose the same field: traverse globally, including external blockers
+and intermediate Issues, then filter dependent endpoints using their existing membership
+rules and omit empty rows. An absent Monitor yields null even for empty membership; no
+reachable dependents yields []. Raw observations, direct impacts and degraded/aborted
+provenance stay unchanged. This is reachability across merged partial observations, not a
+complete graph or proof that the dependencies were simultaneously valid. It establishes no
+current blockage, delay, critical path, priority, health, readiness or launch permission.
+
 Each milestone's `dependency_observations` selects these rows for its effective member
 Issues: direct references and roadmap links resolved by a unique nonempty milestone ID.
 Row order, repeats and missing dependency data remain visible; absent Monitor yields null,
@@ -1790,12 +1832,12 @@ an entry removes its copied policy on the next refresh.
 - Select **Issues**, **Works**, **Agents**, **Board**, or **Settings** from the rail.
 - Open **Logs**, **Index**, and **Profile** directly from their sidebar entries. Scroll the sidebar vertically when its items do not fit. Use the Command Palette for all-stop; individual agent stop/restart remain available through the existing controls.
 - Open **PM** from its separate rail entry; PM uses a single pane and also appears first in Works. Its assigned name and PM badge also appear at the top of Agents.
-- **Works** lists each local live agent once, with its latest three output lines. Open a row with a click, Enter, or Space to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
+- **Works** lists each local live agent once, with its latest terminal output. Choose 3–10 lines (default 3) in **Settings → System → Works output lines**; the saved value applies immediately to Works and its read-only list and survives reloads and app restarts. Select or scroll the output without opening a terminal. Click elsewhere in a row, or use Enter or Space, to use the same native terminal. **Back to Works** returns to the list; the arrows switch between current agents. Esc and other terminal keys go to the agent.
 - **Agents** shows persistent members in **Team**, assignment history and measured statistics, plus actual previous contributors in **Past**. A Works name selects that member in Agents; a current task in Agents opens its exact Works terminal.
-- Choose a tool when adding a member in **Agents**. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; model and runtime settings remain available for each candidate. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates are imported with their settings and configured concurrency capacity preserved.
+- In **Agents**, enter a display name, choose a tool, and click **Register**. Change a selected member’s **Display name** inline to save it automatically; the same member and current work are retained. Invalid drafts stay in the field, and **Retry name** retries a failed or conflicting save. Assignment and Board history retain their original names. **Saved manual candidate** shows the selected member’s saved manual model, reasoning, runtime and permission settings; automatic launches use tier settings. **Saved manual candidate revision** identifies that saved setting content: changing the settings changes the revision, while renaming the member or returning to the same settings preserves it. Focus the read-only field to select or copy the full value; it does not indicate chronological order. **Current work** shows the exact Session’s recorded launch facts separately. **Assignment history** shows each Session’s recorded name, tool and launch model; missing values appear as **—**, and provider-internal model changes are not measured here. Empty names and duplicate names (after trimming spaces and ignoring case, including resting members) are rejected. That member keeps the same tool. **Agents Settings** selects registered people by name and shows their tools; model and runtime settings remain available for each candidate. If the selected tool is unavailable, the queue explains the wait and does not switch tools automatically. Existing saved candidates are imported with their settings and configured concurrency capacity preserved.
 - In the selected **Team** member's details, **Next planned issues** shows upcoming assignments in order with their reasons. Choose another member and select **Reassign** to move a queued issue, or use **Refresh plans** to reload after a conflict or failed response.
 - **Switch to next issue** waits for current activity to finish, then asks the agent to save and push a coherent checkpoint before the same member starts the selected issue. The current task stays open when activity or saved state cannot be confirmed. Use **Cancel switch** before stopping begins; after a launch failure, **Continue saved work** uses the saved task's normal continuation flow. A Host restart discards an unexecuted switch request.
-- **Add member** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
+- **Register** increases the project's requested concurrent capacity by one. **Rest member** reduces it by one while allowing current work to finish. At least one enabled member remains. Machine safety limits can lower the effective allocation.
 - Use **Split view** to choose each pane independently; **Close split** keeps the active surface in one pane. Shells remain auxiliary terminals and do not count as members or live agents.
 
 **Active** counts live agents on this machine, including PM. **Busy**, **Team**, and concurrent
@@ -1806,6 +1848,10 @@ Works shows session-attributed input, cache and output usage, a thirty-minute ac
 branch and verification facts. Unavailable measurements display **—**, including context remaining
 unless the provider reports it directly. Today totals use this project's measured conversations;
 account-wide usage is not copied into them. Individual PR information is not shown here.
+Today and Fleet explain whether measurements are missing, partial, unavailable, or complete;
+unknown totals stay **—**, while measured zero stays **0**. Cost remains unavailable because
+per-session USD is not supported; Landed PRs remains unavailable until complete daily merge
+data is connected.
 
 Saved sessions restore into the current surfaces. The former terminal tabs, grid and Columns
 setting do not return after reload or restart; the roster's Team/Past tabs remain.

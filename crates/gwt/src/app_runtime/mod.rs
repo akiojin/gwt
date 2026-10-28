@@ -4012,6 +4012,7 @@ fn local_probe_batch<'a>(
     owner: &str,
     repo: &str,
     issues: impl Iterator<Item = &'a gwt::IssueMonitorIssue>,
+    linked_prs: &std::collections::BTreeMap<u64, Vec<gwt::cli::LinkedPrSummary>>,
 ) -> gwt::issue_monitor_worker::LinkedPrProbeBatch {
     #[cfg(test)]
     {
@@ -4023,7 +4024,7 @@ fn local_probe_batch<'a>(
             return gwt::issue_monitor_worker::LinkedPrProbeBatch::default();
         }
     }
-    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues)
+    gwt::issue_monitor_worker::LinkedPrProbeBatch::prefetch(owner, repo, issues, linked_prs)
 }
 
 /// The monitor owner of one GUI-local scan and the completion outcomes it
@@ -4085,6 +4086,7 @@ fn observe_local_claim_candidates(
             .issues
             .iter()
             .filter(|issue| queued.contains(&issue.number) || dependencies.contains(&issue.number)),
+        &loaded.linked_prs,
     );
     let mut dependency_observations = std::collections::BTreeMap::new();
     for issue_number in dependencies {
@@ -4556,6 +4558,7 @@ fn run_scheduled_issue_monitor_scan_with_budgets(
                             project_root,
                             &owner,
                             &repo,
+                            &loaded.linked_prs,
                         )
                         .err()
                         .map(|error| {
@@ -4896,6 +4899,7 @@ impl AppRuntime {
         };
         if let Some(session) = &mut session {
             if !is_pm
+                && session.agent_member_id.is_none()
                 && !matches!(
                     session.status,
                     gwt_agent::AgentStatus::Stopped | gwt_agent::AgentStatus::Interrupted
@@ -9971,6 +9975,7 @@ impl AppRuntime {
                                 &project_root,
                                 &owner,
                                 &repo,
+                                &loaded.linked_prs,
                             )
                             .err()
                             .map(|error| {
@@ -12859,12 +12864,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {
@@ -13114,7 +13121,10 @@ impl AppRuntime {
             FrontendEvent::AgentRoster {
                 action,
                 expected_revision,
-            } => self.agent_roster_events(context, &client_id, action, expected_revision),
+                request_id,
+            } => {
+                self.agent_roster_events(context, &client_id, action, expected_revision, request_id)
+            }
             FrontendEvent::AgentSchedule { action } => {
                 self.agent_schedule_events(context, &client_id, action)
             }
@@ -14045,12 +14055,14 @@ impl AppRuntime {
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             } => self.system_settings_update_events(
                 client_id,
                 language,
                 codex_trust_managed_hooks,
                 board_provider,
                 agent_resource,
+                works_preview_lines,
             ),
             FrontendEvent::GetAutostartStatus => self.autostart_status_events(client_id),
             FrontendEvent::UpdateAutostart { enabled } => {

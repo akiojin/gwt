@@ -4067,15 +4067,32 @@ fn merge_workspace_projection_membership_cache_only(
     cached.active_work_count = cached.active_works.len();
 }
 
+fn saved_manual_profile_revision(profile: &gwt::IssueMonitorLaunchProfile) -> String {
+    use sha2::{Digest, Sha256};
+    let mut tuning = serde_json::to_value(profile).expect("saved profile serializes");
+    // Routing belongs to pool policy, independent of this person's tuning.
+    tuning
+        .as_object_mut()
+        .expect("profile object")
+        .remove("prefer_for");
+    let bytes = serde_json::to_vec(&tuning).expect("saved tuning serializes");
+    format!("manual-profile-v1:{:x}", Sha256::digest(bytes))
+}
+
 fn agent_roster_view(
     context: &ProjectContext,
-    roster: gwt::agent_names::AgentRoster,
+    prefs: &gwt::IssueMonitorPrefs,
     sessions: &[Arc<gwt_agent::Session>],
     entries: &[gwt_core::coordination::BoardEntry],
     past_complete: bool,
     sessions_dir: &Path,
 ) -> gwt::AgentRosterView {
     use std::collections::{BTreeMap, BTreeSet};
+    let roster = prefs
+        .agent_roster
+        .as_ref()
+        .expect("initialized roster snapshot");
+    let saved_profiles = prefs.launch_profile_pool();
     let normalized_root =
         dunce::canonicalize(&context.project_root).unwrap_or_else(|_| context.project_root.clone());
     let repo_hash = gwt_core::repo_hash::detect_repo_hash(&context.project_root);
@@ -4114,6 +4131,9 @@ fn agent_roster_view(
             .and_then(|entry| entry.title_summary.clone());
         gwt::AgentAssignmentHistoryView {
             session_id: session.id.clone(),
+            name: session.agent_name.clone(),
+            provider: Some(session.agent_id.command().to_string()),
+            model: session.model.clone(),
             issue_number: session.linked_issue_number,
             title,
             result: Some(format!("{:?}", session.status)),
@@ -4139,10 +4159,21 @@ fn agent_roster_view(
                 .iter()
                 .filter_map(|session| session.linked_issue_number)
                 .collect();
+            let saved_manual_profile = saved_profiles
+                .iter()
+                .find(|profile| {
+                    profile.agent_member_id.as_deref() == Some(member.agent_member_id.as_str())
+                        && member.agent_id.as_deref() == Some(profile.agent_id.as_str())
+                })
+                .cloned();
             gwt::AgentRosterMemberView {
                 member: member.clone(),
                 provider: member.agent_id.clone(),
                 model: latest.and_then(|session| session.model.clone()),
+                saved_manual_revision: saved_manual_profile
+                    .as_ref()
+                    .map(saved_manual_profile_revision),
+                saved_manual_profile,
                 history: assigned
                     .iter()
                     .map(|session| history_for(session))
@@ -4366,6 +4397,7 @@ impl AppRuntime {
         client_id: &ClientId,
         action: gwt::agent_names::AgentRosterAction,
         expected_revision: Option<u64>,
+        request_id: Option<String>,
     ) -> Vec<OutboundEvent> {
         if !matches!(action, gwt::agent_names::AgentRosterAction::Read)
             && expected_revision.is_none()
@@ -4375,6 +4407,7 @@ impl AppRuntime {
                 BackendEvent::AgentRosterError {
                     project_key: context.project_key.to_string(),
                     message: "Load the Agent roster before changing members".into(),
+                    request_id,
                 },
             )];
         }
@@ -4382,25 +4415,28 @@ impl AppRuntime {
         let reply_to = client_id.clone();
         let proxy = self.proxy.clone();
         let sessions_dir = self.sessions_dir.clone();
+        let reply_request_id = request_id.clone();
         let spawn = self.blocking_tasks.try_spawn(move || {
-            let result = gwt::agent_names::mutate_project_roster(
+            let result = gwt::agent_names::mutate_project_roster_snapshot(
                 &context_owned.project_root,
                 &sessions_dir,
                 action,
                 expected_revision,
             );
-            let (roster, error) = match result {
-                Ok(roster) => (Some(roster), None),
+            let (prefs, error) = match result {
+                Ok(prefs) => (Some(prefs), None),
                 Err(error) => (
-                    gwt::agent_names::read_project_roster(
+                    gwt::agent_names::mutate_project_roster_snapshot(
                         &context_owned.project_root,
                         &sessions_dir,
+                        gwt::agent_names::AgentRosterAction::Read,
+                        None,
                     )
                     .ok(),
                     Some(error),
                 ),
             };
-            let event = if let Some(roster) = roster {
+            let event = if let Some(prefs) = prefs {
                 match gwt_agent::session_ledger::load_sessions_shared(&sessions_dir) {
                     Ok(sessions) => {
                         let entries = gwt_core::coordination::load_entries_since(
@@ -4410,18 +4446,22 @@ impl AppRuntime {
                         let complete = entries.is_ok();
                         let mut view = agent_roster_view(
                             &context_owned,
-                            roster,
+                            &prefs,
                             &sessions,
                             &entries.unwrap_or_default(),
                             complete,
                             &sessions_dir,
                         );
                         view.error = error;
-                        BackendEvent::AgentRoster { roster: view }
+                        BackendEvent::AgentRoster {
+                            roster: view,
+                            request_id: reply_request_id,
+                        }
                     }
                     Err(error) => BackendEvent::AgentRosterError {
                         project_key: context_owned.project_key.to_string(),
                         message: error.to_string(),
+                        request_id: reply_request_id,
                     },
                 }
             } else {
@@ -4429,6 +4469,7 @@ impl AppRuntime {
                     project_key: context_owned.project_key.to_string(),
                     message: error
                         .unwrap_or_else(|| "Agent roster unavailable; refresh and retry".into()),
+                    request_id: reply_request_id,
                 }
             };
             proxy.send(UserEvent::ProjectDispatch {
@@ -4443,6 +4484,7 @@ impl AppRuntime {
                 BackendEvent::AgentRosterError {
                     project_key: context.project_key.to_string(),
                     message,
+                    request_id,
                 },
             )],
         }
@@ -4514,6 +4556,23 @@ impl AppRuntime {
                 .host_id
                 .starts_with(&format!("{}:", std::process::id()))
         {
+            return None;
+        }
+        // Unknown and changed membership supersede cached proof, while a
+        // timestamp-only refresh must not invalidate a long-running Work build.
+        let superseded = self.tab(tab_id).is_some_and(|tab| {
+            self.active_work_projection_refresh
+                .borrow()
+                .projects
+                .get(&tab.project_root)
+                .is_some_and(|project| {
+                    lock_recover(&project.local_activity_refresh)
+                        .latest
+                        .as_ref()
+                        .is_some_and(|latest| latest.agents != activity.agents)
+                })
+        });
+        if superseded {
             return None;
         }
         if let Some(agents) = activity.agents.as_mut() {
@@ -6411,12 +6470,13 @@ mod bounded_cache_merge_tests {
             generation: 1,
             project_root: root.clone(),
         };
-        let roster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
-            "agent_member_id":"member-1","name":"Shared","enabled":true,"created_at":"2026-10-25T00:00:00Z"
+        let roster: gwt::agent_names::AgentRoster = serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members":[{
+            "agent_member_id":"member-1","agent_id":"claude","name":"Current name","enabled":true,"created_at":"2026-10-25T00:00:00Z"
         }]})).unwrap();
         let mut own = gwt_agent::Session::new(&root, "own", gwt_agent::AgentId::Codex);
         own.agent_member_id = Some("member-1".into());
-        own.agent_name = Some("Shared".into());
+        own.agent_name = Some("Recorded name".into());
+        own.model = Some("recorded-model".into());
         own.linked_issue_number = Some(4777);
         let own_id = own.id.clone();
         let mut other = own.clone();
@@ -6437,9 +6497,25 @@ mod bounded_cache_merge_tests {
             .into_iter()
             .map(Arc::new)
             .collect::<Vec<_>>();
+        let mut prefs = gwt::IssueMonitorPrefs {
+            agent_roster: Some(roster.clone()),
+            launch_auto: true,
+            ..Default::default()
+        };
+        let saved: gwt::IssueMonitorLaunchProfile = serde_json::from_value(serde_json::json!({
+            "agent_id":"claude", "agent_member_id":"member-1", "model":"saved-model",
+            "reasoning":"high", "runtime_target":"Docker", "docker_service":"worker",
+            "skip_permissions":false
+        }))
+        .unwrap();
+        prefs.set_launch_profile_pool(vec![saved.clone()]);
+        prefs.launch_tiers = vec![vec![serde_json::from_value(serde_json::json!({
+            "agent_id":"claude", "model":"tier-model"
+        }))
+        .unwrap()]];
         let view = agent_roster_view(
             &context,
-            roster,
+            &prefs,
             &sessions,
             &[],
             true,
@@ -6448,6 +6524,98 @@ mod bounded_cache_merge_tests {
         assert_eq!(view.members[0].issue_count, Some(1));
         assert_eq!(view.members[0].history.len(), 1);
         assert_eq!(view.members[0].history[0].session_id, own_id);
+        let history = serde_json::to_value(&view.members[0].history[0]).unwrap();
+        assert_eq!(history["name"], "Recorded name");
+        assert_eq!(history["provider"], "codex");
+        assert_eq!(history["model"], "recorded-model");
+        let mut legacy_payload = history.clone();
+        for key in ["name", "provider", "model"] {
+            legacy_payload.as_object_mut().unwrap().remove(key);
+        }
+        let legacy_payload: gwt::AgentAssignmentHistoryView =
+            serde_json::from_value(legacy_payload).unwrap();
+        assert!(
+            legacy_payload.name.is_none()
+                && legacy_payload.provider.is_none()
+                && legacy_payload.model.is_none()
+        );
+        assert_eq!(view.members[0].member.name, "Current name");
+        assert_eq!(view.members[0].provider.as_deref(), Some("claude"));
+        let mut member_payload = serde_json::to_value(&view.members[0]).unwrap();
+        assert_eq!(
+            member_payload["saved_manual_profile"],
+            serde_json::to_value(&saved).unwrap()
+        );
+        let revision = member_payload["saved_manual_revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(revision.starts_with("manual-profile-v1:"));
+        assert_eq!(revision.len(), "manual-profile-v1:".len() + 64);
+        let mut changed = prefs.clone();
+        let member = &mut changed.agent_roster.as_mut().unwrap().members[0];
+        member.name = "Renamed".into();
+        changed.agent_roster.as_mut().unwrap().revision += 1;
+        changed.launch_profiles[0].prefer_for = vec!["bug".into()];
+        changed.launch_tiers[0][0].model = Some("other-tier-model".into());
+        let projected_revision = |prefs: &gwt::IssueMonitorPrefs| {
+            serde_json::to_value(
+                agent_roster_view(
+                    &context,
+                    prefs,
+                    &sessions,
+                    &[],
+                    true,
+                    &gwt_core::paths::gwt_sessions_dir(),
+                )
+                .members
+                .remove(0),
+            )
+            .unwrap()["saved_manual_revision"]
+                .clone()
+        };
+        assert_eq!(projected_revision(&changed), revision);
+        changed.launch_profiles[0].reasoning = Some("medium".into());
+        assert_ne!(projected_revision(&changed), revision);
+        changed.launch_profiles[0].reasoning = saved.reasoning.clone();
+        assert_eq!(
+            projected_revision(&changed),
+            revision,
+            "content identity, not chronological order"
+        );
+        member_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("saved_manual_revision");
+        member_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("saved_manual_profile");
+        let legacy_member: gwt::AgentRosterMemberView =
+            serde_json::from_value(member_payload).unwrap();
+        assert!(legacy_member.saved_manual_profile.is_none());
+        assert!(serde_json::to_value(legacy_member).unwrap()["saved_manual_revision"].is_null());
+        // Missing legacy facts stay unknown, never borrow the current member.
+        let mut unknown = sessions[0].as_ref().clone();
+        unknown.agent_name = None;
+        unknown.model = None;
+        prefs.launch_profiles[0].agent_member_id = Some("another-member".into());
+        let unknown_view = agent_roster_view(
+            &context,
+            &prefs,
+            &[Arc::new(unknown)],
+            &[],
+            true,
+            &gwt_core::paths::gwt_sessions_dir(),
+        );
+        let history = serde_json::to_value(&unknown_view.members[0].history[0]).unwrap();
+        assert!(history["name"].is_null());
+        assert!(history["model"].is_null());
+        assert!(unknown_view.members[0].saved_manual_profile.is_none());
+        assert!(
+            serde_json::to_value(&unknown_view.members[0]).unwrap()["saved_manual_revision"]
+                .is_null()
+        );
         let legacy = view
             .past_contributors
             .iter()
@@ -6512,6 +6680,71 @@ mod bounded_cache_merge_tests {
             .borrow_mut()
             .insert("tab-1".into(), payload.clone());
         (runtime, context, view, payload)
+    }
+
+    #[test]
+    fn local_agent_activity_replay_preserves_unknown_without_requiring_a_new_timestamp() {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let (mut runtime, context, mut view, _) = retired_activity_fixture(temp.path());
+        runtime.blocking_tasks = super::super::BlockingTaskSpawner::queued().0;
+        let mut known = view.local_agent_activity.take().unwrap();
+        known.agents = Some(Vec::new());
+        view.local_agent_activity = Some(known.clone());
+        let payload: Arc<str> = Arc::from(
+            serde_json::to_string(&BackendEvent::ActiveWorkProjection {
+                projection: Box::new(view.clone()),
+            })
+            .unwrap(),
+        );
+        let state = runtime.project_state_for_tab("tab-1").unwrap();
+        state
+            .active_work_projection_cache
+            .borrow_mut()
+            .insert("tab-1".into(), view);
+        state
+            .active_work_projection_payload_cache
+            .borrow_mut()
+            .insert("tab-1".into(), payload.clone());
+        let refresh = runtime
+            .active_work_projection_refresh
+            .borrow_mut()
+            .projects
+            .entry(context.project_root)
+            .or_default()
+            .local_activity_refresh
+            .clone();
+        let unknown = gwt::LocalAgentActivityView {
+            agents: None,
+            ..known.clone()
+        };
+        lock_recover(&refresh).latest = Some(unknown.clone());
+
+        assert!(
+            runtime
+                .retain_current_local_agent_activity("tab-1", Some(known.clone()))
+                .is_none(),
+            "a cached measurement cannot replace Unknown, including a timestamp tie"
+        );
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(unknown.clone())),
+            Some(unknown)
+        );
+        assert!(
+            !runtime.prepared_active_work_dispatch_is_current("tab-1", &payload),
+            "a reconnect cannot replay the earlier measured census"
+        );
+
+        let newer = gwt::LocalAgentActivityView {
+            observed_at: "2026-10-24T00:00:01Z".into(),
+            ..known.clone()
+        };
+        lock_recover(&refresh).latest = Some(newer);
+        assert_eq!(
+            runtime.retain_current_local_agent_activity("tab-1", Some(known.clone())),
+            Some(known),
+            "unchanged membership stays usable without redating its measurement"
+        );
     }
 
     #[test]
@@ -6787,7 +7020,10 @@ mod bounded_cache_merge_tests {
             .unwrap();
             let view = agent_roster_view(
                 &context,
-                roster,
+                &gwt::IssueMonitorPrefs {
+                    agent_roster: Some(roster),
+                    ..Default::default()
+                },
                 std::slice::from_ref(&source_session),
                 &[],
                 true,

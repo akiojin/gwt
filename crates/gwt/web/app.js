@@ -420,7 +420,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
-      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        onRename: request => {
+          if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
+            request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
+        },
+      });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -572,6 +578,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_name");
           appendRenderKeyPart(parts, windowData?.agent_name || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -859,7 +867,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         return null;
@@ -888,9 +896,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // A switch is valid only on this live Host connection. Never replay
-        // an unacknowledged request or cancellation after a Host restart.
-        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+        // Revisioned names and switches belong to this live connection.
+        // Never replay an unacknowledged write after reconnect.
+        if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
+            (message.kind === "agent_roster" && message.action.kind === "rename")) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -1146,7 +1155,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -1302,6 +1311,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
+        else if (socketProjectKey) send({ kind: "get_system_settings" });
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -1690,7 +1700,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim();
+          const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
+            && member.assignment?.session_id === windowData.session_id);
+          const name = String(member?.name || windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
           if (name) return purpose ? `${name} — ${purpose}` : name;
         }
@@ -1803,10 +1815,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         );
       }
 
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
         windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (splitSurfaces?.show(surface)) {
+          // Late initial windows must not override an explicit surface choice.
+          initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
           pendingPmFrame = false;
@@ -4039,7 +4055,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("issue", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -4370,6 +4386,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         setSettingsStatus,
         supportedAgentsModel,
         customAgentsModel,
+        systemSettingsModel,
       } = createSettingsSurface({
         send,
         createNode,
@@ -4380,10 +4397,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         getIndexStatus,
         pmSettingsPanel,
         rosterModel,
-        mountIssues: (data, host) => {
-          mountKnowledgeWindow(data, host);
-          send({ kind: "request_remote_start_work_branches", id: data.id });
-        },
       });
 
       function ensureWindow(windowData) {
@@ -4488,7 +4501,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge" || surface === "settings") {
+        if (surface === "knowledge") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -4616,6 +4629,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     clearBranchCleanupForWindow(windowId);
 
                     pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
+                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -5011,7 +5025,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyAgentRosterError(event);
             break;
           case "agent_roster":
-            applyAgentRosterSnapshot(event.roster);
+            applyAgentRosterSnapshot(event.roster, event.request_id);
             refreshProfilesAfterRoster(event.roster);
             break;
           case "agent_switch":
@@ -5484,6 +5498,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        systemSettingsModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,
@@ -5542,6 +5557,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      let renderedRosterNames = null;
+      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id])), names => {
+        if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
+        renderedRosterNames = names;
+      });
       rosterModel.subscribe(state => state.revision, () => {
         if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
       });
@@ -5581,7 +5602,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return worksSurface.openWork(live);
       }
       agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
-        onAddMember: agentId => requestAgentRoster({ kind: "add", agent_id: agentId }),
+        onRenameMember: editAgentMemberName,
+        onRetryName: retryAgentMemberName,
+        onAddMember: (agentId, name) => {
+          applyAgentRosterError({ project_key: routeProjectKey, message: null });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+        },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
@@ -5604,7 +5630,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onAgentsHost: setRosterHost,
 
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "settings" : surface;
+          const preset = surface === "issues" ? "issue" : surface;
           send({ kind: "create_window", preset });
         },
         onChange: () => {
@@ -5613,7 +5639,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           refreshVisibleKnowledgeWindows();
         },
         onLayout: (ids) => {
-          for (const id of ids) activateTerminalOnReveal(id);
+          for (const id of ids) {
+            activateTerminalOnReveal(id);
+            windowMap.get(id)?.querySelector(".window-body")?.settingsExplanations?.refresh();
+          }
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
@@ -5645,8 +5674,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
-      let initialSurfaceTabId = null;
-      let initialSurfaceSelected = false;
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
@@ -5792,10 +5819,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
-        if (preset === "issue") {
-          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
-        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset

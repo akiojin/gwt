@@ -4,12 +4,13 @@ import { parseHTML } from "linkedom";
 import { readFileSync } from "node:fs";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createAgentsSurface } from "../agents-surface.js";
+import { createAgentRosterModel } from "../agent-activity-model.js";
 
 const source = readFileSync(new URL("../agents-surface.js", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
 const members = [
   { member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" }, provider: "Codex", model: "GPT-6", created_at: "2026-10-20T00:00:00Z", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-    { session_id: "s0", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+    { session_id: "s0", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
     { session_id: "s2", issue_number: 4600, title: "Later", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
   ] },
   { member_id: "m2", name: "Two", enabled: true, provider: null, model: null, created_at: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
@@ -23,7 +24,9 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const createElement = document.createElement.bind(document);
   document.createElement = (...args) => { const node = createElement(...args); node.focus = () => { activeElement = node; }; return node; };
   const frames = new Set(); const options = { scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); } };
-  const rosterModel = createUiStateStore({ members, revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] }, options);
+  const renamed = [], rosterController = createAgentRosterModel("project", { ...options, onRename: request => renamed.push(request) });
+  const rosterModel = rosterController.model;
+  rosterController.applyAgentRosterSnapshot({ project_key: "project", members: members.map(member => ({ ...member, agent_member_id: member.member_id })), revision: 3, capacity: 2, recommended_capacity: 6, past_contributors: [{ name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T01:00:00Z", post_count: 4 }] });
   const scheduleModel = schedule ? createUiStateStore(schedule, options) : undefined;
   const switchModel = switching ? createUiStateStore(switching, options) : undefined;
   const activityModel = createUiStateStore({ agents: [current], count: 1 }, options);
@@ -31,12 +34,89 @@ async function fixture({ onOpenWork = () => {}, onContinueSavedWork = () => {}, 
   const supportedAgentsModel = createUiStateStore({ agents: [{ id: "codex", name: "Codex" }, { id: "claude", name: "Claude Code" }] }, options);
   const customAgentsModel = createUiStateStore({ catalog: { loaded: true, agents: [{ id: "custom-cli", display_name: "Custom CLI" }] } }, options);
   const opened = [], rested = [], added = [], reassigned = [], refreshed = [], switched = [], saved = [], continued = [];
-  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: tool => added.push(tool), onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
-  for (const node of surface.element.querySelectorAll("select")) node.focus = () => { activeElement = node; };
+  const surface = createAgentsSurface({ document, rosterModel, activityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel, scheduleModel, switchModel, onRenameMember: rosterController.editAgentMemberName, onRetryName: rosterController.retryAgentMemberName, isContinuePending, onContinueSavedWork: workId => { continued.push(workId); onContinueSavedWork(workId); }, onSwitch: action => { switched.push(action); switchModel.update(state => ({ ...state, pending: action })); }, onOpenSavedWork: intent => saved.push(intent), onReassign: action => reassigned.push(action), onRefreshSchedule: () => refreshed.push(true), onAddMember: (tool, name) => { added.push({ tool, name }); rosterModel.update(state => ({ ...state, error: null })); }, onRestMember: id => rested.push(id), onOpenWork: assignment => { opened.push(assignment); onOpenWork(assignment); } });
+  for (const node of surface.element.querySelectorAll("select, input")) node.focus = () => { activeElement = node; };
   document.querySelector("main").append(surface.element);
   const flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
-  return { surface, document, window, frames, flush, rosterModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
+  return { surface, document, window, frames, flush, rosterModel, rosterController, renamed, supportedAgentsModel, customAgentsModel, activityModel, windowCatalogModel, scheduleModel, opened, rested, added, reassigned, refreshed, switchModel, switched, saved, continued };
 }
+
+test("Agents autosaves inline names while retaining native input, focus, invalid drafts and per-member selection drafts", async () => {
+  const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');
+  assert.ok(input, "selected registered member has an inline display name field");
+  assert.equal(input.classList.contains("settings-input"), true);
+  assert.match(styles, /\.roster-name-field\s*\{[^}]*flex-direction:\s*column[^}]*var\(--space-/s);
+  assert.equal(input.value, "One");
+  input.focus(); input.value = "  Maple  "; input.dispatchEvent(new f.window.Event("input"));
+  assert.equal(f.renamed.length, 1); assert.equal(f.renamed[0].action.name, "Maple");
+  f.flush(); assert.match(f.surface.element.querySelector(".roster-name-status").textContent, /Saving/);
+  f.windowCatalogModel.update(state => ({ catalog: { ...state.catalog, version: 2 } }));
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, tokens: 6000 })) }));
+  f.supportedAgentsModel.update(state => ({ agents: [...state.agents] })); f.flush();
+  assert.ok(f.surface.element.querySelector('[aria-label="Display name"]') === input && input.isConnected && f.document.activeElement === input);
+  input.value = " "; input.dispatchEvent(new f.window.Event("input")); f.flush();
+  assert.equal(input.getAttribute("aria-invalid"), "true"); assert.equal(input.value, " ");
+  assert.match(f.surface.element.querySelector(".roster-name-status").textContent, /display name/i);
+  f.surface.selectMember("m2"); f.surface.selectMember("m1");
+  assert.ok(f.surface.element.querySelector('[aria-label="Display name"]') === input);
+  assert.equal(input.value, " ", "switching selection retains each member's draft");
+  const host = f.document.createElement("aside"); f.surface.setPreviewHost(host);
+  assert.equal(host.querySelector('[aria-label="Display name"]').disabled, true);
+  assert.equal(host.querySelector('input:not([disabled]), button:not([disabled])'), null);
+  assert.equal(f.surface.element.querySelector('[data-action="save-name"], [data-action="edit-name"]'), null);
+  f.surface.dispose();
+});
+
+test("Agents waits for IME completion and exposes correlated failure retry without losing the draft", async () => {
+  const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');
+  assert.ok(input, "inline name field is present");
+  input.dispatchEvent(new f.window.Event("compositionstart")); input.value = "か";
+  input.dispatchEvent(new f.window.Event("input")); assert.equal(f.renamed.length, 0);
+  input.value = "楓"; input.dispatchEvent(new f.window.Event("compositionend"));
+  input.dispatchEvent(new f.window.Event("input")); assert.equal(f.renamed.length, 1, "the final input event does not duplicate the write");
+  f.rosterController.applyAgentRosterError({ project_key: "project", request_id: f.renamed[0].request_id, message: "Roster changed; retry" }); f.flush();
+  assert.equal(input.value, "楓"); assert.equal(input.getAttribute("aria-invalid"), "true");
+  const retry = f.surface.element.querySelector('[data-action="retry-name"]'); assert.equal(retry?.textContent, "Retry name");
+  retry.click(); assert.equal(f.renamed.length, 2); assert.equal(f.renamed[1].action.name, "楓");
+  f.rosterController.applyAgentRosterSnapshot({ project_key: "project", revision: 4,
+    members: members.map(member => ({ ...member, agent_member_id: member.member_id, name: member.member_id === "m1" ? "楓" : member.name })) }, f.renamed[1].request_id); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-name-status").textContent, "Saved");
+  assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "楓");
+  assert.equal(input.getAttribute("aria-invalid"), "false"); f.surface.dispose();
+});
+
+test("selection changes never commit an interrupted IME draft through trailing native events", async () => {
+  const f = await fixture(), input = f.surface.element.querySelector('[aria-label="Display name"]');
+  input.dispatchEvent(new f.window.Event("compositionstart")); input.value = "み";
+  input.dispatchEvent(new f.window.Event("input")); f.surface.selectMember("m2");
+  input.dispatchEvent(new f.window.Event("compositionend")); input.dispatchEvent(new f.window.Event("input"));
+  assert.equal(f.renamed.length, 0, "detaching an unfinished input does not submit a name");
+  f.surface.selectMember("m1"); assert.equal(input.value, "み");
+  input.value = "実"; input.dispatchEvent(new f.window.Event("input"));
+  assert.equal(f.renamed.length, 1, "a later explicit completed edit can resume autosave"); f.surface.dispose();
+});
+
+test("Project window titles follow current member names only for an exact assigned Session", () => {
+  const app = readFileSync(new URL("../app.js", import.meta.url), "utf8");
+  const definition = app.match(/      function windowDisplayTitle\(windowData\) \{[\s\S]*?\n      \}/)[0];
+  const member = { member_id: "m1", name: "Maple", assignment: { session_id: "s1" } };
+  const rosterModel = { read: () => ({ members: [member] }) };
+  const title = new Function("rosterModel", "isAgentWindowPreset", "PM_WINDOW_TITLE", `${definition}; return windowDisplayTitle;`)(rosterModel, preset => preset === "agent", "Project Manager");
+  const data = { preset: "agent", session_id: "s1", agent_name: "Historical name", dynamic_title: "Current issue" };
+  assert.equal(title(data), "Maple — Current issue");
+  assert.equal(title({ ...data, session_id: "s2", agent_member_id: "m1" }), "Historical name — Current issue");
+  assert.equal(title({ ...data, is_pm: true }), "Historical name");
+  assert.equal(data.agent_name, "Historical name", "current display never mutates Session or window history");
+  const renderKeyFunctions = ["appendRenderKeyPart", "appendWindowPlacementRenderKey", "workspaceWindowsRenderKey"]
+    .map(name => app.match(new RegExp(`      function ${name}\\([^]*?\\n      \\}`))[0]).join("\n");
+  const renderKey = new Function("windowDisplayTitle", "worksHost", "appState", "allProjectWindowIds", "windowWorktreeForm",
+    `${renderKeyFunctions}; return workspaceWindowsRenderKey;`)(title, null, { active_tab_id: "p" }, () => ["w"], () => "");
+  const workspace = { windows: [{ ...data, id: "w" }] }, previousKey = renderKey(workspace);
+  member.name = "Birch";
+  assert.notEqual(renderKey(workspace), previousKey, "roster rename invalidates the existing title render key without mutating a window");
+  assert.match(app, /applyAgentRosterSnapshot\(event\.roster, event\.request_id\)/);
+  assert.match(app, /onRenameMember:\s*editAgentMemberName/);
+});
 
 test("Agents replaces the old terminal surface with the approved roster contract", () => {
   assert.match(source, /rosterModel/);
@@ -86,10 +166,44 @@ test("Agents keeps Team and Past tabs, capacity, member details, four real aggre
   assert.match(f.surface.element.querySelector(".roster-capacity").textContent, /Recommended.*6/);
   assert.equal(f.surface.element.querySelectorAll(".roster-row").length, 2);
   assert.equal(f.surface.element.querySelectorAll(".roster-detail .roster-stat").length, 4);
-  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*GPT-6.*2026-10-20/s);
+  assert.match(f.surface.element.querySelector(".roster-detail").textContent, /Codex.*2026-10-20/s);
+  assert.doesNotMatch(f.surface.element.querySelector(".roster-detail-heading").textContent, /GPT-6/);
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Saved manual candidate.*Unavailable.*Automatic launches use tier settings/s);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: — · Tool: — · Recorded model: —");
+  const revisionInput = f.surface.element.querySelector(".roster-saved-revision input");
+  assert.ok(revisionInput, "saved manual settings have a revision readout");
+  assert.equal(revisionInput.value, "—");
+  assert.ok(revisionInput.hasAttribute("readonly"), "revision is never an editable setting");
+  assert.equal(revisionInput.getAttribute("aria-label"), "Saved manual candidate revision");
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => member.member_id !== "m1" ? member : { ...member,
+    saved_manual_profile: { agent_id: "codex", model: "saved-model", reasoning: "high", runtime_target: "Docker", docker_service: "worker", skip_permissions: false },
+    saved_manual_revision: `manual-profile-v1:${"a".repeat(64)}`,
+    history: [...member.history, { session_id: "s1", name: "Launch author", provider: "codex", model: "launch-model" }],
+  }) })); f.flush();
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model.*Reasoning: high.*Runtime: Docker.*worker.*Permissions: Ask/s);
+  assert.equal(f.surface.element.querySelector(".roster-saved-revision input"), revisionInput, "revision readout retains the keyboard target");
+  assert.equal(revisionInput.value, `manual-profile-v1:${"a".repeat(64)}`);
+  assert.ok(f.surface.element.querySelector(".roster-saved-settings").previousElementSibling.classList.contains("roster-stats"), "refresh preserves aggregates before saved settings");
+  assert.match(revisionInput.title, /Same settings.*same revision/);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   const history = [...f.surface.element.querySelectorAll(".roster-history li")];
   assert.match(history[0].textContent, /Now.*#4777.*Current issue/s);
   assert.match(history[1].textContent, /Later/); assert.match(history[2].textContent, /Earlier/);
+  assert.equal(history[1].querySelector(".roster-history-config")?.textContent, "Recorded name: — · Tool: — · Recorded model: —");
+  assert.equal(history[2].querySelector(".roster-history-config")?.textContent, "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model");
+  f.rosterModel.update(state => ({ ...state, members: state.members.map(member => ({ ...member, name: "Renamed current", provider: "codex", model: "current-model" })) })); f.flush();
+  assert.equal(f.surface.element.querySelector(".roster-detail h3").textContent, "Renamed current");
+  assert.match(f.surface.element.querySelector(".roster-saved-settings").textContent, /Model: saved-model/);
+  assert.equal(f.surface.element.querySelector(".roster-current-config").textContent, "Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
+  assert.deepEqual([...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent), [
+    "Recorded name: — · Tool: — · Recorded model: —", "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+  ]);
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector(".roster-saved-settings").textContent, f.surface.element.querySelector(".roster-saved-settings").textContent);
+  assert.equal(preview.querySelector(".roster-saved-revision input").value, revisionInput.value);
+  assert.ok(preview.querySelector(".roster-saved-revision input").disabled);
+  assert.equal(preview.querySelector(".roster-current-config").textContent, f.surface.element.querySelector(".roster-current-config").textContent);
+  assert.deepEqual([...preview.querySelectorAll(".roster-history-config")].map(node => node.textContent), [...f.surface.element.querySelectorAll(".roster-history-config")].map(node => node.textContent));
   assert.equal(f.surface.selectMember("m2"), true);
   assert.ok(f.document.activeElement === f.surface.element.querySelector('.roster-row[data-member-id="m2"]'), "selection restores keyboard focus to the new selected row");
   assert.deepEqual([...f.surface.element.querySelectorAll(".roster-detail .roster-stat b")].map(node => node.textContent), ["—", "—", "—", "—"]);
@@ -282,9 +396,11 @@ test("Agents keeps a selected plan control and keyboard focus across unrelated c
 
 test("Agents add and rest actions target a member and Past shows measured contributor data", async () => {
   const f = await fixture();
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  name.value = "Maple"; name.dispatchEvent(new f.window.Event("input"));
   f.surface.element.querySelector('[data-action="add"]').click();
   f.surface.element.querySelector('.roster-detail [data-action="rest"]').click();
-  assert.deepEqual(f.added, ["codex"]); assert.deepEqual(f.rested, ["m1"]);
+  assert.deepEqual(f.added, [{ tool: "codex", name: "Maple" }]); assert.deepEqual(f.rested, ["m1"]);
   f.surface.element.querySelector('[data-tab="past"]').click();
   assert.equal(f.surface.element.querySelector(".roster-team").hidden, true);
   assert.match(f.surface.element.querySelector(".roster-past").textContent, /Earlier author.*Implementation.*#4000.*2026-10-20.*4/s);
@@ -470,15 +586,40 @@ test("Agents continues only server-eligible saved work through the existing corr
 });
 
 
-test("Agents registers a member with the explicitly selected supported or custom tool", async () => {
+test("Agents registers an explicit name with its selected catalog tool and preserves rejected drafts", async () => {
   const f = await fixture();
   const select = f.surface.element.querySelector('[aria-label="Tool for new member"]');
-  assert.ok(select, "registration exposes the fixed Tool attribute");
+  const name = f.surface.element.querySelector('[aria-label="Name for new member"]');
+  assert.ok(name, "registration exposes an accessible display name field");
+  assert.equal(name.classList.contains("settings-input"), true, "registration reuses the tokenized shared input primitive");
+  const register = f.surface.element.querySelector('[data-action="add"]');
+  const input = value => { name.value = value; name.dispatchEvent(new f.window.Event("input")); };
+  assert.equal(register.disabled, true, "empty names cannot register");
+  input("  oNe  ");
+  assert.equal(register.disabled, true, "normalized duplicates are rejected");
+  assert.equal(name.getAttribute("aria-invalid"), "true");
+  input("  Maple  ");
   assert.deepEqual([...select.options].map(option => option.value), ["codex", "claude", "custom-cli"]);
   select.querySelector('[value="custom-cli"]').selected = true;
-  f.surface.element.querySelector('[data-action="add"]').click();
-  assert.deepEqual(f.added, ["custom-cli"]);
-  select.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1 })); f.flush();
+  register.click();
+  assert.deepEqual(f.added, [{ tool: "custom-cli", name: "Maple" }]);
+  f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
+  assert.equal(name.value, "  Maple  ", "backend rejection retains the draft");
+  name.focus(); f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null })); f.flush();
+  assert.ok(f.surface.element.querySelector('[aria-label="Name for new member"]') === name && f.document.activeElement === name);
+  select.focus();
   assert.ok(f.surface.element.querySelector('[aria-label="Tool for new member"]') === select && f.document.activeElement === select);
   assert.equal(select.value, "custom-cli");
+  const preview = f.document.createElement("aside"); f.surface.setPreviewHost(preview);
+  assert.equal(preview.querySelector('[aria-label="Name for new member"]').disabled, true);
+  assert.equal(register.disabled, false, "a rejected request can be retried");
+  f.rosterModel.update(state => ({ ...state, revision: state.revision + 1,
+    members: [...state.members, { member_id: "other-writer", name: "Maple", enabled: true }] })); f.flush();
+  assert.equal(name.value, "  Maple  ", "a later read must not mistake another writer's member for the rejected registration");
+  f.rosterModel.update(state => ({ ...state, error: "Agent roster changed; reload before retrying" })); f.flush();
+  input("Cedar"); register.click();
+  f.activityModel.update(state => ({ ...state, count: 2 })); f.flush();
+  f.rosterModel.update(state => ({ ...state, revision: state.revision + 1, error: null,
+    members: [...state.members, { member_id: "retry", name: "Cedar", enabled: true }] })); f.flush();
+  assert.equal(name.value, "", "retry success clears the submitted draft after unrelated activity redraw");
 });

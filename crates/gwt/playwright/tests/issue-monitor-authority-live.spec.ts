@@ -89,12 +89,11 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const panel = settings.locator('[data-settings-panel="issues"]');
       await expect(panel).toBeVisible();
-      // Settings moves the original controls between its summary and options
-      // panel; their action and accessible name remain unchanged.
-      const monitoring = settings.locator('button[data-action="monitor-toggle"]');
-      const autonomous = settings.getByRole("switch", { name: "Autonomous mode", exact: true });
-      await expect(monitoring).toHaveText("Start");
-      await expect(autonomous).toHaveAttribute("aria-checked", "false");
+      // Independent Settings controls project the same confirmed Monitor state.
+      const monitoring = panel.getByRole("checkbox", { name: "Monitoring", exact: true });
+      const autonomous = panel.getByRole("checkbox", { name: "Autonomous", exact: true });
+      await expect(monitoring).not.toBeChecked();
+      await expect(autonomous).not.toBeChecked();
 
       try {
         await registerPm();
@@ -108,8 +107,8 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
           allowed_labels: [fixture.allowed_label], update_drain: { version: "999.0.0" } });
         expect(cli("issue.monitor.status")).toMatchObject({ enabled: true, autonomous_mode: true, active_launches: [] });
         await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
-        await expect(monitoring).toHaveText("Stop");
-        await expect(autonomous).toHaveAttribute("aria-checked", "true");
+        await expect(monitoring).toBeChecked();
+        await expect(autonomous).toBeChecked();
         await info.attach(`monitor-enabled-${theme}`, { body: await settings.screenshot({ path: join(CHECK_HOME, `monitor-enabled-${theme}.png`) }), contentType: "image/png" });
 
         await registerPm();
@@ -119,8 +118,8 @@ test.describe("Issue #5694 monitor authority (isolated live backend)", () => {
           allowed_labels: [fixture.allowed_label], update_drain: { version: "999.0.0" } });
         expect(cli("issue.monitor.status")).toMatchObject({ enabled: false, autonomous_mode: false, active_launches: [] });
         await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
-        await expect(monitoring).toHaveText("Start");
-        await expect(autonomous).toHaveAttribute("aria-checked", "false");
+        await expect(monitoring).not.toBeChecked();
+        await expect(autonomous).not.toBeChecked();
         await expect(page.locator('.workspace-window[data-preset="codex"], .workspace-window[data-preset="claude"]')).toHaveCount(0);
         expect(JSON.parse(await readFile(pmPath, "utf8")).settings.auto_start).toBe(false);
         await info.attach(`monitor-disabled-${theme}`, { body: await settings.screenshot({ path: join(CHECK_HOME, `monitor-disabled-${theme}.png`) }), contentType: "image/png" });

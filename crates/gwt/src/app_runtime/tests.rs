@@ -1181,7 +1181,7 @@ fn runtime_hook_state(status: &str, session_id: &str) -> gwt::RuntimeHookEvent {
     runtime_hook_state_for_event(status, "Stop", session_id)
 }
 
-fn runtime_hook_state_for_event(
+pub(super) fn runtime_hook_state_for_event(
     status: &str,
     source_event: &str,
     session_id: &str,
@@ -7751,6 +7751,7 @@ fn open_agent_settings_sets(
                 repo,
                 &sessions,
                 gwt::agent_names::AgentRosterAction::Add {
+                    name: None,
                     agent_id: Some(tool.into()),
                 },
                 None,
@@ -8943,7 +8944,33 @@ fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
             if let Some(UserEvent::PmWakeDeliveryComplete(delivery)) =
                 runtime.accept_project_completion(event)
             {
+                // This scheduling fixture has a draining shell, not a provider.
+                // Simulate its exact prompt hook, then let the real wake worker
+                // read the receipt and release its protected transaction.
+                if matches!(delivery.result, Ok(super::pm::PmWakeWrite::Unconfirmed)) {
+                    let prompt = delivery.decision.delivery_prompt();
+                    let receipt_path = gwt::pm_registry::pm_delivery_receipts_path_for_repo_path(
+                        &delivery.context.project_root,
+                    );
+                    let receipts =
+                        gwt::pm_registry::load_pm_delivery_receipts(&receipt_path).unwrap();
+                    if let Some(receipt) = receipts.last() {
+                        let body = prompt.trim_end_matches('\r');
+                        if gwt::pm_registry::pm_delivery_prompt_sha256(body) == receipt.body_sha256
+                        {
+                            let _session =
+                                ScopedEnvVar::set("GWT_SESSION_ID", &receipt.target_session_id);
+                            let input = serde_json::json!({"prompt": format!("{body} [gwt-delivery:{}:{}]", receipt.operation_id, receipt.body_sha256)}).to_string();
+                            gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+                                &delivery.context.project_root,
+                                &input,
+                            );
+                        }
+                    }
+                }
+                let window_id = delivery.decision.window_id.clone();
                 runtime.pm_wake_delivery_complete(delivery);
+                runtime.flush_pending_pm_wake(&window_id);
             }
         }
     }
@@ -9162,6 +9189,7 @@ pub(super) fn attach_live_pm_pane(runtime: &mut AppRuntime, window_id: &str) -> 
     .expect("draining PM test pane");
     let guard = TestPaneGuard::new(&pane);
     insert_test_pane_runtime_with_pane(runtime, window_id, pane);
+    runtime.register_pty_writer(window_id, None);
     guard
 }
 

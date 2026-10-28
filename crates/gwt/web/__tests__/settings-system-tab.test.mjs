@@ -16,7 +16,7 @@ import { dirname, resolve } from "node:path";
 import { parseHTML } from "linkedom";
 import { createUiStateStore } from "../ui-state-store.js";
 import { createInteractionGuard } from "../interaction-guard.js";
-import { setControlExplanation } from "../control-explanations.js";
+import { bindControlExplanations, setControlExplanation } from "../control-explanations.js";
 import { renderCustomAgentEnvEditor } from "../custom-agent-env-editor.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -67,11 +67,11 @@ function createSettingsHarness({ scheduleFrame, onSend } = {}) {
     { member_id: "member-codex", name: "Codex member", agent_id: "codex", enabled: true },
     { member_id: "member-custom", name: "Custom member", agent_id: "fixture-cli", enabled: true },
   ] }, { scheduleFrame: frameScheduler });
-  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation",
+  const factory = Function("document", "window", "createInteractionGuard", "createUiStateStore", "setControlExplanation", "bindControlExplanations",
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${settingsSource
       .replace(/^import .*;\r?\n/gm, "")
       .replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
-    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, renderCustomAgentEnvEditor,
+    document, window, createInteractionGuard, createUiStateStore, setControlExplanation, bindControlExplanations, () => {}, renderCustomAgentEnvEditor,
   );
   const surface = factory({
     scheduleFrame: frameScheduler,
@@ -624,7 +624,7 @@ test("Issue #5531: mounted Settings recovers all lost reads without replaying wr
   sent.length = 0;
   body.remove();
   surface.resyncSettings();
-  assert.deepEqual(sent, [], "detached Settings must not trigger read probes");
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }], "only shared Works presentation settings are read without a Settings mount");
 });
 
 test("Issue #5531: recovered System snapshots preserve unsaved provider and OAuth inputs", () => {
@@ -1029,7 +1029,8 @@ test("Settings keeps grouped navigation beside a flexible content pane", () => {
   assert.match(tabsBlock[1], /overflow-y:\s*auto/);
   assert.match(componentsCss, /\.settings-layout\s*\{[^}]*grid-template-columns:[^}]*minmax\(0, 1fr\)/);
   assert.match(componentsCss, /\.settings-field\s*\{[^}]*align-items:\s*center/);
-  assert.match(componentsCss, /\.settings-issues-options\[open\]\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /\.settings-body\s*\{[^}]*overflow:\s*auto/);
+  assert.match(componentsCss, /@media\s*\(max-width:\s*600px\)[\s\S]*?\.settings-layout\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
 });
 
 test("settings-tab[aria-selected=true] uses --color-state-active tint", () => {
@@ -1714,4 +1715,39 @@ test("renderSystemPanel exposes agent process-tree resource controls (#3813)", (
 test("app.js delegates complete System events to the shared model (#3813)", () => {
   assert.match(appSource, /case "system_settings":\s*case "system_settings_updated":\s*applySystemSettingsEvent\(event\);/);
   assert.match(settingsSource, /agentResource: normalizeAgentResource\(event\.agent_resource, state\.agentResource\)/);
+});
+
+
+test("Works output lines use the System writer and keep invalid or rejected drafts out of the shared setting", () => {
+  const { surface, body, window, sent, flush } = createSettingsHarness();
+  surface.renderSettingsWindow(body, { id: "settings", title: "Settings" });
+  const input = () => body.querySelector('[aria-label="Works output lines"]');
+  assert.ok(input(), "System settings exposes the saved Works line count");
+  assert.equal(input().value, "3");
+  assert.equal(input().getAttribute("min"), "3"); assert.equal(input().getAttribute("max"), "10"); assert.equal(input().getAttribute("step"), "1");
+  surface.applySystemSettingsEvent({ kind: "system_settings", language: "ja" }); flush();
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3);
+  input().value = "5"; input().dispatchEvent(new window.Event("change"));
+  assert.deepEqual(sent.at(-1), { kind: "update_system_settings", language: "ja", works_preview_lines: 5 });
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 3, "only saved backend values reach Works");
+  surface.applySystemSettingsEvent({ kind: "system_settings_updated", works_preview_lines: 5 }); flush();
+  assert.equal(input().value, "5");
+  assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  const count = sent.length;
+  for (const invalid of ["", "2", "11", "4.5"]) {
+    input().value = invalid; input().dispatchEvent(new window.Event("change")); flush();
+    assert.equal(sent.length, count);
+    assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+    assert.match(body.textContent, /whole number from 3 to 10/);
+  }
+  input().value = "10"; input().dispatchEvent(new window.Event("change"));
+  surface.applySystemSettingsEvent({ kind: "system_settings_error", message: "Storage unavailable" }); flush();
+  assert.equal(input().value, "5"); assert.equal(surface.systemSettingsModel.read().worksPreviewLines, 5);
+  assert.match(body.textContent, /Storage unavailable/);
+});
+
+test("Works loads its saved output line count on reconnect without a Settings mount", () => {
+  const { surface, sent } = createSettingsHarness();
+  surface.resyncSettings();
+  assert.deepEqual(sent, [{ kind: "get_system_settings" }]);
 });

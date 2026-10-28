@@ -322,8 +322,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     fixture
         .runtime
         .handle_launch_complete_and_drain(fresh_window.clone(), Ok(completion));
-    let (spawner, _) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
     let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
     ready.continuation_readiness_nonce = Some(readiness_nonce);
     ready.project_root = Some(fixture.project_root.display().to_string());
@@ -364,6 +362,114 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .unwrap(),
         gwt_terminal::PaneStatus::Running
     ));
+    let runtime = &fixture.runtime.runtimes[&fresh_window];
+    let child_pid = runtime.pty.process_id().expect("live PTY child");
+    assert_ne!(child_pid, std::process::id());
+    let incarnation = runtime.incarnation;
+
+    // Keep the launch's queued scheduler: replacing it would strand its
+    // independent observer and leave only a vacuous, empty-candidate test.
+    drain_queued_blocking_tasks(&tasks);
+    let (context, activity) = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { context, events } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => {
+                        Some((context.clone(), activity.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("launch schedules an independent local census dispatch");
+    assert_eq!(
+        fixture.runtime.project_key_for_tab(&context.tab_id),
+        Some(&context.project_key)
+    );
+    assert_eq!(activity.project_key, context.project_key.to_string());
+    let agents = activity.agents.expect("current launch can be observed");
+    assert_eq!(agents.len(), 1, "the real successor must be nonempty");
+    let agent = &agents[0];
+    assert_eq!(agent.window_id, fresh_window);
+    assert_eq!(agent.session_id, session_id);
+    assert_eq!(agent.runtime_incarnation, incarnation);
+    assert_eq!(agent.issue_number, Some(3165));
+    assert!(!agent.is_pm);
+
+    fixture.runtime.agent_roster_events(
+        &context,
+        &"operator".into(),
+        gwt::agent_names::AgentRosterAction::Read,
+        None,
+        Some("read-successor".into()),
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let roster = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::AgentRoster { roster, request_id } => {
+                        assert_eq!(request_id.as_deref(), Some("read-successor"));
+                        Some(roster.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("roster reply for the live successor");
+    assert!(roster.error.is_none(), "{:?}", roster.error);
+    assert_eq!(roster.project_key, activity.project_key);
+    let member = roster
+        .members
+        .iter()
+        .find(|member| {
+            member
+                .member
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.session_id.as_deref())
+                == Some(session_id.as_str())
+        })
+        .expect("observed Session binds a roster member");
+    assert!(member.member.enabled);
+    assert_eq!(
+        candidate.agent_member_id.as_deref(),
+        Some(member.member.agent_member_id.as_str())
+    );
+    let catalog_window = fixture
+        .runtime
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(move |window| (tab, window))
+        })
+        .find(|(tab, window)| combined_window_id(&tab.id, &window.id) == fresh_window)
+        .map(|(_, window)| window)
+        .expect("observed window remains in the catalog");
+    assert_eq!(
+        catalog_window.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        catalog_window.agent_name.as_deref(),
+        Some(member.member.name.as_str())
+    );
     settle_test_pane_child(&fixture.runtime, &fresh_window);
 }
 
@@ -740,12 +846,13 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         agent_project_root: fixture.worktree.display().to_string(),
         ..sample_active_agent_session("tab-1", "predecessor-window")
     };
+    let historical_owner = (case != "4777-ownerless-root").then_some(fixture.execution_owner);
     save_workspace_launch_projection(
         &fixture.project_root,
         &predecessor_active,
         Some("origin/develop"),
-        Some(fixture.execution_owner.number),
-        Some(fixture.execution_owner),
+        historical_owner.map(|owner| owner.number),
+        historical_owner,
         None,
         WorkspaceLaunchProjectionKind::StartWork,
         Some(&HashSet::from([fixture.source_session_id.clone()])),
@@ -866,12 +973,26 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
     }
     if case == "4777-ownerless-root" {
-        history
+        let root = history
             .work_items
-            .iter_mut()
+            .iter()
             .find(|work| work.id == predecessor_id)
-            .unwrap()
-            .owner = None;
+            .unwrap();
+        assert_eq!(root.owner, None, "{case}: seed ownerless projection");
+        let start = root
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .unwrap();
+        assert_eq!(start.owner, None, "{case}: seed ownerless source event");
+        assert!(
+            gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                &fixture.worktree,
+                start,
+            )
+            .unwrap(),
+            "{case}: immutable source matches the ownerless fixture"
+        );
     }
     if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
         let mut start = history
@@ -910,12 +1031,17 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             if case == "4777-missing-historical-owner" || case.contains("ownerless") {
                 // Real historical chains can lose owners at the root,
                 // terminal middle generations, or active latest Work.
-                history
+                let middle = history
                     .work_items
                     .iter_mut()
                     .find(|work| work.id == predecessor_id)
-                    .unwrap()
-                    .owner = None;
+                    .unwrap();
+                middle.owner = None;
+                // Shared intake refolds inline events. Seed the historical
+                // owner consistently instead of racing it back from Start.
+                for event in &mut middle.events {
+                    event.owner = None;
+                }
                 if case == "5082-ownerless-current" {
                     start.id = format!("{case}-middle-start");
                     start.work_item_id =
@@ -934,6 +1060,9 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 start.work_item_id =
                     gwt_core::workspace_projection::successor_work_id(&predecessor_id);
                 start.related_work_item_id = Some(predecessor_id.clone());
+                if case == "4777-ownerless-root" {
+                    start.owner = Some(format!("SPEC-{}", fixture.execution_owner.number));
+                }
                 history.apply_event(start);
             }
         }
@@ -1377,6 +1506,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             staged_diff,
             "{case}: retain staged source bytes"
         );
+    }
+    if case == "4777-missing-historical-owner" {
+        // Exercise the background refold before comparing history, regardless
+        // of whether the launch thread happened to finish its intake first.
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &works_path,
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
     }
     let updated = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
         .unwrap()

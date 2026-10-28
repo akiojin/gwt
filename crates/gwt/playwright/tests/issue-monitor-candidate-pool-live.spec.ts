@@ -13,7 +13,7 @@ const CUSTOM_ID = "fixture-candidate";
 
 test.afterEach(async ({ page }) => {
   if (!BASE || page.isClosed()) return;
-  // The fixed Issues surface recreates its Settings window while selected.
+  // Move away from Settings before closing its fixed live view.
   await page.locator('button[data-surface="agents"]').click();
   const settings = page.locator('.workspace-window[data-preset="settings"]');
   const ids = await settings.evaluateAll(windows => windows.map(window => (window as HTMLElement).dataset.id));
@@ -74,6 +74,7 @@ test.describe("Issue Monitor candidate pool", () => {
         await tool.selectOption(agentId);
         const beforeIds = new Set(roster.members.map((member: any) => member.agent_member_id));
         const cursor = await sequence();
+        await page.getByLabel("Name for new member", { exact: true }).fill(`Candidate ${roster.revision}`);
         await page.locator('.roster-capacity [data-action="add"]').click();
         const next = await freshRoster(cursor, roster.revision);
         const added = next.members.filter((member: any) => !beforeIds.has(member.agent_member_id));
@@ -119,15 +120,17 @@ test.describe("Issue Monitor candidate pool", () => {
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const pool = settings.locator('[data-settings-candidates]');
       const openCandidates = async () => {
-        // The legacy Agents route reveals Candidates in the same Issues options.
+        const issueHosts = page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]');
+        const issueIds = await issueHosts.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")).sort());
+        // The legacy Agents route reveals Candidates in execution settings.
         // It must focus the existing Settings window after reload.
         await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
           detail: { section: "agents" },
         })));
         await expect(pool).toBeVisible();
-        await expect(settings.locator(".settings-issues-options")).toHaveAttribute("open", "");
+        await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
         await expect(settings).toHaveCount(1);
-        await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+        expect(await issueHosts.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")).sort())).toEqual(issueIds);
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
       };
       const saveProfiles = async (action: () => Promise<unknown>, agentIds: string[], dirty = false, memberIds?: string[]) => {

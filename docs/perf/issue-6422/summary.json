@@ -1,0 +1,4650 @@
+{
+  "schema_version": 1,
+  "issue": 6422,
+  "units": "milliseconds; CPU time is summed process accounting, not scheduler latency",
+  "runs": [
+    {
+      "name": "exploratory-dark",
+      "theme": "dark",
+      "measurement_test_passed": false,
+      "production_head": "4b34cd44ada8bbe71ea1cd1f2da78ce19e3ed1e6",
+      "binary_sha256": "6CB704BCB51675AAEA03FA138B587C4F47ADFA00076AF1111CFB411ECF075406",
+      "daemon_sha256": "4916D5AC5C89F2933AAA3BC469CFF9D665E943BF18FC1B184729A40D64EF8A31",
+      "source_snapshot": [
+        {
+          "path": "crates/gwt/src/main.rs",
+          "blob_sha": "0ad36bbdc6c6f62365ac3788ad6e8b3d60c58a7b",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/app_runtime/mod.rs",
+          "blob_sha": "1c349a314c7c2e4ffa6655cabc1f5a39d3823df2",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/app_runtime/wizard.rs",
+          "blob_sha": "cfa71d5c4f1807b02f5e134260d83cd18508bd04",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/app_runtime/launch.rs",
+          "blob_sha": "1565ea3b11a952d40a8dc535f2fb7b587c4756b6",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/launch_runtime.rs",
+          "blob_sha": "1917bcdea82f6290be4626a816c98a445153e3d6",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/launch_runtime/base_freshness.rs",
+          "blob_sha": "3dd8ae4eaddb5efc0217ae8805b9a3e3d2d9a721",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/cli/gwtd_resolver.rs",
+          "blob_sha": "7bd494434435bc53c0c7b23fdb4ca586ee0bbd3b",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/issue_monitor_worker.rs",
+          "blob_sha": "73175f2ad66a0e7873b7a83aacef0f1393874a57",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt-config/src/home.rs",
+          "blob_sha": "6e6710dd249a255ccc334c3f250c792090b994e8",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt-core/src/paths.rs",
+          "blob_sha": "fdc3a62f1cc8c6ca2ff2b67a7d30c005a7f81f6e",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt-core/src/logging/writer.rs",
+          "blob_sha": "6e22e6124c2d11c9ec660adfb86542c861b03de7",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/src/perf/dispatch.rs",
+          "blob_sha": "b2cc147e72aeb48d84df4c4ac67324f5054b92fc",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/web/app.js",
+          "blob_sha": "cbca911dd9aa42dc605564ab179f6b288aa29548",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/web/terminal-viewport-reflow.js",
+          "blob_sha": "b9ae9e71364a9f62d2eb9c69a31b501fcb7ee3c6",
+          "source": "working-tree"
+        },
+        {
+          "path": "scripts/verify-issue-5596.ps1",
+          "blob_sha": "3a3f72fde15b4b2e6c7d86250dfc9b7ef827f5e7",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts",
+          "blob_sha": "0b47cd8bbbf8a79ffd6b7f2efa11d1d5e24a4b07",
+          "source": "working-tree"
+        },
+        {
+          "path": "crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs",
+          "blob_sha": "30e4d9dec9ee4a562b741caf25a2f273f00dd626",
+          "source": "working-tree"
+        }
+      ],
+      "observer": {
+        "interval_ms": 500,
+        "pid": 33600,
+        "current_job": {
+          "name": null,
+          "member": true,
+          "cpu_query_error": 0,
+          "limit_query_error": 0,
+          "cpu_flags": 0,
+          "cpu_rate": 0,
+          "limit_flags": 8192
+        },
+        "method": "Toolhelp process tree + System.Diagnostics.ProcessThread + query-only named Jobs; no stack trace or continuous scheduler trace",
+        "priority": "Normal",
+        "started_at": "2026-10-27T00:32:54.5245115Z"
+      },
+      "os_samples": 441,
+      "os_gap_ms": {
+        "median": 825.1326000000117,
+        "p95": 1854.6187000000064,
+        "max": 2470.5619000000006
+      },
+      "registry_error_samples": 0,
+      "shutdown": {
+        "cleanup_errors": [],
+        "stopped_at": "2026-10-27T00:41:05.5675781Z",
+        "isolated_home": "E:\\gwt\\work\\issue-6422\\target\\gwt-verify-tmp\\gwt-verify-kmkx2c\\gwt-launch-5596-989b0423-4313-43ca-9547-5715826be847",
+        "test_exit_code": 1
+      },
+      "browser_errors": [],
+      "measurements": [
+        {
+          "load": "low",
+          "issue_number": 559601,
+          "claim_id": "0e65b184-1ca5-4059-9484-e4bad82f78f0",
+          "delivery_id": "bbfbf494-30f6-453a-bb95-d7fcccba1571",
+          "session_id": "307e0c19-476d-43ed-9433-7138a2a8277c",
+          "window_id": "launch-perf::agent-1",
+          "enqueued_at": "2026-10-27T00:33:11.397Z",
+          "ack_observed_at": "2026-10-27T00:33:17.334Z",
+          "enqueue_to_ack_ms": 5937,
+          "provider_observed_at": "2026-10-27T00:33:21.019Z",
+          "provider_receipt_created_at": "2026-10-27T00:33:20.861Z",
+          "hook_observed_under_load_at": "2026-10-27T00:33:22.088Z",
+          "first_hook_complete_observed_at": "2026-10-27T00:33:22.088Z",
+          "loaded_observation_ended_at": "2026-10-27T00:33:22.088Z",
+          "post_ack_observation_ms": 4754,
+          "load_before": {
+            "pid": 45040,
+            "workers": 0,
+            "elapsed_ms": 19535,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:33:11.396Z"
+          },
+          "load_at_end": {
+            "pid": 45040,
+            "workers": 0,
+            "elapsed_ms": 30364,
+            "work_units": 0
+          },
+          "load_paused": {
+            "pid": 45040,
+            "workers": 0,
+            "elapsed_ms": 30364,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:33:22.094Z"
+          },
+          "recovery_observation_ended_at": null,
+          "outcome": "first-hook-complete",
+          "os_samples": 13,
+          "controller_max_observation_gap_ms": 535,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:33:21.101328800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "307e0c19-476d-43ed-9433-7138a2a8277c",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:33:21Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:33:21.113375500+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "307e0c19-476d-43ed-9433-7138a2a8277c",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:33:21Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:33:21.165357600+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "307e0c19-476d-43ed-9433-7138a2a8277c",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:33:21Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:33:21.359188+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "307e0c19-476d-43ed-9433-7138a2a8277c",
+                "source_event": "UserPromptSubmit",
+                "occurred_at": "2026-10-27T00:33:21Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [],
+          "processes": [
+            {
+              "pid": 47408,
+              "parent": 15068,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:32:48.6526816Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 12843.75,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 905,
+                "Running": 15,
+                "Ready": 1
+              },
+              "thread_waits": {
+                "UserRequest": 201,
+                "EventPairLow": 92,
+                "Unknown": 606,
+                "Executive": 6
+              }
+            },
+            {
+              "pid": 49252,
+              "parent": 47408,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:32:49.6175623Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 1078.125,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 157
+              },
+              "thread_waits": {
+                "Unknown": 76,
+                "EventPairLow": 61,
+                "UserRequest": 20
+              }
+            },
+            {
+              "pid": 38444,
+              "parent": 49252,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:49.6280520Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 36
+              },
+              "thread_waits": {
+                "UserRequest": 26,
+                "EventPairLow": 10
+              }
+            },
+            {
+              "pid": 32360,
+              "parent": 15068,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:32:50.7790297Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 89
+              },
+              "thread_waits": {
+                "Unknown": 39,
+                "EventPairLow": 50
+              }
+            },
+            {
+              "pid": 32740,
+              "parent": 32360,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:50.7900650Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 38
+              },
+              "thread_waits": {
+                "UserRequest": 26,
+                "EventPairLow": 12
+              }
+            },
+            {
+              "pid": 45040,
+              "parent": 32360,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:32:51.6656880Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 442
+              },
+              "thread_waits": {
+                "UserRequest": 403,
+                "EventPairLow": 39
+              }
+            },
+            {
+              "pid": 33600,
+              "parent": 15068,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:32:51.7996240Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 3687.5,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 333,
+                "Running": 13
+              },
+              "thread_waits": {
+                "UserRequest": 143,
+                "EventPairLow": 190
+              }
+            },
+            {
+              "pid": 46252,
+              "parent": 33600,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:52.0302017Z",
+              "first_observed_at": "2026-10-27T00:33:11.5982120Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 13,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 9781,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 39
+              },
+              "thread_waits": {
+                "UserRequest": 26,
+                "EventPairLow": 13
+              }
+            },
+            {
+              "pid": 44064,
+              "parent": 47408,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:33:16.7935113Z",
+              "first_observed_at": "2026-10-27T00:33:17.1957960Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 6,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 4184,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 42
+              },
+              "thread_waits": {
+                "UserRequest": 18,
+                "Executive": 12,
+                "EventPairLow": 12
+              }
+            },
+            {
+              "pid": 50012,
+              "parent": 47408,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:33:16.8058103Z",
+              "first_observed_at": "2026-10-27T00:33:17.1957960Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 6,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 4184,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 24
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 18,
+                "UserRequest": 4
+              }
+            },
+            {
+              "pid": 13928,
+              "parent": 50012,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:33:16.8979539Z",
+              "first_observed_at": "2026-10-27T00:33:17.1957960Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 6,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 3281.25,
+              "wall_ms": 4184,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 81,
+                "Running": 3
+              },
+              "thread_waits": {
+                "UserRequest": 37,
+                "EventPairLow": 40,
+                "ExecutionDelay": 3,
+                "Executive": 1
+              }
+            },
+            {
+              "pid": 26756,
+              "parent": 13928,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:33:19.9982779Z",
+              "first_observed_at": "2026-10-27T00:33:20.5462168Z",
+              "last_observed_at": "2026-10-27T00:33:21.3798012Z",
+              "samples": 2,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 833,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 8
+              },
+              "thread_waits": {
+                "UserRequest": 2,
+                "EventPairLow": 6
+              }
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:33:16.8058103Z",
+            "upper_bound": "2026-10-27T00:33:16.8979539Z",
+            "gate_pid": 50012,
+            "shell_pid": 13928,
+            "provider_pid": 26756,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        },
+        {
+          "load": "high",
+          "issue_number": 559602,
+          "claim_id": "5033c3c4-e716-43c1-a8c8-5c32963607d0",
+          "delivery_id": "38aa8857-e66d-4a3c-8286-a2e92ae43fe5",
+          "session_id": "d0470631-6382-4f8b-8009-a698fee86178",
+          "window_id": "launch-perf::agent-2",
+          "enqueued_at": "2026-10-27T00:33:22.518Z",
+          "ack_observed_at": "2026-10-27T00:33:29.836Z",
+          "enqueue_to_ack_ms": 7318,
+          "provider_observed_at": "2026-10-27T00:33:41.062Z",
+          "provider_receipt_created_at": "2026-10-27T00:33:40.518Z",
+          "hook_observed_under_load_at": null,
+          "first_hook_complete_observed_at": null,
+          "loaded_observation_ended_at": "2026-10-27T00:36:28.272Z",
+          "post_ack_observation_ms": 178436,
+          "load_before": {
+            "pid": 45040,
+            "workers": 30,
+            "elapsed_ms": 30770,
+            "work_units": 288100000,
+            "observed_at": "2026-10-27T00:33:22.517Z"
+          },
+          "load_at_end": {
+            "pid": 45040,
+            "workers": 30,
+            "elapsed_ms": 278820,
+            "work_units": 726451300000
+          },
+          "load_paused": {
+            "pid": 45040,
+            "workers": 0,
+            "elapsed_ms": 279027,
+            "work_units": 726971000000,
+            "observed_at": "2026-10-27T00:37:30.792Z"
+          },
+          "recovery_observation_ended_at": null,
+          "outcome": "exploratory recovery assertion failed",
+          "os_samples": 107,
+          "controller_max_observation_gap_ms": 63099,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:34:30.108264200+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "d0470631-6382-4f8b-8009-a698fee86178",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:34:30Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:34:30.146965500+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "d0470631-6382-4f8b-8009-a698fee86178",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:34:30Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:34:30.525866900+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "d0470631-6382-4f8b-8009-a698fee86178",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:34:30Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [
+            {
+              "timestamp": "2026-10-27T09:37:30.749724800+09:00",
+              "target": "gwt::agent_launch",
+              "fields": {
+                "message": "window launch failed",
+                "stage": "monitor_startup_timeout",
+                "window_id": "launch-perf::agent-2",
+                "session_id": "d0470631-6382-4f8b-8009-a698fee86178",
+                "error": "Issue Monitor startup timed out after 180s: no initial prompt submission or tool activity; gwt retries this launch automatically without spending an attempt"
+              },
+              "spans": []
+            }
+          ],
+          "processes": [
+            {
+              "pid": 47408,
+              "parent": 15068,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:32:48.6526816Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 75156.25,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 7691,
+                "Running": 42,
+                "Standby": 1,
+                "Unknown": 1
+              },
+              "thread_waits": {
+                "UserRequest": 1856,
+                "EventPairLow": 602,
+                "Unknown": 4867,
+                "Executive": 366
+              }
+            },
+            {
+              "pid": 49252,
+              "parent": 47408,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:32:49.6175623Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 3171.875,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 977,
+                "Running": 1
+              },
+              "thread_waits": {
+                "Unknown": 537,
+                "EventPairLow": 200,
+                "UserRequest": 167,
+                "Executive": 73
+              }
+            },
+            {
+              "pid": 38444,
+              "parent": 49252,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:49.6280520Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 214
+              },
+              "thread_waits": {
+                "UserRequest": 214
+              }
+            },
+            {
+              "pid": 32360,
+              "parent": 15068,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:32:50.7790297Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 442,
+                "Ready": 1
+              },
+              "thread_waits": {
+                "Unknown": 320,
+                "EventPairLow": 122
+              }
+            },
+            {
+              "pid": 32740,
+              "parent": 32360,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:50.7900650Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 214
+              },
+              "thread_waits": {
+                "UserRequest": 214
+              }
+            },
+            {
+              "pid": 45040,
+              "parent": 32360,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:32:51.6656880Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 2570515.625,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 103,
+                "Ready": 1743,
+                "Running": 1471
+              },
+              "thread_waits": {
+                "UserRequest": 103
+              }
+            },
+            {
+              "pid": 33600,
+              "parent": 15068,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:32:51.7996240Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 36546.875,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 1583,
+                "Running": 107
+              },
+              "thread_waits": {
+                "UserRequest": 916,
+                "EventPairLow": 667
+              }
+            },
+            {
+              "pid": 46252,
+              "parent": 33600,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:32:52.0302017Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 214
+              },
+              "thread_waits": {
+                "UserRequest": 214
+              }
+            },
+            {
+              "pid": 44064,
+              "parent": 47408,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:33:16.7935113Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 183271,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 561
+              },
+              "thread_waits": {
+                "UserRequest": 321,
+                "Executive": 214,
+                "EventPairLow": 26
+              }
+            },
+            {
+              "pid": 50012,
+              "parent": 47408,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:33:16.8058103Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 183271,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 146
+              },
+              "thread_waits": {
+                "UserRequest": 107,
+                "EventPairLow": 39
+              }
+            },
+            {
+              "pid": 13928,
+              "parent": 50012,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:33:16.8979539Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 125,
+              "wall_ms": 183271,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 1504,
+                "Ready": 13
+              },
+              "thread_waits": {
+                "UserRequest": 973,
+                "EventPairLow": 530,
+                "ExecutionDelay": 1
+              }
+            },
+            {
+              "pid": 26756,
+              "parent": 13928,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:33:19.9982779Z",
+              "first_observed_at": "2026-10-27T00:33:23.4658858Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 107,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 183271,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-db51283e-ca96-4685-a142-cbc32c0dfaf2",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 168
+              },
+              "thread_waits": {
+                "UserRequest": 107,
+                "EventPairLow": 61
+              }
+            },
+            {
+              "pid": 49212,
+              "parent": 47408,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:33:29.1425991Z",
+              "first_observed_at": "2026-10-27T00:33:30.7277292Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 103,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 176009,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 577
+              },
+              "thread_waits": {
+                "UserRequest": 309,
+                "Executive": 206,
+                "EventPairLow": 62
+              }
+            },
+            {
+              "pid": 48568,
+              "parent": 47408,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:33:29.2624849Z",
+              "first_observed_at": "2026-10-27T00:33:30.7277292Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 103,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 176009,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 148
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 45,
+                "UserRequest": 101
+              }
+            },
+            {
+              "pid": 36276,
+              "parent": 48568,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:33:29.3742171Z",
+              "first_observed_at": "2026-10-27T00:33:30.7277292Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 103,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 1078.125,
+              "wall_ms": 176009,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 1446,
+                "Ready": 18,
+                "Running": 1
+              },
+              "thread_waits": {
+                "UserRequest": 925,
+                "EventPairLow": 518,
+                "Executive": 3
+              }
+            },
+            {
+              "pid": 14104,
+              "parent": 36276,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:33:35.4911453Z",
+              "first_observed_at": "2026-10-27T00:33:36.2556260Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 100,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 170481,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 162
+              },
+              "thread_waits": {
+                "Executive": 3,
+                "EventPairLow": 64,
+                "UserRequest": 95
+              }
+            },
+            {
+              "pid": 2204,
+              "parent": 14104,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:33:41.0355482Z",
+              "first_observed_at": "2026-10-27T00:33:41.5904822Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 97,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 93.75,
+              "wall_ms": 165146,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 23,
+                "Wait": 191
+              },
+              "thread_waits": {
+                "Executive": 4,
+                "EventPairLow": 119,
+                "UserRequest": 68
+              }
+            },
+            {
+              "pid": 27128,
+              "parent": 47408,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:34:15.9688383Z",
+              "first_observed_at": "2026-10-27T00:34:16.5186115Z",
+              "last_observed_at": "2026-10-27T00:34:20.3978032Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3879,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 6
+              },
+              "thread_waits": {
+                "UserRequest": 3,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 38336,
+              "parent": 27128,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:34:16.0053855Z",
+              "first_observed_at": "2026-10-27T00:34:16.5186115Z",
+              "last_observed_at": "2026-10-27T00:34:20.3978032Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3879,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 9
+              },
+              "thread_waits": {
+                "UserRequest": 6,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 30132,
+              "parent": 27128,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:34:16.0552400Z",
+              "first_observed_at": "2026-10-27T00:34:16.5186115Z",
+              "last_observed_at": "2026-10-27T00:34:20.3978032Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 1265.625,
+              "wall_ms": 3879,
+              "jobs": [],
+              "thread_states": {
+                "Running": 1,
+                "Wait": 80
+              },
+              "thread_waits": {
+                "EventPairLow": 9,
+                "UserRequest": 69,
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 14720,
+              "parent": 47408,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:34:22.8590055Z",
+              "first_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "last_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "UserRequest": 1,
+                "EventPairLow": 1
+              }
+            },
+            {
+              "pid": 47744,
+              "parent": 14720,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:34:22.8755790Z",
+              "first_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "last_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 3
+              },
+              "thread_waits": {
+                "UserRequest": 2,
+                "EventPairLow": 1
+              }
+            },
+            {
+              "pid": 5588,
+              "parent": 14720,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:34:22.9148197Z",
+              "first_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "last_observed_at": "2026-10-27T00:34:24.6010528Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 7
+              },
+              "thread_waits": {
+                "Executive": 1,
+                "EventPairLow": 3,
+                "UserRequest": 3
+              }
+            },
+            {
+              "pid": 46116,
+              "parent": 2204,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:34:30.5608596Z",
+              "first_observed_at": "2026-10-27T00:34:30.5903566Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 71,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 116146,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 3,
+                "Ready": 40,
+                "Wait": 28
+              },
+              "thread_waits": {
+                "Executive": 28
+              }
+            },
+            {
+              "pid": 12160,
+              "parent": 49252,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:35:19.9292525Z",
+              "first_observed_at": "2026-10-27T00:35:21.3883237Z",
+              "last_observed_at": "2026-10-27T00:35:23.1944724Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1806,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 33076,
+              "parent": 12160,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:35:19.9385588Z",
+              "first_observed_at": "2026-10-27T00:35:21.3883237Z",
+              "last_observed_at": "2026-10-27T00:35:23.1944724Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1806,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 38024,
+              "parent": 47408,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:35:21.0996471Z",
+              "first_observed_at": "2026-10-27T00:35:21.3883237Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 42,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 62.5,
+              "wall_ms": 65348,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 96
+              },
+              "thread_waits": {
+                "Executive": 5,
+                "EventPairLow": 54,
+                "UserRequest": 37
+              }
+            },
+            {
+              "pid": 28228,
+              "parent": 38024,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:35:21.1067150Z",
+              "first_observed_at": "2026-10-27T00:35:21.3883237Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 42,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 31.25,
+              "wall_ms": 65348,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 3,
+                "Wait": 96
+              },
+              "thread_waits": {
+                "UserRequest": 78,
+                "EventPairLow": 18
+              }
+            },
+            {
+              "pid": 41384,
+              "parent": 49252,
+              "name": "gh.exe",
+              "started_at": "2026-10-27T00:35:24.9866091Z",
+              "first_observed_at": "2026-10-27T00:35:26.5607582Z",
+              "last_observed_at": "2026-10-27T00:35:28.3332659Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1773,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 45488,
+              "parent": 41384,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:35:24.9933914Z",
+              "first_observed_at": "2026-10-27T00:35:26.5607582Z",
+              "last_observed_at": "2026-10-27T00:35:28.3332659Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1773,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 43688,
+              "parent": 38024,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:35:26.1408966Z",
+              "first_observed_at": "2026-10-27T00:35:26.5607582Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 39,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 60176,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 97
+              },
+              "thread_waits": {
+                "Executive": 4,
+                "EventPairLow": 60,
+                "Unknown": 32,
+                "UserRequest": 1
+              }
+            },
+            {
+              "pid": 48916,
+              "parent": 43688,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:35:31.1708294Z",
+              "first_observed_at": "2026-10-27T00:35:31.7807685Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 36,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 54956,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 3,
+                "Wait": 36
+              },
+              "thread_waits": {
+                "Suspended": 32,
+                "Executive": 1,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 8328,
+              "parent": 46116,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:35:44.8836648Z",
+              "first_observed_at": "2026-10-27T00:35:45.7488219Z",
+              "last_observed_at": "2026-10-27T00:36:26.7366586Z",
+              "samples": 27,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 40988,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c2be646f-b34a-4aba-843a-daee3d8a5391",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 23,
+                "Wait": 4
+              },
+              "thread_waits": {
+                "Executive": 1,
+                "UserRequest": 2,
+                "EventPairLow": 1
+              }
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:33:29.2624849Z",
+            "upper_bound": "2026-10-27T00:33:29.3742171Z",
+            "gate_pid": 48568,
+            "shell_pid": 36276,
+            "provider_pid": 14104,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "paired-dark",
+      "theme": "dark",
+      "measurement_test_passed": true,
+      "production_head": "4b34cd44ada8bbe71ea1cd1f2da78ce19e3ed1e6",
+      "binary_sha256": "6CB704BCB51675AAEA03FA138B587C4F47ADFA00076AF1111CFB411ECF075406",
+      "daemon_sha256": "4916D5AC5C89F2933AAA3BC469CFF9D665E943BF18FC1B184729A40D64EF8A31",
+      "source_snapshot": [
+        {
+          "blob_sha": "0ad36bbdc6c6f62365ac3788ad6e8b3d60c58a7b",
+          "path": "crates/gwt/src/main.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "1c349a314c7c2e4ffa6655cabc1f5a39d3823df2",
+          "path": "crates/gwt/src/app_runtime/mod.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "cfa71d5c4f1807b02f5e134260d83cd18508bd04",
+          "path": "crates/gwt/src/app_runtime/wizard.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "1565ea3b11a952d40a8dc535f2fb7b587c4756b6",
+          "path": "crates/gwt/src/app_runtime/launch.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "1917bcdea82f6290be4626a816c98a445153e3d6",
+          "path": "crates/gwt/src/launch_runtime.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "3dd8ae4eaddb5efc0217ae8805b9a3e3d2d9a721",
+          "path": "crates/gwt/src/launch_runtime/base_freshness.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "7bd494434435bc53c0c7b23fdb4ca586ee0bbd3b",
+          "path": "crates/gwt/src/cli/gwtd_resolver.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "73175f2ad66a0e7873b7a83aacef0f1393874a57",
+          "path": "crates/gwt/src/issue_monitor_worker.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "6e6710dd249a255ccc334c3f250c792090b994e8",
+          "path": "crates/gwt-config/src/home.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "fdc3a62f1cc8c6ca2ff2b67a7d30c005a7f81f6e",
+          "path": "crates/gwt-core/src/paths.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "6e22e6124c2d11c9ec660adfb86542c861b03de7",
+          "path": "crates/gwt-core/src/logging/writer.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "b2cc147e72aeb48d84df4c4ac67324f5054b92fc",
+          "path": "crates/gwt/src/perf/dispatch.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "cbca911dd9aa42dc605564ab179f6b288aa29548",
+          "path": "crates/gwt/web/app.js",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "b9ae9e71364a9f62d2eb9c69a31b501fcb7ee3c6",
+          "path": "crates/gwt/web/terminal-viewport-reflow.js",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "4e12498d8539db23f81c181bcaacb8f15f9071f4",
+          "path": "scripts/verify-issue-5596.ps1",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "0b47cd8bbbf8a79ffd6b7f2efa11d1d5e24a4b07",
+          "path": "crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "30e4d9dec9ee4a562b741caf25a2f273f00dd626",
+          "path": "crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "6ec30d990ebb48ac6d717de0c2317328a1c19aa7",
+          "path": "scripts/diagnostics/issue-6422-processes.ps1",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "0869f826e3d049e5db4d0de8eb60111051fb40c3",
+          "path": "crates/gwt/playwright/tests/issue-6422-post-ack-live.spec.ts",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "d876af40c7864287dd8ec647be878810f3f18a04",
+          "path": "crates/gwt-terminal/src/pty.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "c9e36c2ad1aeee0ee4f1d2d868c046dc9b3a15d6",
+          "path": "crates/gwt-terminal/src/pty/process_group.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "71bbcf146e11fa0892732e2ac9aceeba07b4e375",
+          "path": "crates/gwt-core/src/process_tree.rs",
+          "source": "working-tree"
+        },
+        {
+          "blob_sha": "5ef122461cef5d31e4bb7ad7fee99b4703704072",
+          "path": "crates/gwt-core/src/process_tree/job_cpu.rs",
+          "source": "working-tree"
+        }
+      ],
+      "observer": {
+        "priority": "Normal",
+        "interval_ms": 500,
+        "started_at": "2026-10-27T00:45:58.1337198Z",
+        "pid": 10172,
+        "method": "Toolhelp process tree + System.Diagnostics.ProcessThread + query-only named Jobs; no stack trace or continuous scheduler trace",
+        "current_job": {
+          "name": null,
+          "member": true,
+          "cpu_query_error": 0,
+          "limit_query_error": 0,
+          "cpu_flags": 0,
+          "cpu_rate": 0,
+          "limit_flags": 8192
+        }
+      },
+      "os_samples": 72,
+      "os_gap_ms": {
+        "median": 1694.2356000000145,
+        "p95": 2076.199999999997,
+        "max": 54298.4322
+      },
+      "registry_error_samples": 0,
+      "shutdown": {
+        "cleanup_errors": [],
+        "test_exit_code": 0,
+        "stopped_at": "2026-10-27T00:48:37.8042826Z",
+        "isolated_home": "E:\\gwt\\work\\issue-6422\\target\\gwt-verify-tmp\\gwt-verify-FjPGNb\\gwt-launch-5596-74b5c978-c1b3-4a59-aa52-566eacc4b0ca"
+      },
+      "browser_errors": [],
+      "measurements": [
+        {
+          "load": "low",
+          "issue_number": 559601,
+          "claim_id": "738a2536-6218-4e93-9520-a943bd4d4a12",
+          "delivery_id": "f41a861c-9150-401f-a2e5-b9ea5524836f",
+          "session_id": "a09346ca-17e4-422f-b16d-32008b69b3d7",
+          "window_id": "launch-perf::agent-1",
+          "enqueued_at": "2026-10-27T00:46:02.136Z",
+          "ack_observed_at": "2026-10-27T00:46:06.822Z",
+          "enqueue_to_ack_ms": 4686,
+          "provider_observed_at": "2026-10-27T00:46:09.968Z",
+          "provider_receipt_created_at": "2026-10-27T00:46:09.937Z",
+          "hook_observed_under_load_at": "2026-10-27T00:46:10.998Z",
+          "first_hook_complete_observed_at": "2026-10-27T00:46:10.998Z",
+          "loaded_observation_ended_at": "2026-10-27T00:46:10.998Z",
+          "post_ack_observation_ms": 4176,
+          "load_before": {
+            "pid": 8436,
+            "workers": 0,
+            "elapsed_ms": 6215,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:46:02.135Z"
+          },
+          "load_at_end": {
+            "pid": 8436,
+            "workers": 0,
+            "elapsed_ms": 15039,
+            "work_units": 0
+          },
+          "load_paused": {
+            "pid": 8436,
+            "workers": 0,
+            "elapsed_ms": 15039,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:46:11.002Z"
+          },
+          "recovery_observation_ended_at": "2026-10-27T00:46:11.010Z",
+          "outcome": "first-hook-complete",
+          "os_samples": 11,
+          "controller_max_observation_gap_ms": 587,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:46:10.077861800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "a09346ca-17e4-422f-b16d-32008b69b3d7",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:46:10Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:46:10.089370+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "a09346ca-17e4-422f-b16d-32008b69b3d7",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:46:10Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:46:10.124490800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "a09346ca-17e4-422f-b16d-32008b69b3d7",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:46:10Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:46:10.296868600+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "a09346ca-17e4-422f-b16d-32008b69b3d7",
+                "source_event": "UserPromptSubmit",
+                "occurred_at": "2026-10-27T00:46:10Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [],
+          "processes": [
+            {
+              "pid": 45740,
+              "parent": 27028,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:45:52.8061920Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 10500,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 773,
+                "Running": 15
+              },
+              "thread_waits": {
+                "UserRequest": 172,
+                "EventPairLow": 77,
+                "Unknown": 518,
+                "Executive": 6
+              }
+            },
+            {
+              "pid": 37332,
+              "parent": 45740,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:45:53.7293631Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 421.875,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 132,
+                "Running": 1
+              },
+              "thread_waits": {
+                "Unknown": 65,
+                "EventPairLow": 55,
+                "UserRequest": 12
+              }
+            },
+            {
+              "pid": 6996,
+              "parent": 37332,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:53.7388838Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 33
+              },
+              "thread_waits": {
+                "UserRequest": 22,
+                "EventPairLow": 11
+              }
+            },
+            {
+              "pid": 31512,
+              "parent": 27028,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:45:55.1673638Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 77
+              },
+              "thread_waits": {
+                "Unknown": 33,
+                "EventPairLow": 44
+              }
+            },
+            {
+              "pid": 50100,
+              "parent": 31512,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:55.1773504Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 33
+              },
+              "thread_waits": {
+                "UserRequest": 22,
+                "EventPairLow": 11
+              }
+            },
+            {
+              "pid": 8436,
+              "parent": 31512,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:45:55.7926145Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 374
+              },
+              "thread_waits": {
+                "UserRequest": 341,
+                "EventPairLow": 33
+              }
+            },
+            {
+              "pid": 10172,
+              "parent": 27028,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:45:55.8525475Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 4046.875,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 353,
+                "Running": 13
+              },
+              "thread_waits": {
+                "UserRequest": 109,
+                "EventPairLow": 241,
+                "ExecutionDelay": 3
+              }
+            },
+            {
+              "pid": 35544,
+              "parent": 10172,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:56.0735708Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 33
+              },
+              "thread_waits": {
+                "UserRequest": 22,
+                "EventPairLow": 11
+              }
+            },
+            {
+              "pid": 43236,
+              "parent": 27028,
+              "name": "node.exe",
+              "started_at": "2026-10-27T00:45:58.2750572Z",
+              "first_observed_at": "2026-10-27T00:46:02.5251466Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 11,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 234.375,
+              "wall_ms": 7983,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 198
+              },
+              "thread_waits": {
+                "EventPairLow": 88,
+                "UserRequest": 22,
+                "Unknown": 88
+              }
+            },
+            {
+              "pid": 46648,
+              "parent": 45740,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:46:06.2633496Z",
+              "first_observed_at": "2026-10-27T00:46:06.4605343Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 6,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 4048,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 42
+              },
+              "thread_waits": {
+                "UserRequest": 17,
+                "Executive": 12,
+                "EventPairLow": 12,
+                "ExecutionDelay": 1
+              }
+            },
+            {
+              "pid": 37760,
+              "parent": 45740,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:46:06.2755748Z",
+              "first_observed_at": "2026-10-27T00:46:06.4605343Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 6,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 4048,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 24
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 18,
+                "UserRequest": 4
+              }
+            },
+            {
+              "pid": 33160,
+              "parent": 37760,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:46:06.3646574Z",
+              "first_observed_at": "2026-10-27T00:46:06.4605343Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 6,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 2218.75,
+              "wall_ms": 4048,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 82
+              },
+              "thread_waits": {
+                "LpcReply": 1,
+                "EventPairLow": 40,
+                "UserRequest": 37,
+                "ExecutionDelay": 3,
+                "Executive": 1
+              }
+            },
+            {
+              "pid": 7808,
+              "parent": 33160,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:46:09.1722926Z",
+              "first_observed_at": "2026-10-27T00:46:09.6995026Z",
+              "last_observed_at": "2026-10-27T00:46:10.5083209Z",
+              "samples": 2,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 809,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 8
+              },
+              "thread_waits": {
+                "UserRequest": 2,
+                "EventPairLow": 6
+              }
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:46:06.2755748Z",
+            "upper_bound": "2026-10-27T00:46:06.3646574Z",
+            "gate_pid": 37760,
+            "shell_pid": 33160,
+            "provider_pid": 7808,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        },
+        {
+          "load": "high",
+          "issue_number": 559602,
+          "claim_id": "2129a179-72ca-4caa-b6c5-3dfe162b9e64",
+          "delivery_id": "1a652672-b2ce-4a5e-ba3b-25a35e420e2f",
+          "session_id": "7eeecf3a-9b78-45d1-a749-59837a710574",
+          "window_id": "launch-perf::agent-2",
+          "enqueued_at": "2026-10-27T00:46:11.439Z",
+          "ack_observed_at": "2026-10-27T00:46:30.101Z",
+          "enqueue_to_ack_ms": 18662,
+          "provider_observed_at": null,
+          "provider_receipt_created_at": "2026-10-27T00:48:30.511Z",
+          "hook_observed_under_load_at": null,
+          "first_hook_complete_observed_at": "2026-10-27T00:48:31.644Z",
+          "loaded_observation_ended_at": "2026-10-27T00:48:30.434Z",
+          "post_ack_observation_ms": 120333,
+          "load_before": {
+            "pid": 8436,
+            "workers": 30,
+            "elapsed_ms": 15439,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:46:11.438Z"
+          },
+          "load_at_end": {
+            "pid": 8436,
+            "workers": 30,
+            "elapsed_ms": 154489,
+            "work_units": 388459200000
+          },
+          "load_paused": {
+            "pid": 8436,
+            "workers": 0,
+            "elapsed_ms": 154696,
+            "work_units": 389041000000,
+            "observed_at": "2026-10-27T00:48:30.585Z"
+          },
+          "recovery_observation_ended_at": "2026-10-27T00:48:31.644Z",
+          "outcome": "first-hook-complete",
+          "os_samples": 47,
+          "controller_max_observation_gap_ms": 52510,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:48:30.984129+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "7eeecf3a-9b78-45d1-a749-59837a710574",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:48:30Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:48:30.998251400+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "7eeecf3a-9b78-45d1-a749-59837a710574",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:48:30Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:48:31.069490900+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "7eeecf3a-9b78-45d1-a749-59837a710574",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:48:31Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:48:31.328379+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "7eeecf3a-9b78-45d1-a749-59837a710574",
+                "source_event": "UserPromptSubmit",
+                "occurred_at": "2026-10-27T00:48:31Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [],
+          "processes": [
+            {
+              "pid": 45740,
+              "parent": 27028,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:45:52.8061920Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 69953.125,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 3433,
+                "Running": 38
+              },
+              "thread_waits": {
+                "UserRequest": 834,
+                "EventPairLow": 299,
+                "Unknown": 2200,
+                "Executive": 99,
+                "LpcReply": 1
+              }
+            },
+            {
+              "pid": 37332,
+              "parent": 45740,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:45:53.7293631Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 3953.125,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 427,
+                "Running": 2
+              },
+              "thread_waits": {
+                "Unknown": 245,
+                "EventPairLow": 127,
+                "UserRequest": 53,
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 6996,
+              "parent": 37332,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:53.7388838Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 101
+              },
+              "thread_waits": {
+                "UserRequest": 94,
+                "EventPairLow": 7
+              }
+            },
+            {
+              "pid": 31512,
+              "parent": 27028,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:45:55.1673638Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 221,
+                "Ready": 1
+              },
+              "thread_waits": {
+                "Unknown": 140,
+                "EventPairLow": 81
+              }
+            },
+            {
+              "pid": 50100,
+              "parent": 31512,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:55.1773504Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 102
+              },
+              "thread_waits": {
+                "UserRequest": 94,
+                "EventPairLow": 8
+              }
+            },
+            {
+              "pid": 8436,
+              "parent": 31512,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:45:55.7926145Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 1833875,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 68,
+                "Running": 610,
+                "Ready": 803
+              },
+              "thread_waits": {
+                "UserRequest": 44,
+                "EventPairLow": 24
+              }
+            },
+            {
+              "pid": 10172,
+              "parent": 27028,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:45:55.8525475Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15500,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 807,
+                "Running": 47
+              },
+              "thread_waits": {
+                "UserRequest": 438,
+                "EventPairLow": 369
+              }
+            },
+            {
+              "pid": 35544,
+              "parent": 10172,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:45:56.0735708Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 102
+              },
+              "thread_waits": {
+                "UserRequest": 94,
+                "EventPairLow": 8
+              }
+            },
+            {
+              "pid": 43236,
+              "parent": 27028,
+              "name": "node.exe",
+              "started_at": "2026-10-27T00:45:58.2750572Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 750
+              },
+              "thread_waits": {
+                "EventPairLow": 280,
+                "UserRequest": 94,
+                "Unknown": 376
+              }
+            },
+            {
+              "pid": 46648,
+              "parent": 45740,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:46:06.2633496Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 261
+              },
+              "thread_waits": {
+                "UserRequest": 141,
+                "Executive": 94,
+                "EventPairLow": 26
+              }
+            },
+            {
+              "pid": 37760,
+              "parent": 45740,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:46:06.2755748Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 86
+              },
+              "thread_waits": {
+                "UserRequest": 47,
+                "EventPairLow": 39
+              }
+            },
+            {
+              "pid": 33160,
+              "parent": 37760,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:46:06.3646574Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 93.75,
+              "wall_ms": 134848,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 723
+              },
+              "thread_waits": {
+                "UserRequest": 446,
+                "EventPairLow": 275,
+                "ExecutionDelay": 2
+              }
+            },
+            {
+              "pid": 7808,
+              "parent": 33160,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:46:09.1722926Z",
+              "first_observed_at": "2026-10-27T00:46:12.7240629Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 47,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 134848,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-3334dd07-24b0-4279-95be-54de0c458633",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 95
+              },
+              "thread_waits": {
+                "UserRequest": 47,
+                "EventPairLow": 48
+              }
+            },
+            {
+              "pid": 48072,
+              "parent": 45740,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:46:12.9841419Z",
+              "first_observed_at": "2026-10-27T00:46:14.4357163Z",
+              "last_observed_at": "2026-10-27T00:46:16.1917626Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1756,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 48224,
+              "parent": 48072,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:46:12.9955770Z",
+              "first_observed_at": "2026-10-27T00:46:14.4357163Z",
+              "last_observed_at": "2026-10-27T00:46:16.1917626Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1756,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 47824,
+              "parent": 45740,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:46:18.1636320Z",
+              "first_observed_at": "2026-10-27T00:46:19.5731494Z",
+              "last_observed_at": "2026-10-27T00:46:22.6583358Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 3085,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 1
+              },
+              "thread_waits": {
+                "Executive": 1
+              }
+            },
+            {
+              "pid": 49996,
+              "parent": 45740,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:46:29.0528193Z",
+              "first_observed_at": "2026-10-27T00:46:29.2510659Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 37,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 15.625,
+              "wall_ms": 118321,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 201
+              },
+              "thread_waits": {
+                "UserRequest": 111,
+                "Executive": 74,
+                "EventPairLow": 16
+              }
+            },
+            {
+              "pid": 35608,
+              "parent": 45740,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:46:29.0988461Z",
+              "first_observed_at": "2026-10-27T00:46:29.2510659Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 37,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 118321,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 61
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 24,
+                "UserRequest": 35
+              }
+            },
+            {
+              "pid": 45380,
+              "parent": 35608,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:46:29.2214668Z",
+              "first_observed_at": "2026-10-27T00:46:29.2510659Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 37,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 1328.125,
+              "wall_ms": 118321,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 56,
+                "Wait": 508
+              },
+              "thread_waits": {
+                "UserRequest": 253,
+                "EventPairLow": 252,
+                "ExecutionDelay": 1,
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 46944,
+              "parent": 45380,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:47:39.6460346Z",
+              "first_observed_at": "2026-10-27T00:47:39.7365717Z",
+              "last_observed_at": "2026-10-27T00:48:27.5723622Z",
+              "samples": 28,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 47836,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-66ac3562-a640-41b0-811f-ef33e6cebc8a",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 26
+              },
+              "thread_waits": {}
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:46:29.0988461Z",
+            "upper_bound": "2026-10-27T00:46:29.2214668Z",
+            "gate_pid": 35608,
+            "shell_pid": 45380,
+            "provider_pid": 46944,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "paired-light",
+      "theme": "light",
+      "measurement_test_passed": true,
+      "production_head": "4b34cd44ada8bbe71ea1cd1f2da78ce19e3ed1e6",
+      "binary_sha256": "6CB704BCB51675AAEA03FA138B587C4F47ADFA00076AF1111CFB411ECF075406",
+      "daemon_sha256": "4916D5AC5C89F2933AAA3BC469CFF9D665E943BF18FC1B184729A40D64EF8A31",
+      "source_snapshot": [
+        {
+          "blob_sha": "0ad36bbdc6c6f62365ac3788ad6e8b3d60c58a7b",
+          "source": "working-tree",
+          "path": "crates/gwt/src/main.rs"
+        },
+        {
+          "blob_sha": "1c349a314c7c2e4ffa6655cabc1f5a39d3823df2",
+          "source": "working-tree",
+          "path": "crates/gwt/src/app_runtime/mod.rs"
+        },
+        {
+          "blob_sha": "cfa71d5c4f1807b02f5e134260d83cd18508bd04",
+          "source": "working-tree",
+          "path": "crates/gwt/src/app_runtime/wizard.rs"
+        },
+        {
+          "blob_sha": "1565ea3b11a952d40a8dc535f2fb7b587c4756b6",
+          "source": "working-tree",
+          "path": "crates/gwt/src/app_runtime/launch.rs"
+        },
+        {
+          "blob_sha": "1917bcdea82f6290be4626a816c98a445153e3d6",
+          "source": "working-tree",
+          "path": "crates/gwt/src/launch_runtime.rs"
+        },
+        {
+          "blob_sha": "3dd8ae4eaddb5efc0217ae8805b9a3e3d2d9a721",
+          "source": "working-tree",
+          "path": "crates/gwt/src/launch_runtime/base_freshness.rs"
+        },
+        {
+          "blob_sha": "7bd494434435bc53c0c7b23fdb4ca586ee0bbd3b",
+          "source": "working-tree",
+          "path": "crates/gwt/src/cli/gwtd_resolver.rs"
+        },
+        {
+          "blob_sha": "73175f2ad66a0e7873b7a83aacef0f1393874a57",
+          "source": "working-tree",
+          "path": "crates/gwt/src/issue_monitor_worker.rs"
+        },
+        {
+          "blob_sha": "6e6710dd249a255ccc334c3f250c792090b994e8",
+          "source": "working-tree",
+          "path": "crates/gwt-config/src/home.rs"
+        },
+        {
+          "blob_sha": "fdc3a62f1cc8c6ca2ff2b67a7d30c005a7f81f6e",
+          "source": "working-tree",
+          "path": "crates/gwt-core/src/paths.rs"
+        },
+        {
+          "blob_sha": "6e22e6124c2d11c9ec660adfb86542c861b03de7",
+          "source": "working-tree",
+          "path": "crates/gwt-core/src/logging/writer.rs"
+        },
+        {
+          "blob_sha": "b2cc147e72aeb48d84df4c4ac67324f5054b92fc",
+          "source": "working-tree",
+          "path": "crates/gwt/src/perf/dispatch.rs"
+        },
+        {
+          "blob_sha": "cbca911dd9aa42dc605564ab179f6b288aa29548",
+          "source": "working-tree",
+          "path": "crates/gwt/web/app.js"
+        },
+        {
+          "blob_sha": "b9ae9e71364a9f62d2eb9c69a31b501fcb7ee3c6",
+          "source": "working-tree",
+          "path": "crates/gwt/web/terminal-viewport-reflow.js"
+        },
+        {
+          "blob_sha": "4e12498d8539db23f81c181bcaacb8f15f9071f4",
+          "source": "working-tree",
+          "path": "scripts/verify-issue-5596.ps1"
+        },
+        {
+          "blob_sha": "0b47cd8bbbf8a79ffd6b7f2efa11d1d5e24a4b07",
+          "source": "working-tree",
+          "path": "crates/gwt/playwright/tests/issue-monitor-launch-perf-live.spec.ts"
+        },
+        {
+          "blob_sha": "30e4d9dec9ee4a562b741caf25a2f273f00dd626",
+          "source": "working-tree",
+          "path": "crates/gwt/playwright/fixtures/issue-monitor-launch-provider.rs"
+        },
+        {
+          "blob_sha": "6ec30d990ebb48ac6d717de0c2317328a1c19aa7",
+          "source": "working-tree",
+          "path": "scripts/diagnostics/issue-6422-processes.ps1"
+        },
+        {
+          "blob_sha": "0869f826e3d049e5db4d0de8eb60111051fb40c3",
+          "source": "working-tree",
+          "path": "crates/gwt/playwright/tests/issue-6422-post-ack-live.spec.ts"
+        },
+        {
+          "blob_sha": "d876af40c7864287dd8ec647be878810f3f18a04",
+          "source": "working-tree",
+          "path": "crates/gwt-terminal/src/pty.rs"
+        },
+        {
+          "blob_sha": "c9e36c2ad1aeee0ee4f1d2d868c046dc9b3a15d6",
+          "source": "working-tree",
+          "path": "crates/gwt-terminal/src/pty/process_group.rs"
+        },
+        {
+          "blob_sha": "71bbcf146e11fa0892732e2ac9aceeba07b4e375",
+          "source": "working-tree",
+          "path": "crates/gwt-core/src/process_tree.rs"
+        },
+        {
+          "blob_sha": "5ef122461cef5d31e4bb7ad7fee99b4703704072",
+          "source": "working-tree",
+          "path": "crates/gwt-core/src/process_tree/job_cpu.rs"
+        }
+      ],
+      "observer": {
+        "current_job": {
+          "name": null,
+          "member": true,
+          "cpu_query_error": 0,
+          "limit_query_error": 0,
+          "cpu_flags": 0,
+          "cpu_rate": 0,
+          "limit_flags": 8192
+        },
+        "method": "Toolhelp process tree + System.Diagnostics.ProcessThread + query-only named Jobs; no stack trace or continuous scheduler trace",
+        "priority": "Normal",
+        "started_at": "2026-10-27T00:48:51.8009301Z",
+        "interval_ms": 500,
+        "pid": 48236
+      },
+      "os_samples": 102,
+      "os_gap_ms": {
+        "median": 1843.0780000000086,
+        "p95": 2054.565100000007,
+        "max": 2097.060200000007
+      },
+      "registry_error_samples": 0,
+      "shutdown": {
+        "isolated_home": "E:\\gwt\\work\\issue-6422\\target\\gwt-verify-tmp\\gwt-verify-v03MFS\\gwt-launch-5596-c568d3c0-5414-46df-aff6-4fcfb31a903c",
+        "test_exit_code": 0,
+        "stopped_at": "2026-10-27T00:51:39.7155794Z",
+        "cleanup_errors": []
+      },
+      "browser_errors": [],
+      "measurements": [
+        {
+          "load": "low",
+          "issue_number": 559601,
+          "claim_id": "b6c4f6e4-a5f3-4030-8e3e-3e21d121b15a",
+          "delivery_id": "74915ed9-3acf-488c-aa72-4a20ea6d27f9",
+          "session_id": "0b953d50-49b0-4297-8ef5-2036d1f542b8",
+          "window_id": "launch-perf::agent-1",
+          "enqueued_at": "2026-10-27T00:48:55.642Z",
+          "ack_observed_at": "2026-10-27T00:49:00.369Z",
+          "enqueue_to_ack_ms": 4727,
+          "provider_observed_at": "2026-10-27T00:49:03.502Z",
+          "provider_receipt_created_at": "2026-10-27T00:49:03.481Z",
+          "hook_observed_under_load_at": "2026-10-27T00:49:04.011Z",
+          "first_hook_complete_observed_at": "2026-10-27T00:49:04.011Z",
+          "loaded_observation_ended_at": "2026-10-27T00:49:04.011Z",
+          "post_ack_observation_ms": 3642,
+          "load_before": {
+            "pid": 47808,
+            "workers": 0,
+            "elapsed_ms": 6214,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:48:55.641Z"
+          },
+          "load_at_end": {
+            "pid": 47808,
+            "workers": 0,
+            "elapsed_ms": 14437,
+            "work_units": 0
+          },
+          "load_paused": {
+            "pid": 47808,
+            "workers": 0,
+            "elapsed_ms": 14437,
+            "work_units": 0,
+            "observed_at": "2026-10-27T00:49:04.016Z"
+          },
+          "recovery_observation_ended_at": "2026-10-27T00:49:04.025Z",
+          "outcome": "first-hook-complete",
+          "os_samples": 10,
+          "controller_max_observation_gap_ms": 572,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:49:03.620951500+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "0b953d50-49b0-4297-8ef5-2036d1f542b8",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:49:03Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:49:03.634055100+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "0b953d50-49b0-4297-8ef5-2036d1f542b8",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:49:03Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:49:03.667346900+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "0b953d50-49b0-4297-8ef5-2036d1f542b8",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:49:03Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:49:03.858373600+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "0b953d50-49b0-4297-8ef5-2036d1f542b8",
+                "source_event": "UserPromptSubmit",
+                "occurred_at": "2026-10-27T00:49:03Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [],
+          "processes": [
+            {
+              "pid": 13512,
+              "parent": 37484,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:48:46.5227717Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 9343.75,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 704,
+                "Running": 11
+              },
+              "thread_waits": {
+                "UserRequest": 158,
+                "EventPairLow": 73,
+                "Unknown": 467,
+                "Executive": 6
+              }
+            },
+            {
+              "pid": 10056,
+              "parent": 13512,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:48:47.2799059Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 390.625,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 123
+              },
+              "thread_waits": {
+                "Unknown": 59,
+                "EventPairLow": 51,
+                "UserRequest": 13
+              }
+            },
+            {
+              "pid": 45720,
+              "parent": 10056,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:47.2903248Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 30
+              },
+              "thread_waits": {
+                "UserRequest": 20,
+                "EventPairLow": 10
+              }
+            },
+            {
+              "pid": 33064,
+              "parent": 37484,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:48:48.8380633Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 70
+              },
+              "thread_waits": {
+                "Unknown": 30,
+                "EventPairLow": 40
+              }
+            },
+            {
+              "pid": 4132,
+              "parent": 33064,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:48.8471225Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 30
+              },
+              "thread_waits": {
+                "UserRequest": 20,
+                "EventPairLow": 10
+              }
+            },
+            {
+              "pid": 47808,
+              "parent": 33064,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:48:49.4007472Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 340
+              },
+              "thread_waits": {
+                "UserRequest": 310,
+                "EventPairLow": 30
+              }
+            },
+            {
+              "pid": 48236,
+              "parent": 37484,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:48:49.5287957Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 3500,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 320,
+                "Running": 12
+              },
+              "thread_waits": {
+                "UserRequest": 98,
+                "EventPairLow": 220,
+                "ExecutionDelay": 2
+              }
+            },
+            {
+              "pid": 42388,
+              "parent": 48236,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:49.7445734Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 30
+              },
+              "thread_waits": {
+                "UserRequest": 20,
+                "EventPairLow": 10
+              }
+            },
+            {
+              "pid": 30692,
+              "parent": 37484,
+              "name": "node.exe",
+              "started_at": "2026-10-27T00:48:51.8456646Z",
+              "first_observed_at": "2026-10-27T00:48:56.1591611Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 10,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 187.5,
+              "wall_ms": 7073,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 180
+              },
+              "thread_waits": {
+                "EventPairLow": 80,
+                "UserRequest": 20,
+                "Unknown": 80
+              }
+            },
+            {
+              "pid": 46480,
+              "parent": 13512,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:48:56.8075072Z",
+              "first_observed_at": "2026-10-27T00:48:56.9229754Z",
+              "last_observed_at": "2026-10-27T00:48:56.9229754Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 3
+              },
+              "thread_waits": {
+                "UserRequest": 1,
+                "EventPairLow": 2
+              }
+            },
+            {
+              "pid": 29508,
+              "parent": 13512,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:48:58.4068840Z",
+              "first_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "last_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 4
+              },
+              "thread_waits": {
+                "UserRequest": 1,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 10560,
+              "parent": 29508,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:58.4135201Z",
+              "first_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "last_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 3
+              },
+              "thread_waits": {
+                "UserRequest": 2,
+                "EventPairLow": 1
+              }
+            },
+            {
+              "pid": 28752,
+              "parent": 29508,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:48:58.4335739Z",
+              "first_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "last_observed_at": "2026-10-27T00:48:58.4482496Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 4
+              },
+              "thread_waits": {
+                "UserRequest": 1,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 18440,
+              "parent": 13512,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:59.8625793Z",
+              "first_observed_at": "2026-10-27T00:49:00.0125823Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 5,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3220,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 35
+              },
+              "thread_waits": {
+                "UserRequest": 15,
+                "Executive": 10,
+                "EventPairLow": 10
+              }
+            },
+            {
+              "pid": 26440,
+              "parent": 13512,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:48:59.8743464Z",
+              "first_observed_at": "2026-10-27T00:49:00.0125823Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 5,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3220,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 20
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 15,
+                "UserRequest": 3
+              }
+            },
+            {
+              "pid": 48252,
+              "parent": 26440,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:48:59.9546587Z",
+              "first_observed_at": "2026-10-27T00:49:00.0125823Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 5,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 1640.625,
+              "wall_ms": 3220,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Running": 2,
+                "Wait": 59
+              },
+              "thread_waits": {
+                "EventPairLow": 30,
+                "UserRequest": 26,
+                "ExecutionDelay": 3
+              }
+            },
+            {
+              "pid": 31084,
+              "parent": 48252,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:49:02.7285466Z",
+              "first_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "last_observed_at": "2026-10-27T00:49:03.2324278Z",
+              "samples": 1,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 4
+              },
+              "thread_waits": {
+                "UserRequest": 1,
+                "EventPairLow": 3
+              }
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:48:59.8743464Z",
+            "upper_bound": "2026-10-27T00:48:59.9546587Z",
+            "gate_pid": 26440,
+            "shell_pid": 48252,
+            "provider_pid": 31084,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        },
+        {
+          "load": "high",
+          "issue_number": 559602,
+          "claim_id": "4637ecf1-618c-48c3-84a7-5588c91a42fc",
+          "delivery_id": "377ddb7d-bd48-48bd-ba57-66890cc1d5f2",
+          "session_id": "fe931a6a-0fa9-4633-985e-d0d86961f5c9",
+          "window_id": "launch-perf::agent-2",
+          "enqueued_at": "2026-10-27T00:49:04.477Z",
+          "ack_observed_at": "2026-10-27T00:49:31.639Z",
+          "enqueue_to_ack_ms": 27162,
+          "provider_observed_at": "2026-10-27T00:50:12.857Z",
+          "provider_receipt_created_at": "2026-10-27T00:50:12.287Z",
+          "hook_observed_under_load_at": null,
+          "first_hook_complete_observed_at": "2026-10-27T00:51:32.941Z",
+          "loaded_observation_ended_at": "2026-10-27T00:51:31.984Z",
+          "post_ack_observation_ms": 120345,
+          "load_before": {
+            "pid": 47808,
+            "workers": 30,
+            "elapsed_ms": 15045,
+            "work_units": 56400000,
+            "observed_at": "2026-10-27T00:49:04.476Z"
+          },
+          "load_at_end": {
+            "pid": 47808,
+            "workers": 30,
+            "elapsed_ms": 162562,
+            "work_units": 386905200000
+          },
+          "load_paused": {
+            "pid": 47808,
+            "workers": 0,
+            "elapsed_ms": 162970,
+            "work_units": 387445600000,
+            "observed_at": "2026-10-27T00:51:32.406Z"
+          },
+          "recovery_observation_ended_at": "2026-10-27T00:51:32.941Z",
+          "outcome": "first-hook-complete",
+          "os_samples": 78,
+          "controller_max_observation_gap_ms": 947,
+          "authenticated_receipts": [
+            {
+              "timestamp": "2026-10-27T09:50:53.666930300+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "fe931a6a-0fa9-4633-985e-d0d86961f5c9",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:50:53Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:50:53.680077800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "fe931a6a-0fa9-4633-985e-d0d86961f5c9",
+                "source_event": "none",
+                "occurred_at": "2026-10-27T00:50:53Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:50:53.816078800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "fe931a6a-0fa9-4633-985e-d0d86961f5c9",
+                "source_event": "SessionStart",
+                "occurred_at": "2026-10-27T00:50:53Z"
+              },
+              "spans": []
+            },
+            {
+              "timestamp": "2026-10-27T09:51:32.418463800+09:00",
+              "target": "gwt.hook.delivery",
+              "fields": {
+                "message": "runtime hook delivery",
+                "stage": "receipt",
+                "outcome": "authenticated",
+                "gwt_session_id": "fe931a6a-0fa9-4633-985e-d0d86961f5c9",
+                "source_event": "UserPromptSubmit",
+                "occurred_at": "2026-10-27T00:51:32Z"
+              },
+              "spans": []
+            }
+          ],
+          "timeouts": [],
+          "processes": [
+            {
+              "pid": 13512,
+              "parent": 37484,
+              "name": "gwt.exe",
+              "started_at": "2026-10-27T00:48:46.5227717Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 77234.375,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 5753,
+                "Running": 41,
+                "Standby": 2
+              },
+              "thread_waits": {
+                "UserRequest": 1415,
+                "EventPairLow": 528,
+                "Unknown": 3612,
+                "Executive": 198
+              }
+            },
+            {
+              "pid": 10056,
+              "parent": 13512,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:48:47.2799059Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 5078.125,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 772,
+                "Standby": 1,
+                "Running": 1
+              },
+              "thread_waits": {
+                "Unknown": 439,
+                "EventPairLow": 206,
+                "UserRequest": 125,
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 45720,
+              "parent": 10056,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:47.2903248Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 163
+              },
+              "thread_waits": {
+                "UserRequest": 156,
+                "EventPairLow": 7
+              }
+            },
+            {
+              "pid": 33064,
+              "parent": 37484,
+              "name": "cargo.exe",
+              "started_at": "2026-10-27T00:48:48.8380633Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 351
+              },
+              "thread_waits": {
+                "Unknown": 234,
+                "EventPairLow": 117
+              }
+            },
+            {
+              "pid": 4132,
+              "parent": 33064,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:48.8471225Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 164
+              },
+              "thread_waits": {
+                "UserRequest": 156,
+                "EventPairLow": 8
+              }
+            },
+            {
+              "pid": 47808,
+              "parent": 33064,
+              "name": "build-script-build.exe",
+              "started_at": "2026-10-27T00:48:49.4007472Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 1855937.5,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 100,
+                "Ready": 1383,
+                "Running": 959
+              },
+              "thread_waits": {
+                "UserRequest": 76,
+                "EventPairLow": 24
+              }
+            },
+            {
+              "pid": 48236,
+              "parent": 37484,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:48:49.5287957Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 27031.25,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 1296,
+                "Ready": 1,
+                "Running": 78
+              },
+              "thread_waits": {
+                "UserRequest": 720,
+                "EventPairLow": 575,
+                "ExecutionDelay": 1
+              }
+            },
+            {
+              "pid": 42388,
+              "parent": 48236,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:49.7445734Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 164
+              },
+              "thread_waits": {
+                "UserRequest": 156,
+                "EventPairLow": 8
+              }
+            },
+            {
+              "pid": 30692,
+              "parent": 37484,
+              "name": "node.exe",
+              "started_at": "2026-10-27T00:48:51.8456646Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 1231
+              },
+              "thread_waits": {
+                "EventPairLow": 451,
+                "UserRequest": 156,
+                "Unknown": 624
+              }
+            },
+            {
+              "pid": 18440,
+              "parent": 13512,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:48:59.8625793Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 418
+              },
+              "thread_waits": {
+                "UserRequest": 234,
+                "Executive": 156,
+                "EventPairLow": 28
+              }
+            },
+            {
+              "pid": 26440,
+              "parent": 13512,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:48:59.8743464Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 120
+              },
+              "thread_waits": {
+                "UserRequest": 78,
+                "EventPairLow": 42
+              }
+            },
+            {
+              "pid": 48252,
+              "parent": 26440,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:48:59.9546587Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 62.5,
+              "wall_ms": 144746,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 1152
+              },
+              "thread_waits": {
+                "UserRequest": 725,
+                "EventPairLow": 427
+              }
+            },
+            {
+              "pid": 31084,
+              "parent": 48252,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:49:02.7285466Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 78,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 144746,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-f1a68d82-c3f0-427a-b2cd-43ce81e4b5ff",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 139
+              },
+              "thread_waits": {
+                "UserRequest": 78,
+                "EventPairLow": 61
+              }
+            },
+            {
+              "pid": 40168,
+              "parent": 13512,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:49:04.8370716Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:49:06.7681845Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1917,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 49000,
+              "parent": 40168,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:04.8546681Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:49:06.7681845Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1917,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 16708,
+              "parent": 10056,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:04.8716804Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:49:08.5389626Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3687,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 3
+              },
+              "thread_waits": {
+                "Executive": 3
+              }
+            },
+            {
+              "pid": 49164,
+              "parent": 16708,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:04.8785924Z",
+              "first_observed_at": "2026-10-27T00:49:04.8518949Z",
+              "last_observed_at": "2026-10-27T00:49:08.5389626Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3687,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 3
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 39608,
+              "parent": 10056,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:05.0291923Z",
+              "first_observed_at": "2026-10-27T00:49:06.7681845Z",
+              "last_observed_at": "2026-10-27T00:49:08.5389626Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1770,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 47968,
+              "parent": 39608,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:05.0359286Z",
+              "first_observed_at": "2026-10-27T00:49:06.7681845Z",
+              "last_observed_at": "2026-10-27T00:49:08.5389626Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1770,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 1908,
+              "parent": 13512,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:09.5980046Z",
+              "first_observed_at": "2026-10-27T00:49:10.2529250Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 7,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 10876,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 22
+              },
+              "thread_waits": {
+                "Executive": 5,
+                "EventPairLow": 15,
+                "UserRequest": 2
+              }
+            },
+            {
+              "pid": 45384,
+              "parent": 1908,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:09.6109674Z",
+              "first_observed_at": "2026-10-27T00:49:10.2529250Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 7,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 46.875,
+              "wall_ms": 10876,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 15
+              },
+              "thread_waits": {
+                "UserRequest": 10,
+                "EventPairLow": 5
+              }
+            },
+            {
+              "pid": 31396,
+              "parent": 10056,
+              "name": "gh.exe",
+              "started_at": "2026-10-27T00:49:10.0897743Z",
+              "first_observed_at": "2026-10-27T00:49:10.2529250Z",
+              "last_observed_at": "2026-10-27T00:49:11.9729924Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1720,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 45368,
+              "parent": 31396,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:10.0967237Z",
+              "first_observed_at": "2026-10-27T00:49:10.2529250Z",
+              "last_observed_at": "2026-10-27T00:49:11.9729924Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1720,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 2696,
+              "parent": 1908,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:14.6594996Z",
+              "first_observed_at": "2026-10-27T00:49:15.6814990Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 4,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 31.25,
+              "wall_ms": 5447,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 8
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 6
+              }
+            },
+            {
+              "pid": 48120,
+              "parent": 10056,
+              "name": "gh.exe",
+              "started_at": "2026-10-27T00:49:15.1512138Z",
+              "first_observed_at": "2026-10-27T00:49:15.6814990Z",
+              "last_observed_at": "2026-10-27T00:49:17.5224220Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1841,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 2
+              },
+              "thread_waits": {
+                "Executive": 2
+              }
+            },
+            {
+              "pid": 44144,
+              "parent": 48120,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:15.1584084Z",
+              "first_observed_at": "2026-10-27T00:49:15.6814990Z",
+              "last_observed_at": "2026-10-27T00:49:17.5224220Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1841,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 32980,
+              "parent": 13512,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:17.3069834Z",
+              "first_observed_at": "2026-10-27T00:49:17.5224220Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3606,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 1
+              },
+              "thread_waits": {
+                "Executive": 1
+              }
+            },
+            {
+              "pid": 33404,
+              "parent": 2696,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:19.6848719Z",
+              "first_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 1
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 29492,
+              "parent": 10056,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:49:20.6639358Z",
+              "first_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 1
+              },
+              "thread_waits": {
+                "Executive": 1
+              }
+            },
+            {
+              "pid": 38796,
+              "parent": 29492,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:20.6767850Z",
+              "first_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "last_observed_at": "2026-10-27T00:49:21.1280826Z",
+              "samples": 1,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 0,
+              "jobs": [],
+              "thread_states": {
+                "Initialized": 1
+              },
+              "thread_waits": {}
+            },
+            {
+              "pid": 49256,
+              "parent": 13512,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:23.6442875Z",
+              "first_observed_at": "2026-10-27T00:49:24.9234088Z",
+              "last_observed_at": "2026-10-27T00:49:28.7846303Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3861,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 6
+              },
+              "thread_waits": {
+                "UserRequest": 3,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 35140,
+              "parent": 49256,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:23.6785927Z",
+              "first_observed_at": "2026-10-27T00:49:24.9234088Z",
+              "last_observed_at": "2026-10-27T00:49:28.7846303Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3861,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 9
+              },
+              "thread_waits": {
+                "UserRequest": 6,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 6708,
+              "parent": 49256,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:23.7191599Z",
+              "first_observed_at": "2026-10-27T00:49:24.9234088Z",
+              "last_observed_at": "2026-10-27T00:49:28.7846303Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 1281.25,
+              "wall_ms": 3861,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 80,
+                "Running": 1
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 9,
+                "UserRequest": 69
+              }
+            },
+            {
+              "pid": 49236,
+              "parent": 13512,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:30.8933959Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 63,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 116993,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 360
+              },
+              "thread_waits": {
+                "UserRequest": 189,
+                "Executive": 126,
+                "EventPairLow": 45
+              }
+            },
+            {
+              "pid": 42144,
+              "parent": 13512,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:49:30.9127505Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 63,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 116993,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Wait": 108
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 45,
+                "UserRequest": 61
+              }
+            },
+            {
+              "pid": 46800,
+              "parent": 42144,
+              "name": "pwsh.exe",
+              "started_at": "2026-10-27T00:49:31.0203228Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 63,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 2734.375,
+              "wall_ms": 116993,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 15,
+                "Wait": 769,
+                "Running": 2
+              },
+              "thread_waits": {
+                "UserRequest": 436,
+                "EventPairLow": 327,
+                "ExecutionDelay": 3,
+                "Executive": 3
+              }
+            },
+            {
+              "pid": 47036,
+              "parent": 13512,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:31.0836952Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:49:36.5060571Z",
+              "samples": 3,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 3902,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 6
+              },
+              "thread_waits": {
+                "UserRequest": 3,
+                "EventPairLow": 3
+              }
+            },
+            {
+              "pid": 46480,
+              "parent": 47036,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:31.0994196Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:49:34.5812594Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 1977,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 6
+              },
+              "thread_waits": {
+                "UserRequest": 4,
+                "EventPairLow": 2
+              }
+            },
+            {
+              "pid": 45448,
+              "parent": 47036,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:31.4526718Z",
+              "first_observed_at": "2026-10-27T00:49:32.6045807Z",
+              "last_observed_at": "2026-10-27T00:49:34.5812594Z",
+              "samples": 2,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 562.5,
+              "wall_ms": 1977,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 13,
+                "Running": 1
+              },
+              "thread_waits": {
+                "Executive": 1,
+                "EventPairLow": 6,
+                "UserRequest": 6
+              }
+            },
+            {
+              "pid": 18576,
+              "parent": 13512,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:37.9118225Z",
+              "first_observed_at": "2026-10-27T00:49:38.3931280Z",
+              "last_observed_at": "2026-10-27T00:50:20.7515382Z",
+              "samples": 23,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 42358,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 38
+              },
+              "thread_waits": {
+                "UserRequest": 23,
+                "EventPairLow": 15
+              }
+            },
+            {
+              "pid": 3032,
+              "parent": 18576,
+              "name": "conhost.exe",
+              "started_at": "2026-10-27T00:49:37.9266079Z",
+              "first_observed_at": "2026-10-27T00:49:38.3931280Z",
+              "last_observed_at": "2026-10-27T00:50:20.7515382Z",
+              "samples": 23,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 42358,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 61
+              },
+              "thread_waits": {
+                "UserRequest": 46,
+                "EventPairLow": 15
+              }
+            },
+            {
+              "pid": 31032,
+              "parent": 18576,
+              "name": "python.exe",
+              "started_at": "2026-10-27T00:49:37.9713980Z",
+              "first_observed_at": "2026-10-27T00:49:38.3931280Z",
+              "last_observed_at": "2026-10-27T00:50:20.7515382Z",
+              "samples": 23,
+              "priority": [
+                "Normal"
+              ],
+              "cpu_delta_ms": 21765.625,
+              "wall_ms": 42358,
+              "jobs": [],
+              "thread_states": {
+                "Wait": 1345,
+                "Running": 10
+              },
+              "thread_waits": {
+                "Executive": 6,
+                "EventPairLow": 168,
+                "UserRequest": 88,
+                "Unknown": 1083
+              }
+            },
+            {
+              "pid": 43440,
+              "parent": 46800,
+              "name": "codex.exe",
+              "started_at": "2026-10-27T00:50:07.2633262Z",
+              "first_observed_at": "2026-10-27T00:50:08.9583131Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 44,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 31.25,
+              "wall_ms": 80639,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Wait": 106
+              },
+              "thread_waits": {
+                "Executive": 2,
+                "EventPairLow": 64,
+                "UserRequest": 40
+              }
+            },
+            {
+              "pid": 33604,
+              "parent": 43440,
+              "name": "gwtd.exe",
+              "started_at": "2026-10-27T00:50:12.8260888Z",
+              "first_observed_at": "2026-10-27T00:50:14.5478274Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 41,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 78.125,
+              "wall_ms": 75050,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 1,
+                "Ready": 20,
+                "Wait": 88
+              },
+              "thread_waits": {
+                "Executive": 3,
+                "EventPairLow": 68,
+                "UserRequest": 17
+              }
+            },
+            {
+              "pid": 4868,
+              "parent": 33604,
+              "name": "git.exe",
+              "started_at": "2026-10-27T00:50:54.3474217Z",
+              "first_observed_at": "2026-10-27T00:50:56.0097019Z",
+              "last_observed_at": "2026-10-27T00:51:29.5972849Z",
+              "samples": 19,
+              "priority": [
+                "BelowNormal"
+              ],
+              "cpu_delta_ms": 0,
+              "wall_ms": 33588,
+              "jobs": [
+                {
+                  "name": "Local\\gwt-pane-c707dec4-c3d9-4977-8479-9c693c57c753",
+                  "member": true,
+                  "cpu_query_error": 0,
+                  "limit_query_error": 0,
+                  "cpu_flags": 5,
+                  "cpu_rate": 800,
+                  "limit_flags": 8192
+                }
+              ],
+              "thread_states": {
+                "Initialized": 2,
+                "Ready": 16,
+                "Wait": 1
+              },
+              "thread_waits": {
+                "Executive": 1
+              }
+            }
+          ],
+          "pty_release_bracket": {
+            "lower_bound": "2026-10-27T00:49:30.9127505Z",
+            "upper_bound": "2026-10-27T00:49:31.0203228Z",
+            "gate_pid": 42144,
+            "shell_pid": 46800,
+            "provider_pid": 43440,
+            "basis": "Unchanged gate source order plus OS parent/child birth times; not a direct release timestamp"
+          }
+        }
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "file": "exploratory-dark.json.gz",
+      "sha256": "cec584343d9018c366add806555a0078addd7ddd6cdec5430e3c9685e0ea12b3",
+      "uncompressed_sha256": "11fd3e529dfc5321ed2f428f8098046866846f5a2d32b25c8673202ac0f7bb6c",
+      "uncompressed_bytes": 303532
+    },
+    {
+      "file": "exploratory-dark-processes.jsonl.gz",
+      "sha256": "d5a33102a4624b02154c4ffe807ea1cdff6c7be0f50a7b6e73839c850fe2116d",
+      "uncompressed_sha256": "7b34b1a0c0a7182355af100aa9d8b370b06bc69288321dbe5cf620425d9461a2",
+      "uncompressed_bytes": 12784229
+    },
+    {
+      "file": "exploratory-dark-cargo-progress.jsonl.gz",
+      "sha256": "a68d917c1df0e026d8f4ddba07f713ffbb05703bc07bbc9fc9cf4eb6118635ef",
+      "uncompressed_sha256": "81cb18c4251ceb9e6696a4a7b514cc5faa38ad4b0f19d20591158d49d7c1ab20",
+      "uncompressed_bytes": 173730
+    },
+    {
+      "file": "exploratory-dark-boundaries.jsonl.gz",
+      "sha256": "a2900aa97f06e00f21b65ff932e730eb223f1c3f9759eac158c6e1e62696e434",
+      "uncompressed_sha256": "50e0654fa3853659bda44b421fb4ae90de163e5319c9d9a001fb893bc836e38a",
+      "uncompressed_bytes": 61603
+    },
+    {
+      "file": "paired-dark.json.gz",
+      "sha256": "d5f65228ea3074ec398545791648a120dd7c7b20deac8bafdb9e2960ae3e54b8",
+      "uncompressed_sha256": "400ae3f0e82646927a75a6f0e21efde77065e2dc15ec8ffb02d312535bd4a95f",
+      "uncompressed_bytes": 159676
+    },
+    {
+      "file": "paired-dark-processes.jsonl.gz",
+      "sha256": "4148cea62a5041173029f5a0a949b8e30c03ba9929730527b921d61b34248c15",
+      "uncompressed_sha256": "7ee3d9c9819cbdadfb1b1c963caf4e40e548b2e3519dc9d9a58c7522293013b7",
+      "uncompressed_bytes": 2396903
+    },
+    {
+      "file": "paired-dark-cargo-progress.jsonl.gz",
+      "sha256": "c6181f9038a8f12b457bd6aaf03af41c3f7179fd9daccbe2a69d172e5080e344",
+      "uncompressed_sha256": "7e3c73271f4ef7744650ddcac57a8602f897a4ed15d3ed93967d0d1f7e886dde",
+      "uncompressed_bytes": 54872
+    },
+    {
+      "file": "paired-dark-boundaries.jsonl.gz",
+      "sha256": "b839fcf5693359a8edc2f21234164a7a4c8c8f6f2d394aa7f7c51df1a9323216",
+      "uncompressed_sha256": "cc9ea609ad850feeb29613a2bca49038d7fa23cdcee34266445453163d42cb39",
+      "uncompressed_bytes": 52725
+    },
+    {
+      "file": "paired-light.json.gz",
+      "sha256": "75759c7212429ab9586a5b5e44ffea17f3b3dbc129fab4df9b05be4f9439d0a8",
+      "uncompressed_sha256": "a6f8d6ad4baf6b02e652248ca1d7158dc3cd210d28f6e32b35f24cf00389359d",
+      "uncompressed_bytes": 229942
+    },
+    {
+      "file": "paired-light-processes.jsonl.gz",
+      "sha256": "9d54601e7bf8e7628b889c256e03fa289ef2388eda0ee84f5a81f5ff9dccbb44",
+      "uncompressed_sha256": "25fe6bb2a7b68476169d3a39114f6a01fca8212fbba4a6d6f17b9e1884292345",
+      "uncompressed_bytes": 3714232
+    },
+    {
+      "file": "paired-light-cargo-progress.jsonl.gz",
+      "sha256": "59ffb8c719256223bc20aad106815d10776cf75e6e9efc673f6afee50888ebfc",
+      "uncompressed_sha256": "6a9c149199906e6ff7a1be9ed3dbe5e424acae1f5df7434857ea544052f18099",
+      "uncompressed_bytes": 58460
+    },
+    {
+      "file": "paired-light-boundaries.jsonl.gz",
+      "sha256": "2763cebbd6952531260de5f62743420f1a65b8ade23acb5dd6276d14d471da87",
+      "uncompressed_sha256": "de03d036944da2fc73dffec97c78091396f0a0a6607c1320efd529598a3bf6b7",
+      "uncompressed_bytes": 53212
+    }
+  ]
+}

@@ -140,33 +140,27 @@ test("Issues Settings keeps labels and values together and sends existing projec
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 5 },
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
   ]);
-  assert.equal(panel.querySelector('[aria-label="Autonomous"]'), null, "the summary owns Autonomous once");
+  change("Autonomous", true);
+  assert.equal(panel.querySelector('[aria-label="Autonomous"]').checked, false, "wait for the confirmed server status");
+  change("Monitoring", false);
+  assert.deepEqual(sent.slice(-2), [
+    { kind: "set_issue_monitor_autonomous_mode", enabled: true },
+    { kind: "set_issue_monitor_enabled", enabled: false },
+  ], "Settings owns independent controls connected to the same project model");
 });
 
-test("Issues disclosure reuses authoritative launch controls and returns them to the compact summary", () => {
-  const { document } = parseHTML('<div class="settings-root"><div class="knowledge-monitor-controls"><button data-action="monitor-auto-refill">Refill</button><button data-action="monitor-autonomous">Autonomous</button><label class="issue-monitor-limit">Limit</label><button data-action="monitor-settings">Settings</button><button data-action="monitor-toggle">Start</button></div><details class="settings-issues-options"><section></section></details></div>');
-  const body = document.querySelector(".settings-root");
-  const panel = body.querySelector("section");
-  const disclosure = body.querySelector("details");
-  const launchControls = [...body.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]')];
-  let clicked = 0;
-  launchControls[1].addEventListener("click", () => clicked++);
+test("Settings launch controls retain their nodes and save once across status redraws", () => {
+  const { document, Event } = parseHTML('<section data-settings-issues-controls></section>');
+  const panel = document.querySelector("section"), sent = [];
   const render = load("renderIssuesSettingsPanel");
-  const position = load("positionIssuesLaunchControls");
-  disclosure.setAttribute("open", "");
-  for (let i = 0; i < 2; i++) {
-    render(panel, { project: { name: "A" }, status: {}, send: () => {}, launchControls });
-    position(body);
-    assert.equal(panel.querySelector('[data-settings-launch-action="monitor-toggle"] > :last-child').firstElementChild === launchControls[1], true);
-    assert.equal(panel.querySelector('[data-action="monitor-autonomous"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
-    launchControls[1].click();
-  }
-  disclosure.removeAttribute("open");
-  position(body);
-  assert.ok(body.querySelector('[data-action="monitor-auto-refill"]').nextElementSibling === launchControls[0], "toggles remain adjacent after closing Settings");
-  assert.ok(launchControls[0].nextElementSibling.matches('.issue-monitor-limit'));
-  assert.equal(body.querySelectorAll('[data-action="monitor-toggle"]').length, 1);
-  assert.equal(clicked, 2, "original listeners survive status rerenders");
+  const options = { project: { name: "A" }, status: { enabled: true }, send: message => sent.push(message) };
+  render(panel, options);
+  const launchControls = [...panel.querySelectorAll('[data-action]')];
+  render(panel, { ...options, launchControls });
+  assert.equal(panel.querySelector('[aria-label="Monitoring"]'), launchControls[1]);
+  launchControls[1].checked = false;
+  launchControls[1].dispatchEvent(new Event("change"));
+  assert.deepEqual(sent, [{ kind: "set_issue_monitor_enabled", enabled: false }]);
   const css = readFileSync(new URL("../styles/components.css", import.meta.url), "utf8");
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
@@ -626,6 +620,7 @@ test("Candidates follow the shared roster before version metadata and retain dir
     "renderIndexSettingsPanel", "renderCustomAgentEnvEditor", `${source.replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "")}\nreturn createSettingsSurface;`)(
     document, window, createInteractionGuard, createUiStateStore, setControlExplanation, () => {}, () => {}, renderCustomAgentEnvEditor);
   const surface = factory({ send: message => sent.push(message), rosterModel,
+    scheduleFrame: fn => { frames.add(fn); return () => frames.delete(fn); },
     createNode(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; },
     focusWindowLocally() {}, activeProjectTab: () => ({ project_root: "/A" }), focusOrSpawnPreset() {}, renderUsagePanel() {}, pmSettingsPanel: { mount() {} },
     mountIssues(_windowData, host) { host.innerHTML = '<div class="issue-bridge-root"><div class="knowledge-monitor-bar"></div><div class="workspace-toolbar"></div><button data-action="monitor-settings"></button></div>'; },
@@ -661,6 +656,28 @@ test("Candidates follow the shared roster before version metadata and retain dir
   rosterModel.update(state => ({ revision: 2, members: state.members.map(member => ({ ...member, name: `New ${member.name}` })) })); flush();
   assert.ok(panel.querySelector('[data-profile-field="model"]') === model);
   assert.equal(model.value, "draft");
+  surface.applyIssueSettingsStatus({ enabled: true, autonomous_mode: true }, "/A");
+  const labels = document.querySelector('[aria-label="Allowed labels"]');
+  labels.value = "unfinished labels";
+  Object.defineProperty(document, "activeElement", { value: labels, configurable: true });
+  surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A");
+  assert.equal(document.querySelector('[aria-label="Allowed labels"]'), labels);
+  assert.equal(labels.value, "unfinished labels");
+  assert.equal(document.querySelector('[aria-label="Autonomous"]').checked, false);
+  assert.equal(document.querySelector('[aria-label="Monitoring"]').checked, false);
+  const rosterReads = () => sent.filter(message => message.kind === "agent_roster");
+  const beforeProfileAck = rosterReads().length;
+  const ack = { project_root: "/A", request_id: 701, profiles: [{ agent_member_id: "m-claude", agent_id: "claude" }], choices: candidateChoices };
+  surface.applyIssueMonitorProfiles(ack);
+  surface.applyIssueMonitorProfiles({ ...ack, request_id: undefined });
+  assert.equal(rosterReads().length, beforeProfileAck, "profile receivers only commit state, including same-frame readback");
+  flush();
+  assert.deepEqual(rosterReads().slice(beforeProfileAck), [{ kind: "agent_roster", action: { kind: "read" }, expected_revision: null }]);
+  surface.applyIssueMonitorProfiles(ack); flush();
+  assert.equal(rosterReads().length, beforeProfileAck + 1, "a replayed ACK cannot refresh the same save twice");
+  surface.applyIssueMonitorProfiles({ ...ack, project_root: "/B", request_id: 702 });
+  surface.applyIssueMonitorProfilesError({ project_root: "/A", request_id: 703, message: "save rejected" }); flush();
+  assert.equal(rosterReads().length, beforeProfileAck + 1, "unrelated roots and failed writes cannot request a roster read");
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
@@ -717,10 +734,9 @@ test("section-addressed Settings selects and focuses the requested project panel
   assert.deepEqual(selectedSection, { windowId: "settings-A", section: "issues" });
 });
 
-test("Settings declares app/project scope and the global update condition using existing primitives", () => {
-  assert.match(source, /buildSettingsTab\("issues", "Issues"/);
-  assert.match(source, /settings-issues-options/);
-  assert.match(source, /mountIssues\(windowData, issuesHost\)/);
+test("Settings contains execution settings without mounting the Issues Kanban", () => {
+  assert.match(source, /buildSettingsTab\("issues", "Issues execution settings"/);
+  assert.doesNotMatch(source, /mountIssues\(windowData, issuesHost\)/);
   assert.match(source, /aria-orientation.*vertical/);
   assert.match(source, /Application settings/);
   assert.match(source, /Auto-apply updates/);

@@ -2401,6 +2401,11 @@ impl AppRuntime {
         let hook_state_changed =
             self.window_hook_states.get(&window_id).copied() != Some(hook_state);
         self.observe_provider_capacity_hook(&window_id, hook_state);
+        if event.source_event.as_deref() == Some("UserPromptSubmit") {
+            // The hook may acknowledge a retained wake without changing an
+            // already-Running status. Read it before the status-only fast exit.
+            self.flush_pending_pm_wake(&window_id);
+        }
         if !hook_state_changed && !approval_wait_cleared {
             return events;
         }

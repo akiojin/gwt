@@ -421,6 +421,8 @@ pub enum FrontendEvent {
         action: crate::agent_names::AgentRosterAction,
         #[serde(default)]
         expected_revision: Option<u64>,
+        #[serde(default)]
+        request_id: Option<String>,
     },
     /// Read or reassign the authenticated project's persistent Agent schedule.
     AgentSchedule {
@@ -1227,6 +1229,10 @@ pub enum FrontendEvent {
         /// policy. `None` leaves the persisted policy unchanged.
         #[serde(default)]
         agent_resource: Option<AgentResourceSettings>,
+        /// Issue #4777: parsed terminal excerpt size in Works. Omission keeps
+        /// the saved value; only integer values from 3 to 10 are accepted.
+        #[serde(default)]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC #2920 Phase 11: Settings > System opened. Backend replies with
     /// the current OS autostart registration state for this user.
@@ -2040,6 +2046,12 @@ pub struct AgentRosterMemberView {
     pub member: crate::agent_names::AgentMember,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Saved manual candidate input, distinct from Auto tiers and Session facts.
+    #[serde(default)]
+    pub saved_manual_profile: Option<crate::IssueMonitorLaunchProfile>,
+    /// Content identity of saved manual tuning, not a chronological/CAS counter.
+    #[serde(default)]
+    pub saved_manual_revision: Option<String>,
     pub history: Vec<AgentAssignmentHistoryView>,
     pub issue_count: Option<usize>,
     pub landed_count: Option<usize>,
@@ -2050,6 +2062,14 @@ pub struct AgentRosterMemberView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAssignmentHistoryView {
     pub session_id: String,
+    /// Recorded Session facts, independent of the member's current settings.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Recorded launch configuration, not observed provider-internal changes.
+    #[serde(default)]
+    pub model: Option<String>,
     pub issue_number: Option<u64>,
     pub title: Option<String>,
     pub result: Option<String>,
@@ -2154,10 +2174,14 @@ pub enum BackendEvent {
     /// Project-scoped persistent membership and assignment history.
     AgentRoster {
         roster: AgentRosterView,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     AgentRosterError {
         project_key: String,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     AgentSchedule {
         schedule: crate::issue_monitor::AgentScheduleSnapshot,
@@ -2850,6 +2874,8 @@ pub enum BackendEvent {
         /// SPEC #1921 Phase 86 (#3813): authoritative agent resource policy.
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_resource: Option<AgentResourceSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC-2963: remote Board provider sign-in state, the editable provider
     /// configuration (non-secret), and an optional status message. The settings
@@ -2918,6 +2944,8 @@ pub enum BackendEvent {
         /// back so every open Settings window reconciles to the same values.
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_resource: Option<AgentResourceSettings>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        works_preview_lines: Option<u32>,
     },
     /// SPEC-1933 US-4: error reply for [`FrontendEvent::GetSystemSettings`]
     /// or [`FrontendEvent::UpdateSystemSettings`]. `message` is
@@ -5303,12 +5331,20 @@ mod tests {
             serde_json::json!({"kind":"read"}),
             serde_json::json!({"kind":"add"}),
             serde_json::json!({"kind":"rest","member_id":"member-1"}),
+            serde_json::json!({"kind":"rename","member_id":"member-1","name":"Maple"}),
         ] {
             let parsed = serde_json::from_value::<FrontendEvent>(serde_json::json!({
                 "kind":"agent_roster", "action":action, "expected_revision":3
             }));
             assert!(parsed.is_ok(), "roster action was rejected: {parsed:?}");
         }
+        let event: FrontendEvent = serde_json::from_value(serde_json::json!({
+            "kind":"agent_roster", "action":{"kind":"read"}, "request_id":"name-write-1"
+        }))
+        .unwrap();
+        assert!(
+            matches!(event, FrontendEvent::AgentRoster { request_id: Some(id), .. } if id == "name-write-1")
+        );
     }
 
     #[test]

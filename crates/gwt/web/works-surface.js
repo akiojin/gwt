@@ -54,14 +54,15 @@ function drawSpark(document, svg, input, maximum) {
   append();
 }
 
-export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle,
+export function createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, windowDisplayTitle, systemSettingsModel,
   mountTerminal, mountPreview, onLayout = () => {}, onFocus = () => {}, onSelectMember = () => {}, getTelemetry = () => null }) {
   const element = document.createElement("section");
   element.className = "works-surface"; element.setAttribute("aria-label", "Works");
   element.innerHTML = `<div class="works-overview"><header class="works-heading"><h2>Works</h2><div class="works-counts">
     ${["running", "waiting", "idle", "error"].map(state => `<span>${state.toUpperCase()} <b data-count="${state}">—</b></span>`).join("")}</div><span class="works-active"></span></header>
-    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b></div>
-    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg></div>
+    <div class="works-today">Today · Tokens <b data-metric="today-total">—</b> · Input <b data-metric="today-input">—</b> · Cache <b data-metric="today-cache">—</b> · Output <b data-metric="today-output">—</b> · Cost <b data-metric="today-cost">—</b> · Landed PRs <b data-metric="today-landed">—</b>
+      <small class="works-availability" data-availability="today"></small><small class="works-availability works-source-note"></small></div>
+    <div class="works-fleet"><div>Fleet tokens/min <b data-metric="fleet-now">—</b><small>Last 30 minutes</small></div><svg></svg><small class="works-availability" data-availability="fleet"></small></div>
     <div class="works-list" role="list" aria-label="Current agent works"></div><p class="works-empty">No local agents are active.</p></div>
     <section class="works-full" aria-label="Work terminal" hidden><header class="works-full-header"><button type="button" data-action="back">← Back to Works</button>
       <span class="works-full-name"></span><span class="works-full-meta"></span><span class="works-full-usage"></span>
@@ -70,6 +71,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   const entries = new Map();
   let selected = null, previewElement = null, previewCleanups = [], disposed = false;
   let renderedCatalog, renderedActivity, renderedRoster;
+  const previewLines = () => systemSettingsModel?.read().worksPreviewLines ?? 3;
   const isPresented = () => element.isConnected && !element.hidden;
   const nameFor = work => work.member?.name || work.data.agent_name || (work.assignment.is_pm ? "Project Manager" : "Agent");
   const purposeFor = work => work.assignment.current_task || work.data.dynamic_title || work.data.purpose_title || (work.assignment.is_pm ? "Project Manager" : work.data.title) || "—";
@@ -149,7 +151,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     terminal.dataset.windowId = work.data.id;
     terminal.addEventListener("focusin", () => onFocus(work.data.id));
     terminal.addEventListener("pointerdown", () => onFocus(work.data.id));
-    row.addEventListener("click", event => { if (!event.target.closest("button, a")) openWork(entries.get(work.data.id).work.assignment); });
+    row.addEventListener("click", event => { if (!event.target.closest("button, a, .work-tail")) openWork(entries.get(work.data.id).work.assignment); });
     row.addEventListener("keydown", event => {
       if (event.target !== row || !["Enter", " "].includes(event.key)) return;
       event.preventDefault(); openWork(entries.get(work.data.id).work.assignment);
@@ -179,6 +181,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   function syncPreview() {
     if (!previewElement) return;
+    previewElement.style.setProperty("--works-preview-lines", String(previewLines()));
     for (const cleanup of previewCleanups) cleanup?.(); previewCleanups = [];
     previewElement.replaceChildren();
     const note = document.createElement("p"); note.className = "surface-readonly-note"; note.textContent = "Read-only preview · Select this pane to interact"; previewElement.append(note);
@@ -196,7 +199,7 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
       for (const row of clone.querySelectorAll(".work-row")) {
         row.tabIndex = -1; const tail = row.querySelector(".work-tail"); tail.replaceChildren();
         if (!exactWork(entries.get(row.dataset.windowId)?.work.assignment)) continue;
-        previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: 3 }));
+        previewCleanups.push(mountPreview(row.dataset.windowId, tail, { tailLines: previewLines() }));
       }
       previewElement.append(clone);
     }
@@ -212,6 +215,9 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
   }
   function render(rehost) {
     if (disposed) return;
+    const lines = previewLines();
+    const linesChanged = element.style.getPropertyValue("--works-preview-lines") !== String(lines);
+    element.style.setProperty("--works-preview-lines", String(lines));
     const catalog = windowCatalogModel.read().catalog, activity = activityModel.read(), roster = rosterModel.read();
     const works = currentWorks(catalog, activity, roster), ids = new Set(works.map(work => work.data.id));
     let changed = false;
@@ -229,20 +235,30 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     for (const state of ["running", "waiting", "idle", "error"]) element.querySelector(`[data-count="${state}"]`).textContent = activity.count === null ? "—" : String(works.filter(work => work.state === state).length);
     element.querySelector(".works-active").textContent = `Active ${number(activity.count)}`;
     for (const [key, value] of Object.entries({ total: finite(today.input_tokens) && finite(today.output_tokens) ? number(today.input_tokens + today.output_tokens) : "—", input: number(today.input_tokens), cache: number(today.cache_tokens), output: number(today.output_tokens), cost: finite(today.cost_usd) ? `$${today.cost_usd.toFixed(2)}` : "—", landed: number(today.landed_pr_count) })) element.querySelector(`[data-metric="today-${key}"]`).textContent = value;
+    for (const key of ["today", "fleet"]) {
+      const note = element.querySelector(`[data-availability="${key}"]`);
+      const status = telemetry.availability?.[key];
+      note.dataset.state = status?.state || "no_data";
+      note.textContent = status?.detail || "No data: session measurements are not available yet.";
+    }
+    const sourceNote = element.querySelector(".works-source-note");
+    sourceNote.textContent = [!finite(today.cost_usd) && "Cost unavailable: per-session USD is not supported.",
+      !finite(today.landed_pr_count) && "Landed PRs unavailable: daily merge data is not connected."].filter(Boolean).join(" ");
+    sourceNote.hidden = !sourceNote.textContent;
     element.querySelector('[data-metric="fleet-now"]').textContent = number(telemetry.fleet_tokens_per_minute?.at(-1));
     drawSpark(document, element.querySelector(".works-fleet svg"), telemetry.fleet_tokens_per_minute);
     element.querySelector(".works-empty").textContent = activity.count === null ? "Local agent activity is unavailable." : "No local agents are active.";
     element.querySelector(".works-empty").hidden = works.length > 0;
     element.dataset.catalogVersion = String(catalog.version);
     if (selected) { const work = exactWork(selected); if (work) showFull(work, rehost); else back(false); }
-    for (const entry of entries.values()) if (!entry.work.ready) {
+    for (const entry of entries.values()) if (!entry.work.ready || linesChanged) {
       entry.cleanup?.(); entry.cleanup = null; entry.previewMounted = false;
     }
     if (isPresented()) for (const entry of entries.values()) {
       if (!entry.work.ready) continue;
       if (!selected || entry.work.data.id !== selected.window_id) park(entry, rehost || !entry.previewMounted);
       if (!entry.previewMounted) {
-        entry.cleanup = mountPreview(entry.work.data.id, entry.row.querySelector(".work-tail"), { tailLines: 3 });
+        entry.cleanup = mountPreview(entry.work.data.id, entry.row.querySelector(".work-tail"), { tailLines: previewLines() });
         entry.previewMounted = true;
       }
     }
@@ -261,9 +277,10 @@ export function createWorksSurface({ document, windowCatalogModel, activityModel
     windowCatalogModel.subscribeFrame(state => state.catalog, value => { if (value !== renderedCatalog) render(false); }),
     activityModel.subscribeFrame(state => state, value => { if (value !== renderedActivity) render(false); }),
     rosterModel.subscribeFrame(state => state, value => { if (value !== renderedRoster) render(false); }),
+    systemSettingsModel?.subscribeFrame(state => state.worksPreviewLines, () => render(false)),
   ];
   return { element, sync: () => render(true), openWork, reveal: openWork, showList: () => back(false), setPreviewHost,
     contains: id => !!exactWork(id), isVisible: id => !element.hidden && !!exactWork(id),
-    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe(); setPreviewHost(null); for (const entry of entries.values()) entry.cleanup?.(); entries.clear(); disposed = true; },
+    dispose() { if (disposed) return; for (const unsubscribe of unsubscribers) unsubscribe?.(); setPreviewHost(null); for (const entry of entries.values()) entry.cleanup?.(); entries.clear(); disposed = true; },
   };
 }

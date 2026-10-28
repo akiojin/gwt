@@ -1420,6 +1420,9 @@ mod tests {
 
     #[test]
     fn runtime_probe_lock_obeys_ambient_operation_deadline() {
+        use crate::operation_deadline::{
+            ScopedNamedLockContentionObserver, ScopedOperationClock, ScopedOperationDeadline,
+        };
         use fs2::FileExt;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -1436,16 +1439,49 @@ mod tests {
             .open(runtime_dir.join(PROBE_LOCK_FILE))
             .expect("open held probe lock");
         held.lock_exclusive().expect("hold probe lock");
-        let started = std::time::Instant::now();
-        let _deadline = crate::operation_deadline::ScopedOperationDeadline::enter(
-            started + std::time::Duration::from_millis(75),
-        );
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            // test-hygiene: allow-wall-clock-deadline Release a stuck fixture lock if its notification is lost; never decides success.
+            let requested = released.recv_timeout(crate::deadline_budget::HANG_GUARD);
+            FileExt::unlock(&held).expect("release probe lock");
+            requested
+        });
+        let start = std::time::Instant::now();
+        let _clock = ScopedOperationClock::set(start);
+        // test-hygiene: allow-short-duration Logical expiry is advanced only after real lock contention.
+        let budget = std::time::Duration::from_millis(75);
+        let expiry = start + budget;
+        let _deadline = ScopedOperationDeadline::enter(expiry);
+        let expired_clock = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let on_contention = expired_clock.clone();
+        let _contention =
+            ScopedNamedLockContentionObserver::set(&runtime_dir.join(PROBE_LOCK_FILE), move || {
+                assert_eq!(crate::operation_deadline::current(), Some(expiry));
+                assert_eq!(crate::operation_deadline::now(), start);
+                on_contention.replace(Some(ScopedOperationClock::set(expiry)));
+            });
 
         let error = ensure_project_index_runtime_with(&gwt_home, &provisioner)
             .expect_err("contended probe lock must respect the ambient deadline");
 
-        assert!(error.to_string().contains("deadline"));
-        assert!(started.elapsed() < std::time::Duration::from_millis(1_000));
-        FileExt::unlock(&held).expect("release probe lock");
+        assert!(
+            expired_clock.borrow().is_some(),
+            "observe real probe lock contention"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("deadline expired during file lock"),
+            "{message}"
+        );
+        assert!(message.contains("operation=runtime_probe"), "{message}");
+        assert!(
+            !message.contains("lock_contention=not_observed"),
+            "{message}"
+        );
+        release.send(()).expect("request probe lock release");
+        holder
+            .join()
+            .expect("probe lock watchdog")
+            .expect("probe lock released before hang guard");
     }
 }

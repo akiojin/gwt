@@ -47,9 +47,9 @@ test.describe('English application UI', () => {
 
       await page.locator('[data-surface="issues"]').click();
       const settings = page.locator('.workspace-window[data-preset="settings"]');
-      const issues = settings.locator('[data-settings-panel="issues"]');
-      await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute('aria-selected', 'true');
-      await expect(page.locator('.workspace-window[data-preset="issue"], .workspace-window[data-preset="issue_monitor"]')).toHaveCount(0);
+      const issues = page.locator('.workspace-window[data-preset="issue"]');
+      await expect(issues.locator('.settings-root')).toHaveCount(0);
+      await expect(issues).toHaveCount(1);
       await expect(issues.locator('.issue-bridge-root')).toBeVisible();
       await expect(issues.getByRole('group', { name: 'Issue view mode', exact: true })).toBeVisible();
       await expect(issues.getByRole('button', { name: 'Refresh cached work items', exact: true })).toBeVisible();
@@ -63,6 +63,7 @@ test.describe('English application UI', () => {
 
       await issues.getByRole('button', { name: 'Issues settings', exact: true }).click();
       const issuesSettings = settings.locator('[data-settings-panel="issues"]');
+      await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute('aria-selected', 'true');
       await expect(issuesSettings).toBeVisible();
       await expect(issuesSettings.getByLabel('Max active', { exact: true })).toBeVisible();
       await expect(issuesSettings.getByLabel('Allowed labels', { exact: true })).toBeVisible();
