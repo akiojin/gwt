@@ -544,9 +544,9 @@ impl MonitorLaunch {
         self.check_current()?;
         let issue = self.issue()?;
         let before = self.read_monitor()?;
-        // OFF releases Monitor tracking, not the already materialized owner.
-        // Its removed delivery cannot authorize an ACK or physical teardown.
-        if !before.prefs().enabled {
+        // OFF revokes existing reservations, not the materialized owner. Auto
+        // may already be OFF while a valid manual reservation awaits its ACK.
+        if !before.prefs().enabled && !before.launch_identity(issue).active {
             self.check_current()?;
             return Ok(None);
         }
