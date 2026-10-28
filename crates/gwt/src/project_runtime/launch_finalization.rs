@@ -2330,5 +2330,15 @@ pub fn rollback_worker_genesis(
     }
     // Preserve exact removal even if the durable receipt still needs cleanup.
     *removed_session = Some(genesis.session_identity.clone());
+    let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    if crate::load_issue_monitor_prefs(&prefs_path)
+        .map_err(|error| error.to_string())?
+        .agent_roster
+        .is_some()
+    {
+        // Reuse leased absence checks; surviving runtime/handshake evidence
+        // or a switch pin still retains the assignment.
+        crate::agent_names::read_project_roster(project_root, sessions_dir)?;
+    }
     clear_durable_launch_recovery(sessions_dir, &genesis.session_id)
 }

@@ -347,9 +347,27 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
     session
         .set_execution_binding(Some(binding.clone()))
         .expect("bind genesis Session");
+    let member = gwt::agent_names::reserve_project_member(
+        &repo,
+        &runtime.sessions_dir,
+        "genesis-member-reservation",
+        Some(owner.number),
+        None,
+        None,
+        None,
+    )
+    .expect("reserve genesis member");
+    session.agent_member_id = Some(member.agent_member_id.clone());
     session
         .save(&runtime.sessions_dir)
         .expect("save genesis Session");
+    gwt::agent_names::bind_project_member_session(
+        &repo,
+        &member.agent_member_id,
+        "genesis-member-reservation",
+        session_id,
+    )
+    .expect("bind reserved member to genesis Session");
     persist_durable_launch_recovery(
         &runtime.sessions_dir,
         DurableLaunchRecoveryKind::Genesis,
@@ -418,6 +436,22 @@ fn genesis_pty_spawn_failure_terminalizes_generation_and_allows_successor_retry(
             .exists(),
         "the exact failed genesis Session must be removed",
     );
+    let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+        .expect("read persisted member assignment without triggering recovery");
+    let retained = prefs
+        .agent_roster
+        .unwrap()
+        .members
+        .into_iter()
+        .find(|entry| entry.agent_member_id == member.agent_member_id)
+        .expect("keep the registered member");
+    assert!(
+        retained.assignment.is_none(),
+        "failed genesis must not strand its member assignment"
+    );
+    assert_eq!(retained.name, member.name);
+    assert_eq!(retained.enabled, member.enabled);
+    assert_eq!(retained.agent_id, member.agent_id);
     assert!(!durable_launch_recovery_exists(
         &runtime.sessions_dir,
         session_id,
