@@ -11,6 +11,7 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
+    sync::{Arc, Mutex, RwLock},
 };
 
 use gwt_core::repo_hash::ProjectKey;
@@ -61,6 +62,8 @@ pub enum AuthorizationError {
     StaleSession,
     #[error("command sequence is repeated or out of order")]
     Replay,
+    #[error("mobile authorization synchronization is unavailable")]
+    Unavailable,
 }
 
 /// Authorization rejection does not write; a storage error disables access.
@@ -153,6 +156,54 @@ pub struct AuthenticatedSession {
     issued_at: u64,
     expires_at: u64,
     next_sequence: u64,
+}
+
+/// Host-only connection shared as `Arc<MobileConnection>` across queued work.
+/// Every reference uses the same session sequence and Host revocation state.
+/// This does not register a client, open a transport, or enable mobile access.
+pub struct MobileConnection {
+    authorization: Arc<RwLock<MobileAuthorization>>,
+    session: Mutex<AuthenticatedSession>,
+}
+
+impl MobileConnection {
+    /// The trusted Host adapter supplies its single shared authority and a
+    /// session authenticated on this connection. Never accept client sessions.
+    /// PC control-plane mutations take this same authority's write lock.
+    pub fn new(
+        authorization: Arc<RwLock<MobileAuthorization>>,
+        session: AuthenticatedSession,
+    ) -> Self {
+        Self {
+            authorization,
+            session: Mutex::new(session),
+        }
+    }
+
+    /// Call at the synchronous effect, never just to enqueue it. Read trusted
+    /// Host time after both locks, including time spent waiting for them.
+    /// Neither callback may reenter this connection or mutate its authority;
+    /// never call dispatch while holding that authority's write lock.
+    /// The adapter must also recheck the live client and current Project binding.
+    pub fn dispatch<T>(
+        &self,
+        project: &ProjectKey,
+        sequence: u64,
+        now: impl FnOnce() -> u64,
+        effect: impl FnOnce() -> T,
+    ) -> Result<T, AuthorizationError> {
+        // Waiters on this session must not retain a Host read lock and delay
+        // revocation. Poisoned state is never recovered as valid authority.
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let authorization = self
+            .authorization
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        authorization.dispatch(&mut session, project, sequence, now(), effect)
+    }
 }
 
 /// A single authority per Host, shared behind its owner's synchronization fence.
@@ -600,6 +651,102 @@ mod tests {
             .unwrap();
         auth.authenticate(&challenge.id, signature.as_ref(), NOW)
             .unwrap()
+    }
+
+    #[test]
+    fn connection_shares_sequence_and_holds_locks_through_clock_and_effect() {
+        use std::sync::{Arc, RwLock};
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = session(&mut auth, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = Arc::new(MobileConnection::new(auth.clone(), session));
+        let queued = connection.clone();
+        let check_locks = || {
+            assert!(auth.try_write().is_err());
+            assert!(connection.session.try_lock().is_err());
+        };
+        assert_eq!(
+            queued.dispatch(
+                &project(),
+                0,
+                || {
+                    check_locks();
+                    NOW
+                },
+                || {
+                    check_locks();
+                    "written"
+                }
+            ),
+            Ok("written")
+        );
+        assert_eq!(
+            connection.dispatch(&project(), 0, || NOW, || panic!("replayed effect")),
+            Err(AuthorizationError::Replay)
+        );
+        assert!(auth.try_write().is_ok());
+    }
+
+    #[test]
+    fn connection_rechecks_authority_when_queued_effect_runs() {
+        use std::{
+            cell::Cell,
+            sync::{Arc, RwLock},
+        };
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let session = session(&mut auth, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = MobileConnection::new(auth.clone(), session);
+        let now = Cell::new(NOW);
+        let queued =
+            || connection.dispatch(&project(), 0, || now.get(), || panic!("expired effect"));
+        now.set(NOW + SESSION_TTL_SECS);
+        assert_eq!(queued(), Err(AuthorizationError::Expired));
+        assert_eq!(
+            connection.dispatch(&other_project(), 0, || NOW, || panic!("wrong project")),
+            Err(AuthorizationError::WrongProject)
+        );
+        let queued = || connection.dispatch(&project(), 0, || NOW, || panic!("revoked effect"));
+        auth.write().unwrap().revoke(device.id()).unwrap();
+        assert_eq!(queued(), Err(AuthorizationError::Revoked));
+    }
+
+    #[test]
+    fn connection_rejects_poisoned_session_or_host_without_running_effect() {
+        use std::sync::{Arc, RwLock};
+        let mut auth = MobileAuthorization::default();
+        auth.enable();
+        let key = key();
+        let device = paired(&mut auth, &key);
+        let first = session(&mut auth, &device, &key);
+        let second = session(&mut auth, &device, &key);
+        let auth = Arc::new(RwLock::new(auth));
+        let connection = MobileConnection::new(auth.clone(), first);
+        assert!(std::panic::catch_unwind(|| {
+            let _guard = connection.session.lock().unwrap();
+            panic!("poison session");
+        })
+        .is_err());
+        assert_eq!(
+            connection.dispatch(&project(), 0, || panic!("clock"), || ()),
+            Err(AuthorizationError::Unavailable)
+        );
+        let connection = MobileConnection::new(auth.clone(), second);
+        assert!(std::panic::catch_unwind(|| {
+            let _guard = auth.write().unwrap();
+            panic!("poison host");
+        })
+        .is_err());
+        assert_eq!(
+            connection.dispatch(&project(), 0, || panic!("clock"), || ()),
+            Err(AuthorizationError::Unavailable)
+        );
     }
 
     #[test]
