@@ -1338,6 +1338,7 @@ fn app_runtime_output_classifies_rendered_codex_approval_prompt() {
             data: prompt.to_vec(),
             seq,
             screen: None,
+            screen_ansi: None,
         }),
     )
     .unwrap();
@@ -1649,6 +1650,7 @@ fn app_runtime_generic_agent_uses_persisted_claude_provider_for_approval_prompt(
             data: prompt.to_vec(),
             seq,
             screen: None,
+            screen_ansi: None,
         }),
     )
     .unwrap();

@@ -1373,7 +1373,7 @@ impl OwnerState {
                 } => {
                     let result = self.exact(&id, incarnation).map(|_| ());
                     if result.is_ok() {
-                        self.observe_owner_screen_policy(&id, wall, now);
+                        self.observe_owner_screen_policy(&id, wall, now, None);
                     }
                     let _ = reply.send(result);
                 }
@@ -8482,7 +8482,7 @@ impl OwnerState {
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
-            self.observe_owner_screen_policy(&id, wall, now);
+            self.observe_owner_screen_policy(&id, wall, now, None);
         }
         self.sweep_policy_capacity_resumes(now);
     }
@@ -8492,6 +8492,7 @@ impl OwnerState {
         id: &str,
         now: chrono::DateTime<chrono::Utc>,
         monotonic_now: std::time::Instant,
+        captured_screen: Option<String>,
     ) {
         let Some(runtime) = self.runtimes.get_mut(id) else {
             return;
@@ -8502,11 +8503,13 @@ impl OwnerState {
             .agent
             .as_ref()
             .map(|agent| agent.active.agent_id.clone());
-        let screen = runtime
-            .pane
-            .lock()
-            .ok()
-            .map(|pane| pane.screen().contents());
+        let screen = captured_screen.or_else(|| {
+            runtime
+                .pane
+                .lock()
+                .ok()
+                .map(|pane| pane.screen().contents())
+        });
         let approval_settle_due = runtime
             .policy
             .approval_settle_at
@@ -8652,7 +8655,7 @@ impl OwnerState {
         }
         let ids: Vec<_> = self.runtimes.keys().cloned().collect();
         for id in ids {
-            self.observe_owner_screen_policy(&id, now, std::time::Instant::now());
+            self.observe_owner_screen_policy(&id, now, std::time::Instant::now(), None);
         }
     }
 
@@ -9048,7 +9051,8 @@ impl OwnerState {
                 incarnation,
                 data,
                 seq,
-                ..
+                screen,
+                screen_ansi,
             } if self.exact(&id, incarnation).is_ok() => {
                 self.runtimes
                     .get_mut(&id)
@@ -9066,21 +9070,27 @@ impl OwnerState {
                     },
                     Some(seq),
                 );
-                let (screen, screen_ansi, screen_seq) = {
-                    let pane = self.runtimes[&id]
-                        .pane
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    (
-                        pane.screen().contents(),
-                        pane.screen().contents_formatted(),
-                        pane.output_seq(),
-                    )
+                // The reader captured these together while parsing this seq.
+                // Re-locking its hot Pane here can starve the owner mailbox.
+                let (screen, screen_ansi, screen_seq) = match (screen, screen_ansi) {
+                    (Some(screen), Some(screen_ansi)) => (screen, screen_ansi, seq),
+                    _ => {
+                        let pane = self.runtimes[&id]
+                            .pane
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        (
+                            pane.screen().contents(),
+                            pane.screen().contents_formatted(),
+                            pane.output_seq(),
+                        )
+                    }
                 };
                 self.observe_owner_screen_policy(
                     &id,
                     chrono::Utc::now(),
                     std::time::Instant::now(),
+                    Some(screen.clone()),
                 );
                 OwnerEvent::Output {
                     id,

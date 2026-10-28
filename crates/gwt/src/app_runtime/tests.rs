@@ -1737,6 +1737,7 @@ fn process_test_owner_output(runtime: &mut AppRuntime, window_id: &str, bytes: &
             data: bytes.to_vec(),
             seq,
             screen: Some(screen.clone()),
+            screen_ansi: None,
         }),
     )
     .expect("production owner consumes fixture output");

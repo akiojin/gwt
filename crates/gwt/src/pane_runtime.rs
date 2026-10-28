@@ -29,6 +29,7 @@ pub enum PaneRuntimeEvent {
         data: Vec<u8>,
         seq: u64,
         screen: Option<String>,
+        screen_ansi: Option<Vec<u8>>,
     },
     Status {
         id: String,
@@ -79,16 +80,23 @@ pub fn spawn_output_thread(
                 Ok(0) => {
                     let tail = pane.lock().ok().and_then(|mut pane| {
                         let data = pane.finish_owner_output();
-                        (!data.is_empty())
-                            .then(|| (data, pane.output_seq(), pane.screen().contents()))
+                        (!data.is_empty()).then(|| {
+                            (
+                                data,
+                                pane.output_seq(),
+                                pane.screen().contents(),
+                                pane.screen().contents_formatted(),
+                            )
+                        })
                     });
-                    if let Some((data, seq, screen)) = tail {
+                    if let Some((data, seq, screen, screen_ansi)) = tail {
                         sink(PaneRuntimeEvent::Output {
                             id: id.clone(),
                             incarnation,
                             data,
                             seq,
                             screen: Some(screen),
+                            screen_ansi: Some(screen_ansi),
                         });
                     }
                     break;
@@ -98,6 +106,7 @@ pub fn spawn_output_thread(
                     let lock_started = Instant::now();
                     let mut seq = 0;
                     let mut screen = None;
+                    let mut screen_ansi = None;
                     let mut responses = None;
                     if let Ok(mut pane) = pane.lock() {
                         let lock_wait_us = lock_started.elapsed().as_micros() as u64;
@@ -107,6 +116,7 @@ pub fn spawn_output_thread(
                         responses = Some((pane.shared_pty(), output.cursor_reports));
                         seq = pane.output_seq();
                         screen = Some(pane.screen().contents());
+                        screen_ansi = Some(pane.screen().contents_formatted());
                         let parse_us = parse_started.elapsed().as_micros() as u64;
                         // Log only when the contention window is large enough
                         // to plausibly starve a concurrent `write_input`. The
@@ -159,6 +169,7 @@ pub fn spawn_output_thread(
                         data: chunk,
                         seq,
                         screen,
+                        screen_ansi,
                     });
                 }
                 Err(error) => {
@@ -375,9 +386,14 @@ mod tests {
                     data,
                     seq,
                     screen,
+                    screen_ansi,
                 } => {
                     assert!(data.len() <= super::OUTPUT_BATCH_MAX_BYTES);
                     assert!(screen.is_some(), "the parser worker supplies the screen");
+                    assert!(
+                        screen_ansi.is_some(),
+                        "the parser worker supplies the same-sequence ANSI screen"
+                    );
                     identities.push((id, incarnation));
                     bytes.extend(data);
                     sequences.push(seq);
