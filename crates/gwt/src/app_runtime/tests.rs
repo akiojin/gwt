@@ -7441,7 +7441,8 @@ fn owner_monitor_launch_with_config(
     .unwrap_or_else(|error| {
         let prefs = gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(root)).unwrap();
         let observed = owner_monitor_read(root, issue);
-        panic!("actual Monitor launch failed: {error}; pending={:?}; plan={:?}; failed={:?}; source={:?}; schedule={:?}; inbox={:?}; cap={}", prefs.pending_launch_deliveries, prefs.agent_issue_schedule, prefs.failed_issues, observed.launch_source_exclusion(issue), observed.agent_schedule_launch_exclusion(issue), observed.inbox_item(issue), observed.effective_max_active_agents())
+        let actual_status = gwt::daemon_publisher::read_issue_monitor_status(root);
+        panic!("actual Monitor launch failed: {error}; pending={:?}; plan={:?}; failed={:?}; source={:?}; schedule={:?}; inbox={:?}; cap={}; launched={:?}; accounting={:?}; dependency={:?}; actual_canvas={:?}; actual_status={:?}", prefs.pending_launch_deliveries, prefs.agent_issue_schedule, prefs.failed_issues, observed.launch_source_exclusion(issue), observed.agent_schedule_launch_exclusion(issue), observed.inbox_item(issue), observed.effective_max_active_agents(), prefs.launched_issues, observed.agent_status(), observed.launch_dependency_exclusion(issue), owner.monitor_snapshot(), actual_status)
     });
     let incarnation = receipt["incarnation"].as_u64().unwrap();
     owner_fixture_block_on(owner.command(OwnerCommand::AcknowledgeMonitorLaunch {
