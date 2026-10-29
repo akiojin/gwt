@@ -168,7 +168,7 @@ fn app_runtime_row_cleanup_candidate_hides_workspace_with_live_cwd_process() {
     let _child = KillOnDrop(
         gwt_core::process::hidden_command("sh")
             .arg("-c")
-            .arg("sleep 30")
+            .arg("exec sleep 30")
             .current_dir(&worktree)
             .spawn()
             .expect("spawn cwd process"),

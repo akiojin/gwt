@@ -2069,7 +2069,7 @@ fn spawn_work_merge_status_scan_skips_dirty_worktree_branch() {
     let _child = KillOnDrop(
         gwt_core::process::hidden_command("sh")
             .arg("-c")
-            .arg("sleep 30")
+            .arg("exec sleep 30")
             .current_dir(&repo)
             .spawn()
             .expect("spawn live cwd process"),

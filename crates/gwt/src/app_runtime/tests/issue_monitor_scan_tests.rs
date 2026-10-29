@@ -217,7 +217,8 @@ fn authenticated_pm_scan_now_enqueues_one_exact_project_worker_and_refuses_overl
     assert_eq!(mismatched["accepted"], false);
     assert_eq!(mismatched["reason"], "project_scope_mismatch");
 
-    gwt::daemon_publisher::publish_issue_monitor_control(
+    // Fixture setup awaits the real durable ACK; GUI latency is not this case's contract.
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(
         &repo,
         gwt::runtime_daemon_events::issue_monitor_payload(
             "control",

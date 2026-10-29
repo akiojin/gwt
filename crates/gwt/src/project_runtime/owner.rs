@@ -10255,7 +10255,19 @@ fn close_agent_runtime(
             desired_restore_on_startup,
             exit_receipt.as_ref(),
         )?;
-        if runtime.policy.quota_hold.is_none()
+        // The physical owner keeps its captured identity after directory loss.
+        // Re-deriving project paths then would write into a new fallback store
+        // (or a replacement repository), rather than this owner's Work.
+        let project_is_current = runtime.project_root.is_dir()
+            && id.split_once("::").is_some_and(|(project, _)| {
+                gwt_core::paths::project_scope_hash(&runtime.project_root).as_str() == project
+            });
+        if !project_is_current {
+            tracing::warn!(
+                window_id = id,
+                "skipping Work cleanup after project identity changed"
+            );
+        } else if runtime.policy.quota_hold.is_none()
             && super::workspace::session_uses_ephemeral_worktree_for_project(
                 Some(&runtime.project_root),
                 &agent.active,
