@@ -1097,7 +1097,10 @@ fn deregistering_pty_writer_can_finish_while_a_reserved_submit_is_settling() {
 
 #[test]
 fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics() {
-    use gwt::project_runtime::{events::OwnerCommand, test_support::ProjectOwnerHarness};
+    use gwt::project_runtime::{
+        events::{OwnerCommand, OwnerEvent},
+        test_support::ProjectOwnerHarness,
+    };
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let repo = temp.path().join("repo");
@@ -1123,6 +1126,33 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         Some("Retain this actual launch prompt until physical exit.".into());
     let worktree = config.working_dir.clone().unwrap();
     let probe = super::pane_control_tests::control_owner_launch(&owner, "diagnostic", config);
+    let tab = sample_project_tab(
+        "tab-1",
+        "Repo",
+        repo.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent],
+    );
+    let mut gui = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
+    let gui_id = combined_window_id("tab-1", &gui.tabs[0].workspace.persisted().windows[0].id);
+    let context = gui.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let state = gui.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+        id: probe.id.clone(),
+        incarnation: probe.incarnation,
+    }))
+    .unwrap();
+    gui.install_remote_owner_projection(
+        &context,
+        &gui_id,
+        owner.client(),
+        serde_json::from_value(snapshot).unwrap(),
+        probe.session.clone(),
+    );
+    let mut observed = owner.subscribe();
     let generation = probe
         .writer
         .as_ref()
@@ -1189,16 +1219,40 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         }),
     )
     .unwrap();
-    assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_ok());
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Await the actual exact Closed receipt, not a scheduling delay after the child's exit.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = observed.recv().await.unwrap();
+                let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None }
+                    if id == &probe.id && *incarnation == probe.incarnation);
+                gui.handle_project_owner_event(&context, 1, &identity, event);
+                if closed {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the exact native diagnostic exit must complete");
+    });
+    assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
+    assert!(gui.tracked_window_exists(&gui_id));
+    assert_eq!(gui.runtimes[&gui_id].incarnation, probe.incarnation);
+    assert_eq!(gui.runtimes[&gui_id].owner_pane_id, probe.id);
+    assert!(!gui.active_agent_sessions.contains_key(&gui_id));
+    let reconnect =
+        gui.handle_frontend_event("diagnostic-client".into(), FrontendEvent::FrontendReady);
+    assert!(
+        reconnect.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { id, .. } if id == &gui_id)),
+        "the read-only diagnostic screen must survive the physical runtime's retirement"
+    );
     assert!(
         !prompt_path.exists(),
         "confirmed exit must release the prompt even while diagnostics remain"
     );
-    owner_fixture_block_on(owner.command(OwnerCommand::Close {
-        id: probe.id,
-        incarnation: probe.incarnation,
-    }))
-    .unwrap();
+    assert!(generation.write_input(b"late input after Closed").is_err());
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]

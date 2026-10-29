@@ -8164,6 +8164,22 @@ fn assert_ack_preserves_failed_window_replacement(test_root: &Path, restart_exis
         false,
     );
     let repo = fixture.project_root.clone();
+    // Auto remains OFF. This case models an explicitly reserved manual
+    // launch awaiting its ACK, not an unreserved launch after revocation.
+    gwt::try_mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&repo),
+        |prefs| {
+            assert!(!prefs.enabled);
+            prefs
+                .launching_issues
+                .push(gwt::IssueMonitorLaunchingIssue {
+                    issue_number: 3165,
+                    claimed_at: Some(Utc::now().to_rfc3339()),
+                });
+            Ok(())
+        },
+    )
+    .unwrap();
     seed_owner_fixture_roster(&repo, 8);
     configure_owner_fixture_tools(&repo, &["codex", "pane-contract-fixture"]);
     let (owner, launched_id, launched, _) = materialize_monitor_relaunch_at_owner(

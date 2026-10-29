@@ -6543,18 +6543,44 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                 );
             }
             let runtime = &mut fixture.runtime;
-            let observation = runtime
-                .issue_monitor_window_snapshot_for_tab("tab-1", &chrono::Utc::now().to_rfc3339())
-                .unwrap();
+            assert!(
+                runtime
+                    .issue_monitor_window_snapshot_for_tab(
+                        "tab-1",
+                        &chrono::Utc::now().to_rfc3339()
+                    )
+                    .is_none(),
+                "the GUI cannot republish the native owner's panes under tab aliases"
+            );
+            let issued_session = pane.session.as_ref().unwrap();
             assert_eq!(
-                observation.windows[0].monitor_owned, pending_identity,
+                gwt::cli::execution_state::session_launch_route_from_session(issued_session)
+                    == gwt_agent::LaunchRoute::Autonomous,
+                pending_identity,
                 "{label}: only the actual Monitor launch route owns this observation"
             );
             assert_eq!(
-                observation.windows[0].issue_number,
+                issued_session.linked_issue_number,
                 Some(3165),
                 "{label}: actual Issue identity is observable"
             );
+            let inventory = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
+            let physical = inventory["panes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|current| current["id"] == owner_id);
+            if expect_adoption {
+                let physical = physical.expect("the native owner observes the exact live holder");
+                assert_eq!(physical["session_id"], holder_sid);
+                assert_eq!(physical["incarnation"], pane.incarnation);
+                assert_eq!(physical["child_pid"], holder_pid.unwrap());
+            } else {
+                assert!(
+                    physical.is_none(),
+                    "the finished diagnostic row is not a live holder"
+                );
+            }
 
             let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
             runtime.blocking_tasks = ack_spawner;
