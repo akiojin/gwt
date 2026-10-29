@@ -807,6 +807,22 @@ impl AppRuntime {
         // live PTY incarnation. Production callers must use
         // `handle_runtime_status_event`, which also applies the incarnation
         // fence before accepting an exit receipt.
+        let status = if exit_confirmed {
+            // Model only the GUI cache transition after OwnerEvent::Closed;
+            // this fixture cannot settle a Session or retire a physical pane.
+            self.active_agent_sessions.remove(&id);
+            if !self.window_lookup.contains_key(&id) {
+                self.forget_window_scoped_state(&id);
+                return Vec::new();
+            }
+            if status == WindowProcessStatus::Exited {
+                WindowProcessStatus::Stopped
+            } else {
+                status
+            }
+        } else {
+            status
+        };
         self.handle_runtime_status_inner(id, status, detail, true, exit_confirmed, false)
     }
 

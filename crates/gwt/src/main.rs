@@ -6335,7 +6335,12 @@ mod tests {
             WindowProcessStatus::Error,
             Some("boom".to_string()),
         );
-        assert_eq!(error_events.len(), 2);
+        assert_eq!(error_events.len(), 3);
+        assert!(matches!(
+            error_events[2].event,
+            BackendEvent::ActiveWorkProjectionPatch { ref projection }
+                if projection.active_agents == 2
+        ));
         assert!(
             runtime.active_agent_sessions.contains_key(&claude_one_id),
             "PTY Error with a live hook state keeps Agent session ownership for recovery"
@@ -6367,7 +6372,12 @@ mod tests {
         );
         // PTY exit alone keeps the window open so launch diagnostics remain
         // visible; explicit hook stop owns structural auto-close.
-        assert_eq!(close_events.len(), 2);
+        assert_eq!(close_events.len(), 3);
+        assert!(matches!(
+            close_events[2].event,
+            BackendEvent::ActiveWorkProjectionPatch { ref projection }
+                if projection.active_agents == 1
+        ));
         assert!(matches!(
             close_events[0].event,
             BackendEvent::WindowState { ref window_id, state }
@@ -7545,7 +7555,7 @@ mod tests {
             "late completion without a live project owner must be discarded"
         );
 
-        let raw_missing_id = "tab-1::ghost-window".to_string();
+        let raw_missing_id = "tab-1::ghost".to_string();
         runtime.window_lookup.insert(
             raw_missing_id.clone(),
             WindowAddress {
