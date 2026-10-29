@@ -14190,6 +14190,13 @@ impl AppRuntime {
                 },
             ));
         }
+        // WindowRemoved precedes Closed, which can no longer resolve this alias.
+        // Reobserve activity after removal; cached proof keeps its old timestamp.
+        self.schedule_runtime_hook_active_work_projection_refresh(
+            &context.project_root,
+            "owner_window_removed",
+            "closed",
+        );
         self.proxy
             .for_project(context.clone())
             .send(UserEvent::IssueMonitorScheduledTick);

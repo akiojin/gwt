@@ -52,7 +52,13 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
       const selected = await request({ kind: "issue_monitor_profiles_set", request_id: 359050, profiles },
         "issue_monitor_profiles");
       expect(selected.profiles).toEqual(profiles);
-      await request({ kind: "issue_monitor_queue_push", issue_numbers: [43, 44] }, "issue_monitor_queue_result");
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [43] }, "issue_monitor_queue_result");
+      // Confirm the first ordinary admission before requesting its companion;
+      // both must be alive before this case closes only one of them.
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString())
+        .launch_confirmations?.["43"]?.window_id,
+      { timeout: 90_000, message: "the first actual native launch is confirmed" }).toBeTruthy();
+      await request({ kind: "issue_monitor_queue_push", issue_numbers: [44] }, "issue_monitor_queue_result");
       await expect.poll(async () => (await fixture.launches()).length,
         { timeout: 90_000, message: "both real provider children materialize" }).toBe(2);
       const launches = await fixture.launches();
@@ -135,6 +141,13 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
         ecr_status: "completed", settlement_severity: "warning", settlement_obligation_open: true,
         work_event_receipt_matches_current_generation: true,
       });
+      // Works membership arrives separately from the window catalog and Monitor
+      // census. Prove its real activity projection converged before capture.
+      const currentWorks = page.getByRole("list", { name: "Current agent works" });
+      await expect(currentWorks.locator(".work-row")).toHaveCount(1, { timeout: 30_000 });
+      await expect(currentWorks.locator('.work-row[data-window-id="' + sourceId + '"]')).toHaveCount(0);
+      await expect(currentWorks.locator('.work-row[data-window-id="' + companionId + '"]')).toBeVisible();
+      await expect(page.locator(".works-active")).toHaveText("Active 1");
       await info.attach("closed-owner-convergence-" + theme, {
         body: await page.screenshot(), contentType: "image/png",
       });
