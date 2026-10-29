@@ -4473,6 +4473,27 @@ mod tests {
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let (mut runtime, probe, id) =
             crate::app_runtime::tests::owner_browser_input_fixture(temp.path());
+        let runtime_path = gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &probe.session.as_ref().unwrap().id,
+        );
+        let mut observed = gwt_agent::SessionRuntimeState::load(&runtime_path).unwrap();
+        assert_eq!(observed.child_pid, probe.pty.process_id());
+        assert_eq!(observed.runtime_incarnation, Some(probe.incarnation));
+        // The input-draining provider is waiting for its next prompt. Model
+        // that telemetry without changing its actual launch/child identity.
+        observed.status = gwt_agent::AgentStatus::Idle;
+        observed.save(&runtime_path).unwrap();
+        assert!(
+            !gwt::project_runtime::pm_delivery::pm_wake_runtime_is_busy(
+                &runtime_path,
+                probe.incarnation,
+            ),
+            "the composer-only fixture must start with an Idle provider: status={:?}, source={:?}, completed={:?}",
+            observed.status,
+            observed.source_event,
+            observed.last_completed_hook_event_at,
+        );
         let (state, events) = sample_server_state();
         state.clients.register_scoped(
             "client-1".into(),
@@ -4509,6 +4530,7 @@ mod tests {
             Instant::now(),
         );
         forward_browser_inputs(&events, &mut runtime);
+        crate::app_runtime::tests::drain_pm_wake_delivery_tasks(&mut runtime);
         assert!(crate::app_runtime::tests::drain_browser_owner_input(&mut runtime).is_empty());
         assert!(!probe.pty.has_unsent_user_input());
         assert!(!runtime.pane_has_unsent_user_input(&id));

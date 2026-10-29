@@ -2252,13 +2252,16 @@ fn app_runtime_frontend_ready_replays_terminal_snapshot_with_scrollback_history(
                 "/d".to_string(),
                 "/s".to_string(),
                 "/c".to_string(),
-                "exit /b 0".to_string(),
+                "set /p snapshot=".to_string(),
             ],
         )
     } else {
         (
             "/bin/sh".to_string(),
-            vec!["-lc".to_string(), "exit 0".to_string()],
+            vec![
+                "-lc".to_string(),
+                "while IFS= read -r line; do :; done".to_string(),
+            ],
         )
     };
     insert_test_pane_runtime_with_command(&mut runtime, &window_id, command, args, 80, 6);

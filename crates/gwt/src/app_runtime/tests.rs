@@ -10839,7 +10839,7 @@ pub(super) fn pm_wake_fixture(temp: &tempfile::TempDir) -> (PathBuf, AppRuntime,
     (repo, runtime, pm_window_id)
 }
 
-fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
+pub(crate) fn drain_pm_wake_delivery_tasks(runtime: &mut AppRuntime) {
     let BlockingTaskSpawner::Queued(tasks) = &runtime.blocking_tasks else {
         panic!("PM wake fixture must use queued workers");
     };

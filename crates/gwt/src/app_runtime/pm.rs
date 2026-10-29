@@ -1788,13 +1788,21 @@ impl AppRuntime {
         let address = self.window_lookup[id].clone();
         let context = self.project_context(&address.tab_id).unwrap();
         let project_root = context.project_root.clone();
-        let loop_state = pm_registry::load_pm_loop_state(
-            &pm_registry::pm_loop_state_path_for_repo_path(&project_root),
+        let wake_id = Some(uuid::Uuid::new_v4().to_string());
+        pm_registry::with_active_pm_loop(
+            &pm_registry::pm_prefs_path_for_repo_path(&project_root),
+            || {
+                let path = pm_registry::pm_loop_state_path_for_repo_path(&project_root);
+                let mut state = pm_registry::load_pm_loop_state(&path).unwrap();
+                state.last_wake_id = wake_id.clone();
+                pm_registry::save_pm_loop_state(&path, &state).unwrap();
+            },
         )
-        .unwrap();
+        .unwrap()
+        .expect("the registered fixture PM loop is active");
         let decision = PmWakeDecision {
             project_root,
-            wake_id: loop_state.last_wake_id,
+            wake_id,
             window_id: id.into(),
             prompt: prompt.into(),
             unconfirmed: false,
