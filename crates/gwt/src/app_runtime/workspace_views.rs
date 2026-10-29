@@ -6154,6 +6154,19 @@ pub(super) fn full_active_work_projection_builds() -> usize {
     FULL_ACTIVE_WORK_PROJECTION_BUILDS.with(std::cell::Cell::get)
 }
 
+#[cfg(test)]
+pub(super) fn local_agent_activity_refresh_is_running(
+    runtime: &super::AppRuntime,
+    project_root: &Path,
+) -> bool {
+    runtime
+        .active_work_projection_refresh
+        .borrow()
+        .projects
+        .get(project_root)
+        .is_some_and(|project| lock_recover(&project.local_activity_refresh).running)
+}
+
 // Logical loader invocations, in hook snapshot / journal / Session ledger order.
 // The hook snapshot includes the shared error ledger; these are not OS read counts.
 #[cfg(test)]

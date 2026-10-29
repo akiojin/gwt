@@ -359,6 +359,9 @@ pub fn prepare_agent_launch(
             config.entrypoint_args(),
             config.session_mode == gwt_agent::SessionMode::Resume,
         );
+        // Preserve the native provider argv for permission validation before
+        // shell transport moves it into a script or environment variable.
+        let provider_permission_args = config.args.clone();
         apply_windows_host_shell_wrapper(&mut config)?;
 
         let branch_name = config.branch.clone().unwrap_or_else(|| "work".to_string());
@@ -560,7 +563,7 @@ pub fn prepare_agent_launch(
             &previous,
             previous.source,
             false,
-            &config.args,
+            &provider_permission_args,
             &config.env_vars,
         );
         // Keep the existing ECR decision parameter consistent with the final

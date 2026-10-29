@@ -7403,7 +7403,8 @@ mod tests {
                     live_sessions: Vec::new(),
                     docker_context: None,
                     docker_service_status: gwt_docker::ComposeServiceStatus::NotFound,
-                    linked_issue_number: Some(42),
+                    // This NonRepo/Echo selection fixture is a non-producing launch.
+                    linked_issue_number: None,
                     linked_issue_kind: None,
                     ultracode_supported: false,
                     claude_workflows_enabled: false,

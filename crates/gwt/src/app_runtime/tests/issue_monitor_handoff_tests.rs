@@ -6280,6 +6280,16 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
             ),
         )
         .unwrap();
+        // Restore rebuilds Codex from the canonical profile, independently of
+        // the initial command override. Both launches must use this fixture.
+        let profile = gwt_core::paths::gwt_config_path();
+        let mut settings = if profile.exists() {
+            Settings::load_from_path(&profile).unwrap()
+        } else {
+            Settings::default()
+        };
+        pin_launch_agents(&mut settings, temp.path());
+        write_profile_config(&profile, &settings);
         let mut selected = super::pane_control_tests::control_launch_config(&root, 3165);
         run_git(
             selected.working_dir.as_ref().unwrap(),
@@ -6519,7 +6529,7 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                 || failed
                     .as_ref()
                     .is_ok_and(|value| value.get("launch_failure").is_some()),
-            "the real missing gate must fail before replacement spawn"
+            "the real missing gate must fail before replacement spawn: {failed:?}"
         );
         let after = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap();
         assert!(

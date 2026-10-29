@@ -38,9 +38,24 @@ fn issue_3777_runtime_hook_returns_before_full_projection_build() {
     let context = runtime.test_context();
     let identity = owner.client().identity().unwrap().clone();
     // Commit launch-time preparation before measuring this status request.
+    // test-hygiene: allow-wall-clock-deadline Bounds the existing setup; actual observer completion establishes ordering.
+    let preparation_deadline = Instant::now() + Duration::from_secs(5);
     runtime.blocking_tasks = BlockingTaskSpawner::thread();
     runtime.refresh_active_work_projection_for_project_root(&context.project_root);
     wait_for_active_work_projection(&mut runtime);
+    // Work and census finish independently. A running census would correctly
+    // coalesce this next request instead of enqueueing another worker.
+    while super::super::workspace_views::local_agent_activity_refresh_is_running(
+        &runtime,
+        &context.project_root,
+    ) {
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Same setup hang guard; the observer's running state supplies ordering.
+            Instant::now() < preparation_deadline,
+            "launch-time census did not finish before measuring the next hook"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
