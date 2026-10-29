@@ -2032,7 +2032,16 @@ fn normalize_spawn_config(config: SpawnConfig) -> Result<SpawnConfig, String> {
 
     #[cfg(not(windows))]
     {
-        Ok(normalize_non_windows_spawn_config(config))
+        let config = normalize_non_windows_spawn_config(config);
+        let program = Path::new(&config.command);
+        if program.is_absolute()
+            && !program.try_exists().map_err(|error| {
+                format!("cannot inspect PTY command {}: {error}", program.display())
+            })?
+        {
+            return Err(format!("PTY command does not exist: {}", program.display()));
+        }
+        Ok(config)
     }
 }
 
@@ -3085,7 +3094,6 @@ mod tests {
         let attempted = std::cell::Cell::new(false);
         let result = PtyHandle::spawn_with_attempt_observer(config, || attempted.set(true));
         assert!(result.is_err());
-        #[cfg(windows)]
         assert!(
             !attempted.get(),
             "command resolution fails before an OS spawn attempt"
