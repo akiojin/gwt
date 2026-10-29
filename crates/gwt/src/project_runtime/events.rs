@@ -81,6 +81,25 @@ pub struct OwnerRequest {
     pub command: OwnerCommand,
 }
 
+/// A pre-row audit observation, never a Session, claim or physical launch grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerLaunchPermissionCheck {
+    pub operation_id: String,
+    pub project_key: String,
+    pub host_instance_id: String,
+    pub config_hash: String,
+    pub blocked: bool,
+    pub record: Option<crate::cli::permission_readiness::PermissionReadinessRecord>,
+}
+
+impl OwnerLaunchPermissionCheck {
+    pub fn config_hash(config: &gwt_agent::LaunchConfig) -> Result<String, String> {
+        let value = serde_json::to_value(config).map_err(|error| error.to_string())?;
+        Ok(gwt_core::index::view::canonical_json_sha256(&value))
+    }
+}
+
 /// An observation from the first read-only facts pass, never a claim or a
 /// cleanup permit. The fixed owner revalidates every expected source field.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +120,10 @@ pub struct OwnerMonitorLaunchRejection {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerCommand {
+    CheckLaunchPermission {
+        operation_id: String,
+        config: Box<gwt_agent::LaunchConfig>,
+    },
     PrepareMobileInput {
         identity: OwnerMobileInputIdentity,
         data: Vec<u8>,

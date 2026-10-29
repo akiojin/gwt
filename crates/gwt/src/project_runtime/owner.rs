@@ -444,6 +444,10 @@ pub(crate) enum OwnerMessage {
         operation_id: String,
         result: OwnerReply,
     },
+    PermissionCheckFinished {
+        operation_id: String,
+        result: OwnerReply,
+    },
     #[cfg(any(test, feature = "test-gh-guard"))]
     SetIssueClientFactory {
         factory: super::launch::RuntimeIssueClientFactory,
@@ -1199,6 +1203,10 @@ impl OwnerState {
                     }
                 }
                 OwnerMessage::MonitorRejectionFinished {
+                    operation_id,
+                    result,
+                }
+                | OwnerMessage::PermissionCheckFinished {
                     operation_id,
                     result,
                 } => {
@@ -2311,6 +2319,10 @@ impl OwnerState {
                 }
             }
         }
+        if matches!(&request.command, OwnerCommand::CheckLaunchPermission { .. }) {
+            self.check_launch_permission(request.command, reply);
+            return;
+        }
         if matches!(&request.command, OwnerCommand::RejectMonitorLaunch { .. }) {
             self.reject_monitor_launch(request.command, reply);
             return;
@@ -2734,6 +2746,7 @@ impl OwnerState {
             | OwnerCommand::DriveAgentSwitch
             | OwnerCommand::DeliverAutonomousAnswer { .. }
             | OwnerCommand::RejectMonitorLaunch { .. }
+            | OwnerCommand::CheckLaunchPermission { .. }
             | OwnerCommand::NotifyBoardDecision { .. }
             | OwnerCommand::AcknowledgeMonitorLaunch { .. }
             | OwnerCommand::AdoptMonitorLaunch { .. }
@@ -3899,6 +3912,91 @@ impl OwnerState {
                     let _ = crate::session_finalizer::kill_and_reap(&pane.shared_pty(), &id);
                 }
             }
+        });
+    }
+
+    fn check_launch_permission(
+        &mut self,
+        command: OwnerCommand,
+        reply: oneshot::Sender<OwnerReply>,
+    ) {
+        let request = match serde_json::to_value(&command) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = reply.send(Err(error.to_string()));
+                return;
+            }
+        };
+        let OwnerCommand::CheckLaunchPermission {
+            operation_id,
+            config,
+        } = command
+        else {
+            unreachable!()
+        };
+        if uuid::Uuid::parse_str(&operation_id).is_err() {
+            let _ = reply.send(Err("permission audit operation must be a UUID".into()));
+            return;
+        }
+        if let Some(operation) = self.agent_operations.get_mut(&operation_id) {
+            if operation.request != request {
+                let _ = reply.send(Err("permission audit operation changed".into()));
+            } else if let Some(result) = operation.result.as_ref() {
+                let _ = reply.send(result.clone());
+            } else {
+                operation.replies.push(reply);
+            }
+            return;
+        }
+        let current = Arc::new(AtomicBool::new(true));
+        self.agent_operations.insert(
+            operation_id.clone(),
+            AgentOperation {
+                session_id: None,
+                early_events: VecDeque::new(),
+                request,
+                id: format!("permission-check:{operation_id}"),
+                incarnation: 0,
+                current: current.clone(),
+                replies: vec![reply],
+                cancel_replies: Vec::new(),
+                cancellation_cleaned: false,
+                manual_predecessor_stopped: None,
+                retained_manual_failure: None,
+                pending_continue: None,
+                failed_session: None,
+                result: None,
+            },
+        );
+        let root = self.root.clone();
+        let project_key = self.project_key.clone();
+        let host_instance_id = self.host_instance_id.clone();
+        let sender = self.sender.clone();
+        self.input_jobs += 1;
+        spawn_owner_worker(move || {
+            let result = (|| {
+                let config_hash = super::events::OwnerLaunchPermissionCheck::config_hash(&config)?;
+                let record = super::launch::check_launch_permission(
+                    &root,
+                    &project_key,
+                    &operation_id,
+                    &config,
+                    &current,
+                )?;
+                serde_json::to_value(super::events::OwnerLaunchPermissionCheck {
+                    operation_id: operation_id.clone(),
+                    project_key,
+                    host_instance_id,
+                    config_hash,
+                    blocked: record.is_some(),
+                    record,
+                })
+                .map_err(|error| error.to_string())
+            })();
+            let _ = sender.send(OwnerMessage::PermissionCheckFinished {
+                operation_id,
+                result,
+            });
         });
     }
 
@@ -5948,7 +6046,11 @@ impl OwnerState {
             .chain(
                 self.agent_operations
                     .values()
-                    .filter(|operation| operation.result.is_none() && operation.id != excluded_id)
+                    .filter(|operation| {
+                        operation.result.is_none()
+                            && operation.id != excluded_id
+                            && operation.request["type"] != "check_launch_permission"
+                    })
                     .map(|operation| {
                         let metadata = operation
                             .request
@@ -10680,6 +10782,165 @@ mod tests {
             project_key: "0123456789abcdef".into(),
             command,
         }
+    }
+
+    #[tokio::test]
+    async fn permission_audit_replays_unknown_ack_without_launching_or_trusting_a_claimed_decision()
+    {
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "work/issue-4544"],
+            vec![
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/audit/project.git",
+            ],
+        ] {
+            assert!(gwt_core::process::hidden_command("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let project_key = gwt_core::paths::project_scope_hash(&root).to_string();
+        let (mut state, receiver, handle) = owner_fixture(&root);
+        state.project_key = project_key.clone();
+        let home = temp.path().to_path_buf();
+        let actor = thread::spawn(move || {
+            let _home = gwt_core::test_support::ScopedGwtHome::set(home);
+            run_fixture_owner(state, receiver);
+        });
+        let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenClaw)
+            .working_dir(&root)
+            .branch("work/issue-4544")
+            .linked_issue_number(4544)
+            .build();
+        // A caller's supported verdict cannot change the actual provider mapping.
+        config.permission_decision = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .build()
+            .permission_decision;
+        let operation = uuid::Uuid::new_v4().to_string();
+        let audit = |operation_id: String, config: gwt_agent::LaunchConfig| OwnerRequest {
+            project_key: project_key.clone(),
+            command: OwnerCommand::CheckLaunchPermission {
+                operation_id,
+                config: Box::new(config),
+            },
+        };
+        let (reply, unknown_ack) = oneshot::channel();
+        handle
+            .sender
+            .send(OwnerMessage::Request(
+                audit(operation.clone(), config.clone()),
+                reply,
+            ))
+            .unwrap();
+        // Lose only this audit's reply; its actual accepted worker still finishes.
+        drop(unknown_ack);
+        let replay = handle
+            .request(audit(operation.clone(), config.clone()))
+            .await
+            .unwrap();
+        assert_eq!(replay["blocked"], true);
+        let record = crate::cli::permission_readiness::load(&root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.provider, "openclaw");
+        assert_eq!(record.session_id, format!("permission-check:{operation}"));
+        assert_eq!(replay["record"], serde_json::to_value(&record).unwrap());
+        let mut changed = config.clone();
+        changed.args.push("changed immutable request".into());
+        assert!(handle
+            .request(audit(operation, changed))
+            .await
+            .unwrap_err()
+            .contains("operation changed"));
+        let mut wrong_owner = config.clone();
+        wrong_owner.linked_issue_number = Some(4545);
+        assert!(handle
+            .request(audit(uuid::Uuid::new_v4().to_string(), wrong_owner))
+            .await
+            .unwrap_err()
+            .contains("owner changed"));
+        let foreign = tempfile::tempdir().unwrap();
+        let mut wrong_project = config.clone();
+        wrong_project.working_dir = Some(foreign.path().into());
+        assert!(handle
+            .request(audit(uuid::Uuid::new_v4().to_string(), wrong_project))
+            .await
+            .unwrap_err()
+            .contains("another project"));
+        let mut wrong_envelope = audit(uuid::Uuid::new_v4().to_string(), config.clone());
+        wrong_envelope.project_key = "another project".into();
+        assert!(handle
+            .request(wrong_envelope)
+            .await
+            .unwrap_err()
+            .contains("project key mismatch"));
+        let mut allowed = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+            .working_dir(&root)
+            .branch("work/issue-4544")
+            .linked_issue_number(4544)
+            .build();
+        // A stale refusal cannot force the audit to launch, or invent a new block.
+        allowed.permission_decision =
+            gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenClaw)
+                .linked_issue_number(4544)
+                .build()
+                .permission_decision;
+        for allowed in [
+            allowed,
+            {
+                let mut review = config.clone();
+                review.suppress_execution_control = true;
+                review
+            },
+            {
+                let mut continuation = config;
+                continuation.session_mode = gwt_agent::SessionMode::Resume;
+                continuation
+            },
+        ] {
+            let checked = handle
+                .request(audit(uuid::Uuid::new_v4().to_string(), allowed))
+                .await
+                .unwrap();
+            assert_eq!(checked["blocked"], false);
+            assert!(checked["record"].is_null());
+        }
+        let health = handle
+            .request(OwnerRequest {
+                project_key: project_key.clone(),
+                command: OwnerCommand::Health,
+            })
+            .await
+            .unwrap();
+        assert_eq!(health["panes"], 0);
+        assert_eq!(health["test_pty_writers"], 0);
+        let inventory = handle
+            .request(OwnerRequest {
+                project_key,
+                command: OwnerCommand::ListPanes,
+            })
+            .await
+            .unwrap();
+        assert!(inventory["panes"].as_array().unwrap().is_empty());
+        assert!(inventory["pending"].as_array().unwrap().is_empty());
+        assert!(inventory["canonical_rows"]["windows"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", record.session_id))
+        )
+        .is_err());
+        handle.shutdown().await;
+        actor.join().unwrap();
     }
 
     #[test]

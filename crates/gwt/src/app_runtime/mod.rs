@@ -976,6 +976,7 @@ pub(crate) mod continuation;
 mod frontend_action_log;
 mod knowledge;
 mod launch;
+pub(crate) use launch::LaunchPermissionChecked;
 mod launch_errors;
 mod loaders;
 mod migration;

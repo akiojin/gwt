@@ -1,5 +1,357 @@
 use super::*;
 
+#[test]
+fn producing_permission_checks_precede_gui_rows() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-4544"]);
+    let branch = git_stdout(&repo, &["branch", "--show-current"]);
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    for agent in [
+        gwt_agent::AgentId::OpenClaw,
+        gwt_agent::AgentId::Custom("missing-skip-mapping".into()),
+        gwt_agent::AgentId::Codex,
+    ] {
+        let mut config = gwt_agent::AgentLaunchBuilder::new(agent.clone())
+            .working_dir(&repo)
+            .branch(&branch)
+            .linked_issue_number(4544)
+            .build();
+        if agent == gwt_agent::AgentId::Codex {
+            config.args.retain(|arg| arg != "--yolo");
+            config.permission_decision = gwt_agent::validate_materialized_launch(
+                config.permission_decision,
+                &config.args,
+                &config.env_vars,
+            );
+        }
+        assert!(config.permission_decision.is_diagnostic());
+        if agent == gwt_agent::AgentId::OpenClaw {
+            // Even a supported verdict copied from another provider cannot
+            // authorize creating the row for this actual unsupported launch.
+            config.permission_decision =
+                gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+                    .linked_issue_number(4544)
+                    .build()
+                    .permission_decision;
+        }
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        runtime
+            .spawn_agent_window("tab-1", config.clone(), None)
+            .unwrap();
+        assert!(
+            runtime.tabs[0].workspace.persisted().windows.is_empty(),
+            "{agent:?}: permission must be checked before a GUI Agent row exists"
+        );
+        assert!(runtime.active_agent_sessions.is_empty());
+        assert!(runtime.pending_launch_completions.is_empty());
+        assert_eq!(tasks.lock().unwrap().len(), 1, "one native audit is queued");
+        runtime
+            .spawn_agent_window("tab-1", config.clone(), None)
+            .unwrap();
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            1,
+            "a duplicate click cannot queue another audit"
+        );
+        tasks.lock().unwrap().pop().unwrap()();
+        let completed = {
+            let mut events = recorded.lock().unwrap();
+            let index = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::LaunchPermissionChecked(_)
+                    )
+                })
+                .expect("the actual native audit replies");
+            let UserEvent::LaunchPermissionChecked(completion) =
+                into_recorded_project_payload(events.remove(index))
+            else {
+                unreachable!()
+            };
+            completion
+        };
+        let stale = completed.clone();
+        let refused = runtime.handle_launch_permission_checked(*completed);
+        assert!(refused.iter().any(|event| matches!(&event.event,
+            BackendEvent::IssueMonitorToast { message, .. } if message.contains("launch refused:") && message.contains("Recovery:"))),
+            "the actual native refusal must carry its recovery action: {refused:?}");
+        let record = gwt::cli::permission_readiness::load(&repo)
+            .unwrap()
+            .unwrap();
+        assert!(record.integrity_ok());
+        assert_eq!(record.owner_number, 4544);
+        assert!(record.session_id.starts_with("permission-check:"));
+        assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+        assert!(runtime.pending_launch_completions.is_empty());
+        let health = owner_fixture_block_on(
+            owner.command(gwt::project_runtime::events::OwnerCommand::Health),
+        )
+        .unwrap();
+        assert_eq!(health["panes"], 0);
+        assert_eq!(health["test_pty_writers"], 0);
+        runtime.spawn_agent_window("tab-1", config, None).unwrap();
+        assert!(runtime.handle_launch_permission_checked(*stale).is_empty());
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            1,
+            "an old reply cannot consume the new attempt"
+        );
+        assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+        if agent == gwt_agent::AgentId::Codex {
+            // Fail the actual canonical write, rather than manufacturing an audit reply.
+            let gate = gwt::cli::trusted_store::trusted_dir_for_worktree(&repo)
+                .unwrap()
+                .join("permission-readiness.json");
+            fs::remove_file(&gate).unwrap();
+            fs::create_dir(&gate).unwrap();
+            tasks.lock().unwrap().pop().unwrap()();
+            let failed = {
+                let mut events = recorded.lock().unwrap();
+                let index = events
+                    .iter()
+                    .position(|event| {
+                        matches!(
+                            recorded_project_payload(event),
+                            UserEvent::LaunchPermissionChecked(_)
+                        )
+                    })
+                    .unwrap();
+                let UserEvent::LaunchPermissionChecked(completion) =
+                    into_recorded_project_payload(events.remove(index))
+                else {
+                    unreachable!()
+                };
+                completion
+            };
+            let failure = runtime.handle_launch_permission_checked(*failed);
+            assert!(failure.iter().any(|event| matches!(&event.event,
+                BackendEvent::IssueMonitorToast { message, .. } if message.contains("record could not be confirmed"))));
+            assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+            assert!(runtime.pending_launch_completions.is_empty());
+            fs::remove_dir(gate).unwrap();
+        }
+    }
+    // A genuine delivered-owner Inspection is allowed by the native check,
+    // even though its unsupported provider retains a diagnostic builder decision.
+    run_git(
+        &repo,
+        &["update-ref", "refs/remotes/origin/develop", "HEAD"],
+    );
+    let cache = gwt::issue_cache::issue_cache_root_for_repo_path(&repo)
+        .unwrap()
+        .join("4544");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join("meta.json"), r#"{"state":"closed"}"#).unwrap();
+    assert!(gwt::cli::delivered_owner::classify_launch_for_owner(
+        &repo,
+        &repo,
+        4544,
+        gwt::cli::delivered_owner::FollowUpIntent::Default,
+    )
+    .is_inspection());
+    for boundary in ["allowed", "replaced", "closed"] {
+        let config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::OpenClaw)
+            .working_dir(&repo)
+            .branch(&branch)
+            .linked_issue_number(4544)
+            .build();
+        let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
+        let (mut runtime, recorded) =
+            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        runtime
+            .spawn_agent_window("tab-1", config.clone(), None)
+            .unwrap();
+        tasks.lock().unwrap().pop().unwrap()();
+        let (delivery, completion) = {
+            let mut events = recorded.lock().unwrap();
+            let index = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        recorded_project_payload(event),
+                        UserEvent::LaunchPermissionChecked(_)
+                    )
+                })
+                .unwrap();
+            let delivery = events.remove(index);
+            let UserEvent::LaunchPermissionChecked(completion) =
+                into_recorded_project_payload(delivery.clone())
+            else {
+                unreachable!()
+            };
+            (delivery, completion)
+        };
+        let duplicate = completion.clone();
+        let (key, pending) = runtime
+            .inflight_launches
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        runtime.inflight_launches.get_mut(&key).unwrap().0 =
+            format!("permission-check:{}", uuid::Uuid::new_v4());
+        assert!(runtime
+            .handle_launch_permission_checked(*completion.clone())
+            .is_empty());
+        assert!(runtime.tabs[0].workspace.persisted().windows.is_empty());
+        let old_marker = pending.0.clone();
+        runtime.inflight_launches.insert(key, pending);
+        if boundary == "replaced" {
+            runtime
+                .project_tab_incarnations
+                .get_mut("tab-1")
+                .unwrap()
+                .generation += 1;
+            runtime.refresh_project_state("tab-1");
+            runtime.spawn_agent_window("tab-1", config, None).unwrap();
+            assert_eq!(
+                tasks.lock().unwrap().len(),
+                1,
+                "the reopened project must not wait for the old generation's audit reply"
+            );
+        } else if boundary == "closed" {
+            runtime.project_tab_incarnations.remove("tab-1");
+        }
+        if let Some(UserEvent::LaunchPermissionChecked(completion)) =
+            runtime.accept_project_completion(delivery)
+        {
+            runtime.handle_launch_permission_checked(*completion);
+        }
+        assert!(
+            runtime
+                .inflight_launches
+                .values()
+                .all(|(marker, _)| marker != &old_marker),
+            "even a stale reply must release its own pre-row attempt marker"
+        );
+        let expected_rows = usize::from(boundary == "allowed");
+        assert_eq!(
+            runtime.tabs[0].workspace.persisted().windows.len(),
+            expected_rows,
+            "{boundary}"
+        );
+        assert_eq!(
+            runtime.pending_launch_completions.len(),
+            expected_rows,
+            "{boundary}"
+        );
+        assert!(runtime
+            .handle_launch_permission_checked(*duplicate)
+            .is_empty());
+        assert_eq!(
+            runtime.tabs[0].workspace.persisted().windows.len(),
+            expected_rows
+        );
+        let health = owner_fixture_block_on(
+            owner.command(gwt::project_runtime::events::OwnerCommand::Health),
+        )
+        .unwrap();
+        assert_eq!(
+            health["panes"], 0,
+            "the permission check never runs LaunchAgent"
+        );
+    }
+    owner_fixture_block_on(owner.shutdown());
+}
+
+#[test]
+fn native_final_permission_guard_rechecks_materialized_skip_after_an_allowed_audit() {
+    use gwt::project_runtime::{
+        events::OwnerCommand,
+        launch::{prepare_agent_launch, AgentLaunchInput},
+    };
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    init_repo_with_initial_commit(&repo);
+    run_git(&repo, &["branch", "-M", "work/issue-4544"]);
+    let owner = owner_fixture_block_on(production_owner_fixture(&repo));
+    let sessions_dir = temp.path().join("sessions");
+    let profile = temp.path().join("health-profile.toml");
+    let mut settings = Settings::default();
+    pin_launch_agents(
+        &mut settings,
+        &write_fixture_runners(temp.path(), &["codex"]),
+    );
+    write_profile_config(&profile, &settings);
+    let mut config = gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Codex)
+        .working_dir(&repo)
+        .branch("work/issue-4544")
+        .linked_issue_number(4544)
+        .explicit_follow_up()
+        .build();
+    pin_config_fixture_runners(&mut config, temp.path(), &["codex"]);
+    let checked = owner_fixture_block_on(owner.command(OwnerCommand::CheckLaunchPermission {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        config: Box::new(config.clone()),
+    }))
+    .unwrap();
+    assert_eq!(checked["blocked"], false);
+    let prepare = |config| {
+        prepare_agent_launch(
+            AgentLaunchInput {
+                sessions_dir: sessions_dir.clone(),
+                project_root: repo.display().to_string(),
+                window_id: owner.pane_id("final-permission"),
+                config,
+                profile_config_path: profile.clone(),
+                agent_capability_issuer: None,
+                prepared_manual_launch_claim: None,
+                issue_monitor_trust_candidate: None,
+                issue_monitor_launch: false,
+            },
+            |_| {},
+        )
+    };
+    // Establish the actual health/preparation path reaches the next authority
+    // boundary without minting a grant or pretending an issued Session exists.
+    let control = prepare(config.clone()).unwrap_err();
+    assert!(
+        control
+            .detail
+            .contains("missing its Host capability issuer"),
+        "{control}"
+    );
+    config.args.retain(|arg| arg != "--yolo");
+    assert!(
+        !config.permission_decision.is_diagnostic(),
+        "the earlier decision is deliberately stale"
+    );
+    let refused = prepare(config).unwrap_err();
+    assert!(refused.detail.starts_with("launch refused:"), "{refused}");
+    let record = gwt::cli::permission_readiness::load(&repo)
+        .unwrap()
+        .unwrap();
+    assert!(record.observed_permission_mode.contains("dropped"));
+    assert!(!sessions_dir
+        .join(format!("{}.toml", record.session_id))
+        .exists());
+    assert_eq!(
+        owner_fixture_block_on(owner.command(OwnerCommand::Health)).unwrap()["panes"],
+        0
+    );
+    owner_fixture_block_on(owner.shutdown());
+}
+
 pub(super) fn managed_owner_fixture(
     temp: &Path,
     with_monitor: bool,

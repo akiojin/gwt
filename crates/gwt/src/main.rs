@@ -1975,6 +1975,7 @@ fn browser_project_input_allowed(
 enum UserEvent {
     MobileInput(Arc<gwt::mobile_connection::MobileInputRequest>),
     RemoteOwnerLaunchComplete(Box<app_runtime::RemoteOwnerLaunchComplete>),
+    LaunchPermissionChecked(Box<app_runtime::LaunchPermissionChecked>),
     RemoteOwnerInventoryComplete(Box<app_runtime::RemoteOwnerInventoryComplete>),
     RemoteRuntimeCommandComplete(Box<app_runtime::RemoteRuntimeCommandCompletion>),
     ProjectOwnerSnapshot(Box<app_runtime::RemoteOwnerSnapshotCompletion>),
@@ -10990,6 +10991,9 @@ fn main() -> std::io::Result<()> {
             }
             Event::UserEvent(UserEvent::RemoteOwnerLaunchComplete(completion)) => {
                 clients.dispatch(app.handle_remote_owner_launch_complete(*completion));
+            }
+            Event::UserEvent(UserEvent::LaunchPermissionChecked(completion)) => {
+                clients.dispatch(app.handle_launch_permission_checked(*completion));
             }
             Event::UserEvent(UserEvent::RemoteOwnerInventoryComplete(completion)) => {
                 clients.dispatch(app.handle_remote_owner_inventory_complete(*completion));

@@ -66,6 +66,125 @@ pub enum AgentLaunchEvent {
     },
 }
 
+fn configured_custom_agent_for_launch(
+    config: &gwt_agent::LaunchConfig,
+    profile_config_path: &Path,
+) -> Result<Option<gwt_agent::CustomCodingAgent>, String> {
+    if !matches!(&config.agent_id, gwt_agent::AgentId::Custom(_)) {
+        return Ok(None);
+    }
+    Ok(
+        gwt_agent::load_custom_agents_from_path(profile_config_path)?
+            .into_iter()
+            .find(|agent| config.agent_id == gwt_agent::AgentId::Custom(agent.id.clone())),
+    )
+}
+
+/// Audit the immutable request without materializing any launch authority or pane.
+pub(super) fn check_launch_permission(
+    project_root: &Path,
+    project_key: &str,
+    operation_id: &str,
+    config: &gwt_agent::LaunchConfig,
+    current: &std::sync::atomic::AtomicBool,
+) -> Result<Option<crate::cli::permission_readiness::PermissionReadinessRecord>, String> {
+    use gwt_core::daemon::{RuntimeScope, RuntimeTarget};
+    use std::sync::atomic::Ordering;
+    if !current.load(Ordering::Acquire)
+        || !RuntimeScope::from_project_root(project_root, RuntimeTarget::Host)
+            .is_ok_and(|scope| scope.repo_hash == project_key)
+    {
+        return Err("permission audit project identity changed".into());
+    }
+    let worktree = dunce::canonicalize(config.working_dir.as_deref().unwrap_or(project_root))
+        .map_err(|error| format!("permission audit worktree: {error}"))?;
+    if !RuntimeScope::from_project_root(&worktree, RuntimeTarget::Host)
+        .is_ok_and(|scope| scope.repo_hash == project_key)
+        && !super::continuation::worktree_matches_project_state(&worktree, project_root)
+    {
+        return Err("permission audit worktree belongs to another project".into());
+    }
+    if config.is_ephemeral
+        || config.suppress_execution_control
+        || config.session_mode != gwt_agent::SessionMode::Normal
+    {
+        return Ok(None);
+    }
+    let Some(number) = config.linked_issue_number else {
+        return Ok(None);
+    };
+    if number == 0 {
+        return Err("permission audit owner is invalid".into());
+    }
+    let branch = crate::launch_runtime::current_git_branch(&worktree)?;
+    if config
+        .branch
+        .as_deref()
+        .is_some_and(|expected| crate::launch_runtime::normalize_branch_name(expected) != branch)
+        || gwt_core::workspace_projection::work_owner_for_branch(&branch)
+            .is_some_and(|owner| owner != format!("Issue #{number}"))
+    {
+        return Err("permission audit worktree owner changed".into());
+    }
+    let owner = crate::cli::execution_state::ExecutionOwnerKey {
+        kind: crate::cli::execution_state::detect_owner_kind(&worktree, number),
+        number,
+    };
+    if producing_owner_after_delivery_check(&worktree, Some(owner), config.explicit_follow_up)
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let custom = configured_custom_agent_for_launch(config, &gwt_core::paths::gwt_config_path())?;
+    let mut materialized = config.clone();
+    gwt_agent::LaunchEnvironment::from_active_profile(
+        &gwt_core::paths::gwt_config_path(),
+        config.runtime_target,
+    )?
+    .with_project_root(&worktree)
+    .apply_to_config(&mut materialized);
+    let entrypoint =
+        gwt_agent::permission_mode::entrypoint_from_launch_args(config.entrypoint_args(), false);
+    let decision = gwt_agent::validate_materialized_launch(
+        gwt_agent::decide_permission_mode(&gwt_agent::PermissionModeInputs {
+            agent_id: &config.agent_id,
+            custom_agent: custom.as_ref(),
+            source: config.permission_decision.source,
+            entrypoint: &entrypoint,
+            launch_route: config.launch_route,
+            requested_skip_permissions: Some(config.skip_permissions),
+            producing_work: true,
+        }),
+        &materialized.args,
+        &materialized.env_vars,
+    );
+    // This identity names an audit attempt, never an issued durable Session.
+    let attempt = format!("permission-check:{operation_id}");
+    let record = crate::cli::permission_readiness::pre_launch_block(
+        owner.kind.as_str(),
+        number,
+        &attempt,
+        &decision,
+    );
+    if !current.load(Ordering::Acquire) {
+        return Err("permission audit cancelled".into());
+    }
+    if let Some(record) = record.as_ref() {
+        crate::cli::permission_readiness::record_pre_launch_block(&worktree, record).map_err(
+            |error| {
+                format!(
+                    "launch refused: {}; its permission record could not be confirmed: {error}",
+                    record.describe(),
+                )
+            },
+        )?;
+    }
+    if !current.load(Ordering::Acquire) {
+        return Err("permission audit cancelled".into());
+    }
+    Ok(record)
+}
+
 /// Prepare the durable Session and process command on the owner's blocking worker.
 pub fn prepare_agent_launch(
     input: AgentLaunchInput,
@@ -427,18 +546,29 @@ pub fn prepare_agent_launch(
             producing_owner,
             config.explicit_follow_up,
         );
-        // Issue #4543 AC-5: cloned out of `config` so the record write can
-        // borrow it while the install still holds `&mut config.env_vars`.
-        let permission_decision = config.permission_decision.clone();
-        // Issue #4544 AC-1: refuse a producing-work launch whose permission
-        // mode cannot be honored, before anything observable exists.
-        //
-        // This sits above the capability install on purpose: everything the
-        // AC names — the prompt the agent would be handed, the agent window,
-        // the Execution Control Record that pass evidence hangs off, and any
-        // PR or verification the session could then attempt — is downstream
-        // of `install_with_prepared_claim`. Blocking here means an
-        // unsupported launch produces a gate decision and nothing else.
+        // A pre-row audit is no launch grant. Recheck the actual provider and
+        // profile-materialized args/env before installing any authority.
+        let custom = configured_custom_agent_for_launch(&config, &profile_config_path)?;
+        let mut previous = config.permission_decision.clone();
+        previous.provider_mapping =
+            gwt_agent::provider_skip_mapping(&config.agent_id, custom.as_ref());
+        previous.provider = previous.provider_mapping.provider.clone();
+        if config.skip_permissions && !previous.skip_permissions_requested() {
+            previous.requested_skip_permissions = Some(true);
+        }
+        let permission_decision = gwt_agent::redecide_for_materialized_launch(
+            &previous,
+            previous.source,
+            false,
+            &config.args,
+            &config.env_vars,
+        );
+        // Keep the existing ECR decision parameter consistent with the final
+        // materialization; Session.skip_permissions records the requested mode.
+        config.permission_decision = permission_decision.clone();
+        // Issue #4544 AC-1: the GUI screened its row separately. Conditions
+        // that changed since that audit must still refuse here, before
+        // capability/ECR installation or delivery of a prompt to a child.
         if let Some(owner) = producing_owner {
             gwt::cli::permission_readiness::block_launch_if_unready(
                 &worktree_path,

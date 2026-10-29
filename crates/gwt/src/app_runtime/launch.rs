@@ -122,6 +122,22 @@ struct AgentWindowSpawnOptions {
     deliver_pending_autonomous_answer: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchPermissionChecked {
+    context: super::ProjectContext,
+    operation_id: String,
+    inflight_key: String,
+    config: gwt_agent::LaunchConfig,
+    options: AgentWindowSpawnOptions,
+    result: Result<
+        (
+            gwt::daemon_subscriber::ProjectOwnerIdentity,
+            gwt::project_runtime::events::OwnerLaunchPermissionCheck,
+        ),
+        String,
+    >,
+}
+
 #[cfg(test)]
 pub(super) use gwt::project_runtime::launch::{
     issue_monitor_trust_candidate_from_feedback, IssueMonitorTrustCandidate,
@@ -630,6 +646,16 @@ impl AppRuntime {
         config: gwt_agent::LaunchConfig,
         options: AgentWindowSpawnOptions,
     ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_options_inner(tab_id, config, options, false)
+    }
+
+    fn spawn_agent_window_with_options_inner(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        options: AgentWindowSpawnOptions,
+        permission_checked: bool,
+    ) -> Result<Vec<OutboundEvent>, String> {
         use gwt::project_runtime::launch_payload::{ManualSuccessorChoice, OwnerLaunchMetadata};
         if self.agent_maintenance.busy {
             return Err(agent_maintenance::AGENT_MAINTENANCE_BUSY.to_string());
@@ -637,6 +663,50 @@ impl AppRuntime {
         let context = self
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
+        let mut permission_options = None;
+        if !permission_checked
+            && !config.is_ephemeral
+            && !config.suppress_execution_control
+            && config.session_mode == gwt_agent::SessionMode::Normal
+            && options.continuation.is_none()
+        {
+            if let Some(number) = config.linked_issue_number {
+                // Pure display-side screening. Only the fixed owner may
+                // determine Inspection or persist a permission refusal.
+                let decision = if config.skip_permissions {
+                    // Derive provider/argv facts instead of accepting a stored
+                    // verdict. Custom mappings require the native config read.
+                    gwt_agent::validate_materialized_launch(
+                        gwt_agent::decide_permission_mode(&gwt_agent::PermissionModeInputs {
+                            agent_id: &config.agent_id,
+                            custom_agent: None,
+                            source: config.permission_decision.source,
+                            entrypoint: &gwt_agent::permission_mode::entrypoint_from_launch_args(
+                                config.entrypoint_args(),
+                                false,
+                            ),
+                            launch_route: config.launch_route,
+                            requested_skip_permissions: Some(true),
+                            producing_work: true,
+                        }),
+                        &config.args,
+                        &config.env_vars,
+                    )
+                } else {
+                    config.permission_decision.clone()
+                };
+                if gwt::cli::permission_readiness::pre_launch_block(
+                    "issue",
+                    number,
+                    "pending-permission-audit",
+                    &decision,
+                )
+                .is_some()
+                {
+                    permission_options = Some(options.clone());
+                }
+            }
+        }
         let AgentWindowSpawnOptions {
             selected_agent_member_id,
             inherited_agent_name,
@@ -691,6 +761,9 @@ impl AppRuntime {
             {
                 return Ok(self.focus_existing_live_work_agent_events(&window_id.clone()));
             }
+        }
+        if let Some(options) = permission_options {
+            return self.queue_launch_permission_check(context, config, options);
         }
         let purpose = if is_review {
             config
@@ -794,6 +867,151 @@ impl AppRuntime {
             Some("Launching...".into()),
         ));
         Ok(events)
+    }
+
+    fn queue_launch_permission_check(
+        &mut self,
+        context: super::ProjectContext,
+        config: gwt_agent::LaunchConfig,
+        options: AgentWindowSpawnOptions,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        let work_key = inflight_launch_key(&context.tab_id, &config)
+            .ok_or("Choose a worktree before checking producing-launch permissions")?;
+        let key = format!(
+            "permission:{}:{}:{work_key}",
+            context.project_key, context.generation
+        );
+        if self.inflight_launches.contains_key(&key) {
+            return Ok(Vec::new());
+        }
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        // An attempt marker only; no GUI row, pane or Session is allocated.
+        self.inflight_launches.insert(
+            key.clone(),
+            (
+                format!("permission-check:{operation_id}"),
+                std::time::Instant::now(),
+            ),
+        );
+        // This completion must release its own marker even when the project
+        // closed. Its handler performs the context fence before any GUI effect.
+        let proxy = self.proxy.clone();
+        let supervisor = self.daemon_supervisor.clone();
+        let inflight_key = key.clone();
+        if let Err(error) = self.blocking_tasks.try_spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        let client =
+                            gwt::project_runtime::client::ProjectRuntimeClient::connect_for_gui(
+                                context.project_root.clone(),
+                                supervisor,
+                            )
+                            .await?;
+                        let identity = client
+                            .identity()
+                            .cloned()
+                            .ok_or("Permission check owner is unconfirmed")?;
+                        let reply = client
+                            .command(
+                                gwt::project_runtime::events::OwnerCommand::CheckLaunchPermission {
+                                    operation_id: operation_id.clone(),
+                                    config: Box::new(config.clone()),
+                                },
+                            )
+                            .await?;
+                        let checked =
+                            serde_json::from_value(reply).map_err(|error| error.to_string())?;
+                        Ok((identity, checked))
+                    })
+                });
+            proxy.send(UserEvent::LaunchPermissionChecked(Box::new(
+                LaunchPermissionChecked {
+                    context,
+                    operation_id,
+                    inflight_key,
+                    config,
+                    options,
+                    result,
+                },
+            )));
+        }) {
+            self.inflight_launches.remove(&key);
+            return Err(format!("Permission check could not start: {error}"));
+        }
+        Ok(Vec::new())
+    }
+
+    pub(crate) fn handle_launch_permission_checked(
+        &mut self,
+        completion: LaunchPermissionChecked,
+    ) -> Vec<OutboundEvent> {
+        let LaunchPermissionChecked {
+            context,
+            operation_id,
+            inflight_key,
+            config,
+            options,
+            result,
+        } = completion;
+        let marker = format!("permission-check:{operation_id}");
+        if !self
+            .inflight_launches
+            .get(&inflight_key)
+            .is_some_and(|(pending, _)| pending == &marker)
+        {
+            return Vec::new();
+        }
+        self.inflight_launches.remove(&inflight_key);
+        if !self.project_context_is_current(&context) {
+            return Vec::new();
+        }
+        let result = result
+            .and_then(|(identity, checked)| {
+                if checked.operation_id != operation_id
+                    || checked.project_key != context.project_key.as_str()
+                    || checked.host_instance_id != identity.host_instance_id
+                    || checked.config_hash
+                        != gwt::project_runtime::events::OwnerLaunchPermissionCheck::config_hash(
+                            &config,
+                        )?
+                    || checked.blocked != checked.record.is_some()
+                    || self
+                        .project_state(&context)
+                        .and_then(|state| state.project_owner_identity.as_ref())
+                        .is_some_and(|current| current != &identity)
+                {
+                    return Err("Permission check identity changed; retry the launch".into());
+                }
+                if let Some(record) = checked.record {
+                    if !record.integrity_ok()
+                        || Some(record.owner_number) != config.linked_issue_number
+                        || record.session_id != format!("permission-check:{operation_id}")
+                    {
+                        return Err("Permission refusal identity changed; retry the launch".into());
+                    }
+                    return Err(format!("launch refused: {}", record.describe()));
+                }
+                Ok(())
+            })
+            .and_then(|()| {
+                self.spawn_agent_window_with_options_inner(&context.tab_id, config, options, true)
+            });
+        result.unwrap_or_else(|message| {
+            vec![OutboundEvent::project(
+                context.project_key,
+                gwt::BackendEvent::IssueMonitorToast {
+                    level: "error".into(),
+                    message,
+                    issue_number: None,
+                    notification_transition: None,
+                    notification_transition_id: None,
+                },
+            )]
+        })
     }
 
     #[cfg(test)]
