@@ -5,7 +5,7 @@
  */
 import { spawn, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
@@ -25,6 +25,17 @@ type Fixture = { a: Project; b: Project; pa: Pane; pb: Pane; pages: Page[]; erro
 test.skip(!BASE || !HOME, "requires a browser-check checkout and fresh HOME");
 test.use({ headless: false, viewport: { width: 1440, height: 960 } });
 test.setTimeout(240_000);
+
+test.beforeAll(async () => {
+  // The owner reads this fixture's canonical mapping, never the caller's verdict.
+  await appendFile(join(HOME, ".gwt/config.toml"), `
+[tools.customCodingAgents.supervisor-isolation-fixture]
+displayName = "Supervisor isolation fixture"
+agentType = "path"
+command = ${JSON.stringify(SHELL)}
+skipPermissionsArgs = ${JSON.stringify(SHELL_ARGS)}
+`);
+});
 
 function isolatedEnv() {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GWT_")
