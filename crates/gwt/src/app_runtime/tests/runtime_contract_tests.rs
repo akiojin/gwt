@@ -115,9 +115,9 @@ fn app_runtime_surface_owner_start_work_shell_is_agents_and_temporary() {
 fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
-        .split("pub fn spawn_unbound_pane")
+        .split("pub fn spawn_unbound_pane(")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn spawn_bound_pane").next())
+        .and_then(|tail| tail.split("pub fn spawn_bound_pane(").next())
         .expect("direct spawn route body");
     assert!(
         direct.contains("policy_gate"),
@@ -136,7 +136,7 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
     assert!(apply < release, "policy must be applied before release");
 
     let bound = source
-        .split("pub fn spawn_bound_pane")
+        .split("pub fn spawn_bound_pane(")
         .nth(1)
         .and_then(|tail| tail.split("#[cfg(test)]").next())
         .expect("bound spawn route body");
@@ -155,12 +155,12 @@ fn agent_bootstrap_spawn_routes_apply_resource_policy_before_release() {
 fn agent_resource_policy_failure_never_fails_the_spawn_routes() {
     let source = include_str!("../../project_runtime.rs");
     let direct = source
-        .split("pub fn spawn_unbound_pane")
+        .split("pub fn spawn_unbound_pane(")
         .nth(1)
-        .and_then(|tail| tail.split("pub fn spawn_bound_pane").next())
+        .and_then(|tail| tail.split("pub fn spawn_bound_pane(").next())
         .expect("direct spawn route body");
     let bound = source
-        .split("pub fn spawn_bound_pane")
+        .split("pub fn spawn_bound_pane(")
         .nth(1)
         .and_then(|tail| tail.split("#[cfg(test)]").next())
         .expect("bound spawn route body");

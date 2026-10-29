@@ -644,6 +644,9 @@ fn issue_3713_read_board(project: &Path, session: &str) {
 
 #[test]
 fn issue_3713_agent_self_close_keeps_capability_until_recent_owner_evidence_is_read() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -728,6 +731,9 @@ fn issue_3713_human_canvas_close_is_not_subject_to_agent_read_receipts() {
 
 #[test]
 fn issue_3713_agent_peer_close_requires_reading_recent_target_session_evidence() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
@@ -1188,6 +1194,9 @@ fn fleet_pane_close_matches_absent_runtime_without_wildcards() {
 
 #[test]
 fn recover_restored_window_protects_replacement_and_normal_launches() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let _custom_agents = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);

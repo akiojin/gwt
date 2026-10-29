@@ -339,6 +339,13 @@ fn read_pane_health(project_root: &Path, requested_id: Option<&str>) -> Result<S
     .flat_map(|prefs| prefs.failed_issues)
     .filter(|failure| failure.message == gwt_core::pane_health::CODEX_DIRECTORY_TRUST_PROMPT_REASON)
     .filter_map(|failure| failure.window_id)
+    .map(|id| {
+        if id.contains("::") {
+            id
+        } else {
+            format!("{scope}::{id}")
+        }
+    })
     .collect();
     let panes: Vec<_> = workspace
         .windows

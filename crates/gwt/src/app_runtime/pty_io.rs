@@ -468,7 +468,7 @@ impl AppRuntime {
             return self.remote_command_refusal(
                 window_id,
                 &kind,
-                "no remote pane is installed".into(),
+                "no live runtime for remote pane".into(),
             );
         };
         self.queue_remote_runtime_command(
