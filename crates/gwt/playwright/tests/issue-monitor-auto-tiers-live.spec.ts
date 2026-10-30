@@ -102,7 +102,8 @@ test.describe("Issue Monitor automatic tiers", () => {
         await expect(issues).toBeVisible();
         await expect(settingsWindow).toHaveCount(1);
         await expect(settingsWindow.locator(".issue-bridge-root")).toHaveCount(0);
-        await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue(String(status.max_active_agents));
+        await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
+        await expect(issues.locator('[data-action="monitor-autonomous"]')).toBeVisible();
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await page.screenshot({ path: join(CHECK_HOME, `auto-tiers-${testInfo.project.name}.png`), fullPage: true });
         const after = cli("issue.monitor.status");

@@ -57,12 +57,21 @@ function load(name, bindings = {}) {
 test("Settings entry points reuse only the requested surface owner", () => {
   const { document, CustomEvent } = parseHTML('<html><body><div id="normal"></div><div id="pm"></div></body></html>');
   const normal = document.getElementById("normal"), pm = document.getElementById("pm");
-  for (const body of [normal, pm]) body.dataset.settingsProjectRoot = "/A";
+  for (const body of [normal, pm]) {
+    body.dataset.settingsProjectRoot = "/A";
+    body.hidden = true;
+  }
   pm.dataset.surfaceOwner = "pm";
   const selected = [], focused = [], pending = [];
-  load("installSettingsOpenHandler", { switchSettingsTab: (body, target) => selected.push([body.id, target]) })({
+  load("installSettingsOpenHandler", { switchSettingsTab: (body, target) => {
+    assert.equal(body.hidden, false, "reveal the surface before focusing its section");
+    selected.push([body.id, target]);
+  } })({
     document, settingsWindowBodies: new Set([normal, pm]), activeProjectTab: () => ({ project_root: "/A" }),
-    focusOrSpawnPreset: (...args) => focused.push(args), setPendingTarget: (...args) => pending.push(args),
+    focusOrSpawnPreset: (...args) => {
+      focused.push(args);
+      (args[1].surfaceOwner === "pm" ? pm : normal).hidden = false;
+    }, setPendingTarget: (...args) => pending.push(args),
   });
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { target: "project-manager", surface_owner: "pm" } }));
   document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
@@ -113,10 +122,13 @@ test("Issues Settings keeps labels and values together and sends existing projec
   assert.match(panel.textContent, /Project settings.*Project A/);
   assert.deepEqual([...panel.querySelectorAll("legend")].map(el => el.textContent), ["Launch control", "Refill", "Target"]);
   assert.equal(panel.firstElementChild.tagName, "H3", "project identity precedes settings groups");
-  assert.equal(panel.querySelector('[aria-label="Max active"]').closest("fieldset").querySelector("legend").textContent, "Launch control");
+  assert.equal(panel.querySelectorAll('[aria-label="Max active"]').length, 0, "capacity is managed outside Project settings");
+  assert.equal(panel.querySelector('[aria-label="Max active mode"]'), null);
+  assert.equal(panel.querySelector('[aria-label="Apply Max active"]'), null);
+  assert.equal(panel.querySelector(".settings-issues-capacity"), null);
   assert.equal(panel.querySelector('[aria-label="Auto-refill"]').closest("fieldset").querySelector("legend").textContent, "Refill");
   assert.equal(panel.querySelector('[aria-label="Allowed labels"]').closest("fieldset").querySelector("legend").textContent, "Target");
-  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Max active", "Monitoring"]);
+  assert.deepEqual([...panel.querySelector("fieldset").querySelectorAll(".settings-field > :first-child")].map(el => el.textContent), ["Autonomous", "Monitoring"]);
   const change = (name, value) => {
     const control = panel.querySelector(`[aria-label="${name}"]`);
     assert.ok(control, name);
@@ -124,18 +136,10 @@ test("Issues Settings keeps labels and values together and sends existing projec
     else control.value = value;
     control.dispatchEvent(new Event("change"));
   };
-  change("Max active", "6");
-  panel.querySelector('[aria-label="Apply Max active"]').click();
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  assert.equal(mode.value, "manual");
-  mode.querySelector('[value="auto"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
   change("Auto-refill", true);
   change("Refill limit", "5");
   change("Allowed labels", "auto-merge, bug");
   assert.deepEqual(sent, [
-    { kind: "set_issue_monitor_max_active_agents", max_active_agents: 6 },
-    { kind: "set_issue_monitor_max_active_agents", max_active_agents: null },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 3 },
     { kind: "set_issue_monitor_auto_refill", enabled: true, limit: 5 },
     { kind: "set_issue_monitor_allowed_labels", allowed_labels: ["auto-merge", "bug"] },
@@ -165,146 +169,25 @@ test("Settings launch controls retain their nodes and save once across status re
   assert.match(css, /\[data-settings-issues-controls\] \.settings-field\s*\{[^}]*grid-template-columns:\s*140px minmax\(0, 1fr\)/);
 });
 
-test("Auto capacity is read-only and Manual starts with the machine worker limit", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
-    status: { max_active_agents: 3, max_active_agents_override: null,
-      agent_capacity: { machine_budget: 7, own_pm_agents: 1, other_live_agents: 3, other_pm_agents: 1 } },
-    send: m => sent.push(m) });
-  const max = panel.querySelector('[aria-label="Max active"]');
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  assert.equal(max.disabled, true);
-  assert.equal(mode.value, "auto");
-  assert.equal(max.value, "3");
-  max.value = "9";
-  max.dispatchEvent(new Event("input"));
-  max.dispatchEvent(new Event("change"));
-  panel.querySelector('[aria-label="Apply Max active"]').click();
-  assert.deepEqual(sent, [], "Auto never sends a numeric override");
-  max.value = "3";
-  mode.querySelector('[value="manual"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
-  assert.equal(max.value, "5", "the project allocation of three must not become the shared Manual request");
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 5 }]);
-  panel.updateMaxActiveStatus({ max_active_agents: 3, max_active_agents_override: null,
-    agent_capacity: { machine_budget: null, other_live_agents: 3, other_pm_agents: 1, own_untracked_workers: 1 } });
-  mode.querySelector('[value="manual"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
-  assert.equal(max.value, "6", "unknown machine capacity reconstructs the full current worker allowance");
-  assert.equal(sent.at(-1).max_active_agents, 6);
-});
-
-test("Max active stepper edits commit once on Apply and survive status redraw", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  const render = load("renderIssuesSettingsPanel");
-  const options = { project: { project_root: "/A" },
-    status: { max_active_agents: 6, max_active_agents_override: 6, active_count: 4 },
-    send: message => sent.push(message) };
-  render(panel, options);
-  const max = panel.querySelector('[aria-label="Max active"]');
-  for (const value of ["5", "4", "3"]) {
-    max.value = value;
-    max.dispatchEvent(new Event("input"));
-    max.dispatchEvent(new Event("change"));
-  }
-  assert.deepEqual(sent, [], "intermediate values are draft edits only");
-  render(panel, options);
-  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "3");
-  const apply = panel.querySelector('[aria-label="Apply Max active"]');
-  apply.click();
-  apply.click();
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 3 }]);
-  render(panel, { ...options, status: { ...options.status, max_active_agents: 3, max_active_agents_override: 3 } });
-  assert.match(panel.textContent, /Existing agents continue.*new launches wait/i);
-});
-
-test("authoritative Auto status disables a focused Manual draft before deferred redraw", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
-    status: { max_active_agents: 6, max_active_agents_override: 6 }, send: message => sent.push(message) });
-  const max = panel.querySelector('[aria-label="Max active"]');
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  const apply = panel.querySelector('[aria-label="Apply Max active"]');
-  max.value = "3";
-  max.dispatchEvent(new Event("input"));
-  assert.equal(apply.disabled, false);
-  // The edit guard keeps these nodes; only the status callback runs while focused.
-  panel.updateMaxActiveStatus({ max_active_agents: 7, max_active_agents_override: null });
-  assert.equal(max.disabled, true);
-  assert.equal(mode.value, "auto");
-  assert.equal(apply.disabled, true);
-  assert.equal(max.value, "7");
-  assert.equal(panel.dataset.maxActiveDraft, undefined);
-  max.dispatchEvent(new Event("change"));
-  apply.click();
-  assert.deepEqual(sent, [], "an old Manual draft cannot overwrite remote Auto");
-  panel.updateMaxActiveStatus({ max_active_agents: 5, max_active_agents_override: 5 });
-  assert.equal(max.disabled, false);
-  assert.equal(mode.value, "manual");
-  assert.equal(max.value, "5", "returning to Manual does not resurrect the old draft");
-  assert.equal(apply.disabled, true);
-});
-
-test("machine Max active updates shared controls and project allocation in the existing panel", () => {
+test("Project settings never writes capacity when opened, remounted or updated", () => {
   const { document } = parseHTML("<section></section>");
   const panel = document.querySelector("section"), sent = [];
-  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" }, status: {
-    max_active_agents_scope: "machine", max_active_agents: 3, max_active_agents_override: 8,
-    agent_capacity: { measurement_complete: true, other_live_agents: 5, other_pm_agents: 2 },
-  }, send: message => sent.push(message) });
-  const capacity = panel.querySelector(".settings-issues-capacity");
-  const max = capacity.querySelector('[aria-label="Max active"]');
-  const mode = capacity.querySelector('[aria-label="Max active mode"]');
-  assert.match(capacity.textContent, /All projects on this machine/);
-  assert.match(capacity.textContent, /This project allocation: 3.*Other project workers: 3/);
-  assert.equal(max.value, "8", "Manual edits the shared request, not the project's allocation");
-  assert.equal(mode.value, "manual");
-  panel.updateMaxActiveStatus({ max_active_agents_scope: "machine", max_active_agents: 2,
-    max_active_agents_override: null,
-    agent_capacity: { measurement_complete: true, other_live_agents: 7, other_pm_agents: 3 } });
-  assert.equal(panel.querySelector('[aria-label="Max active"]'), max, "status updates reuse the mounted controls");
-  assert.equal(mode.value, "auto");
-  assert.equal(max.disabled, true);
-  assert.equal(max.value, "2");
-  assert.match(capacity.textContent, /This project allocation: 2.*Other project workers: 4/);
-  panel.updateMaxActiveStatus({ max_active_agents_scope: "machine", max_active_agents: 1,
-    max_active_agents_override: 6,
-    agent_capacity: { measurement_complete: true, other_live_agents: 8, other_pm_agents: 2 } });
-  assert.equal(mode.value, "manual");
-  assert.equal(max.disabled, false);
-  assert.equal(max.value, "6");
-  assert.match(capacity.textContent, /This project allocation: 1.*Other project workers: 6/);
-  assert.deepEqual(sent, [], "machine status updates do not save settings");
-});
-
-test("Auto shows measuring state beside its effective limit until capacity is ready", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section");
   const render = load("renderIssuesSettingsPanel");
-  const options = { project: { project_root: "/A" }, status: {
-    max_active_agents: 4, max_active_agents_override: null,
-    agent_capacity: { measurement_complete: false },
-  }, send: () => {} };
-  render(panel, options);
-  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "4");
-  assert.match(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  mode.querySelector('[value="manual"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
-  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
-  mode.querySelector('[value="auto"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
-  panel.updateMaxActiveStatus({ ...options.status, max_active_agents: 7,
-    agent_capacity: { measurement_complete: true } });
-  assert.equal(panel.querySelector('[aria-label="Max active"]').value, "7", "focused Auto status stays live");
-  render(panel, { ...options, status: { ...options.status, agent_capacity: { measurement_complete: true } } });
-  assert.doesNotMatch(panel.querySelector(".settings-issues-capacity").textContent, /Measuring capacity/);
+  for (const status of [
+    { max_active_agents: 0, max_active_agents_override: null },
+    { max_active_agents: 2, max_active_agents_override: 8 },
+    { agent_roster_capacity: 5, agent_roster_revision: 3, max_active_agents: 2 },
+  ]) {
+    render(panel, { project: { project_root: "/A" }, status, send: message => sent.push(message),
+      launchControls: [...panel.querySelectorAll("[data-action]")] });
+    assert.equal(panel.querySelectorAll('[aria-label^="Max active"], [aria-label="Apply Max active"], .settings-issues-capacity').length, 0);
+    assert.doesNotMatch(panel.textContent, /This project allocation|Measuring capacity|All projects on this machine/);
+    assert.equal(panel.querySelectorAll('[data-action="monitor-autonomous"], [data-action="monitor-toggle"]').length, 2);
+  }
+  assert.deepEqual(sent, []);
 });
 
-test("AC-6: Issues Settings exposes explanations for capacity, refill and targeting", t => {
+test("AC-6: Issues Settings exposes explanations for launch, refill and targeting", t => {
   const { document } = parseHTML("<html><body><section></section></body></html>");
   const panel = document.querySelector("section"), sent = [];
   const explanations = bindControlExplanations({ document, root: panel, id: "settings-explanation" });
@@ -312,7 +195,7 @@ test("AC-6: Issues Settings exposes explanations for capacity, refill and target
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 4, max_active_agents_override: null }, send: message => sent.push(message) });
   for (const [name, meaning] of [
-    ["Max active", /maximum.*agents/i], ["Max active mode", /automatic.*manual/i],
+    ["Autonomous", /human approval/i], ["Monitoring", /monitoring/i],
     ["Auto-refill", /automatically.*queue/i], ["Refill limit", /0.*disables/i],
     ["Allowed labels", /matching issues/i],
   ]) {
@@ -331,15 +214,13 @@ test("AC-6: Issues Settings exposes explanations for capacity, refill and target
     assert.equal(explanations.visible, true);
     control.dispatchEvent(new document.defaultView.Event("mouseout", { bubbles: true }));
   }
-  const capacity = panel.querySelector(".settings-issues-capacity");
-  assert.equal(capacity.getAttribute("tabindex"), "0", "Auto's disabled value has a keyboard reachable explanation");
-  assert.match(capacity.getAttribute("aria-description"), /maximum.*agents/i);
-  capacity.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
+  const refill = panel.querySelector('[aria-label="Auto-refill"]');
+  refill.dispatchEvent(new document.defaultView.Event("focusin", { bubbles: true }));
   load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
     status: { max_active_agents: 5, max_active_agents_override: null }, send: message => sent.push(message) });
   panel.dispatchEvent(new document.defaultView.Event("control-explanations:refresh"));
   assert.equal(explanations.visible, true, "a Settings redraw keeps a focused explanation readable");
-  const replacement = panel.querySelector(".settings-issues-capacity");
+  const replacement = panel.querySelector('[aria-label="Auto-refill"]');
   assert.equal(replacement.getAttribute("aria-describedby"), "settings-explanation");
   assert.equal(document.getElementById("settings-explanation").textContent, replacement.getAttribute("aria-description"));
   assert.deepEqual(sent, [], "registering explanations does not change settings");
@@ -406,22 +287,6 @@ test("AC-6: Issues Settings exposes explanations for capacity, refill and target
   railExplanations.refresh();
   assert.ok(parseFloat(railPopup.style.top) >= railRect.bottom, "the wrapped top strip stays clear of explanations");
   assert.ok(parseFloat(railPopup.style.left) + Math.min(360, parseFloat(railPopup.style.maxWidth)) <= 392);
-});
-
-test("Manual starts at one when Auto has no available capacity", () => {
-  const { document, Event } = parseHTML("<section></section>");
-  const panel = document.querySelector("section"), sent = [];
-  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" },
-    status: { max_active_agents: 0, max_active_agents_override: null }, send: m => sent.push(m) });
-  const max = panel.querySelector('[aria-label="Max active"]');
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  assert.equal(max.value, "0", "Auto still displays its effective capacity");
-  mode.querySelector('[value="manual"]').selected = true;
-  mode.dispatchEvent(new Event("change"));
-  assert.equal(max.disabled, false);
-  assert.equal(max.value, "1");
-  assert.match(panel.textContent, /This project allocation: 0/, "a Manual request does not replace the authoritative allocation");
-  assert.deepEqual(sent, [{ kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 }]);
 });
 
 test("Agents Settings edits full profiles while preserving runtime fields and project isolation", () => {
@@ -781,23 +646,6 @@ test("failed update preference save restores the last authoritative toggle value
   assert.equal(toggle.checked, true, "failed OFF must not look saved");
   assert.equal(state.auto_apply_updates, true);
   assert.match(readFileSync(new URL("../app.js", import.meta.url), "utf8"), /case "system_settings_error":\s*applyGlobalUpdateSettings\(event\)/);
-});
-
-
-test("persistent roster edits project member capacity while retaining the separate effective allocation", () => {
-  const { document } = parseHTML("<section></section>");
-  const panel = document.querySelector("section");
-  load("renderIssuesSettingsPanel")(panel, { project: { project_root: "/A" }, status: {
-    agent_roster_capacity: 5, agent_roster_revision: 3, max_active_agents: 2, max_active_agents_override: null,
-  }, send: () => {} });
-  const max = panel.querySelector('[aria-label="Max active"]');
-  const mode = panel.querySelector('[aria-label="Max active mode"]');
-  assert.equal(max.value, "5");
-  assert.equal(max.disabled, false);
-  assert.equal(mode.disabled, true);
-  assert.match(max.dataset.issueExplanation, /members.*project/i);
-  panel.updateMaxActiveStatus({ agent_roster_capacity: 6, agent_roster_revision: 4, max_active_agents: 1 });
-  assert.equal(max.value, "6");
 });
 
 
