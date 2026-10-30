@@ -163,7 +163,7 @@ jobs:
   # is warmed for it by cache-warm.yml.
   lint-macos:
     name: Clippy (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       # Mirrors build.yml's check-macos: the pre-installed Rust on macOS
