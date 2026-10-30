@@ -6516,7 +6516,7 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                         let event = observed.recv().await.unwrap();
                         exit_confirmed |= matches!(&event, OwnerEvent::Status { id, incarnation, exit_confirmed: true, .. }
                             if id == &owner_id && *incarnation == pane.incarnation);
-                        let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None }
+                        let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None, .. }
                             if id == &owner_id && *incarnation == pane.incarnation);
                         fixture.runtime.handle_project_owner_event(&context, 1, &owner_identity, event);
                         if closed { break; }
@@ -7339,7 +7339,7 @@ fn durable_issue_monitor_delivery_preserves_live_materializer_and_replays_after_
         assert!(panes
             .iter()
             .all(|pane| closed.iter().any(|event| matches!(event,
-            OwnerEvent::Closed { id, incarnation, error: None }
+            OwnerEvent::Closed { id, incarnation, error: None, .. }
                 if id == &pane.id && *incarnation == pane.incarnation))));
         fs::write(
             root.join("live-materializer-drained.json"),

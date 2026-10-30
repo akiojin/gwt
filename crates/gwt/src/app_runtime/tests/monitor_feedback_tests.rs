@@ -2048,7 +2048,7 @@ fn assert_issue5596_unsubmitted_answer_packet_retries(
             loop {
                 let event = owner_events.recv().await.unwrap();
                 let closed = matches!(&event,
-                    gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None }
+                    gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None, .. }
                     if id == &source_pane.id && *incarnation == source_pane.incarnation);
                 fixture.runtime.handle_project_owner_event(&context, 1, &identity, event);
                 if closed { break; }
@@ -3014,6 +3014,7 @@ fn termination_class_requires_exact_exit_and_readable_bridge_evidence() {
                         id,
                         incarnation,
                         error,
+                        ..
                     } = completed.recv().await.unwrap()
                     {
                         if id == pane.id && incarnation == pane.incarnation {

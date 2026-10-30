@@ -14395,6 +14395,7 @@ impl AppRuntime {
                 id,
                 incarnation,
                 error,
+                final_screen,
             } => {
                 let Some(id) = self.window_id_for_owner_pane(context, identity, &id, incarnation)
                 else {
@@ -14406,6 +14407,23 @@ impl AppRuntime {
                 // A diagnostic row keeps its read-only screen for new clients;
                 // the owner has already retired the exact physical runtime.
                 let runtime = self.runtimes.get_mut(&id).expect("fenced remote runtime");
+                let final_snapshot = final_screen
+                    .filter(|frame| frame.screen_seq >= runtime.screen_seq)
+                    .map(|frame| {
+                        runtime.screen = frame.screen;
+                        runtime.screen_ansi = frame.screen_ansi;
+                        runtime.screen_seq = frame.screen_seq;
+                        runtime.output_seq = runtime.output_seq.max(frame.screen_seq);
+                        OutboundEvent::project(
+                            context.project_key.clone(),
+                            BackendEvent::TerminalSnapshot {
+                                id: id.clone(),
+                                data_base64: base64::engine::general_purpose::STANDARD
+                                    .encode(&runtime.screen_ansi),
+                            },
+                        )
+                        .with_terminal_stream_seq(Some(frame.screen_seq))
+                    });
                 runtime.status_revision = runtime.status_revision.saturating_add(1);
                 let (status, detail) = if runtime.exit_confirmed
                     && matches!(
@@ -14422,7 +14440,13 @@ impl AppRuntime {
                 runtime.status = status;
                 runtime.detail = detail.clone();
                 self.active_agent_sessions.remove(&id);
-                self.apply_owner_status_projection(&id, status, detail)
+                let mut events = Vec::new();
+                if let Some(snapshot) = final_snapshot {
+                    self.pending_runtime_outputs.remove(&id);
+                    events.push(snapshot);
+                }
+                events.extend(self.apply_owner_status_projection(&id, status, detail));
+                events
             }
             OwnerEvent::LaunchProgress {
                 id,

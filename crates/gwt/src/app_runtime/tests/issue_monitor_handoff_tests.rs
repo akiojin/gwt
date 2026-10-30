@@ -6401,6 +6401,7 @@ fn app_runtime_monitor_quota_hold_clear_resumes_the_same_conversation() {
                             id: event_id,
                             incarnation,
                             error,
+                            ..
                         } if event_id == id && incarnation == pane.incarnation => {
                             assert!(error.is_none(), "{error:?}");
                             break waiting;

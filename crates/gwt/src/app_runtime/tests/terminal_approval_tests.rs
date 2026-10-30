@@ -3065,6 +3065,7 @@ fn account_switch_releases_pane_quota_without_relatching_the_old_notice() {
                         id,
                         incarnation,
                         error: None,
+                        ..
                     } if id == probe.id && incarnation == probe.incarnation => break,
                     _ => {}
                 }

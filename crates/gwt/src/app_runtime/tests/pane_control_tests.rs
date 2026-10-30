@@ -4444,6 +4444,7 @@ fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
                             id: closed,
                             incarnation,
                             error,
+                            ..
                         } = events.recv().await.unwrap()
                         {
                             if closed == source.id && incarnation == source.incarnation {

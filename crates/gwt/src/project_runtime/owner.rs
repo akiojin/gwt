@@ -6282,6 +6282,31 @@ impl OwnerState {
                 Ok(())
             });
 
+            // close_runtime joined the reader before this exact successful
+            // ACK. Its last Output may have arrived after retirement and been
+            // rejected; carry the authoritative parsed screen with the ACK.
+            let final_screen = result.is_ok().then(|| {
+                let pane = runtime
+                    .pane
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                super::events::OwnerFinalScreen {
+                    screen: pane.screen().contents(),
+                    screen_ansi: pane.screen().contents_formatted(),
+                    screen_seq: pane.output_seq(),
+                }
+            });
+            if let Some(frame) = final_screen.as_ref() {
+                use base64::Engine;
+                self.dispatch_project(
+                    crate::BackendEvent::TerminalSnapshot {
+                        id: id.clone(),
+                        data_base64: base64::engine::general_purpose::STANDARD
+                            .encode(&frame.screen_ansi),
+                    },
+                    Some(frame.screen_seq),
+                );
+            }
             let natural_terminal = (matches!(cause, CloseCause::NaturalExit)
                 || cause.is_diagnostic())
                 && result.is_ok();
@@ -6395,6 +6420,7 @@ impl OwnerState {
                 id: id.clone(),
                 incarnation,
                 error: result.as_ref().err().cloned(),
+                final_screen,
             });
             if result.is_err() {
                 self.retirements.insert(

@@ -1224,7 +1224,7 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = observed.recv().await.unwrap();
-                let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None }
+                let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None, .. }
                     if id == &probe.id && *incarnation == probe.incarnation);
                 gui.handle_project_owner_event(&context, 1, &identity, event);
                 if closed {

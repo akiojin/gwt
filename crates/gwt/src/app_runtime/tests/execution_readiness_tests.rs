@@ -1227,6 +1227,7 @@ fn assert_fresh_monitor_startup_failures_stop(failures: &[&str]) {
                             id: closed,
                             incarnation: generation,
                             error,
+                            ..
                         } = events.recv().await.unwrap()
                         {
                             if closed == id && generation == incarnation {
@@ -1507,6 +1508,7 @@ fn fresh_execution_ready_timeout_aborts_candidate_and_preserves_blocked_predeces
                         id,
                         incarnation,
                         error,
+                        ..
                     } if id == fixture.captured.id
                         && incarnation == fixture.captured.incarnation =>
                     {

@@ -271,6 +271,14 @@ pub enum OwnerCommand {
     },
 }
 
+/// Read-only screen captured after the exact runtime's output reader joined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerFinalScreen {
+    pub screen: String,
+    pub screen_ansi: Vec<u8>,
+    pub screen_seq: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OwnerEvent {
@@ -346,6 +354,8 @@ pub enum OwnerEvent {
         id: String,
         incarnation: u64,
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        final_screen: Option<OwnerFinalScreen>,
     },
     PmLifecycle {
         id: String,

@@ -574,6 +574,48 @@ fn project_owner_health_is_project_scoped_and_rejects_stale_context() {
         "a stream gap cannot forward the surviving delta as a contiguous raw chunk"
     );
 
+    // The reader may parse its final bytes before retirement rejects its
+    // queued Output event. The successful close ACK must retain that screen.
+    let closed = |incarnation, error: Option<&str>, screen_seq| {
+        serde_json::from_value(serde_json::json!({
+            "type": "closed", "id": "owner-pane-a", "incarnation": incarnation,
+            "error": error,
+            "final_screen": {
+                "screen": "final diagnostic screen", "screen_ansi": b"final ANSI",
+                "screen_seq": screen_seq,
+            },
+        }))
+        .unwrap()
+    };
+    assert!(runtime
+        .handle_project_owner_event(&a, 1, &identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &replaced_identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&b, 2, &identity, closed(7, None, 9))
+        .is_empty());
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &identity, closed(6, None, 9))
+        .is_empty());
+    runtime.handle_project_owner_event(&a, 2, &identity, closed(7, Some("close failed"), 9));
+    assert_eq!(runtime.runtimes["a::agent"].screen, "full repaired screen");
+    let finalized =
+        runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 9));
+    assert_eq!(runtime.runtimes["a::agent"].screen, "final diagnostic screen");
+    assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
+    assert_eq!(runtime.runtimes["a::agent"].output_seq, 9);
+    assert!(finalized.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { data_base64, .. }
+        if base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap() == b"final ANSI")
+        && event.terminal_stream_seq == Some(9)));
+    assert!(runtime
+        .handle_project_owner_event(&a, 2, &identity, output(7))
+        .is_empty());
+    runtime.handle_project_owner_event(&a, 2, &identity, closed(7, None, 7));
+    assert_eq!(runtime.runtimes["a::agent"].screen_seq, 9);
+
     assert!(
         runtime
             .handle_project_owner_event(

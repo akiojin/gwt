@@ -986,7 +986,7 @@ pub(super) fn finish_managed_exit(
                 .await
                 .expect("actual owner terminal event")
                 .expect("owner event stream");
-            let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None }
+            let closed = matches!(&event, OwnerEvent::Closed { id, incarnation, error: None, .. }
                 if id == &probe.id && *incarnation == probe.incarnation);
             if let OwnerEvent::Closed {
                 error: Some(error), ..
@@ -3190,6 +3190,7 @@ fn production_bound_agent_launch_publishes_exact_runtime_and_natural_exit_retain
                     id: ended,
                     incarnation: ended_incarnation,
                     error,
+                    ..
                 }) = observed.recv().await
                 {
                     if ended == id && ended_incarnation == incarnation {
@@ -3838,7 +3839,7 @@ fn current_incarnation_confirmed_runtime_exit_auto_closes_active_agent_window() 
     assert_eq!(
         std::iter::from_fn(|| finalizers.try_recv().ok())
             .filter(|event| matches!(event,
-                gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None }
+                gwt::project_runtime::events::OwnerEvent::Closed { id, incarnation, error: None, .. }
                     if id == &probe.id && *incarnation == probe.incarnation))
             .count(),
         1,
