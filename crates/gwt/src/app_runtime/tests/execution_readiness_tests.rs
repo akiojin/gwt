@@ -2335,6 +2335,27 @@ fn fresh_execution_session_start_via_daemon_fanout_preserves_readiness_nonce() {
     fixture
         .owner
         .transport_event(gwt::project_transport::TransportEvent::RuntimeHook(event));
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe completion of the preceding real fanout before authenticating a separate positive HTTP request; no scheduler delay or elapsed-time assertion.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let active = fixture
+                    .owner
+                    .probe(&fixture.captured.id, fixture.captured.incarnation)
+                    .await
+                    .expect("the actual fanout's exact runtime");
+                if active.readiness_watch.is_none()
+                    && !active.readiness_inflight
+                    && active.pending_fresh_execution.is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the fanout must complete actual readiness");
+    });
     commit_owner_fresh_readiness(&fixture);
     let active = fixture
         .executor
