@@ -11189,9 +11189,8 @@ impl IssueMonitorState {
 
     /// Persist only an explicit accepted change, preserving its replay identity.
     pub fn persist_machine_max_active_change(&mut self, control_id: &str) -> io::Result<()> {
-        if self.agent_roster.is_some() {
-            return Ok(());
-        }
+        // The roster owns project membership; an explicit limit also updates
+        // the separate machine budget used to admit those members.
         let change = self.max_active_last_change.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
