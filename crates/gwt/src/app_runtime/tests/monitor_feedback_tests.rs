@@ -162,7 +162,7 @@ fn pm_wakes_exclude_terminal_and_superseded_escalations() {
 }
 
 #[test]
-fn pm_pending_wake_rechecks_subject_before_delivery() {
+fn pm_wake_pending_signal_rechecks_subject_before_delivery() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -174,8 +174,13 @@ fn pm_pending_wake_rechecks_subject_before_delivery() {
     let mut subject = gwt_agent::Session::new(&repo, "work/subject", gwt_agent::AgentId::Codex);
     subject.status = gwt_agent::AgentStatus::Running;
     seed_pm_session_escalation(&repo, &subject, "PENDING-SUBJECT");
+    runtime.pm_wake_events(&repo, &[]);
     runtime.terminal_input_events(&pm_window_id, "draft");
-    runtime.pm_periodic_wake_events_at(&repo, "2026-08-18T01:00:00Z");
+    // Important signals remain held during input; periodic ticks are discarded.
+    runtime.pm_wake_events(
+        &repo,
+        &[pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman)],
+    );
     assert!(runtime
         .project_state(&runtime.test_context())
         .unwrap()
@@ -1091,6 +1096,22 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
     )
     .expect("initialize enough persistent members for the stale preparation");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    gwt::try_mutate_issue_monitor_prefs(&prefs_path, |prefs| {
+        let profile = prefs.launch_profile_pool()[0].clone();
+        prefs.set_launch_profile_pool(
+            roster
+                .members
+                .iter()
+                .map(|member| {
+                    let mut profile = profile.clone();
+                    profile.agent_member_id = Some(member.agent_member_id.clone());
+                    profile
+                })
+                .collect(),
+        );
+        Ok(())
+    })
+    .expect("select all three registered people with their saved tuning");
     let history_path = gwt_core::paths::gwt_project_dir_for_repo_path(&fixture.project_root)
         .join("agent-names.jsonl");
     let member_names = fs::read(&history_path).expect("pre-existing member names");
@@ -1180,6 +1201,24 @@ fn issue5596_prepared_roster_revision_revalidates_before_publishing_a_pane() {
         1,
         "the stale roster needs exactly one worker revalidation"
     );
+    fixture
+        .runtime
+        .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(
+            &fixture.recorded_events,
+        ));
+    assert_eq!(
+        fixture
+            .runtime
+            .tab("tab-1")
+            .unwrap()
+            .workspace
+            .persisted()
+            .windows
+            .len(),
+        1,
+        "a changed selected person must reprepare before publishing a pane"
+    );
+    drain_queued_blocking_tasks(&queued);
     fixture
         .runtime
         .handle_issue_monitor_launch_prepared(take_issue4803_monitor_preparation(

@@ -1434,6 +1434,21 @@ fn default_launch_usage_threshold_percent() -> u8 {
     DEFAULT_LAUNCH_USAGE_THRESHOLD_PERCENT
 }
 
+/// A registered person owns a candidate; old provider-only inputs keep their key.
+pub(crate) fn launch_profile_identity(profile: &IssueMonitorLaunchProfile) -> String {
+    profile
+        .agent_member_id
+        .as_ref()
+        .map(|id| format!("member:{id}"))
+        .unwrap_or_else(|| {
+            format!(
+                "provider:{}",
+                normalize_issue_monitor_provider(&profile.agent_id)
+                    .unwrap_or_else(|| profile.agent_id.trim().to_ascii_lowercase())
+            )
+        })
+}
+
 /// Drop later candidates that resolve to a provider an earlier one already
 /// covers. The pool is unique per provider (FR-003) and the first mention wins.
 fn dedupe_launch_profile_pool(
@@ -1442,8 +1457,7 @@ fn dedupe_launch_profile_pool(
     let mut seen = BTreeSet::new();
     pool.into_iter()
         .filter(|profile| {
-            let key = normalize_issue_monitor_provider(&profile.agent_id)
-                .unwrap_or_else(|| profile.agent_id.trim().to_ascii_lowercase());
+            let key = launch_profile_identity(profile);
             seen.insert(key)
         })
         .collect()
@@ -1496,6 +1510,62 @@ impl IssueMonitorPrefs {
         self.launch_profile.clone().into_iter().collect()
     }
 
+    /// Resolve only selected people with the primary's fixed tool. Exact queue
+    /// and delivery pins wait when unavailable instead of changing their owner.
+    pub fn registered_launch_profiles_for_issue(
+        &self,
+        issue_number: u64,
+    ) -> Vec<IssueMonitorLaunchProfile> {
+        let pool = self.launch_profile_pool();
+        let Some(primary) = pool
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        else {
+            return pool;
+        };
+        let tool = normalize_issue_monitor_provider(&primary.agent_id);
+        let host = crate::process::current_hostname();
+        let scheduled = self
+            .pending_launch_deliveries
+            .iter()
+            .find(|delivery| delivery.issue_number == issue_number)
+            .and_then(|delivery| delivery.agent_member_id.as_deref())
+            .or_else(|| {
+                self.agent_issue_schedule
+                    .reservations
+                    .iter()
+                    .find(|entry| entry.issue_number == issue_number && entry.host_id == host)
+                    .map(|entry| entry.agent_member_id.as_str())
+            });
+        pool.iter()
+            .filter(|profile| {
+                normalize_issue_monitor_provider(&profile.agent_id) == tool
+                    && scheduled.is_none_or(|scheduled| {
+                        profile.agent_member_id.as_deref() == Some(scheduled)
+                    })
+                    && self.agent_roster.as_ref().is_some_and(|roster| {
+                        roster.members.iter().any(|member| {
+                            profile.agent_member_id.as_deref()
+                                == Some(member.agent_member_id.as_str())
+                                && (member.enabled
+                                    || member.assignment.as_ref().is_some_and(|assignment| {
+                                        assignment.issue_number == Some(issue_number)
+                                    }))
+                                && member
+                                    .agent_id
+                                    .as_deref()
+                                    .and_then(normalize_issue_monitor_provider)
+                                    == tool
+                                && member.assignment.as_ref().is_none_or(|assignment| {
+                                    assignment.issue_number == Some(issue_number)
+                                })
+                        })
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
     /// SPEC #3914 FR-001: replace the pool and keep `launch_profile` in sync
     /// with its head so pre-#3914 readers see the primary candidate.
     pub fn set_launch_profile_pool(&mut self, pool: Vec<IssueMonitorLaunchProfile>) {
@@ -1518,11 +1588,19 @@ impl IssueMonitorPrefs {
     /// only when the head keeps its provider (the form has no tag input).
     pub fn set_head_launch_profile(&mut self, mut profile: IssueMonitorLaunchProfile) {
         let mut pool = self.launch_profile_pool();
+        if profile.agent_member_id.is_none() {
+            profile.agent_member_id = pool
+                .iter()
+                .find(|candidate| {
+                    normalize_issue_monitor_provider(&candidate.agent_id)
+                        == normalize_issue_monitor_provider(&profile.agent_id)
+                })
+                .and_then(|candidate| candidate.agent_member_id.clone());
+        }
         match pool.first_mut() {
             Some(head) => {
                 if profile.prefer_for.is_empty()
-                    && normalize_issue_monitor_provider(&head.agent_id)
-                        == normalize_issue_monitor_provider(&profile.agent_id)
+                    && launch_profile_identity(head) == launch_profile_identity(&profile)
                 {
                     profile.prefer_for = std::mem::take(&mut head.prefer_for);
                 }
@@ -2122,6 +2200,8 @@ const REQUEUE_AUDIT_CAP: usize = 100;
 struct IssueMonitorLaunchProfileRepr {
     agent_id: String,
     #[serde(default)]
+    agent_member_id: Option<String>,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
@@ -2159,6 +2239,7 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
         };
         Self {
             agent_id,
+            agent_member_id: repr.agent_member_id,
             model: repr.model,
             reasoning: repr.reasoning,
             version: repr.version,
@@ -2178,6 +2259,8 @@ impl From<IssueMonitorLaunchProfileRepr> for IssueMonitorLaunchProfile {
 #[serde(from = "IssueMonitorLaunchProfileRepr")]
 pub struct IssueMonitorLaunchProfile {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_member_id: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -2210,6 +2293,7 @@ pub struct IssueMonitorLaunchProfile {
 impl From<&gwt_agent::LaunchConfig> for IssueMonitorLaunchProfile {
     fn from(config: &gwt_agent::LaunchConfig) -> Self {
         Self {
+            agent_member_id: None,
             agent_id: config.agent_id.command().to_string(),
             model: config.model.clone(),
             reasoning: config.reasoning_level.clone(),
@@ -2327,6 +2411,8 @@ impl IssueMonitorProfilesSetRequest {
             &self.patches,
         );
         crate::cli::issue::validate_monitor_profiles_set(&result.0, None)?;
+        crate::agent_names::validate_registered_profiles(prefs, &result.0)
+            .map_err(io::Error::other)?;
         Ok(result)
     }
 }
@@ -2360,7 +2446,8 @@ impl<'de> Deserialize<'de> for IssueMonitorLaunchProfilePatch {
 
 /// Every field of [`IssueMonitorLaunchProfile`] except `agent_id`, which names
 /// the candidate and can never be inherited.
-pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 11] = [
+pub const ISSUE_MONITOR_LAUNCH_PROFILE_FIELDS: [&str; 12] = [
+    "agent_member_id",
     "model",
     "reasoning",
     "version",
@@ -2408,8 +2495,11 @@ fn launch_profile_object(
         .ok()
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    // `prefer_for` is skipped when empty, but the merge needs every field
-    // present so an omitted key can be told from an absent value.
+    // Serialization skips unbound legacy identity and empty routing tags,
+    // but the merge needs their values to report inheritance accurately.
+    object
+        .entry("agent_member_id".to_string())
+        .or_insert(serde_json::Value::Null);
     object
         .entry("prefer_for".to_string())
         .or_insert_with(|| serde_json::json!([]));
@@ -2436,11 +2526,15 @@ pub fn merge_issue_monitor_profiles_set(
     let mut changes = Vec::new();
     let shared = saved_head.map(launch_profile_object);
     for (index, patch) in patches.iter().enumerate() {
-        let key = normalize_issue_monitor_provider(&patch.profile.agent_id);
         let base = current_pool
             .iter()
             .find(|candidate| {
-                key.is_some() && normalize_issue_monitor_provider(&candidate.agent_id) == key
+                if patch.profile.agent_member_id.is_some() {
+                    launch_profile_identity(candidate) == launch_profile_identity(&patch.profile)
+                } else {
+                    normalize_issue_monitor_provider(&candidate.agent_id)
+                        == normalize_issue_monitor_provider(&patch.profile.agent_id)
+                }
             })
             .map(launch_profile_object);
         let mut object = launch_profile_object(&patch.profile);
@@ -4661,8 +4755,19 @@ pub fn select_launch_profile(
     let avoid_provider = avoid_provider.and_then(normalize_issue_monitor_provider);
     let mut selection = LaunchProfileSelection::default();
     let mut eligible = Vec::new();
+    let fixed_tool = pool
+        .first()
+        .filter(|profile| profile.agent_member_id.is_some())
+        .and_then(|profile| normalize_issue_monitor_provider(&profile.agent_id));
     for (index, profile) in pool.iter().enumerate() {
         let provider = normalize_issue_monitor_provider(&profile.agent_id);
+        if fixed_tool
+            .as_ref()
+            .is_some_and(|fixed| provider.as_ref() != Some(fixed))
+        {
+            selection.skipped.push(LaunchProfileSkip { index, agent_id: profile.agent_id.clone(), reason: "Waiting for the selected member's fixed tool; automatic tool switching is disabled".into() });
+            continue;
+        }
         if let Some(reset_at) = provider
             .as_deref()
             .and_then(|provider| hold_reset_after(holds, provider, now))
@@ -14044,6 +14149,15 @@ impl IssueMonitorState {
     /// SPEC #3914 FR-008: every distinct provider in the candidate pool, in
     /// pool order.
     fn saved_launch_providers(&self) -> Vec<String> {
+        if let Some(primary) = self
+            .launch_profiles
+            .first()
+            .filter(|profile| profile.agent_member_id.is_some())
+        {
+            return normalize_issue_monitor_provider(&primary.agent_id)
+                .into_iter()
+                .collect();
+        }
         if self.launch_auto {
             launch_pool_providers(
                 &self
@@ -14871,6 +14985,21 @@ impl IssueMonitorState {
                                 item.exclusion_reason.iter().cloned().collect::<Vec<_>>();
                             reasons.extend(self.claim_candidate_exclusions(item.issue.number));
                             (!reasons.is_empty()).then(|| reasons.join("; "))
+                        } else if item.state == MonitorInboxState::Launching
+                            && !self.has_observed_monitor_runtime(item.issue.number)
+                            && !self.has_monitor_pane_for_issue(item.issue.number)
+                            && self.pending_launch_deliveries.iter().any(|delivery| {
+                                delivery.issue_number == item.issue.number
+                                    && delivery.materialized_window_id.is_none()
+                            })
+                        {
+                            item.exclusion_reason.clone().or_else(|| {
+                                issue_monitor_candidate_exclusion(
+                                    &item.issue,
+                                    self.source_repository,
+                                )
+                                .map(|(_, reason)| reason)
+                            })
                         } else {
                             item.exclusion_reason.clone()
                         },
@@ -15274,6 +15403,25 @@ impl IssueMonitorState {
             && self
                 .autonomous_record(issue_number)
                 .is_none_or(|record| record.review_passed != Some(false))
+    }
+
+    /// A failed review vetoes completion; it does not establish a human decision.
+    fn hold_failed_merged_review(&mut self, issue_number: u64) {
+        if self.issue_is_closed(issue_number)
+            || self
+                .autonomous_record(issue_number)
+                .is_some_and(|record| record.phase == AutonomousPhase::NeedsHuman)
+            || self.open_autonomous_handoff(issue_number).is_some()
+        {
+            return;
+        }
+        let reason = "merged delivery has a failed independent acceptance review; resolve the review before closing";
+        if self.autonomous_mode {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            self.request_autonomous_steering(issue_number, reason, &now);
+        } else {
+            self.escalate_to_needs_human(issue_number, NeedsHumanKind::UserChoiceRequired, reason);
+        }
     }
 
     /// Change the auto-close override. Like the autonomous toggle, a change
@@ -16396,11 +16544,7 @@ impl IssueMonitorState {
                 )
             })
         {
-            self.escalate_to_needs_human(
-                issue_number,
-                NeedsHumanKind::UserChoiceRequired,
-                "merged delivery has a failed independent acceptance review; resolve the review before closing",
-            );
+            self.hold_failed_merged_review(issue_number);
         }
     }
 
@@ -19070,6 +19214,14 @@ impl IssueMonitorState {
         {
             return true;
         }
+        // Holding a new pane requires no cancellation authority. A cached
+        // readiness regression must wait even before a complete Live scan
+        // can compensate the claim; existing-pane ACKs above stay valid.
+        if self.inbox_item(delivery.issue_number).is_some_and(|item| {
+            issue_monitor_candidate_exclusion(&item.issue, self.source_repository).is_some()
+        }) {
+            return false;
+        }
         if self
             .agent_schedule_launch_exclusion(delivery.issue_number)
             .is_some()
@@ -20786,11 +20938,7 @@ impl IssueMonitorState {
             .autonomous_record(issue_number)
             .is_some_and(|record| record.review_passed == Some(false))
         {
-            self.escalate_to_needs_human(
-                issue_number,
-                NeedsHumanKind::UserChoiceRequired,
-                "merged delivery has a failed independent acceptance review; resolve the review before closing",
-            );
+            self.hold_failed_merged_review(issue_number);
             return false;
         }
         let issue = self.inbox_item(issue_number).map(|item| item.issue.clone());
@@ -27118,6 +27266,7 @@ mod tests {
 
     fn test_launch_profile(agent_id: &str) -> IssueMonitorLaunchProfile {
         IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -28313,6 +28462,7 @@ mod tests {
             },
         );
         let profile = IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: "claude".to_string(),
             model: Some("sonnet".to_string()),
             reasoning: None,
@@ -28818,6 +28968,7 @@ mod tests {
         assert!(!monitor.has_launch_profile());
         let disk = IssueMonitorPrefs {
             launch_profile: Some(IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "claude".to_string(),
                 model: None,
                 reasoning: None,
@@ -29423,6 +29574,62 @@ mod tests {
                 serde_json::from_value(serde_json::json!({"agent_id": agent_id})).unwrap();
             assert_eq!(profile.agent_id, expected);
         }
+    }
+
+    #[test]
+    fn registered_candidates_share_a_tool_but_never_a_member() {
+        let profiles = ["ada", "bob"].map(|member| {
+            serde_json::from_value::<IssueMonitorLaunchProfile>(serde_json::json!({
+                "agent_id":"codex", "agent_member_id":member, "model":member
+            }))
+            .unwrap()
+        });
+        assert!(crate::cli::issue::validate_monitor_profiles_set(&profiles, None).is_ok());
+        let mut prefs = IssueMonitorPrefs::default();
+        prefs.set_launch_profile_pool(profiles.to_vec());
+        assert_eq!(prefs.launch_profile_pool().len(), 2);
+        assert_eq!(
+            serde_json::to_value(&prefs.launch_profile_pool()[1]).unwrap()["agent_member_id"],
+            "bob"
+        );
+        prefs.agent_roster = Some(serde_json::from_value(serde_json::json!({"schema_version":1,"revision":1,"members": [
+            {"agent_member_id":"ada","agent_id":"codex","name":"Ada","enabled":true,"created_at":"2026-10-26T00:00:00Z"},
+            {"agent_member_id":"bob","agent_id":"codex","name":"Bob","enabled":true,"created_at":"2026-10-26T00:00:00Z"}
+        ]})).unwrap());
+        assert!(crate::agent_names::validate_registered_profiles(&prefs, &profiles).is_ok());
+        assert_eq!(
+            prefs.effective_launch_tiers(),
+            vec![profiles.to_vec()],
+            "ordinary saved candidates keep each person's model"
+        );
+        let mut wrong = profiles[0].clone();
+        wrong.agent_id = "claude".into();
+        assert!(crate::agent_names::validate_registered_profiles(&prefs, &[wrong]).is_err());
+        let patch =
+            serde_json::from_value(serde_json::json!({"agent_id":"codex","agent_member_id":"bob"}))
+                .unwrap();
+        assert_eq!(
+            merge_issue_monitor_profiles_set(&profiles, Some(&profiles[0]), &[patch]).0[0]
+                .model
+                .as_deref(),
+            Some("bob")
+        );
+        assert!(crate::cli::issue::validate_monitor_profiles_set(
+            &[profiles[0].clone(), profiles[0].clone()],
+            None
+        )
+        .is_err());
+        let selected = select_launch_profile(
+            &[profiles[0].clone(), test_launch_profile("claude")],
+            &BTreeMap::from([("codex".into(), "2099-01-01T00:00:00Z".into())]),
+            &[],
+            None,
+            "2026-10-26T00:00:00Z",
+        );
+        assert!(
+            selected.selected.is_none(),
+            "registered primary never changes tools on a hold"
+        );
     }
 
     #[test]
@@ -47749,40 +47956,173 @@ mod tests {
 
     #[test]
     fn merged_delivery_with_failed_review_keeps_acceptance_unmet() {
-        let mut monitor = test_monitor(IssueMonitorConfig::default());
-        monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
-        scan_queued_candidates(&mut monitor, &[checked_issue(42)], "2026-09-01T00:00:00Z");
-        monitor.begin_review(42, 7, "aaa");
-        assert!(monitor.merged_issue_close_allowed(42));
-        assert!(monitor.propose_merged_issue_settlement(
-            42,
-            &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
-            MergedIssueSettlementAction::Close { delegated: false },
-        ));
+        for autonomous in [false, true] {
+            let mut monitor = test_monitor(IssueMonitorConfig::default());
+            monitor.set_autonomous_mode(autonomous);
+            monitor.set_auto_close_merged_issues_with_effect_revocation(Some(true));
+            let mut candidate = checked_issue(42);
+            candidate.labels.push("gwt-spec".into());
+            candidate.readiness = IssueMonitorReadiness::ReadyWithCompletedTasks;
+            scan_queued_candidates(&mut monitor, &[candidate.clone()], "2026-09-01T00:00:00Z");
+            monitor.capture_acceptance_snapshot(
+                42,
+                crate::issue_monitor_gate::classify_acceptance_criteria(
+                    checked_issue(42).body.as_deref().unwrap(),
+                )
+                .snapshot(),
+            );
+            monitor.begin_review(42, 7, "aaa");
+            assert!(monitor.merged_issue_close_allowed(42));
+            assert!(monitor.propose_merged_issue_settlement(
+                42,
+                &merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+                MergedIssueSettlementAction::Close { delegated: false },
+            ));
+            let expected_state = if autonomous {
+                MonitorInboxState::Queued
+            } else {
+                MonitorInboxState::NeedsHuman
+            };
+            monitor.record_review_verdict(42, false);
+            assert!(!monitor.merged_issue_close_allowed(42));
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(expected_state),
+                "FAIL vetoes the pending close without inventing a human decision"
+            );
+            monitor.record_merged(42);
+            assert_eq!(
+                monitor.inbox_item(42).map(|item| item.state),
+                Some(expected_state),
+                "Issue #5126: checked boxes cannot override a failed independent review"
+            );
+            assert_eq!(
+                monitor.autonomous_record(42).unwrap().review_passed,
+                Some(false)
+            );
+            let deliveries = BTreeMap::from([(
+                "work/issue-42".to_string(),
+                merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+            )]);
+            assert!(monitor
+                .merged_issue_settlement_candidates(&deliveries)
+                .is_empty());
+            let record = monitor.autonomous_record(42).unwrap().clone();
+            assert_eq!(record.reviewed_sha.as_deref(), Some("aaa"));
+            assert!(record.acceptance_snapshot.is_some());
+            assert!(record.review_attempts.is_some());
+            assert_eq!(record.steering.is_some(), autonomous);
+            if autonomous {
+                assert_eq!(record.steering.as_ref().unwrap().count, 1);
+                let mut restored =
+                    test_monitor_with_prefs(IssueMonitorConfig::default(), monitor.prefs());
+                restored.record_candidate(candidate);
+                restored.record_merged(42);
+                let saved = restored.autonomous_record(42).unwrap();
+                assert_eq!(saved.review_passed, Some(false));
+                assert_eq!(saved.reviewed_sha, record.reviewed_sha);
+                assert_eq!(saved.acceptance_snapshot, record.acceptance_snapshot);
+                assert_eq!(saved.review_attempts, record.review_attempts);
+                assert_eq!(
+                    saved.steering, record.steering,
+                    "same failure is not renewed"
+                );
+                assert!(!restored.merged_issue_close_allowed(42));
+            }
+        }
+    }
+
+    #[test]
+    fn autonomous_failed_review_merge_retains_live_partial_ownership() {
+        let candidate = spec_issue(42, IssueMonitorReadiness::ReadyWithOpenTasks, IDLE_NOW);
+        let window = "tab-1::agent-42";
+        let mut monitor = launched_monitor_for_issue(candidate, window);
+        monitor.set_autonomous_mode(true);
+        monitor.config.max_active = 1;
+        monitor.record_candidate(issue(43));
+        monitor.begin_review(42, 7, "failed-head");
         monitor.record_review_verdict(42, false);
-        assert!(!monitor.merged_issue_close_allowed(42));
-        assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman),
-            "a failed review must park a pending close before its worker finishes"
+        let before = monitor.prefs();
+        monitor.record_window_snapshot(pane_snapshot(
+            IDLE_NOW,
+            vec![live_pane_observation(window, 42, WindowState::Running)],
+        ));
+        monitor.record_issue_completion_with_live_pane(
+            42,
+            IssueCompletionEvidence::WorkBranch,
+            true,
         );
-        monitor.record_merged(42);
         assert_eq!(
-            monitor.inbox_item(42).map(|item| item.state),
-            Some(MonitorInboxState::NeedsHuman),
-            "Issue #5126: checked boxes cannot override a failed independent review"
+            monitor.inbox_item(42).unwrap().state,
+            MonitorInboxState::Launched
+        );
+        assert_eq!(monitor.active_count(), 1);
+        assert_eq!(monitor.launched_window_id(42).as_deref(), Some(window));
+        assert_eq!(monitor.prefs().launched_claims, before.launched_claims);
+        assert_eq!(monitor.prefs().launch_bindings, before.launch_bindings);
+        assert_eq!(
+            monitor.prefs().launch_confirmations,
+            before.launch_confirmations
         );
         assert_eq!(
             monitor.autonomous_record(42).unwrap().review_passed,
             Some(false)
         );
-        let deliveries = BTreeMap::from([(
-            "work/issue-42".to_string(),
-            merged_delivery(7, "aaa", "2026-09-01T00:01:00Z"),
+        assert_eq!(
+            monitor
+                .autonomous_record(42)
+                .unwrap()
+                .reviewed_sha
+                .as_deref(),
+            Some("failed-head")
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
+        assert!(monitor.next_launch_request(IDLE_NOW).is_none());
+
+        // An unprocessed question is a separate authority, even before it parks the row.
+        use crate::autonomous_handoff::{
+            AutonomousExecutionContext, AutonomousQuestionHandoff, ExtractedQuestion,
+        };
+        monitor.absorb_autonomous_handoffs([AutonomousQuestionHandoff::new(
+            "pending-question".into(),
+            &AutonomousExecutionContext {
+                issue_number: 42,
+                session_id: "session-42".into(),
+            },
+            "codex",
+            "request_user_input",
+            ExtractedQuestion {
+                question: "Approve a destructive change?".into(),
+                options: vec![],
+            },
+            IDLE_NOW,
         )]);
-        assert!(monitor
-            .merged_issue_settlement_candidates(&deliveries)
-            .is_empty());
+        let pending = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(monitor.prefs(), pending);
+
+        // A real human decision remains authoritative on later merge observations.
+        monitor.escalate_to_needs_human(
+            42,
+            NeedsHumanKind::ProviderAuthenticationRequired,
+            "credentials required",
+        );
+        let parked = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.prefs(),
+            parked,
+            "FAIL must not replace a real human park"
+        );
+
+        // A fresh Closed owner cannot gain steering merely from the old FAIL.
+        let mut monitor = test_monitor_with_prefs(IssueMonitorConfig::default(), before);
+        monitor.record_closed(42, Some(IDLE_NOW.into()));
+        monitor.begin_review(42, 7, "old-head");
+        monitor.record_review_verdict(42, false);
+        let closed = monitor.prefs();
+        monitor.record_merged(42);
+        assert_eq!(monitor.prefs(), closed);
     }
 
     /// Issue #3959 AC-5: a `needs_human` park stamped by the pre-#3930
@@ -49749,6 +50089,15 @@ mod tests {
                 .into(),
         );
         let mut monitor = launched_monitor_for_issue(candidate.clone(), "old-tab::slice");
+        monitor.set_autonomous_mode(true);
+        monitor.begin_review(42, 7, "failed-parent-head");
+        monitor.record_review_verdict(42, false);
+        monitor.record_merged(42);
+        assert_eq!(
+            monitor.autonomous_record(42).unwrap().review_passed,
+            Some(false)
+        );
+        assert!(!monitor.merged_issue_close_allowed(42));
         let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Completed)]);
         observed.get_mut(&42).unwrap().holder_host_dead = true;
         let attempts = monitor.attempt_count(42);
@@ -49791,6 +50140,10 @@ mod tests {
                 .is_empty());
             assert_eq!(restored.queued_issue_numbers(), vec![42]);
         }
+        let review = restored.autonomous_record(42).unwrap();
+        assert_eq!(review.review_passed, Some(false));
+        assert_eq!(review.reviewed_sha.as_deref(), Some("failed-parent-head"));
+        assert!(!restored.merged_issue_close_allowed(42));
         let mut admission = restored.clone();
         let launch = admission
             .next_launch_request(IDLE_NOW)

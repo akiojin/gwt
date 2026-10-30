@@ -519,8 +519,8 @@ async function openAgentWork(page: Page) {
 }
 
 async function openShell(page: Page) {
-  await page.locator("#window-list-button").click();
-  await page.locator(".window-list-row").filter({ has: page.locator(".window-list-title", { hasText: "Shell" }) }).click();
+  await page.evaluate(() => sessionStorage.setItem("file-drop-shell-focused", "true"));
+  await page.reload();
   await expect(page.locator('.workspace-window[data-id="shell-1"]')).toBeVisible();
 }
 
@@ -723,6 +723,12 @@ async function installFileDropBackend(page, options: { failUploads?: boolean } =
         this.url = url;
         this.readyState = FixtureWebSocket.CONNECTING;
         window.__emitFileDropBackendEvent = (payload) => this.emit(payload);
+        if (sessionStorage.getItem("file-drop-shell-focused") === "true") {
+          for (const tab of workspaceState.workspace.tabs) {
+            const shell = tab.workspace.windows.find(window => window.id === "shell-1");
+            if (shell) shell.z_index = Math.max(...tab.workspace.windows.map(window => window.z_index || 0)) + 1;
+          }
+        }
         setTimeout(() => {
           this.readyState = FixtureWebSocket.OPEN;
           this.dispatchEvent(new Event("open"));

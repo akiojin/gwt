@@ -233,6 +233,17 @@ Absent Monitor yields null; supplied snapshots with no blocker edges yield [].
 Degraded or aborted snapshots retain these facts with the enclosing Monitor provenance and limits.
 An empty inverse does not prove no impact, and dependent counts do not establish importance,
 current blockage, critical path, priority, readiness or permission to act.
+`policy.dependency_reachability` follows only the union of supplied blocked_by edges.
+Each row lists distinct direct and indirect dependent Issues in numeric order, excluding its root.
+Traversal terminates on cycles and self-loops; cycle/bundle declarations do not create edges.
+Traverse globally before filtering endpoints to each diagnostic's existing member Issues.
+Goal, milestone and roadmap diagnostics retain external blockers and intermediate Issues,
+then omit rows with no member dependents. Existing membership rules remain unchanged.
+Absent Monitor yields null, including empty membership; no reachable dependents yields [].
+Keep the raw observations, direct impacts, degraded/aborted facts and enclosing provenance.
+Reachability describes merged partial observations, not a complete graph or dependencies
+that were simultaneously valid. It does not establish current blockage, delay, critical path,
+priority, health, readiness or permission to act.
 Each milestone's `dependency_observations` selects only its effective member Issues:
 direct references plus roadmap links resolved through a unique nonempty milestone ID.
 It retains the same supplied row order, repeats, typed diagnostics and null/[] semantics.
@@ -4549,6 +4560,8 @@ This paragraph says it is reported immediately and never held for a digest.\n\
             "`successful_monitor_scan` is missing and saved WIP/queue-age comparisons stay unknown",
             "`policy.dependency_observations` preserves every supplied inbox row",
             "`policy.dependency_impacts` reverses only supplied canonical blocked_by edges",
+            "`policy.dependency_reachability` follows only the union of supplied blocked_by edges",
+            "Traverse globally before filtering endpoints to each diagnostic's existing member Issues",
             "Direct impact observations never expand transitive chains or cycle/bundle declarations",
             "Neither absent nor empty dependency status proves readiness",
             "Each milestone's `dependency_observations` selects only its effective member Issues",

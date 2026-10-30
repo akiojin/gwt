@@ -91,6 +91,7 @@ export function createBoardLogsSurface({
       let pendingBoardEntryFocusId = null;
       const boardModel = createUiStateStore(null);
       boardModel.subscribe((snapshot) => snapshot, (snapshot) => {
+        if (snapshot?.receipt) snapshot = applyBoardReceipt(snapshot.receipt);
         if (!snapshot) return;
         const state = ensureBoardState(snapshot.windowId);
         state.entries = snapshot.entries;
@@ -1801,15 +1802,15 @@ export function createBoardLogsSurface({
           return;
       }
 
-      // SPEC-3064 Phase 3 (E6c): receive() bodies for board_* / log_*
-      // events moved verbatim from app.js; the case arms in app.js delegate
-      // here.
-      function applyBoardLogsReceiveEvent(event) {
+      // The shared model owns each response before request settlement, merging
+      // and rendering. Typed rows remain store-owned across settings updates;
+      // only the merged outer list needs freezing after derivation.
+      // Keep settlement synchronous with the receive FIFO.
+      function applyBoardReceipt(event) {
         switch (event.kind) {
           case "board_entries": {
             const state = ensureBoardState(event.id);
-            const incomingEntries = (event.entries || []).map(entry => ({ ...entry,
-              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } }));
+            const incomingEntries = event.entries;
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
             const incomingEntryIds = new Set(incomingEntries.map((entry) => entry.id));
             const retainedHistory = state.entries.some(
@@ -1843,7 +1844,7 @@ export function createBoardLogsSurface({
               : incomingEntries;
             const merged = mergeBoardEntries(state.resetToLatest ? [] : state.entries, acceptedEntries);
             const evicted = merged.length > maxBoardEntries;
-            state.entries = merged.slice(-maxBoardEntries);
+            state.entries = Object.freeze(merged.slice(-maxBoardEntries));
             state.hasMoreBefore = evicted || (retainedHistory && !state.resetToLatest
               ? state.hasMoreBefore
               : Boolean(event.has_more_before));
@@ -1889,25 +1890,55 @@ export function createBoardLogsSurface({
             if (completedSubmit && state.hasNewerEntries) {
               state.pendingLatestReload = true;
             }
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries, mentionEntry }));
-            break;
+            return { windowId: event.id, entries: state.entries, mentionEntry };
           }
           case "board_history_page": {
             const state = ensureBoardState(event.id);
             const existingEntryIds = new Set(state.entries.map((entry) => entry.id));
-            const olderEntries = (event.entries || []).map(entry => ({ ...entry,
-              content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })).filter(
+            const olderEntries = event.entries.filter(
               (entry) => !entry.id || !existingEntryIds.has(entry.id),
             );
             const merged = mergeBoardEntries(state.entries, olderEntries);
             state.hasNewerEntries = state.hasNewerEntries || merged.length > maxBoardEntries;
-            state.entries = merged.slice(0, maxBoardEntries);
+            state.entries = Object.freeze(merged.slice(0, maxBoardEntries));
             state.hasMoreBefore = Boolean(event.has_more_before);
             state.oldestEntryId = state.entries[0]?.id || null;
             state.loadingOlder = false;
             state.preserveBoardScrollPosition = olderEntries.length > 0;
             state.error = "";
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
+            return { windowId: event.id, entries: state.entries };
+          }
+          case "board_error": {
+            const state = ensureBoardState(event.id);
+            state.loading = false;
+            state.loadingOlder = false;
+            state.submitting = false;
+            state.resetToLatest = false;
+            state.pendingLatestReload = false;
+            state.pendingSubmit = null;
+            state.error = event.message;
+            return { windowId: event.id, entries: Object.freeze(state.entries) };
+          }
+          default:
+            return null;
+        }
+      }
+
+      // SPEC-3064 Phase 3 (E6c): app.js delegates Board/Logs receipts here.
+      function applyBoardLogsReceiveEvent(event) {
+        switch (event.kind) {
+          case "board_entries": {
+            boardModel.update(() => ({ windowId: event.id, receipt: { ...event,
+              entries: (event.entries || []).map(entry => ({ ...entry,
+                content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })),
+            } }));
+            break;
+          }
+          case "board_history_page": {
+            boardModel.update(() => ({ windowId: event.id, receipt: { ...event,
+              entries: (event.entries || []).map(entry => ({ ...entry,
+                content: { type: "markdown", body: entry.body || "", body_html: entry.body_html || "" } })),
+            } }));
             break;
           }
           case "log_entries": {
@@ -1919,15 +1950,7 @@ export function createBoardLogsSurface({
             logResponseModel.update(() => ({ kind: event.kind, entry: event.entry }));
             break;
           case "board_error": {
-            const state = ensureBoardState(event.id);
-            state.loading = false;
-            state.loadingOlder = false;
-            state.submitting = false;
-            state.resetToLatest = false;
-            state.pendingLatestReload = false;
-            state.pendingSubmit = null;
-            state.error = event.message;
-            boardModel.update(() => ({ windowId: event.id, entries: state.entries }));
+            boardModel.update(() => ({ windowId: event.id, receipt: event }));
             break;
           }
           case "log_error": {

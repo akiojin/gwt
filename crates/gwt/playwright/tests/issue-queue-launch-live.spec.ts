@@ -6,11 +6,11 @@ import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
-  test.skip(process.platform === "win32", "fixture requires POSIX executables");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
 
   test("T20b pending switch preserves current and cancels without replay after restart", async ({ page }, info) => {
+    test.skip(process.platform === "win32", "switch actor fixture requires POSIX executables");
     const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -238,7 +238,10 @@ test.describe("Issue queue real backend launch", () => {
     expect(errors).toEqual([]);
   });
 
-  test("T20a UI reassigned schedule survives GUI restart and launches its exact member", async ({ page }, info) => {
+  test("T20a UI reassigned schedule survives GUI restart and force requeue with live Busy and Works", async ({ page }, info) => {
+    // Setup, GUI restart and two bounded launches reached proof collection at
+    // 242s on Windows. Budget their aggregate plus cleanup; retain phase limits.
+    test.setTimeout(420_000);
     const fixture = await startIssueQueueLaunchFixture(info);
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
@@ -286,6 +289,25 @@ test.describe("Issue queue real backend launch", () => {
         expected_revision: initial.revision }, "agent_roster")).roster;
       expect(roster.error).toBeFalsy();
       expect(roster.members.filter((member: any) => member.enabled)).toHaveLength(2);
+      // Registration and launch eligibility are separate: explicitly select
+      // both fixed-tool people while retaining the legacy profile's tuning.
+      const preferences = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+      const baseProfile = preferences.launch_profiles[0];
+      expect(baseProfile.agent_id).toBe("codex");
+      expect(baseProfile.agent_member_id).toBe(initial.members[0].agent_member_id);
+      const selectedProfiles = roster.members.filter((member: any) => member.enabled).map((member: any) => {
+        expect(member.agent_id).toBe("codex");
+        return { ...baseProfile, agent_member_id: member.agent_member_id, agent_id: member.agent_id };
+      });
+      const beforeProfiles = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      await sendLiveGwtEvent(current, { kind: "issue_monitor_profiles_set", request_id: 477727, profiles: selectedProfiles });
+      const profileReply = await current.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477727
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeProfiles).then(handle => handle.jsonValue());
+      expect(profileReply.kind, profileReply.message).toBe("issue_monitor_profiles");
+      expect(profileReply.profiles).toEqual(selectedProfiles);
+      expect(JSON.parse((await fixture.monitorPreferencesBytes()).toString()).launch_profiles).toEqual(selectedProfiles);
       const queued = await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] },
         "issue_monitor_queue_result");
       expect(queued.error).toBeNull();
@@ -360,6 +382,41 @@ test.describe("Issue queue real backend launch", () => {
       expect(() => process.kill(launch.pid, 0)).not.toThrow();
       const session = () => readFile(join(fixture.home, ".gwt", "sessions", `${launch.gwt_session_id}.toml`), "utf8");
       const field = (record: string, key: string) => record.match(new RegExp(`^${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1];
+      const receivedActivity = (after = 0) => current.evaluate(after => {
+        let latest: any;
+        for (const entry of (window as any).__gwtPlaywrightMessages ?? []) {
+          if (entry.sequence <= after) continue;
+          // Only the independent observer's standalone event proves this
+          // scheduler path; a Work projection could mask an empty observer.
+          const next = entry.payload.kind === "local_agent_activity" ? entry.payload.activity : undefined;
+          if (next && (!latest || Date.parse(next.observed_at) >= Date.parse(latest.observed_at))) latest = next;
+        }
+        return latest;
+      }, after);
+      const assertObservedWork = async (sessionId: string, memberId: string, after = 0, previousIncarnation?: number) => {
+        await expect.poll(async () => (await receivedActivity(after))?.agents?.some((agent: any) =>
+          agent.session_id === sessionId && !agent.is_pm && agent.runtime_incarnation !== previousIncarnation),
+        { timeout: 60_000, message: "the real independent observer sees the launched child" }).toBe(true);
+        const activity = await receivedActivity(after);
+        const agent = activity.agents.find((entry: any) => entry.session_id === sessionId);
+        expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
+        expect(agent.runtime_incarnation).toBeGreaterThan(0);
+        expect(agent.runtime_incarnation).not.toBe(previousIncarnation);
+        const actual = (await request({ kind: "agent_roster", action: { kind: "read" } }, "agent_roster")).roster;
+        expect(actual.error).toBeFalsy();
+        expect(actual.members.find((member: any) => member.agent_member_id === memberId)?.assignment)
+          .toMatchObject({ session_id: sessionId, issue_number: fixture.issueNumber });
+        await openMemberPlans(memberId);
+        const main = current.getByRole("region", { name: "Main pane", exact: true });
+        await expect(main.locator(".roster-capacity-note")).toContainText("Busy 1 / Team");
+        await expect(main.locator(`.roster-row[data-member-id="${memberId}"] .roster-current`)).toContainText("In Works");
+        await current.locator('.op-rail__surface[data-surface="works"]').click();
+        await expect(main).toHaveAttribute("data-surface", "works");
+        if (await main.locator(".works-full:not([hidden])").isVisible())
+          await main.locator('.works-full [data-action="back"]').click();
+        await expect(main.locator(`.work-row[data-window-id="${agent.window_id}"]`)).toBeVisible();
+        return { activity, agent, memberId };
+      };
       await expect.poll(async () => field(await session(), "agent_session_id"),
         { timeout: 60_000, message: "authentic Session receives the provider SessionStart identity" }).toBe(launch.provider_session_id);
       const record = await session();
@@ -367,10 +424,53 @@ test.describe("Issue queue real backend launch", () => {
       expect(field(record, "agent_member_id")).toBe(target.agent_member_id);
       expect(field(record, "agent_name")).toBe(target.name);
       expect(record).toMatch(new RegExp(`^linked_issue_number\\s*=\\s*${fixture.issueNumber}$`, "m"));
+      const firstObservation = await assertObservedWork(launch.gwt_session_id!, target.agent_member_id);
       fixture.auditHooks(launch.cwd);
+
+      // Stop only the owned provider, then recover through the real authenticated
+      // Monitor path. No incoming census or roster frame is manufactured here.
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: false });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled).toBe(false);
+      await sendLiveGwtEvent(current, { kind: "terminal_input", id: firstObservation.agent.window_id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(() => {
+        try { process.kill(launch.pid, 0); return false; } catch { return true; }
+      }, { timeout: 60_000, message: "the predecessor provider really exited" }).toBe(true);
+      // Provider exit precedes the Host's PTY exit event and durable failure.
+      // Observe the guard's state before the single force-requeue write.
+      await expect.poll(async () => {
+        const prefs = JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+        const ownsIssue = (entry: any) => entry.issue_number === fixture.issueNumber;
+        return !prefs.launched_issues?.some(ownsIssue)
+          && !prefs.pending_launch_deliveries?.some(ownsIssue)
+          && prefs.failed_issues?.some((entry: any) => ownsIssue(entry)
+            && entry.window_id === firstObservation.agent.window_id);
+      }, { timeout: 60_000, message: "the Host records the exact predecessor exit and releases its launch" }).toBe(true);
+      const after = await current.evaluate(() => (window as any).__gwtPlaywrightMessageSequence || 0);
+      const requeued = fixture.fixtureOperation("issue.monitor.requeue", {
+        number: fixture.issueNumber, reason: "Issue #6362 real observer force-requeue regression", force: true,
+      });
+      expect(requeued.ok, JSON.stringify(requeued)).toBe(true);
+      await sendLiveGwtEvent(current, { kind: "set_issue_monitor_enabled", enabled: true });
+      await expect.poll(async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString()).enabled,
+        { timeout: 30_000, message: "Monitor enable is durable before the separate launch_now operation" }).toBe(true);
+      const immediate = fixture.fixtureOperation("issue.monitor.launch_now", { number: fixture.issueNumber });
+      expect(immediate.ok, JSON.stringify(immediate)).toBe(true);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
+      const successor = (await fixture.launches())[1];
+      expect(successor.gwt_session_id).toBeTruthy();
+      expect(() => process.kill(successor.pid, 0)).not.toThrow();
+      const successorSession = () => readFile(join(fixture.home, ".gwt", "sessions", `${successor.gwt_session_id}.toml`), "utf8");
+      await expect.poll(async () => field(await successorSession(), "agent_session_id"), { timeout: 60_000 })
+        .toBe(successor.provider_session_id);
+      const successorMember = field(await successorSession(), "agent_member_id");
+      expect(successorMember).toBeTruthy();
+      const successorObservation = await assertObservedWork(successor.gwt_session_id!, successorMember!, after,
+        firstObservation.agent.runtime_incarnation);
+      fixture.auditHooks(successor.cwd);
       await info.attach(`agent-schedule-${theme}`, { body: await current.screenshot(), contentType: "image/png" });
       await info.attach("agent-schedule-launch", { body: JSON.stringify({ observed, saved, stale,
-        target: { agent_member_id: target.agent_member_id, name: target.name }, launch }, null, 2), contentType: "application/json" });
+        target: { agent_member_id: target.agent_member_id, name: target.name }, launch, firstObservation,
+        requeued, immediate, successor, successorObservation }, null, 2), contentType: "application/json" });
       expect(errors, "zero console/page errors across UI reassignment, GUI restart and real launch").toEqual([]);
     } finally {
       try { await current.close(); } finally { await fixture.stop(); }
@@ -388,12 +488,10 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings" });
-      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue" });
+      const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
       await expect(issueWindow).toBeVisible();
-      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
-      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-      const issues = issueWindow.locator('[data-settings-panel="issues"]');
+      const issues = issueWindow.locator(".issue-bridge-root");
       const metric = issues.locator('[data-metric="active"]');
       await expect(metric).toHaveText("Active 0 · 0 issues · PM 0", { timeout: 60_000 });
       const row = issues.locator(`[data-issue-number="${fixture.issueNumber}"]`);
@@ -402,9 +500,12 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
       const launch = (await fixture.launches())[0];
       const activity = () => page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .filter((item: any) => item.payload.projection?.local_agent_activity)
-        .at(-1)?.payload.projection.local_agent_activity);
+        .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+        .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2] && snapshot.host_id
+          && Number.isFinite(Date.parse(snapshot.observed_at)))
+        .sort((left: any, right: any) => Date.parse(left.observed_at) - Date.parse(right.observed_at)).at(-1));
       await expect(metric).toHaveText("Active 1 · 1 issue · PM 0", { timeout: 60_000 });
+      await expect.poll(async () => (await activity())?.agents?.some((agent: any) => agent.session_id === launch.gwt_session_id)).toBe(true);
       const live = await activity();
       const agent = live.agents.find((agent: any) => agent.session_id === launch.gwt_session_id);
       expect(agent).toMatchObject({ issue_number: fixture.issueNumber, is_pm: false });
@@ -440,9 +541,9 @@ test.describe("Issue queue real backend launch", () => {
     } finally {
       try {
         const observations = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
-          .filter(({ payload }: any) => payload.projection || payload.kind === "terminal_status")
+          .filter(({ payload }: any) => payload.projection || ["terminal_status", "local_agent_activity"].includes(payload.kind))
           .map(({ sequence, payload }: any) => ({ sequence, kind: payload.kind,
-            activity: payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
+            activity: payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity, id: payload.id, status: payload.status })));
         await info.attach("local-live-wire", { body: JSON.stringify({ observations, errors }, null, 2), contentType: "application/json" });
       } finally {
         // Close the client before its server so cleanup cannot trigger reconnect errors.
@@ -462,15 +563,11 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
-      await sendLiveGwtEvent(page, { kind: "create_window", preset: "settings",
+      await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue",
         bounds: { x: 20, y: 60, width: 1480, height: 920 } });
-      const issueWindow = page.locator('.workspace-window[data-preset="settings"]');
+      const issueWindow = page.locator('.workspace-window[data-preset="issue"]');
       await expect(issueWindow).toBeVisible();
-      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", {
-        detail: { section: "issues" },
-      })));
-      await expect(issueWindow.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
-      const issues = issueWindow.locator('[data-settings-panel="issues"]');
+      const issues = issueWindow.locator(".issue-bridge-root");
       const backlog = issues.locator('[data-queue-column="backlog"]');
       const queued = issues.locator('[data-queue-column="queued"]');
       const row = backlog.locator(`[data-issue-number="${fixture.issueNumber}"]`);

@@ -319,7 +319,7 @@ enum AuthorityResolutionPurpose {
 
 enum ProjectAuthorityResolution {
     Missing,
-    Live(DaemonEndpoint),
+    Live(Box<DaemonEndpoint>),
     Recover,
 }
 
@@ -334,7 +334,7 @@ pub(crate) fn resolve_live_project_authority(
         is_process_alive,
         AuthorityResolutionPurpose::Route,
     )? {
-        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(endpoint)),
+        ProjectAuthorityResolution::Live(endpoint) => Ok(Some(*endpoint)),
         ProjectAuthorityResolution::Missing => Ok(None),
         ProjectAuthorityResolution::Recover => {
             Err("Issue Monitor authority fence retains pending crash recovery".to_string())
@@ -375,6 +375,7 @@ fn resolve_project_authority(
                     return authority_owned_endpoint(gwt_home, scope, fence, &|pid| {
                         is_process_alive(pid)
                     })
+                    .map(Box::new)
                     .map(ProjectAuthorityResolution::Live);
                 }
                 Err(error) => {
@@ -389,6 +390,7 @@ fn resolve_project_authority(
         crate::IssueMonitorAuthorityFenceState::Missing => Ok(ProjectAuthorityResolution::Missing),
         crate::IssueMonitorAuthorityFenceState::Active(fence) if is_process_alive(fence.pid) => {
             authority_owned_endpoint(gwt_home, scope, &fence, &|pid| is_process_alive(pid))
+                .map(Box::new)
                 .map(ProjectAuthorityResolution::Live)
         }
         crate::IssueMonitorAuthorityFenceState::Active(_)
@@ -423,6 +425,7 @@ pub(crate) fn resolve_project_daemon_bootstrap(
         AuthorityResolutionPurpose::RecoverUnderLease,
     )? {
         ProjectAuthorityResolution::Live(endpoint) => {
+            let endpoint = *endpoint;
             return Ok(
                 if expected_version.is_some_and(|version| endpoint.daemon_version != version) {
                     DaemonBootstrapAction::RetireStaleVersion { endpoint }

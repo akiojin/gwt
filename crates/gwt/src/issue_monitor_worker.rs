@@ -122,6 +122,9 @@ pub struct LoadedIssueMonitorCandidates {
     /// at commit time must neither do network I/O nor refresh its acquisition time.
     pub open_pr_observations: BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
     pub open_pr_observed_at: Option<String>,
+    /// Complete linked-PR timelines acquired during this scan, including
+    /// completed Issues retained when a later timeline read failed.
+    pub linked_prs: BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
     pub urgent_assignments: BTreeMap<u64, LabelAssignment>,
     pub source: IssueMonitorCandidateSource,
     /// The live-list failure that forced a cache fallback. Kept alongside the
@@ -1569,6 +1572,12 @@ fn load_urgent_assignments_with<E: fmt::Display>(
     assignments
 }
 
+type OpenPrLaunchObservations = (
+    BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
+    Option<String>,
+    BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
+);
+
 /// Issue #4157: discover related PRs once, then read only PRs belonging to
 /// candidates this terminal could admit. Existing in-flight ownership is not
 /// changed by these normal-launch observations.
@@ -1578,10 +1587,7 @@ fn load_open_pr_launch_observations(
     repo: &str,
     issues: &[IssueMonitorIssue],
     prefs: &crate::IssueMonitorPrefs,
-) -> (
-    BTreeMap<u64, Option<crate::issue_monitor::IssueMonitorOpenPrHold>>,
-    Option<String>,
-) {
+) -> OpenPrLaunchObservations {
     let local = prefs
         .terminal_queues
         .get(&crate::process::current_hostname());
@@ -1602,7 +1608,7 @@ fn load_open_pr_launch_observations(
         })
         .collect();
     if candidates.is_empty() {
-        return (BTreeMap::new(), None);
+        return (BTreeMap::new(), None, BTreeMap::new());
     }
     let observed_at = chrono::Utc::now().to_rfc3339();
     // Existing holds must be refreshable even when expensive association
@@ -1727,7 +1733,7 @@ fn load_open_pr_launch_observations(
             });
         }
     }
-    (observations, Some(observed_at))
+    (observations, Some(observed_at), linked)
 }
 
 fn collect_open_pr_launch_observations(
@@ -1874,12 +1880,13 @@ pub fn load_open_issue_monitor_candidates_for_repo_path_with_provenance(
                     error.to_string()
                 })
             });
-            let (open_pr_observations, open_pr_observed_at) =
+            let (open_pr_observations, open_pr_observed_at, linked_prs) =
                 load_open_pr_launch_observations(repo_path, owner, repo, &issues, &prefs);
             return Ok(LoadedIssueMonitorCandidates {
                 issues,
                 open_pr_observations,
                 open_pr_observed_at,
+                linked_prs,
                 source,
                 // Issue #4436 AC-1: the live list succeeded and every other
                 // Issue's readiness was refreshed, so this pass is not a failed
@@ -2014,6 +2021,7 @@ where
             Ok(LoadedIssueMonitorCandidates {
                 open_pr_observations: BTreeMap::new(),
                 open_pr_observed_at: None,
+                linked_prs: BTreeMap::new(),
                 issues,
                 source,
                 live_error: None,
@@ -2027,6 +2035,7 @@ where
                     return Ok(LoadedIssueMonitorCandidates {
                         open_pr_observations: BTreeMap::new(),
                         open_pr_observed_at: None,
+                        linked_prs: BTreeMap::new(),
                         issues,
                         source: IssueMonitorCandidateSource::Cache,
                         live_error: Some(live_error),
@@ -2244,24 +2253,29 @@ pub struct LinkedPrProbeBatch {
 }
 
 impl LinkedPrProbeBatch {
-    /// Read the linked PRs of every gwt-spec issue in `issues` in bulk.
+    /// Reuse complete timelines from this scan and read missing gwt-spec Issues in bulk.
     pub fn prefetch<'a>(
         owner: &str,
         repo: &str,
         issues: impl IntoIterator<Item = &'a IssueMonitorIssue>,
+        linked_prs: &BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
     ) -> Self {
         let numbers: Vec<u64> = issues
             .into_iter()
             .filter(|issue| is_spec_candidate(issue))
             .map(|issue| issue.number)
             .collect();
-        Self::prefetch_with(&numbers, |numbers| {
+        Self::prefetch_with(&numbers, linked_prs, |numbers| {
             crate::cli::issue::fetch_linked_prs_bulk_via_gh(owner, repo, numbers)
         })
     }
 
     /// Injectable core of [`Self::prefetch`].
-    pub fn prefetch_with<F>(numbers: &[u64], fetch: F) -> Self
+    pub fn prefetch_with<F>(
+        numbers: &[u64],
+        linked_prs: &BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
+        fetch: F,
+    ) -> Self
     where
         F: FnOnce(&[u64]) -> std::io::Result<BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>>,
     {
@@ -2270,25 +2284,45 @@ impl LinkedPrProbeBatch {
         {
             return Self::default();
         }
-        match fetch(numbers) {
-            Ok(linked) => Self {
+        let mut linked = BTreeMap::new();
+        let missing: Vec<_> = numbers
+            .iter()
+            .filter_map(|number| match linked_prs.get(number) {
+                Some(prs) => {
+                    linked.insert(*number, prs.clone());
+                    None
+                }
+                None => Some(*number),
+            })
+            .collect();
+        if missing.is_empty() {
+            return Self {
                 linked,
                 failure: None,
-            },
+            };
+        }
+        match fetch(&missing) {
+            Ok(fetched) => {
+                linked.extend(fetched);
+                Self {
+                    linked,
+                    failure: None,
+                }
+            }
             Err(error) => {
                 tracing::debug!(
                     error = %error,
                     "bulk linked-PR read failed; its candidates report that failure"
                 );
                 Self {
-                    linked: BTreeMap::new(),
+                    linked,
                     failure: Some(error.to_string()),
                 }
             }
         }
     }
 
-    /// The bulk read's failure, when the batch holds nothing because of it.
+    /// The missing timelines' bulk failure; already complete timelines remain available.
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
     }
@@ -2452,6 +2486,7 @@ pub fn reconcile_issue_monitor_merges(
     repo_path: &Path,
     owner: &str,
     repo: &str,
+    linked_prs: &BTreeMap<u64, Vec<crate::cli::LinkedPrSummary>>,
 ) -> gwt_core::Result<IssueMonitorMergeReconciliation> {
     if monitor.active_launched_branches().is_empty()
         && !monitor.has_open_launch_plan_candidates()
@@ -2489,7 +2524,7 @@ pub fn reconcile_issue_monitor_merges(
 
     let untracked = monitor.untracked_merged_branch_candidates(&merged_branches);
     // SPEC #4093 FR-005: one bulk read for every nominated candidate.
-    let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter());
+    let batch = LinkedPrProbeBatch::prefetch(owner, repo, untracked.iter(), linked_prs);
     let mut batch_failure_recorded = false;
     for issue in untracked {
         let issue_number = issue.number;
@@ -3702,7 +3737,7 @@ mod linked_pr_batch_tests {
     fn issue_3924_completion_batch_failure_is_recorded_once() {
         let temp = tempfile::tempdir().unwrap();
         let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
-        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], |_| {
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2], &BTreeMap::new(), |_| {
             Err(std::io::Error::other("bulk completion read failed"))
         });
         let error = IssueMonitorScanFailure::new(
@@ -3745,7 +3780,7 @@ mod linked_pr_batch_tests {
     fn batch_reads_all_spec_candidates_once_and_answers_from_memory() {
         let issues = [spec_issue(1), spec_issue(2), spec_issue(3)];
         let mut reads = 0;
-        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], |numbers| {
+        let batch = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], &BTreeMap::new(), |numbers| {
             reads += 1;
             assert_eq!(numbers, [1, 2, 3]);
             let mut linked = BTreeMap::new();
@@ -3773,7 +3808,31 @@ mod linked_pr_batch_tests {
             "an unreturned candidate falls back to the single probe"
         );
 
-        let refused = LinkedPrProbeBatch::prefetch_with(&[1], |_| {
+        let mut seed = batch.linked.clone();
+        seed.insert(99, Vec::new());
+        let mut queried = Vec::new();
+        let reused = LinkedPrProbeBatch::prefetch_with(&[1, 2, 3], &seed, |numbers| {
+            queried.extend_from_slice(numbers);
+            Err(std::io::Error::other("missing timeline failed"))
+        });
+        assert_eq!(queried, vec![3], "complete timelines are not re-read");
+        assert_eq!(reused.len(), 2, "unrequested seed Issues are excluded");
+        assert_eq!(reused.completed(&issues[0]), Some(true));
+        assert_eq!(reused.completed(&issues[1]), Some(false));
+        let error =
+            try_issue_completed_by_merged_pr_classified_with("o", "r", &issues[2], Some(&reused))
+                .expect_err("missing timelines retain the bulk failure without a single retry");
+        assert!(error
+            .into_failure()
+            .detail
+            .contains("missing timeline failed"));
+        let fully_reused = LinkedPrProbeBatch::prefetch_with(&[1, 2], &seed, |_| {
+            panic!("complete same-scan timelines need no remote read")
+        });
+        assert_eq!(fully_reused.len(), 2);
+        assert!(fully_reused.failure().is_none());
+
+        let refused = LinkedPrProbeBatch::prefetch_with(&[1], &BTreeMap::new(), |_| {
             Err(std::io::Error::other(
                 "gh api graphql failed: API rate limit already exceeded",
             ))
@@ -4621,6 +4680,7 @@ pub(crate) mod tests {
                 }),
             )]),
             open_pr_observed_at: Some("2026-10-21T00:00:00Z".into()),
+            linked_prs: BTreeMap::new(),
         };
         let mut monitor = test_monitor(crate::IssueMonitorConfig {
             enabled: true,
@@ -4671,6 +4731,7 @@ pub(crate) mod tests {
         let loaded = LoadedIssueMonitorCandidates {
             open_pr_observations: BTreeMap::new(),
             open_pr_observed_at: None,
+            linked_prs: BTreeMap::new(),
             issues: vec![urgent],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
@@ -5812,6 +5873,7 @@ pub(crate) mod tests {
     /// a freshly saved profile carries.
     fn unsupported_launch_profile(agent_id: &str) -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: agent_id.to_string(),
             model: None,
             reasoning: None,
@@ -6018,6 +6080,7 @@ pub(crate) mod tests {
         let loaded = LoadedIssueMonitorCandidates {
             open_pr_observations: BTreeMap::new(),
             open_pr_observed_at: None,
+            linked_prs: BTreeMap::new(),
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Live,
             live_error: None,
@@ -6931,6 +6994,7 @@ pub(crate) mod tests {
             let loaded = LoadedIssueMonitorCandidates {
                 open_pr_observations: BTreeMap::new(),
                 open_pr_observed_at: None,
+                linked_prs: BTreeMap::new(),
                 issues: vec![issue(owner.number)],
                 source: IssueMonitorCandidateSource::Cache,
                 live_error: None,
@@ -7040,6 +7104,7 @@ pub(crate) mod tests {
             let loaded = LoadedIssueMonitorCandidates {
                 open_pr_observations: BTreeMap::new(),
                 open_pr_observed_at: None,
+                linked_prs: BTreeMap::new(),
                 issues: vec![issue(owner.number), issue(new_owner)],
                 source: IssueMonitorCandidateSource::Cache,
                 live_error: None,
@@ -7998,6 +8063,7 @@ pub(crate) mod tests {
         let live_with_failed_spec_enrichment = LoadedIssueMonitorCandidates {
             open_pr_observations: BTreeMap::new(),
             open_pr_observed_at: None,
+            linked_prs: BTreeMap::new(),
             issues: vec![cached_issue.clone()],
             source: IssueMonitorCandidateSource::Live,
             live_error: Some("issue #43 targeted refresh failed".to_string()),
@@ -8054,6 +8120,7 @@ pub(crate) mod tests {
         let loaded = LoadedIssueMonitorCandidates {
             open_pr_observations: BTreeMap::new(),
             open_pr_observed_at: None,
+            linked_prs: BTreeMap::new(),
             issues: vec![issue(42)],
             source: IssueMonitorCandidateSource::Cache,
             live_error: Some("operation deadline exceeded at issue-list stage".to_string()),

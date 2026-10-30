@@ -1,5 +1,89 @@
 use super::*;
 
+#[test]
+fn dropping_window_runtime_reclaims_worker_owned_pty_without_the_pane_lock() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    super::super::pty_io::initialize_process_window_close_finalizer().unwrap();
+    let temp = tempdir().unwrap();
+    let (command, args) = if cfg!(windows) {
+        ("cmd", vec!["/d", "/s", "/c", "exit /b 0"])
+    } else {
+        ("/bin/cat", vec![])
+    };
+    // No frontend answers ConPTY's startup query: even this exit command
+    // remains alive until its owning runtime explicitly tears it down.
+    let pane = Arc::new(Mutex::new(
+        Pane::new(
+            "drop-runtime".into(),
+            command.into(),
+            args.into_iter().map(str::to_owned).collect(),
+            80,
+            24,
+            HashMap::new(),
+            Some(temp.path().to_owned()),
+        )
+        .unwrap(),
+    ));
+    let pty = pane.lock().unwrap().shared_pty();
+    let _cleanup = TestPaneGuard {
+        pty: pty.clone(),
+        reader: None,
+    };
+    let (exit_tx, exit_rx) = mpsc::channel();
+    let output_tx = exit_tx.clone();
+    let mut runtime = WindowRuntime::new(1, pane.clone());
+    runtime.output_thread = Some(gwt::pane_runtime::spawn_output_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |event| {
+            if matches!(event, gwt::pane_runtime::PaneRuntimeEvent::Status { .. }) {
+                let _ = output_tx.send("output");
+            }
+        },
+    ));
+    runtime.status_thread = Some(gwt::pane_runtime::spawn_status_thread(
+        "drop-runtime".into(),
+        1,
+        pane.clone(),
+        move |_| {
+            let _ = exit_tx.send("status");
+        },
+    ));
+    let pane_lock = pane.lock().unwrap();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let dropper = thread::spawn(move || {
+        drop(runtime);
+        let _ = dropped_tx.send(());
+    });
+    // test-hygiene: allow-wall-clock-deadline Bound a regressed pane mutex wait; the channel establishes Drop completion.
+    let dropped_without_pane_lock = dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    drop(pane_lock);
+    dropper.join().unwrap();
+    assert!(
+        dropped_without_pane_lock,
+        "runtime Drop must dispatch cleanup without taking the pane lock"
+    );
+    let mut exited = [
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual OS child exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must stop its owned child"),
+        exit_rx
+            // test-hygiene: allow-wall-clock-deadline Bound actual PTY reader exit; this event establishes completion.
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime Drop must release its PTY reader"),
+    ];
+    exited.sort_unstable();
+    assert_eq!(exited, ["output", "status"]);
+    assert!(
+        pty.try_wait().unwrap().is_some(),
+        "owned child must be reaped before verification ends"
+    );
+}
+
 fn issue_3713_read_board(project: &Path, session: &str) {
     let _session =
         gwt_core::test_support::ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, session);
@@ -4974,6 +5058,55 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
         .iter()
         .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
     assert!(runtime.assign_missing_agent_names().is_empty());
+}
+
+#[test]
+fn agent_name_keeps_bound_session_independent_of_roster_readback() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let root = temp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let mut session = gwt_agent::Session::new(&root, "work/test", gwt_agent::AgentId::Codex);
+    session.agent_name = Some("Falcon".into());
+    session.agent_member_id = Some("bound-member".into());
+    session.update_status(gwt_agent::AgentStatus::Running);
+    let mut tab = sample_project_tab_with_window_at(
+        "tab",
+        "agent",
+        root.clone(),
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    tab.workspace
+        .set_session_id("agent", Some(session.id.clone()));
+    tab.workspace
+        .set_agent_name("agent", session.agent_name.clone());
+    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
+    session.save(&runtime.sessions_dir).unwrap();
+    let pid = std::process::id();
+    let started = gwt::process::host_process_start_time(pid).unwrap();
+    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    sidecar.host_started_at = Some(started);
+    sidecar.child_pid = Some(pid);
+    sidecar.child_started_at = Some(started);
+    sidecar
+        .save(&gwt_agent::runtime_state_path_for_pid(
+            &runtime.sessions_dir,
+            pid,
+            &session.id,
+        ))
+        .unwrap();
+    let prefs = gwt::issue_monitor_prefs_path_for_repo_path(&root);
+    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    fs::write(&prefs, "unreadable roster").unwrap();
+
+    let result = runtime.ensure_window_agent_name("tab", "agent");
+    assert_eq!(result, Ok(Some("Falcon".into())));
+    assert_eq!(fs::read_to_string(prefs).unwrap(), "unreadable roster");
+    let saved =
+        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+            .unwrap();
+    assert_eq!(saved.agent_member_id, session.agent_member_id);
 }
 
 #[test]

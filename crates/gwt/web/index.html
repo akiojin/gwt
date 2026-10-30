@@ -129,14 +129,9 @@
                 <span aria-hidden="true">⚙</span>
               </button>
             </div>
-            <!-- 2026-06-20 Update: Board (⌘B) and Logs (⌘L) were demoted out of
-                 the Navigate rail group per user feedback. They stay reachable
-                 via the Add Window presets, the command palette, and the ⌘B /
-                 ⌘L hotkeys; the op:command handlers (open-board / open-logs)
-                 and operator-shell.js wiring are unchanged. -->
           </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
-          <!-- Issue #4777 T-1: the rail picks one of four surfaces. Every
+          <!-- Issue #4777 T-1: the rail picks a fixed workspace surface. Every
                window preset folds into Issues / Agents / Board / Settings
                (surface-rail.js), and the entry for the focused window's
                surface is pressed. The PM sits above them, cut off by the
@@ -189,44 +184,20 @@
               <svg class="op-rail__surface-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8h16"/><path d="M4 16h16"/><path d="M14 6v4"/><path d="M9 14v4"/></svg>
               <span class="op-rail__surface-label">Settings</span>
             </button>
-          </div>
-          <div class="op-rail__divider" aria-hidden="true"></div>
-          <div class="op-rail__group" role="group" aria-label="Windows">
-            <div class="window-list-shell">
-              <button
-                class="op-rail__item"
-                id="window-list-button"
-                aria-label="List windows"
-                aria-expanded="false"
-                title="List windows"
-              >
-                <span class="op-rail__icon" aria-hidden="true">❒</span>
-                <span class="op-rail__badge" id="op-rail-window-count" hidden></span>
-                <span class="op-rail__flyout" aria-hidden="true">
-                  <span class="op-rail__flyout-label">Windows</span>
-                </span>
-              </button>
-              <div class="window-list-panel" id="window-list-panel" hidden></div>
-            </div>
-            <button class="op-rail__item" id="add-button" aria-label="Add window" title="Add window">
-              <span class="op-rail__icon" aria-hidden="true">＋</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Add window</span>
-              </span>
+            <button class="op-rail__item op-rail__surface" type="button" data-cmd="open-logs" title="Logs: application events and process activity">
+              <span class="op-rail__surface-icon" aria-hidden="true">≡</span>
+              <span class="op-rail__surface-label">Logs</span>
+            </button>
+            <button class="op-rail__item op-rail__surface" type="button" data-cmd="open-index" title="Index: search indexed project content">
+              <span class="op-rail__surface-icon" aria-hidden="true">⌕</span>
+              <span class="op-rail__surface-label">Index</span>
+            </button>
+            <button class="op-rail__item op-rail__surface" type="button" data-cmd="open-profile" title="Profile: environment profiles and variables">
+              <span class="op-rail__surface-icon" aria-hidden="true">◑</span>
+              <span class="op-rail__surface-label">Profile</span>
             </button>
           </div>
           <div class="op-rail__spacer" aria-hidden="true"></div>
-          <div class="op-rail__group" role="group" aria-label="Agents">
-            <!-- SPEC-2356 Anshin Addendum (FR-042): STOP ALL kill-switch. Halts
-                 every running agent runtime (windows stay on canvas) after a
-                 confirm. The op:command handler in app.js owns the prompt. -->
-            <button class="op-rail__item op-rail__item--stop-all" type="button" data-cmd="stop-all-windows" aria-label="Stop all agents" title="Stop all agents">
-              <span class="op-rail__icon" aria-hidden="true">⏹</span>
-              <span class="op-rail__flyout" aria-hidden="true">
-                <span class="op-rail__flyout-label">Stop all agents</span>
-              </span>
-            </button>
-          </div>
           <div class="op-rail__divider" aria-hidden="true"></div>
           <div class="op-rail__group op-rail__group--system" role="group" aria-label="System">
             <!-- SPEC #3206 v2 (FR-009): notification bell + unread badge. The
@@ -472,87 +443,6 @@
               <span>Close overlay</span>
               <kbd class="op-kbd">Esc</kbd>
             </div>
-          </div>
-        </div>
-      </div>
-      <div class="modal-backdrop" id="preset-modal" aria-hidden="true">
-        <div
-          class="modal-shell is-surface-deck"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="preset-modal-title"
-          tabindex="-1"
-        >
-          <p class="preset-modal__kicker"><span class="preset-modal__tick" aria-hidden="true">▸</span>DEPLOY A SURFACE</p>
-          <h2 id="preset-modal-title">Add window</h2>
-          <!-- SPEC-2356 landscape redesign (Plan B, weighted deck): the three
-               categorized sections lay out as side-by-side weighted columns inside
-               .preset-deck so the deck stays low and never overflows short viewports. -->
-          <div class="preset-deck">
-          <div class="preset-section" data-category="surface">
-            <div class="preset-section-label">Surfaces</div>
-            <div class="preset-list">
-              <button class="preset-button" data-preset="logs" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">≡</span>
-                <span class="preset-button__text">
-                  <strong>Logs</strong>
-                  <span>Open the logs surface</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="board" data-category="surface">
-                <span class="preset-button__icon" aria-hidden="true">▦</span>
-                <span class="preset-button__text">
-                  <strong>Board</strong>
-                  <span>Open the board surface</span>
-                </span>
-              </button>
-              <!-- SPEC-3671 FR-016 (T-029): the Work window left this deck once
-                   every Work information item moved to the Issue row. Already
-                   open Work windows keep working (preset `work` still resolves). -->
-            </div>
-          </div>
-          <div class="preset-section" data-category="knowledge">
-            <div class="preset-section-label">GitHub &amp; Knowledge</div>
-            <div class="preset-list">
-              <button class="preset-button" data-preset="issue" data-category="knowledge">
-                <span class="preset-button__icon" aria-hidden="true">◍</span>
-                <span class="preset-button__text">
-                  <strong>Issues</strong>
-                  <span>Open Settings › Project › Issues</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="index" data-category="knowledge">
-                <span class="preset-button__icon" aria-hidden="true">⌕</span>
-                <span class="preset-button__text">
-                  <strong>Index</strong>
-                  <span>Search indexed project content</span>
-                </span>
-              </button>
-            </div>
-          </div>
-          <div class="preset-section" data-category="config">
-            <div class="preset-section-label">Configuration</div>
-            <div class="preset-list">
-              <button class="preset-button" data-preset="settings" data-category="config">
-                <span class="preset-button__icon" aria-hidden="true">⚙</span>
-                <span class="preset-button__text">
-                  <strong>Settings</strong>
-                  <span>Manage custom agents and launch presets</span>
-                </span>
-              </button>
-              <button class="preset-button" data-preset="profile" data-category="config">
-                <span class="preset-button__icon" aria-hidden="true">◑</span>
-                <span class="preset-button__text">
-                  <strong>Profile</strong>
-                  <span>Manage env profiles and variables</span>
-                </span>
-              </button>
-            </div>
-          </div>
-          </div><!-- /.preset-deck -->
-          <div class="modal-footer">
-            <span class="preset-modal__hint">↑↓←→ move · ↵ deploy · esc close</span>
-            <button class="text-button" id="close-modal">Cancel</button>
           </div>
         </div>
       </div>

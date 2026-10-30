@@ -58,6 +58,13 @@ pub const PM_CYCLE_REPORTING_CLAUSE: &str =
 pub const PM_ESCALATION_PROMPT_PREFIX: &str = " UNRESOLVED BLOCKED ESCALATIONS (";
 pub const PM_AGENT_IDLE_WAKE_PREFIX: &str = "[gwt] Agent idle: ";
 
+/// Canonical periodic instruction shared by delivery and prompt classification.
+/// ASCII punctuation preserves the exact text through Windows terminal input.
+pub const PM_PERIODIC_WAKE_INSTRUCTION: &str =
+    "[gwt] Scheduled supervision tick: reconcile now: read a fresh \
+     `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
+     (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).";
+
 /// Issue #3776 / SPEC-3431 FR-148 and Issue #3825: compact execution budget
 /// and subscribe-ordering reminder for the Stop-gate continuation. The
 /// generated gwt-pm guidance owns the full retry, readback, and lifecycle
@@ -441,7 +448,10 @@ pub fn pm_autonomous_bootstrap_allowed(worktree: &Path) -> bool {
 }
 
 pub fn pm_delivery_receipts_path_for_repo_path(repo_path: &Path) -> PathBuf {
-    gwt_core::paths::gwt_project_dir_for_repo_path(repo_path)
+    // A local-only PM worktree has a different path-fallback hash from its
+    // project, but its canonical store already identifies the receipt owner.
+    pm_worktree_store_dir(repo_path)
+        .unwrap_or_else(|| gwt_core::paths::gwt_project_dir_for_repo_path(repo_path))
         .join("project-state/pm-delivery-receipts.jsonl")
 }
 

@@ -35,24 +35,25 @@ test.describe("Operator chrome smoke", () => {
 
   test("rail items are reachable without any reveal interaction", async ({ page }) => {
     for (const id of [
-      "#tile-button",
-      "#stack-button",
-      "#align-button",
-      "#window-list-button",
-      "#add-button",
+      '[data-surface="issues"]',
+      '[data-surface="works"]',
+      '[data-cmd="open-logs"]',
+      '[data-cmd="open-index"]',
+      '[data-cmd="open-profile"]',
       "#op-palette-button",
     ]) {
       await expect(page.locator(id)).toBeVisible();
     }
   });
 
-  test("hovering a rail item raises its flyout label", async ({ page }) => {
-    const tile = page.locator("#tile-button");
-    const flyout = tile.locator(".op-rail__flyout");
-    await expect(flyout).toHaveCSS("opacity", "0");
-    await tile.hover();
-    await expect(flyout).toHaveCSS("opacity", "1");
-    await expect(flyout).toHaveText(/Tile/);
+  test("hovering and focusing a rail item exposes its explanation outside the scroll area", async ({ page }) => {
+    const control = page.locator("#op-palette-button");
+    const explanation = page.locator("#rail-control-explanation");
+    await control.hover();
+    await expect(explanation).toBeVisible();
+    await expect(explanation).toContainText("Command palette");
+    await control.focus();
+    await expect(explanation).toBeVisible();
   });
 
   test("⌘K opens the command palette", async ({ page }) => {
@@ -77,6 +78,6 @@ test.describe("Operator chrome reduced-motion", () => {
 
   test("the rail renders identically under prefers-reduced-motion", async ({ page }) => {
     await expect(page.locator(".op-rail")).toBeVisible();
-    await expect(page.locator("#tile-button")).toBeVisible();
+    await expect(page.locator('[data-surface="works"]')).toBeVisible();
   });
 });

@@ -103,23 +103,6 @@ test("existing grouped surfaces do not reactivate saved canvas groups", () => {
   assert.doesNotMatch(extractFunctionBody(appSource, "openExistingSurfaceWindow"), /activate_window_tab/);
 });
 
-test("Add Window surface buttons use the same reopen path as rail and palette commands", () => {
-  const modalLoop = appSource.match(
-    /for\s*\(\s*const\s+button\s+of\s+modal\.querySelectorAll\("\[data-preset\]"\)\s*\)\s*\{([\s\S]*?)\n\s*\}\n\s*\n\s*\/\/ SPEC-2356 "Surface Deck"/,
-  );
-  assert.ok(modalLoop, "expected Add Window preset button loop");
-  assert.match(
-    modalLoop[1],
-    /focusOrSpawnPreset\(\s*button\.dataset\.preset\s*\)/,
-    "Add Window buttons must reuse existing surface windows before creating",
-  );
-  assert.doesNotMatch(
-    modalLoop[1],
-    /kind:\s*"create_window"/,
-    "Add Window buttons must not bypass the shared surface reopen helper",
-  );
-});
-
 test("surface aliases are normalized before singleton lookup", () => {
   const normalizeBody = extractFunctionBody(appSource, "normalizeSurfacePreset");
   assert.match(

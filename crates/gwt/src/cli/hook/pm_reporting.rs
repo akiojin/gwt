@@ -460,11 +460,18 @@ mod tests {
             crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE,
             crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE,
         );
+        let portable_tick = format!(
+            "[gwt] Scheduled supervision tick: reconcile now: read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close). {} {} {}",
+            crate::pm_registry::PM_STEERING_WAKE_CLAUSE,
+            crate::pm_registry::PM_GWTD_EXECUTION_WAKE_CLAUSE,
+            crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE,
+        );
         let notification = "<task-notification>\n<task-id>background-1</task-id>\n<tool-use-id>tool-1</tool-use-id>\n<output-file>/tmp/result</output-file>\n<status>completed</status>\n<summary>Background task completed</summary>\n</task-notification>";
         let extended_notification = notification.replace("</task-notification>", "<note>Read the result</note>\n<result>Done</result>\n<usage><tool_uses>1</tool_uses></usage>\n</task-notification>");
         for prompt in [
             "$gwt-pm",
             tick.as_str(),
+            portable_tick.as_str(),
             notification,
             extended_notification.as_str(),
         ] {
@@ -482,6 +489,8 @@ mod tests {
         );
         for prompt in [
             "[gwt] Scheduled supervision tick について説明して".to_owned(),
+            format!("Explain this notification: {portable_tick}"),
+            format!("{portable_tick}\nこれは何を意味しますか？"),
             "$gwt-pm の使い方を教えて".to_owned(),
             format!("Explain this notification: {notification}"),
             format!("{notification}\n何が完了しましたか？"),
@@ -714,6 +723,7 @@ mod tests {
             crate::pm_registry::PM_CYCLE_REPORTING_CLAUSE
         );
         let tick = format!("[gwt] Scheduled supervision tick: reconcile now — read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).{suffix}");
+        let portable_tick = format!("[gwt] Scheduled supervision tick: reconcile now: read a fresh `issue.monitor.status` snapshot and inventory open PRs with `pr.list` (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never auto-close).{suffix}");
         let delta = format!("[gwt] Monitor activity while the PM was idle (new needs_human). Reconcile now: fresh `issue.monitor.status`, triage new items, inventory PRs with `pr.list` (stale/SUPERSEDED/owner-closed rows: digest, never auto-close).{suffix}");
         let idle = "[gwt] Agent idle: 修正担当 (#3932) | [gwt] Agent idle: 次の担当 (#5349). Reconcile pane.list and issue.monitor.status; steer the idle agents.";
         let escalations = " UNRESOLVED BLOCKED ESCALATIONS (1) — decide fresh launch / spec ruling / tool fix for each, then post the resolution with params.resolves: #2338 params.resolves:[\"blocked-entry\"] 依頼: fresh launch を手配してほしい";
@@ -727,6 +737,7 @@ mod tests {
         truncated_idle.truncate(end);
         for prompt in [
             format!("{tick}{escalations}\r"),
+            format!("{portable_tick}{escalations}\r"),
             format!("{delta}{escalations}\r"),
             format!("{tick}{escalations} quoted: UNRESOLVED BLOCKED ESCALATIONS (1)\r"),
             format!("{idle}\r"),

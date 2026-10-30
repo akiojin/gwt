@@ -202,7 +202,7 @@ root_js_modules! {
     "profile-window-surface.js" => "createProfileWindowSurface",
     // SPEC-3064 Phase 3 (E7) — Project & workspace shell chrome surface
     // (project tabs + close-tab confirm, recent projects + open-project
-    // menu, picker/onboarding, window list dropdown, maximized viewport
+    // menu, picker/onboarding, maximized viewport
     // sync, clone/migration modal glue) extracted from app.js.
     "project-shell-surface.js" => "createProjectShellSurface",
     // Issue #4777 T-1 — the rail picks Issues / Agents / Board / Settings and
@@ -213,10 +213,6 @@ root_js_modules! {
     "agents-surface.js" => "createAgentsSurface",
     "works-surface.js" => "createWorksSurface",
     "terminal-text-preview.js" => "createTerminalTextPreview",
-    // SPEC-3038 (2026-06-20) — Command Rail Windows popover model: groups the
-    // cross-tab open-window set by owning project tab so the list matches the
-    // badge and supports cross-tab focus.
-    "window-list-model.js" => "groupProjectWindowList",
 }
 
 /// Embedded payload of a [`StaticAsset`].

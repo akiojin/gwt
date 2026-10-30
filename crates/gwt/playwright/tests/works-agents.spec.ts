@@ -190,8 +190,12 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(page.locator("#op-strip-running")).toHaveText("0");
     await expect(page.locator("#op-strip-idle")).toHaveText("1");
     await openRail(page, "works");
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     await expect(works(page).locator(".work-row")).toHaveCount(1);
     await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Idle");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("waiting"));
+    await expect(workRow(page, "agent-one").locator(".work-state")).toHaveText("Waiting");
+    await expect(page.locator("#op-strip-waiting")).toHaveText("1");
     await page.evaluate(() => (window as any).__worksAgentsFixture.status("agent-one", "running"));
     await expect(page.locator("#op-strip-running")).toHaveText("1");
     await expect(works(page).locator('[data-count="running"]')).toHaveText("1");
@@ -227,6 +231,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(works(page).locator('[data-metric="today-output"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-cost"]')).toHaveText("—");
     await expect(works(page).locator('[data-metric="today-landed"]')).toHaveText("—");
+    await expect(works(page).locator('[data-availability="today"]')).toContainText("No data");
+    await expect(works(page).locator('[data-availability="fleet"]')).toContainText("No data");
+    await expect(works(page).locator(".works-source-note")).toContainText("per-session USD");
+    await expect(works(page).locator(".works-source-note")).toContainText("daily merge data");
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("aria-label", /last 30 minutes/);
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
     await expect(workRow(page, "agent-one").locator(".work-stats")).toContainText("Context remaining");
@@ -276,10 +284,46 @@ test.describe("Works and Agents approved baseline", () => {
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
-    await roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose').press("Enter");
+    const purpose = roster(page).locator('.roster-row[data-member-id="m-one"] .roster-purpose');
+    await purpose.focus();
+    await purpose.evaluate(node => { (window as any).__focusedRosterPurpose = node; });
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceTitle("Updated purpose before Enter"));
+    await expect(purpose).toHaveText("Updated purpose before Enter");
+    expect(await purpose.evaluate(node => node === (window as any).__focusedRosterPurpose)).toBe(true);
+    await expect(purpose).toBeFocused();
+    await purpose.press("Enter");
     await expect(main(page)).toHaveAttribute("data-surface", "works");
     await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
 
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
+    const now = roster(page).locator(".roster-now button");
+    await now.focus();
+    await now.evaluate(node => { (window as any).__focusedRosterNow = node; });
+    await page.keyboard.down("Space");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceTitle("Updated current work while Space held"));
+    await expect(now).toContainText("Updated current work while Space held");
+    expect(await now.evaluate(node => node === (window as any).__focusedRosterNow)).toBe(true);
+    await expect(now).toBeFocused();
+    await page.keyboard.up("Space");
+    await expect(main(page)).toHaveAttribute("data-surface", "works");
+    expect(await full(page).locator(".xterm").evaluate(node => node === (window as any).__worksNativeTerminal)).toBe(true);
+
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await workRow(page, "agent-one").getByRole("button", { name: "View Aster in Agents" }).press("Enter");
+    const memberOrder = () => roster(page).locator(".roster-row").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.memberId));
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reorderMembers(["m-two", "m-one", "m-idle"]));
+    await expect.poll(memberOrder).toEqual(["m-two", "m-one", "m-idle"]);
+    await purpose.focus();
+    await page.keyboard.down("Space");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.reorderMembers(["m-one", "m-two", "m-idle"]));
+    await expect.poll(memberOrder).toEqual(["m-one", "m-two", "m-idle"]);
+    expect(await purpose.evaluate(node => node === (window as any).__focusedRosterPurpose)).toBe(true);
+    await expect(purpose).toBeFocused();
+    await page.keyboard.up("Space");
+    await expect(main(page)).toHaveAttribute("data-surface", "works");
+    await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
+    expect(await full(page).locator(".xterm").evaluate(node => node === (window as any).__worksNativeTerminal)).toBe(true);
     await full(page).getByRole("button", { name: "Back to Works" }).click();
     for (const [state, label] of [["idle", "Idle"], ["error", "Error"], ["waiting", "Waiting"]]) {
       await page.evaluate(status => (window as any).__worksAgentsFixture.status("agent-two", status), state);
@@ -288,12 +332,104 @@ test.describe("Works and Agents approved baseline", () => {
         .toBe(await workRow(page, "agent-two").locator(".work-state").evaluate(node => getComputedStyle(node).color));
       await expect(works(page).locator(`[data-count="${state}"]`)).toHaveText("1");
     }
+    for (const state of ["unavailable", "partial"]) {
+      await page.evaluate(state => (window as any).__worksAgentsFixture.usage(state), state);
+      await expect(works(page).locator('[data-availability="today"]')).toHaveAttribute("data-state", state);
+      await expect(works(page).locator('[data-availability="fleet"]')).toHaveAttribute("data-state", state);
+      await expect(works(page).locator('[data-availability="today"]')).toContainText(state === "unavailable"
+        ? "Fixture transcript cannot be read" : "incomplete");
+      await expect(works(page).locator('[data-metric="today-total"]')).toHaveText("—");
+      await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("—");
+    }
     await page.evaluate(() => (window as any).__worksAgentsFixture.usage());
+    await expect(works(page).locator('[data-availability="today"]')).toHaveAttribute("data-state", "measured");
+    await expect(works(page).locator('[data-availability="fleet"]')).toHaveAttribute("data-state", "measured");
     await expect(works(page).locator('[data-metric="today-input"]')).toHaveText("0");
     await expect(works(page).locator('[data-metric="fleet-now"]')).toHaveText("0");
     await expect(works(page).locator(".works-fleet svg")).toHaveAttribute("data-known-count", "30");
     await expect(workRow(page, "agent-one").locator('[data-stat="context"]')).toHaveText("0%");
     await page.screenshot({ path: info.outputPath("works-measured-zero.png") });
+  });
+
+  test("saved Works output lines preserve raw text, readonly mirrors and native controls", async ({ page }, info) => {
+    // Keep each source line short enough for the narrow split terminal grid;
+    // the preview intentionally preserves parsed visual wraps, not source rows.
+    const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
+    const output = async () => page.evaluate(text => (window as any).__worksAgentsFixture.output("agent-one", `\u001b[2J\u001b[H${text}\r\n`), lines.join("\r\n"));
+    const tail = () => page.locator('.works-surface:not(.works-surface--preview) .work-row[data-window-id="agent-one"] .terminal-text-preview');
+    const expectLines = async (count: number, mirror = false) => {
+      const surfaces = page.locator(mirror ? ".works-surface" : ".works-surface:not(.works-surface--preview)");
+      await expect(surfaces).toHaveCount(mirror ? 2 : 1);
+      for (const surface of await surfaces.all()) {
+        await expect(surface).toHaveCSS("--works-preview-lines", String(count));
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .terminal-text-preview'))
+          .toHaveText(lines.slice(-count).join("\n"), { useInnerText: false });
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .terminal-text-preview x')).toHaveCount(0);
+        await expect(surface.locator(".work-row")).toHaveCount(3);
+        await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(surface.locator(".works-fleet svg")).toHaveAttribute("data-known-count", "0");
+        await expect(surface.locator('.work-row[data-window-id="agent-one"] .work-stats [data-stat]')).toHaveCount(8);
+      }
+    };
+    await output(); await expectLines(3);
+    await works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm').evaluate(node => {
+      (window as any).__worksLineTerminal = node;
+    });
+    await openRail(page, "settings");
+    const input = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
+    await expect(input).toHaveValue("3");
+    for (const count of [5, 10]) {
+      await input.fill(String(count)); await input.press("Tab");
+      await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
+      await openRail(page, "works"); await expectLines(count);
+      expect(await works(page).locator('.work-runtime-cache[data-window-id="agent-one"] .xterm')
+        .evaluate(node => node === (window as any).__worksLineTerminal)).toBe(true);
+      await openRail(page, "settings");
+    }
+    await page.screenshot({ path: info.outputPath("settings-works-output-lines.png") });
+    const saves = (await sent(page)).filter(message => message.kind === "update_system_settings").length;
+    await input.fill("2"); await input.press("Tab");
+    await expect(page.locator('[data-role="system-settings-status"]')).toContainText("whole number from 3 to 10");
+    expect((await sent(page)).filter(message => message.kind === "update_system_settings")).toHaveLength(saves);
+    await openRail(page, "works"); await expectLines(10);
+    await tail().click();
+    await tail().evaluate(node => {
+      const range = document.createRange(); range.selectNodeContents(node);
+      const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    });
+    await tail().hover(); await page.mouse.wheel(200, 0);
+    await expect(full(page)).toBeHidden();
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("works");
+    await expectLines(10, true);
+    await page.setViewportSize({ width: 400, height: 1000 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    await expectLines(10, true);
+    const graphLabels = await page.locator(".works-surface .work-side small").evaluateAll(nodes => nodes.map(node => {
+      const style = getComputedStyle(node);
+      return { height: node.getBoundingClientRect().height, line: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5 };
+    }));
+    for (const label of graphLabels) expect(label.height, "graph explanation remains readable in each narrow split pane").toBeLessThanOrEqual(label.line * 4);
+    for (const surface of await page.locator(".works-surface").all()) {
+      await surface.locator('.work-row[data-window-id="agent-one"]').scrollIntoViewIfNeeded();
+    }
+    await page.screenshot({ path: info.outputPath("works-output-lines-split-400.png") });
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.reload(); await openRail(page, "works"); await output(); await expectLines(10);
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal" }).click();
+    await expect(full(page)).toBeVisible();
+    const nativeInput = full(page).locator(".xterm-helper-textarea");
+    await nativeInput.press("Escape"); await nativeInput.press("q");
+    await expect.poll(async () => (await sent(page)).filter(message => message.kind === "terminal_input" && message.id === "agent-one").map(message => message.data))
+      .toEqual(expect.arrayContaining(["\u001b", "q"]));
+    await full(page).getByRole("button", { name: "Previous work" }).click();
+    await expect(full(page).locator(".works-full-name .window-role-badge")).toHaveText("PM");
+    await full(page).getByRole("button", { name: "Next work" }).click();
+    await expect(full(page).locator(".works-full-name")).toHaveText("Aster");
+    await full(page).getByRole("button", { name: "Back to Works" }).click();
+    await expectLines(10);
+    await page.screenshot({ path: info.outputPath("works-output-lines-10.png") });
   });
 
   test("Team/Past, revision readback, idle-safe links and 400px layouts retain the approved roster", async ({ page }, info) => {
@@ -306,6 +442,10 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-detail .roster-stat")).toHaveCount(4);
     await expect(roster(page).locator(".roster-detail")).toContainText("Codex");
     await expect(roster(page).locator(".roster-detail")).toContainText("Member since 2026-10-20");
+    await expect(roster(page).locator(".roster-detail-heading")).not.toContainText("Fixture model");
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Model: saved-manual-model");
+    await expect(roster(page).locator(".roster-saved-settings")).toContainText("Automatic launches use tier settings");
+    await expect(roster(page).locator(".roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
     expect(await roster(page).locator(".roster-history li").allTextContents()).toEqual([
       expect.stringMatching(/Now.*#4777.*Current issue/), expect.stringContaining("Later slice"), expect.stringContaining("Earlier slice"),
     ]);
@@ -326,15 +466,20 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(roster(page).locator(".roster-past tbody tr")).toContainText("2026-10-20");
     await page.screenshot({ path: info.outputPath("agents-approved-past.png") });
     await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
+    const newMemberTool = roster(page).getByRole("combobox", { name: "Tool for new member", exact: true });
+    await expect(newMemberTool.locator("option")).toHaveText(["Codex", "Claude Code"]);
+    await newMemberTool.selectOption("codex");
+    await roster(page).getByLabel("Name for new member", { exact: true }).fill("Dahlia");
     await roster(page).locator('.roster-capacity [data-action="add"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("4");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("4");
+    expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").agent_id)).toBe("codex");
     await roster(page).locator('.roster-row[data-member-id="m-added"]').click();
     await roster(page).locator('.roster-detail [data-action="rest"]').click();
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
     await expect(roster(page).locator(".roster-capacity-value")).toHaveText("3");
     const mutations = (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind !== "read");
-    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
+    expect(mutations.map(message => [message.action, message.expected_revision])).toEqual([[{ kind: "add", agent_id: "codex", name: "Dahlia" }, 3], [{ kind: "rest", member_id: "m-added" }, 4]]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.rejectedRevisions)).toEqual([]);
     expect(await page.evaluate(() => (window as any).__worksAgentsFixture.members.find(member => member.agent_member_id === "m-added").enabled)).toBe(false);
 
@@ -346,18 +491,102 @@ test.describe("Works and Agents approved baseline", () => {
     await expect(main(page)).toHaveAttribute("data-surface", "agents");
     await expect(roster(page).locator(".roster-now, .roster-row[data-member-id='m-one'] .roster-current")).toHaveCount(0);
     await page.evaluate(() => (window as any).__worksAgentsFixture.error("Roster readback unavailable"));
-    await expect(roster(page).locator(".roster-error")).toHaveText("Roster readback unavailable");
+    await expect(roster(page).locator(":scope > .roster-error")).toHaveText("Roster readback unavailable");
     await expect(roster(page).locator(".roster-count")).toHaveText("3");
 
     await page.setViewportSize({ width: 400, height: 1000 });
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
     await page.screenshot({ path: info.outputPath("agents-approved-400.png") });
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    const previewName = page.locator('.agents-surface--preview [aria-label="Name for new member"]');
+    await expect(previewName).toBeDisabled();
+    await expect(previewName).toHaveAttribute("tabindex", "-1");
+    await page.getByRole("button", { name: "Close split", exact: true }).click();
     await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
     await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
     await openRail(page, "works");
     await expect(works(page).locator(".work-row")).toHaveCount(2);
     await expectNoHorizontalOverflow(page, ".works-surface:not([hidden]):not(.works-surface--preview)");
     await page.screenshot({ path: info.outputPath("works-approved-400.png") });
+    await expect(works(page).locator('[data-availability="today"]')).toBeVisible();
+    await expect(works(page).locator('[data-availability="fleet"]')).toBeVisible();
+    await expect(works(page).locator(".works-source-note")).toBeVisible();
+  });
+
+  test("inline member names preserve drafts, IME, current work and history through conflict retry", async ({ page }, info) => {
+    await openRail(page, "agents");
+    const name = roster(page).getByRole("textbox", { name: "Display name", exact: true });
+    const status = roster(page).locator(".roster-name-status");
+    const writes = async () => (await sent(page)).filter(message => message.kind === "agent_roster" && message.action.kind === "rename");
+    const identity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
+    await page.evaluate(() => (window as any).__worksAgentsFixture.deferRename());
+    await name.fill("Maple current");
+    await expect(status).toContainText("Saving");
+    await name.fill("Oak current");
+    expect(await writes()).toHaveLength(1);
+    await name.focus();
+    await page.evaluate(() => (window as any).__worksAgentsFixture.workspaceStatus("idle"));
+    await expect(name).toBeFocused();
+    await expect(name).toHaveValue("Oak current");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect.poll(async () => (await writes()).length).toBe(2);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    await page.evaluate(() => (window as any).__worksAgentsFixture.replayRename());
+    await expect(name).toHaveValue("Oak current");
+    await expect(roster(page).locator(".roster-detail h3")).toHaveText("Oak current");
+    await name.fill("  ");
+    await expect(name).toHaveAttribute("aria-invalid", "true");
+    await name.fill(" BIRCH ");
+    await expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(await writes()).toHaveLength(2);
+    await name.dispatchEvent("compositionstart");
+    await name.fill("楓");
+    expect(await writes()).toHaveLength(2);
+    await name.dispatchEvent("compositionend");
+    await expect.poll(async () => (await writes()).length).toBe(3);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    await name.fill("Draft after conflict");
+    await expect.poll(async () => (await writes()).length).toBe(4);
+    await page.evaluate(() => { (window as any).__worksAgentsFixture.renameElsewhere("Remote name"); (window as any).__worksAgentsFixture.releaseRename(); });
+    await expect(status).toContainText("changed");
+    await expect(name).toHaveValue("Draft after conflict");
+    await expect(roster(page).locator(".roster-detail h3")).toHaveText("Remote name");
+    await roster(page).getByRole("button", { name: "Retry name", exact: true }).click();
+    await expect.poll(async () => (await writes()).length).toBe(5);
+    await page.evaluate(() => (window as any).__worksAgentsFixture.releaseRename());
+    await expect(status).toHaveText("Saved");
+    const renamedIdentity = await page.evaluate(() => (window as any).__worksAgentsFixture.currentIdentity());
+    // The fixture's explicit status refresh is unrelated to the rename.
+    expect(renamedIdentity.agents).toEqual(identity.agents);
+    expect(renamedIdentity.assignments).toEqual(identity.assignments);
+    await expect(roster(page).locator(".roster-history-config")).toHaveText([
+      "Recorded name: — · Tool: — · Recorded model: —",
+      "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+    ]);
+    await roster(page).getByRole("tab", { name: "Past", exact: true }).click();
+    await expect(roster(page).locator(".roster-past tbody")).toContainText("Earlier author");
+    await roster(page).getByRole("tab", { name: "Team", exact: true }).click();
+    await openRail(page, "works");
+    await expect(workRow(page, "agent-one").locator(".work-name")).toHaveText("Draft after conflict");
+    await workRow(page, "agent-one").getByRole("button", { name: "Open terminal", exact: true }).click();
+    await expect(full(page).locator(".works-full-name")).toContainText("Draft after conflict");
+    await openRail(page, "agents");
+    await page.setViewportSize({ width: 400, height: 1000 });
+    await expectNoHorizontalOverflow(page, ".agents-surface:not([hidden]):not(.agents-surface--preview)");
+    await name.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath("inline-name-400.png") });
+    await page.getByRole("button", { name: "Split view", exact: true }).click();
+    await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("agents");
+    await expect(page.locator('.agents-surface--preview [aria-label="Display name"]')).toBeDisabled();
+    await expect(page.locator(".agents-surface--preview .roster-history-config")).toHaveText([
+      "Recorded name: — · Tool: — · Recorded model: —",
+      "Recorded name: Recorded author · Tool: claude · Recorded model: recorded-model",
+    ]);
+    await expect(page.locator(".agents-surface--preview .roster-saved-settings")).toContainText("Model: saved-manual-model");
+    await expect(page.locator(".agents-surface--preview .roster-current-config")).toHaveText("Recorded name: Launch author · Tool: codex · Recorded model: launch-model");
   });
 
   test("ordered member plans keep current work through pending readback, stale rejection and reassignment", async ({ page }, info) => {
@@ -451,13 +680,16 @@ async function installWorksAgentsBackend(page: Page) {
     ];
     const assignment = (session_id: string, issue_number: number) => ({ reservation_id: `r-${session_id}`, session_id, issue_number, spec_number: null, delivery_id: null, host_id: "fixture-host", host_pid: 12345, host_started_at: 1 });
     const members: any[] = [
-      { agent_member_id: "m-one", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
-        { session_id: "s-earlier", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
+      { agent_member_id: "m-one", agent_id: "codex", name: "Aster", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4777, last_spec_number: null, assignment: assignment("s-one", 4777), provider: "Codex", model: "Fixture model", saved_manual_profile: { agent_id: "codex", agent_member_id: "m-one", model: "saved-manual-model", reasoning: "high", runtime_target: "Host", skip_permissions: false }, issue_count: 3, landed_count: 2, active_seconds: 7200, tokens: 5000, history: [
+        { session_id: "s-one", name: "Launch author", provider: "codex", model: "launch-model", issue_number: 4777, title: "Current issue", result: "Running", started_at: "2026-10-23T00:00:00Z", ended_at: null },
+        { session_id: "s-earlier", name: "Recorded author", provider: "claude", model: "recorded-model", issue_number: 4000, title: "Earlier slice", result: "landed", started_at: "2026-10-20T00:00:00Z", ended_at: "2026-10-20T02:00:00Z" },
         { session_id: "s-later", issue_number: 4600, title: "Later slice", result: null, started_at: "2026-10-22T00:00:00Z", ended_at: "2026-10-22T02:00:00Z" },
       ] },
-      { agent_member_id: "m-two", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
-      { agent_member_id: "m-idle", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+      { agent_member_id: "m-two", agent_id: "claude", name: "Birch", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: 4001, last_spec_number: null, assignment: assignment("s-two", 4001), provider: "Claude", model: "Fixture model", issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
+      { agent_member_id: "m-idle", agent_id: "codex", name: "Cedar", enabled: true, created_at: "2026-10-20T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, issue_count: null, landed_count: null, active_seconds: null, tokens: null, history: [] },
     ];
+    // Fixture-only backing storage models backend persistence across page reload.
+    let worksPreviewLines = Number(sessionStorage.getItem("fixture:works-preview-lines") || 3);
     let revision = 3, activityRevision = 0;
     let agents: any[] = [
       { window_id: "agent-two", session_id: "s-two", runtime_incarnation: 2, issue_number: 4001, is_pm: false },
@@ -467,7 +699,7 @@ async function installWorksAgentsBackend(page: Page) {
     const sentMessages: any[] = [], rejectedRevisions: any[] = [];
     const rejectedScheduleRevisions: any[] = [];
     let queueRevision = "queue-v1:fixture-1", scheduleRevision = 7, deferredSchedule = false;
-    let pendingSchedule: any = null;
+    let pendingSchedule: any = null, pendingRename: any = null, deferredRename = false, firstRenameReceipt: any = null;
     const planned = [
       { agent_member_id: "m-one", issues: [{ issue_number: 5002, reason: "same_spec_continuation" }, { issue_number: 5003, reason: "queue_order" }] },
       { agent_member_id: "m-two", issues: [{ issue_number: 5004, reason: "queue_order" }] },
@@ -476,6 +708,18 @@ async function installWorksAgentsBackend(page: Page) {
     let socket: FixtureWebSocket;
     const workspace = () => ({ kind: "workspace_state", workspace: { app_version: "playwright", active_tab_id: "tab-works", recent_projects: [], tabs: [{ id: "tab-works", title: "Works Agents Fixture", project_root: "/fixture", project_key: projectKey, kind: "git", workspace: { windows, viewport: { x: 0, y: 0, zoom: 1 } } }] } });
     const rosterSnapshot = () => ({ kind: "agent_roster", roster: { project_key: projectKey, revision, members, capacity: members.filter(member => member.enabled).length, recommended_capacity: 6, past_complete: true, past_contributors: [{ session_id: "s-earlier", name: "Earlier author", kind: "implementation", issue_numbers: [4000], first_posted_at: "2026-10-20T00:00:00Z", last_posted_at: "2026-10-20T02:00:00Z", post_count: 4 }], by_session: Object.fromEntries(agents.map(agent => [agent.session_id, { branch: `work/${agent.window_id}`, ahead_of_develop: 0, model: "Fixture model", provider: agent.is_pm || agent.session_id === "s-two" ? "Claude" : "Codex", last_action: "Fixture observation", elapsed_seconds: 120, warning_count: 0 }])), error: null } });
+    const applyRename = (message: any) => {
+      const member = members.find(member => member.agent_member_id === message.action.member_id);
+      const name = message.action.name.trim();
+      let error: string | null = null;
+      if (message.expected_revision !== revision) error = "Agent roster changed; reload before retrying";
+      else if (!member || !name || members.some(other => other !== member && other.name.trim().toLowerCase() === name.toLowerCase())) error = "Invalid display name";
+      else if (member.name !== name) { member.name = name; revision++; }
+      const receipt = { ...rosterSnapshot(), request_id: message.request_id };
+      receipt.roster.error = error as any;
+      if (!firstRenameReceipt) firstRenameReceipt = JSON.parse(JSON.stringify(receipt));
+      socket.emit(receipt);
+    };
     const scheduleSnapshot = () => ({ kind: "agent_schedule", schedule: { project_key: projectKey, roster_revision: revision, queue_revision: queueRevision, schedule_revision: scheduleRevision, members: members.filter(member => member.enabled).map(member => ({ agent_member_id: member.agent_member_id, issues: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues || [], empty_reason: planned.find(plan => plan.agent_member_id === member.agent_member_id)?.issues.length ? null : "No queued issue" })) } });
     const applySchedule = (action: any) => {
       if (action.expected_roster_revision !== revision || action.expected_queue_revision !== queueRevision || action.expected_schedule_revision !== scheduleRevision) {
@@ -501,9 +745,30 @@ async function installWorksAgentsBackend(page: Page) {
       }
       send(raw: string) {
         const message = JSON.parse(raw); sentMessages.push(message);
+        if (message.kind === "create_window" && message.preset === "settings" && !windows.some(data => data.preset === "settings")) {
+          windows.push(baseWindow("settings-window", { title: "Settings", preset: "settings", z_index: 101, surface_owner: message.surface_owner }));
+          this.emit(workspace());
+        }
+        if (message.kind === "get_system_settings") this.emit({ kind: "system_settings", language: "auto", works_preview_lines: worksPreviewLines });
+        if (message.kind === "update_system_settings") {
+          if (Number.isInteger(message.works_preview_lines) && message.works_preview_lines >= 3 && message.works_preview_lines <= 10) {
+            worksPreviewLines = message.works_preview_lines;
+            sessionStorage.setItem("fixture:works-preview-lines", String(worksPreviewLines));
+            this.emit({ kind: "system_settings_updated", language: message.language, works_preview_lines: worksPreviewLines });
+          } else this.emit({ kind: "system_settings_error", message: "Invalid fixture Works output lines" });
+        }
+        if (message.kind === "list_supported_agents") this.emit({ kind: "supported_agent_list", agents: [
+          { id: "codex", name: "Codex", installed: true }, { id: "claude", name: "Claude Code", installed: true },
+        ] });
+        if (message.kind === "list_custom_agents") this.emit({ kind: "custom_agent_list", agents: [] });
         if (message.kind === "agent_roster") {
+          if (message.action.kind === "rename") {
+            if (deferredRename) pendingRename = message;
+            else applyRename(message);
+            return;
+          }
           if (message.action.kind !== "read" && message.expected_revision !== revision) { rejectedRevisions.push(message); this.emit(rosterSnapshot()); return; }
-          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", name: "Dahlia", enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
+          if (message.action.kind === "add") { members.push({ agent_member_id: "m-added", agent_id: message.action.agent_id, name: message.action.name, enabled: true, created_at: "2026-10-25T00:00:00Z", last_issue_number: null, last_spec_number: null, assignment: null, provider: null, model: null, history: [], issue_count: 0, landed_count: 0, active_seconds: 0, tokens: 0 }); revision++; }
           if (message.action.kind === "rest") { const member = members.find(member => member.agent_member_id === message.action.member_id); if (member) { member.enabled = false; revision++; } }
           this.emit(rosterSnapshot());
         }
@@ -519,6 +784,10 @@ async function installWorksAgentsBackend(page: Page) {
     Object.defineProperty(window, "WebSocket", { configurable: true, value: FixtureWebSocket });
     (window as any).__worksAgentsFixture = {
       sent: sentMessages, members, rejectedRevisions, rejectedScheduleRevisions,
+      deferRename() { deferredRename = true; },
+      releaseRename() { const message = pendingRename; pendingRename = null; if (message) applyRename(message); },
+      replayRename() { if (firstRenameReceipt) socket.emit(firstRenameReceipt); },
+      renameElsewhere(name: string) { members[0].name = name; revision++; socket.emit(rosterSnapshot()); },
       activityForWorks(session_id: string, runtime_incarnation: number) {
         agents = [{ window_id: "agent-one", session_id, runtime_incarnation, issue_number: 4777,
           is_pm: false, current_task: `Live ${session_id}` }];
@@ -538,6 +807,8 @@ async function installWorksAgentsBackend(page: Page) {
         socket.emit(event);
       },
       workspaceTitle(title: string) { windows.find(data => data.id === "agent-one").dynamic_title = title; socket.emit(workspace()); },
+      workspaceStatus(status: string) { windows.find(data => data.id === "agent-one").status = status; socket.emit(workspace()); },
+      reorderMembers(ids: string[]) { members.splice(0, members.length, ...ids.map(id => members.find(member => member.agent_member_id === id))); revision++; socket.emit(rosterSnapshot()); },
       currentIdentity() { return { windows: windows.filter(data => data.session_id).map(({ id, session_id, status }) => ({ id, session_id, status })), agents, assignments: members.map(member => ({ member_id: member.agent_member_id, assignment: member.assignment })) }; },
       deferSchedule() { deferredSchedule = true; },
       changeQueueRevision() { queueRevision = "queue-v1:fixture-2"; },
@@ -556,7 +827,24 @@ async function installWorksAgentsBackend(page: Page) {
       status(id: string, status: string) { const data = windows.find(data => data.id === id); if (data) data.status = status; socket.emit({ kind: "terminal_status", id, status }); },
       retire(id: string, immediate: boolean) { agents = agents.filter(agent => agent.window_id !== id); const event = activity(); if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: event })); else socket.emit(event); },
       error(message: string) { socket.emit({ kind: "agent_roster_error", project_key: projectKey, message }); },
-      usage() { socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({ session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`, provider: agent.is_pm || agent.session_id === "s-two" ? "claude_code" : "codex", project_path: "/fixture", model: "Fixture model", active: true, input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, output_tokens: 0, total_tokens: 0, reported_context_left_pct: 0, context_used_tokens: null, context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true, state: { kind: "ok" }, telemetry: { source: "fixture-reported", quality: "measured", observed_at: "2026-10-25T00:00:00Z", today_tokens: 0, today_input_tokens: 0, today_cache_read_tokens: 0, today_cache_creation_tokens: 0, today_output_tokens: 0, minute_buckets: Array.from({ length: 30 }, (_, index) => ({ started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: 0 })) } })) }); },
+      usage(quality = "measured") {
+        const measured = quality === "measured", value = measured ? 0 : null;
+        socket.emit({ kind: "provider_usage", accounts: [], consumption: [], sessions: agents.map(agent => ({
+          session_id: agent.session_id, provider_session_id: `provider-${agent.session_id}`,
+          provider: agent.is_pm || agent.session_id === "s-two" ? "claude_code" : "codex", project_path: "/fixture",
+          model: "Fixture model", active: true, input_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0,
+          output_tokens: 0, total_tokens: 0, reported_context_left_pct: 0, context_used_tokens: null,
+          context_limit_tokens: null, context_left_pct: null, limit_reached: false, eligible: true,
+          state: quality === "unavailable" ? { kind: "unavailable", reason: "Fixture transcript cannot be read" } : { kind: "ok" },
+          telemetry: quality === "unavailable" ? null : { source: "fixture-reported", quality,
+            observed_at: "2026-10-25T00:00:00Z", today_tokens: value, today_input_tokens: value,
+            today_cache_read_tokens: value, today_cache_creation_tokens: value, today_output_tokens: value,
+            minute_buckets: Array.from({ length: 30 }, (_, index) => ({
+              started_at: new Date(1792884600000 + index * 60000).toISOString(), tokens: value,
+            })),
+          },
+        })) });
+      },
     };
   }, { projectKey: APP_PROJECT_KEY });
 }

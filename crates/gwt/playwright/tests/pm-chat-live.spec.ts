@@ -161,7 +161,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('Reports and Execution log render the same window version for every receive', async ({ page }, info) => {
+  test('Reports and Execution log render the same window version for every receive without focus or animation frames', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -177,9 +177,17 @@ test.describe('PM reports', () => {
       expect(id).toBeTruthy();
       const terminal = await pane.locator('.terminal-root').elementHandle();
       const marker = `Shared version ${theme}`;
+      // Complete the normal first-fit handshake before measuring an inactive
+      // terminal. A never-revealed log intentionally defers its initial bytes.
+      await pane.getByRole('button', { name: 'Execution log', exact: true }).click();
+      await expect.poll(() => page.evaluate(id => window.__gwtTerminalTestApi!.metrics(id!).isReady, id)).toBe(true);
+      await pane.getByRole('button', { name: 'Reports', exact: true }).click();
+      await expect(reports).toBeVisible();
+      await page.locator('#op-pm-entry').focus();
+      await expect(page.locator('#op-pm-entry')).toBeFocused();
 
       // Controlled inbound frames exercise the real checkout receive/model/view
-      // path. These are functional observations, not a real PTY or latency run.
+      // deadline with rAF withheld, not real PTY throughput or OS background paint.
       const evidence = await page.evaluate(async ({ id, marker }) => {
         const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
         const reportRoot = pane.querySelector<HTMLElement>('.pm-chat')!;
@@ -190,23 +198,38 @@ test.describe('PM reports', () => {
         const original = (window as any).__gwtPlaywrightMessages.map((entry: any) => entry.payload)
           .findLast((event: any) => event.kind === 'pm_reports' && event.id === id);
         if (!socket || !original) throw new Error('Missing live project socket or hydrated Reports');
-        const dispatch = (...events: object[]) => new Promise<{ before: (string | undefined)[]; after: (string | undefined)[] }>((resolve, reject) => {
+        const dispatch = (raw: string, reportText: string, ...events: object[]) => new Promise<{
+          before: (string | undefined)[]; after: (string | undefined)[]; elapsed_ms: number;
+        }>((resolve, reject) => {
           const before = versions();
+          const startedAt = performance.now();
+          let after: (string | undefined)[] | undefined;
+          const check = () => {
+            const elapsed_ms = performance.now() - startedAt;
+            if (after && reportRoot.textContent!.includes(reportText)
+              && window.__gwtTerminalTestApi!.bufferText(id!).includes(raw)) {
+              resolve({ before, after, elapsed_ms });
+            } else if (elapsed_ms >= 1_000) {
+              observer.disconnect();
+              reject(new Error(`Receive did not update both views and RAW buffer within one second: ${JSON.stringify({
+                before, after, reportMatched: reportRoot.textContent!.includes(reportText),
+                rawMatched: window.__gwtTerminalTestApi!.bufferText(id!).includes(raw),
+                terminal: window.__gwtTerminalTestApi!.metrics(id!),
+              })}`));
+            } else timer = setTimeout(check, 100);
+          };
           const observer = new MutationObserver(() => {
             observer.disconnect();
-            clearTimeout(timeout);
-            resolve({ before, after: versions() });
+            after = versions();
+            clearTimeout(timer);
+            check();
           });
-          const timeout = setTimeout(() => {
-            observer.disconnect();
-            reject(new Error('Receive did not advance the Reports window version'));
-          }, 5_000);
+          let timer = setTimeout(check, 100);
           observer.observe(reportRoot, { attributes: true, attributeFilter: ['data-state-version'] });
           for (const event of events) socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(event) }));
         });
-        const snapshot = await dispatch({ kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
         // Obtain a real model-issued force token without sending this controlled
-        // request to the backend; its response is injected below.
+        // request to the backend, before withholding animation callbacks.
         let request: any;
         const originalSend = socket.send;
         socket.send = function (data: string) {
@@ -217,23 +240,50 @@ test.describe('PM reports', () => {
         try { document.dispatchEvent(new Event('visibilitychange')); }
         finally { socket.send = originalSend; }
         if (!request) throw new Error('Missing model-issued Reports request');
-        const report = await dispatch({ ...original, request_id: request.request_id, snapshot: true,
-          version: { epoch: original.version.epoch, revision: original.version.revision + 1 }, reports: [...original.reports, {
-          id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
-          body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
-        }] });
-        const reportNodes = [...reportRoot.querySelectorAll('article')];
-        const output = await dispatch({ kind: 'terminal_output', id, data_base64: btoa('PAIR RAW appended\r\n') });
-        const reportsRetainedOnOutput = reportNodes.every((node, index) => node === reportRoot.querySelectorAll('article')[index]);
-        const reportText = reportRoot.textContent;
-        // The following valid packet fences dispatcher processing of the stale
-        // frame: only that valid packet may advance the shared version.
-        const stale = await dispatch(
-          { ...original, session_id: 'stale-session', reports: [], error: 'STALE REPORT ERROR' },
-          { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW fence\r\n') },
-        );
-        return { snapshot, report, output, stale, reportsRetainedOnOutput,
-          reportsRetainedOnStale: reportRoot.textContent === reportText };
+        const originalFrame = window.requestAnimationFrame;
+        const originalCancel = window.cancelAnimationFrame;
+        const captured = new Map<number, FrameRequestCallback>();
+        let requestedFrames = 0;
+        let focusEvents = 0;
+        const onFocus = () => { focusEvents += 1; };
+        pane.addEventListener('focusin', onFocus);
+        window.requestAnimationFrame = callback => {
+          const handle = -(++requestedFrames);
+          captured.set(handle, callback);
+          return handle;
+        };
+        window.cancelAnimationFrame = handle => {
+          if (!captured.delete(handle)) originalCancel.call(window, handle);
+        };
+        try {
+          const snapshot = await dispatch('PAIR RAW snapshot', 'Persisted before restart',
+            { kind: 'terminal_snapshot', id, data_base64: btoa('PAIR RAW snapshot\r\n') });
+          const report = await dispatch('PAIR RAW snapshot', marker, { ...original, request_id: request.request_id, snapshot: true,
+            version: { epoch: original.version.epoch, revision: original.version.revision + 1 }, reports: [...original.reports, {
+            id: 'shared-version-report', kind: 'progress', created_at: '2026-10-19T00:00:00Z',
+            body: `## ${marker}`, body_html: `<h2>${marker}</h2>`,
+          }] });
+          const reportNodes = [...reportRoot.querySelectorAll('article')];
+          const output = await dispatch('PAIR RAW appended', marker,
+            { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW appended\r\n') });
+          const reportsRetainedOnOutput = reportNodes.every((node, index) => node === reportRoot.querySelectorAll('article')[index]);
+          const reportText = reportRoot.textContent;
+          // The following valid packet fences dispatcher processing of the stale
+          // frame: only that valid packet may advance the shared version.
+          const stale = await dispatch('PAIR RAW fence', marker,
+            { ...original, session_id: 'stale-session', reports: [], error: 'STALE REPORT ERROR' },
+            { kind: 'terminal_output', id, data_base64: btoa('PAIR RAW fence\r\n') },
+          );
+          return { snapshot, report, output, stale, reportsRetainedOnOutput,
+            reportsRetainedOnStale: reportRoot.textContent === reportText,
+            requestedFrames, capturedFrames: captured.size, focusEvents,
+            windowFocused: pane.contains(document.activeElement) };
+        } finally {
+          window.requestAnimationFrame = originalFrame;
+          window.cancelAnimationFrame = originalCancel;
+          pane.removeEventListener('focusin', onFocus);
+          for (const callback of captured.values()) originalFrame.call(window, callback);
+        }
       }, { id, marker });
       for (const step of [evidence.snapshot, evidence.report, evidence.output, evidence.stale]) {
         expect(step.before[0]).toMatch(/^\d+$/);
@@ -242,7 +292,12 @@ test.describe('PM reports', () => {
         expect(step.after, 'each receive advances both views together').toEqual([
           String(Number(step.before[0]) + 1), String(Number(step.before[0]) + 1),
         ]);
+        expect(step.elapsed_ms, 'joint DOM and RAW buffer advance within one second').toBeLessThanOrEqual(1_000);
       }
+      expect(evidence.requestedFrames, 'animation callbacks were withheld').toBeGreaterThan(0);
+      expect(evidence.capturedFrames).toBeGreaterThan(0);
+      expect(evidence.windowFocused).toBe(false);
+      expect(evidence.focusEvents, 'no target focus restored updates').toBe(0);
       expect(evidence.reportsRetainedOnOutput).toBe(true);
       expect(evidence.reportsRetainedOnStale).toBe(true);
       await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
@@ -358,7 +413,7 @@ test.describe('PM reports', () => {
     });
   });
 
-  test('unchanged polls are silent, changed reports arrive and reconnect hydrates', async ({ page }, info) => {
+  test('unchanged polls are silent, inactive Reports receive live deltas and reconnect snapshots', async ({ page }, info) => {
     await withLiveGwtBackendLock(BASE, info, async () => {
       const errors: string[] = [];
       page.on('pageerror', error => errors.push(error.message));
@@ -384,15 +439,164 @@ test.describe('PM reports', () => {
         entry.sequence > cursor && entry.payload.kind === 'pm_reports' && entry.payload.id === id), { id, cursor });
       expect(unchanged).toHaveLength(0);
 
-      const marker = `Changed report ${info.project.name}`;
-      const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
-      appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
-        id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
-      })}\n`);
-      await refreshPmReports(page);
-      await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      let lastMarker = '';
+      for (const snapshot of [false, true]) {
+        const phase = snapshot ? 'snapshot' : 'delta';
+        const marker = `${phase} report ${info.project.name} ${randomUUID()}`;
+        const fixture = JSON.parse(readFileSync(`${HOME}/issue-5023-isolated.json`, 'utf8'));
+        await page.locator('#op-pm-entry').focus();
+        await expect(page.locator('#op-pm-entry')).toBeFocused();
+        await page.evaluate(({ id, marker, snapshot }) => {
+          const pane = document.querySelector(`.workspace-window[data-id="${id}"]`)!;
+          const report = pane.querySelector<HTMLElement>('.pm-chat')!;
+          const log = pane.querySelector<HTMLElement>('.pm-conversation-log')!;
+          const versions = () => [report.dataset.stateVersion, log.dataset.stateVersion];
+          const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
+            candidate.readyState === WebSocket.OPEN && new URL(candidate.url).searchParams.has('repo_hash'));
+          if (!socket) throw new Error('Missing live project socket');
+          const originalSocket = window.WebSocket;
+          const observedSockets = new Set([socket]);
+          const interceptedSockets = new Set<WebSocket>();
+          const heldHydration: Array<() => void> = [];
+          let holdHydration = snapshot;
+          const originalFrame = window.requestAnimationFrame;
+          const originalCancel = window.cancelAnimationFrame;
+          const captured = new Map<number, FrameRequestCallback>();
+          let requestedFrames = 0;
+          let focusEvents = 0;
+          let receivedAt: number | null = null;
+          let before: (string | undefined)[] = [];
+          const state: any = { result: null, snapshot, receivedSnapshot: null, replacementSocket: false,
+            heldRequests: 0, forceHeld: false };
+          const check = () => {
+            if (receivedAt === null || state.result) return;
+            const after = versions();
+            const elapsed_ms = performance.now() - receivedAt;
+            const updated = report.textContent!.includes(marker) && after[0] === after[1]
+              && Number(after[0]) > Number(before[0]);
+            if (updated || elapsed_ms >= 1_000) state.result = {
+              before, after, elapsed_ms, updated, requestedFrames, focusEvents,
+              snapshot: state.receivedSnapshot, replacementSocket: state.replacementSocket,
+              heldRequests: state.heldRequests, forceHeld: state.forceHeld,
+              nodesConnected: pane.isConnected && report.isConnected && log.isConnected,
+              documentHidden: document.hidden, windowFocused: pane.contains(document.activeElement),
+            };
+          };
+          const onMessage = (event: MessageEvent) => {
+            const payload = JSON.parse(String(event.data));
+            // Time only wire receipt -> joint DOM, excluding poll/reconnect wait.
+            // Both paths use the real backend without focus/visibility triggers.
+            if (receivedAt === null && payload.kind === 'pm_reports' && payload.id === id && payload.snapshot === snapshot
+              && payload.reports.some((entry: any) => entry.body === `# ${marker}`)) {
+              before = versions();
+              receivedAt = performance.now();
+              state.receivedSnapshot = payload.snapshot;
+              state.replacementSocket = event.currentTarget !== socket;
+            }
+          };
+          const onFocus = () => { focusEvents += 1; };
+          const observer = new MutationObserver(check);
+          observer.observe(report, { attributes: true, childList: true, subtree: true });
+          socket.addEventListener('message', onMessage);
+          if (snapshot) window.WebSocket = new Proxy(originalSocket, {
+            construct(Target, args) {
+              const replacement = new Target(...args as ConstructorParameters<typeof WebSocket>);
+              if (new URL(replacement.url).searchParams.has('repo_hash')) {
+                observedSockets.add(replacement);
+                replacement.addEventListener('message', onMessage);
+                const originalSend = replacement.send;
+                interceptedSockets.add(replacement);
+                replacement.send = data => {
+                  let request: any;
+                  try { request = JSON.parse(String(data)); } catch { /* forward non-JSON unchanged */ }
+                  if (holdHydration && request?.kind === 'load_pm_reports' && request.id === id) {
+                    heldHydration.push(() => originalSend.call(replacement, data));
+                    state.heldRequests += 1;
+                    if (request.version === null) state.forceHeld = true;
+                    return;
+                  }
+                  originalSend.call(replacement, data);
+                };
+              }
+              return replacement;
+            },
+          });
+          state.disconnect = () => new Promise<void>(resolve => {
+            socket.addEventListener('close', () => resolve(), { once: true });
+            socket.close();
+          });
+          state.releaseHydration = () => {
+            holdHydration = false;
+            for (const send of heldHydration.splice(0)) send();
+          };
+          pane.addEventListener('focusin', onFocus);
+          window.requestAnimationFrame = callback => {
+            const handle = -(++requestedFrames);
+            captured.set(handle, callback);
+            return handle;
+          };
+          window.cancelAnimationFrame = handle => {
+            if (!captured.delete(handle)) originalCancel.call(window, handle);
+          };
+          const timer = setInterval(check, 100);
+          state.restore = () => {
+            clearInterval(timer);
+            observer.disconnect();
+            heldHydration.length = 0;
+            for (const candidate of interceptedSockets) delete (candidate as any).send;
+            for (const candidate of observedSockets) candidate.removeEventListener('message', onMessage);
+            window.WebSocket = originalSocket;
+            pane.removeEventListener('focusin', onFocus);
+            window.requestAnimationFrame = originalFrame;
+            window.cancelAnimationFrame = originalCancel;
+            for (const callback of captured.values()) originalFrame.call(window, callback);
+          };
+          (window as any).__inactiveReportsPoll = state;
+        }, { id, marker, snapshot });
+        let evidence: any;
+        try {
+          if (snapshot) {
+            await page.evaluate(() => (window as any).__inactiveReportsPoll.disconnect());
+            // Observe the app's forced hydration before writing, then release
+            // its unchanged request only after the marker is durable.
+            await page.waitForFunction(() => (window as any).__inactiveReportsPoll.forceHeld,
+              undefined, { polling: 100, timeout: 20_000 });
+          }
+          appendFileSync(`${HOME}/.gwt/projects/${fixture.repo_hash}/project-state/pm-reports.jsonl`, `${JSON.stringify({
+            id: randomUUID(), kind: 'progress', body: `# ${marker}`, created_at: new Date().toISOString(),
+          })}\n`);
+          if (snapshot) await page.evaluate(() => (window as any).__inactiveReportsPoll.releaseHydration());
+          await page.waitForFunction(() => (window as any).__inactiveReportsPoll.result,
+            undefined, { polling: 100, timeout: 20_000 });
+          evidence = await page.evaluate(() => (window as any).__inactiveReportsPoll.result);
+        } finally {
+          await page.evaluate(() => { (window as any).__inactiveReportsPoll.restore(); delete (window as any).__inactiveReportsPoll; });
+        }
+        const evidenceFile = info.outputPath(`inactive-reports-${phase}-${theme}.json`);
+        writeFileSync(evidenceFile, JSON.stringify(evidence, null, 2));
+        await info.attach(`Real backend ${phase} to joint DOM (rAF withheld)`, { path: evidenceFile, contentType: 'application/json' });
+        expect(evidence.updated, `backend ${phase} updates joint DOM within one second without focus or frames`).toBe(true);
+        expect(evidence.snapshot).toBe(snapshot);
+        expect(evidence.replacementSocket).toBe(snapshot);
+        expect(evidence.nodesConnected).toBe(true);
+        expect(evidence.forceHeld).toBe(snapshot);
+        if (snapshot) expect(evidence.heldRequests).toBeGreaterThan(0);
+        expect(evidence.elapsed_ms).toBeLessThanOrEqual(1_000);
+        expect(evidence.before[0]).toMatch(/^\d+$/);
+        expect(evidence.before[1]).toBe(evidence.before[0]);
+        expect(evidence.after[1]).toBe(evidence.after[0]);
+        expect(evidence.requestedFrames).toBeGreaterThan(0);
+        expect(evidence.documentHidden).toBe(false);
+        expect(evidence.windowFocused).toBe(false);
+        expect(evidence.focusEvents).toBe(0);
+        await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+        const screenshot = info.outputPath(`inactive-reports-${phase}-${theme}.png`);
+        await pane.screenshot({ path: screenshot });
+        await info.attach(`Inactive Reports after ${phase}`, { path: screenshot, contentType: 'image/png' });
+        lastMarker = marker;
+      }
       await page.reload();
-      await expect(reports.getByRole('heading', { name: marker, exact: true })).toBeVisible();
+      await expect(reports.getByRole('heading', { name: lastMarker, exact: true })).toBeVisible();
       expect(errors).toEqual([]);
     });
   });

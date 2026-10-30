@@ -38,20 +38,20 @@ test.describe("Surface rail", () => {
     await expect(page.locator(".render-degradation-banner")).toHaveCount(0);
   });
 
-  for (const [surface, focusedId] of [["settings", "issue-window"], ["board", "board-window"], ["issues", "legacy-issues-window"]] as const) {
+  for (const [surface, focusedId] of [["settings", "settings-grouped"], ["board", "board-window"], ["issues", "legacy-issues-window"]] as const) {
     test(`restoring ${surface} ignores legacy canvas geometry and grouping`, async ({ page }, testInfo) => {
       const errors = captureBrowserErrors(page);
       await installSurfaceAssets(page);
       await installSurfaceRailBackend(page, true, false, focusedId);
       await page.goto(surfaceAppUrl);
       const main = page.getByRole("region", { name: "Main pane", exact: true });
-      // Settings retains its existing default Issues tab; the rail follows
-      // that visible content rather than introducing new tab persistence.
-      const visibleSurface = surface === "settings" ? "issues" : surface;
+      // Restored Settings stays configuration-only, independent of Issues.
+      const visibleSurface = surface;
       await expect(main).toHaveAttribute("data-surface", visibleSurface);
       await expect(main.locator(`.workspace-window[data-id='${focusedId}']`)).toBeVisible();
       if (surface === "settings") {
-        await expect(main.getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
+        await expect(main.getByRole("tab", { name: "System", exact: true })).toHaveAttribute("aria-selected", "true");
+        await expect(main.locator(".issue-bridge-root")).toHaveCount(0);
       }
       await expectSurfaceOnly(page);
       await page.reload();
@@ -73,6 +73,24 @@ test.describe("Surface rail", () => {
       expect(errors).toEqual([]);
     });
   }
+
+  test("rail choice survives delayed initial windows", async ({ page }, testInfo) => {
+    const errors = captureBrowserErrors(page);
+    await installSurfaceAssets(page);
+    await installSurfaceRailBackend(page, false, false, "board-window", true);
+    await page.goto(surfaceAppUrl);
+    await expect(page).toHaveTitle(/Surface Rail Fixture/);
+    await expect(page.locator('.workspace-window[data-id="board-window"]')).toHaveCount(0);
+    await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    const main = page.getByRole("region", { name: "Main pane", exact: true });
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await page.evaluate(() => (window as any).__releaseSurfaceWindows());
+    await expect(page.locator('.workspace-window[data-id="board-window"]')).toBeAttached();
+    await expect(main).toHaveAttribute("data-surface", "agents");
+    await expect(page.locator('.op-rail__surface[data-surface="agents"]')).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
+    expect(errors).toEqual([]);
+  });
 
   for (const id of ["pm-window", "shell-window"]) {
     test(`fixed ${id} has no destructive canvas chrome after restoration`, async ({ page }, testInfo) => {
@@ -147,7 +165,8 @@ test.describe("Surface rail", () => {
     await page.getByRole("button", { name: "Split view", exact: true }).click();
     await page.getByRole("combobox", { name: "Right pane surface" }).selectOption("board");
     await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } })));
-    await expect(page.getByRole("region", { name: "Right pane", exact: true })).toHaveAttribute("data-surface", "issues");
+    await expect(page.getByRole("region", { name: "Right pane", exact: true })).toHaveAttribute("data-surface", "settings");
+    await expect(page.getByRole("region", { name: "Right pane", exact: true }).locator(".issue-bridge-root")).toHaveCount(0);
     await expect(page.locator("#split-surfaces")).toHaveAttribute("data-split", "true");
     await expectSurfaceOnly(page);
     await page.screenshot({ path: testInfo.outputPath("fixed-layout-entry-points.png") });
@@ -223,11 +242,6 @@ test.describe("Surface rail", () => {
     expect(await main.locator('[data-id="pm-window"] .xterm').evaluate(node => node === (window as any).__ownedPmTerminal)).toBe(true);
     await page.locator('.op-rail__surface[data-surface="works"]').click();
     await expect(main.locator(".work-row")).toHaveCount(4);
-    await page.locator("#window-list-button").click();
-    await page.locator(".window-list-row").filter({ has: page.locator(".window-list-title", { hasText: "start-work-shell" }) }).click();
-    await expect(main.locator('[data-id="start-work-shell"] .xterm')).toBeVisible();
-    await main.locator('[data-id="start-work-shell"] .xterm-helper-textarea').press("s");
-    await expect.poll(async () => (await sentMessages(page)).filter(message => message.kind === "terminal_input")).toContainEqual({ kind: "terminal_input", id: "start-work-shell", data: "s" });
     await openPm();
     await page.locator("#op-pm-settings-button").click();
     await page.reload();
@@ -374,7 +388,7 @@ test.describe("Surface rail", () => {
     for (const surface of ["board", "issues", "settings"]) {
       await left.getByRole("combobox", { name: "Left pane surface" }).selectOption(surface);
       await right.getByRole("combobox", { name: "Right pane surface" }).selectOption(surface);
-      const preset = surface === "issues" ? "settings" : surface;
+      const preset = surface === "issues" ? "issue" : surface;
       const view = `.workspace-window[data-preset='${preset}']`;
       await expect(left.locator(view)).toBeVisible();
       await expect(right.locator(view)).toBeVisible();
@@ -390,7 +404,7 @@ test.describe("Surface rail", () => {
       await pane.getByRole("tab", { name: "Custom Agents", exact: true }).click();
       await expect(pane.getByRole("tab", { name: "Custom Agents", exact: true })).toHaveAttribute("aria-selected", "true");
     }
-    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(2);
+    expect((await sentMessages(page)).filter(message => message.kind === "create_window").length).toBe(3);
     for (const message of (await sentMessages(page)).filter(message => message.kind === "create_window")) {
       expect(message).not.toHaveProperty("bounds");
       expect(message).not.toHaveProperty("geometry");
@@ -509,9 +523,32 @@ test.describe("Surface rail", () => {
     });
     await page.locator('.op-rail__surface[data-surface="settings"]').click();
     const settings = page.locator('.workspace-window[data-preset="settings"]');
-    await settings.getByRole("tab", { name: "Issues", exact: true }).click();
+    const railPopup = page.locator("#rail-control-explanation");
+    const systemTab = settings.getByRole("tab", { name: "System", exact: true });
+    await page.locator('.op-rail__surface[data-surface="works"]').hover();
+    await expect(railPopup).toBeVisible();
+    const popupBounds = await railPopup.boundingBox(), tabBounds = await systemTab.boundingBox();
+    expect(popupBounds && tabBounds).toBeTruthy();
+    const left = Math.max(popupBounds!.x, tabBounds!.x), right = Math.min(popupBounds!.x + popupBounds!.width, tabBounds!.x + tabBounds!.width);
+    const top = Math.max(popupBounds!.y, tabBounds!.y), bottom = Math.min(popupBounds!.y + popupBounds!.height, tabBounds!.y + tabBounds!.height);
+    expect(right - left).toBeGreaterThan(0); expect(bottom - top).toBeGreaterThan(0);
+    const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+    await page.mouse.move(point.x, point.y);
+    await expect(railPopup).toBeVisible();
+    // This is an ordinary native click at a point inside both existing UI
+    // rectangles; the explanation must not consume the underlying tab action.
+    await systemTab.click({ position: { x: point.x - tabBounds!.x, y: point.y - tabBounds!.y } });
+    await expect(systemTab).toHaveAttribute("aria-selected", "true");
+    await expect(railPopup).toBeHidden();
+    await page.locator('.op-rail__surface[data-surface="issues"]').click();
+    const issueView = page.locator('.workspace-window[data-preset="issue"]');
+    await page.locator('.op-rail__surface[data-surface="agents"]').hover();
+    await expect(railPopup).toBeVisible();
+    await issueView.locator(".knowledge-monitor-pill").focus();
+    await expect(railPopup).toBeHidden();
+    await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
+    await issueView.getByRole("button", {name:"Issues settings",exact:true}).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
-    await issues.getByRole("button", {name:"Issues settings",exact:true}).click();
     await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
     await clearMessages(page);
     const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {
@@ -542,8 +579,8 @@ test.describe("Surface rail", () => {
     await pm.locator('[data-role="pm-autonomy-status"]').focus();
     const popupId = (await pm.locator('[data-role="pm-autonomy-status"]').getAttribute("aria-describedby"))!.split(/\s+/).at(-1);
     await expect(page.locator(`#${popupId}`)).toBeVisible();
-    await page.evaluate(() => (window as any).__removeSurfaceAgent("issue-window"));
-    await expect(windowById(page, "issue-window")).toHaveCount(0);
+    await page.evaluate(() => (window as any).__removeSurfaceAgent("settings-window"));
+    await expect(windowById(page, "settings-window")).toHaveCount(0);
     await expect(page.locator(`#${popupId}`)).toHaveCount(0);
     expect((await sentMessages(page)).filter(message => /^(set_issue_monitor|set_pm|restart_pm|update_viewport)/.test(message.kind || ""))).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.includes("light") ? "light" : "dark");
@@ -560,9 +597,38 @@ test.describe("Surface rail", () => {
     await expect(page.locator('.work-row')).toHaveCount(3);
     await expect(page.locator('.agents-grid, .agents-tabs')).toHaveCount(0);
     await expect(page.getByRole("spinbutton", { name: "Agent columns" })).toHaveCount(0);
-    await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+    await page.reload();
+    const works = page.locator('.op-rail__surface[data-surface="works"]');
+    const agents = page.locator('.op-rail__surface[data-surface="agents"]');
+    const explanation = page.locator("#rail-control-explanation");
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const tip = await explanation.boundingBox(), railBox = await page.locator(".op-rail").boundingBox();
+    expect(tip && railBox).toBeTruthy();
+    expect(tip!.x).toBeGreaterThanOrEqual(railBox!.x + railBox!.width);
+    await page.mouse.move(tip!.x + tip!.width / 2, tip!.y + tip!.height / 2);
+    await expect(explanation).toBeVisible();
+    await page.mouse.move(1439, 899);
+    await expect(explanation).toBeHidden();
+    await agents.click();
     await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
-    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible(); expect(errors).toEqual([]);
+    await expect(page.getByRole("tab", { name: "Past", exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 400, height: 700 });
+    await works.hover();
+    await expect(explanation).toBeVisible();
+    const narrowTip = await explanation.boundingBox(), narrowRail = await page.locator(".op-rail").boundingBox();
+    expect(narrowTip && narrowRail).toBeTruthy();
+    expect(narrowTip!.y).toBeGreaterThanOrEqual(narrowRail!.y + narrowRail!.height);
+    expect(narrowTip!.x + narrowTip!.width).toBeLessThanOrEqual(392);
+    await page.mouse.move(narrowTip!.x + narrowTip!.width / 2, narrowTip!.y + narrowTip!.height / 2);
+    await expect(explanation).toBeVisible();
+    await page.mouse.move(399, 699);
+    await works.focus();
+    await expect(works).toHaveAttribute("aria-describedby", "rail-control-explanation");
+    await expect(explanation).toBeVisible();
+    await agents.click();
+    await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
   });
 
   test("Work previous and next retain direct input without terminal tabs", async ({ page }) => {
@@ -635,7 +701,7 @@ test.describe("Surface rail", () => {
 
   test("selects Issues / Works / Agents / Board / Settings and folds to a top strip when narrow", async ({
     page,
-  }) => {
+  }, testInfo) => {
     const consoleErrors: string[] = [];
     const pageErrors: string[] = [];
     page.on("console", (message) => {
@@ -648,7 +714,7 @@ test.describe("Surface rail", () => {
     await page.goto(surfaceAppUrl);
 
     const rail = page.locator("#op-rail");
-    const surfaces = rail.locator(".op-rail__surface");
+    const surfaces = rail.locator(".op-rail__surface[data-surface]");
     const entry = (surface: string) => rail.locator(`[data-surface='${surface}']`);
 
     await expect(windowById(page, "board-window")).toBeVisible({ timeout: 10_000 });
@@ -674,6 +740,18 @@ test.describe("Surface rail", () => {
     await expect(pressedSurfaces(page)).resolves.toEqual(["board"]);
     const railWidth = await rail.evaluate((element) => element.getBoundingClientRect().width);
     expect(railWidth).toBe(64);
+    // Move from another rail entry so a fresh headed context cannot reuse
+    // an unchanged OS pointer position before Chromium receives hover state.
+    await entry("works").hover();
+    await entry("pm").hover();
+    const pmGear = page.locator("#op-pm-settings-button");
+    const railBounds = await rail.boundingBox();
+    const gearBounds = await pmGear.boundingBox();
+    expect(gearBounds!.x + gearBounds!.width + 2).toBeLessThanOrEqual(railBounds!.x + railBounds!.width);
+    await pmGear.focus();
+    await expect(pmGear).toHaveCSS("opacity", "1");
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Escape");
     // The pressed entry carries a 2px accent edge, not only a color change.
     await expect(entry("board")).toHaveCSS("border-left-width", "2px");
     const accent = await entry("board").evaluate(
@@ -707,18 +785,20 @@ test.describe("Surface rail", () => {
     await windowById(page, "pm-window").locator(".titlebar").click();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["pm"]);
 
-    // Issues opens its section in the migrated Settings view, keeping its ID.
+    // Issues selects its own live host without Settings chrome.
     await clearMessages(page);
     await entry("issues").click();
     await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
     await expect.poll(() => pressedSurfaces(page)).toEqual(["issues"]);
-    await expect(windowById(page, "issue-window").getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(windowById(page, "issue-window").locator(".settings-root, .settings-tabs")).toHaveCount(0);
+    await expect(windowById(page, "issue-window").locator(".issue-bridge-root")).toBeVisible();
     expect(await createdPresets(page)).toEqual([]);
 
-    // Settings reuses that same view without creating a second host.
+    // Settings selects its independent configuration host.
     await clearMessages(page);
     await entry("settings").click();
-    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="issue-window"]')).toBeVisible();
+    await expect(page.getByRole("region", { name: "Main pane", exact: true }).locator('[data-id="settings-window"]')).toBeVisible();
+    await expect(windowById(page, "settings-window").locator(".issue-bridge-root")).toHaveCount(0);
     expect(await createdPresets(page)).toEqual([]);
 
     // Every entry explains itself on hover.
@@ -726,6 +806,36 @@ test.describe("Surface rail", () => {
       await expect(entry(surface)).toHaveAttribute("title", /\S/);
     }
     await expect(entry("issues")).toHaveAttribute("title", /⌘G/);
+
+    // The retired picker/list/kill-switch do not leave hidden controls behind.
+    await expect(page.locator('#window-list-button, #window-list-panel, #op-rail-window-count, #add-button, #preset-modal, .op-rail__item[data-cmd="stop-all-windows"]')).toHaveCount(0);
+    for (const preset of ["logs", "index", "profile"]) {
+      const tool = rail.locator(`[data-cmd="open-${preset}"]`);
+      await clearMessages(page);
+      await tool.click();
+      const opened = page.locator(`.workspace-window[data-preset="${preset}"]`);
+      await expect(opened).toBeVisible();
+      expect(await createdPresets(page)).toEqual([preset]);
+      await tool.click();
+      expect(await createdPresets(page)).toEqual([preset]);
+    }
+    await page.screenshot({ path: testInfo.outputPath("sidebar-direct-surfaces.png") });
+    await page.setViewportSize({ width: 1440, height: 400 });
+    await expect(rail).toHaveCSS("overflow-y", "auto");
+    expect(await rail.evaluate(node => node.scrollHeight > node.clientHeight)).toBe(true);
+    await rail.locator("#op-palette-button").scrollIntoViewIfNeeded();
+    await rail.locator("#op-palette-button").hover();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await expect(page.locator("#rail-control-explanation")).toContainText("Command palette");
+    await rail.locator("#op-palette-button").focus();
+    await expect(page.locator("#rail-control-explanation")).toBeVisible();
+    await rail.locator("#op-palette-button").click();
+    await expect(page.locator("#op-palette-backdrop")).toHaveAttribute("data-open", "true");
+    await page.locator("#op-palette-input").fill("Stop All");
+    await expect(page.locator("#op-palette-list")).toContainText("Stop All Running Agents");
+    await page.keyboard.press("Escape");
+    await entry("issues").click();
+    await page.screenshot({ path: testInfo.outputPath("sidebar-short-scroll.png") });
 
     // At 860px and below the rail is a strip across the top of the surfaces.
     await page.setViewportSize({ width: 800, height: 900 });
@@ -744,6 +854,12 @@ test.describe("Surface rail", () => {
     );
     expect(new Set(surfaceTops).size).toBe(1);
 
+    await page.setViewportSize({ width: 400, height: 900 });
+    for (const preset of ["logs", "index", "profile"]) {
+      await expect(rail.locator(`[data-cmd="open-${preset}"]`)).toBeInViewport({ ratio: 1 });
+    }
+
+    await page.screenshot({ path: testInfo.outputPath("sidebar-400.png") });
     expect(pageErrors).toEqual([]);
     expect(consoleErrors).toEqual([]);
   });
@@ -792,8 +908,8 @@ async function clearMessages(page: Page): Promise<void> {
   });
 }
 
-async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false, focusedId = "board-window"): Promise<void> {
-  await page.addInitScript(({ groupedSettings, ownership, focusedId }) => {
+async function installSurfaceRailBackend(page: Page, groupedSettings = false, ownership = false, focusedId = "board-window", deferWindows = false): Promise<void> {
+  await page.addInitScript(({ groupedSettings, ownership, focusedId, deferWindows }) => {
     (window as any).__gwtPlaywrightTestBridge = true;
     const surfaceWindow = (id: string, overrides: Record<string, unknown>) => ({
       id,
@@ -838,10 +954,16 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
         z_index: 2,
       }),
       surfaceWindow("issue-window", {
+        title: "Issues",
+        preset: "issue",
+        geometry: { x: 80, y: 80, width: 640, height: 420 },
+        z_index: 10,
+      }),
+      surfaceWindow("settings-window", {
         title: "Settings",
         preset: "settings",
         geometry: { x: 80, y: 80, width: 640, height: 420 },
-        z_index: 10,
+        z_index: 9,
       }),
       surfaceWindow("board-window", {
         title: "Board",
@@ -870,7 +992,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     ];
     if (groupedSettings) {
       Object.assign(windows.find((data) => data.id === "board-window")!, { tab_group_id: "group", tab_group_active: true });
-      windows.push(surfaceWindow("settings-grouped", { preset: "settings", tab_group_id: "group", tab_group_active: false }));
+      Object.assign(windows.find((data) => data.id === "settings-window")!, { id: "settings-grouped", tab_group_id: "group", tab_group_active: false });
     }
     if (focusedId === "shell-window") {
       windows.push(surfaceWindow(focusedId, { preset: "shell", status: "running", minimized: true,
@@ -883,7 +1005,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
     if (focused) focused.z_index = 100;
     if (focusedId === "issue-window") {
       // An inline agent can have a newer persisted z-index without becoming
-      // the project landing surface. Restore its owning Settings/Issues view.
+      // the project landing surface. Restore its owning Issues view.
       for (const data of windows.filter(data => ["agent-one", "agent-two"].includes(data.id))) {
         Object.assign(data, { z_index: 200, placement: { kind: "issue_preview", issue_window_id: "issue-window", issue_number: 5595 } });
       }
@@ -922,7 +1044,7 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
             kind: "git",
             workspace: {
               viewport: { x: 0, y: 0, zoom: 1 },
-              windows: windows.map((windowData) => ({ ...windowData })),
+              windows: deferWindows ? [] : windows.map((windowData) => ({ ...windowData })),
             },
           },
           {
@@ -1026,6 +1148,10 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       value: FixtureWebSocket,
     });
     (window as any).__surfaceRailSocket = () => socket;
+    (window as any).__releaseSurfaceWindows = () => {
+      deferWindows = false;
+      socket?.emit(workspaceState());
+    };
     (window as any).__switchSurfaceProject = (id: string) => {
       activeTabId = id;
       socket?.emit(workspaceState());
@@ -1045,5 +1171,5 @@ async function installSurfaceRailBackend(page: Page, groupedSettings = false, ow
       if (immediate) window.dispatchEvent(new CustomEvent("__gwt_test_inject", { detail: workspaceState() }));
       else socket?.emit(workspaceState());
     };
-  }, { groupedSettings, ownership, focusedId });
+  }, { groupedSettings, ownership, focusedId, deferWindows });
 }

@@ -1894,7 +1894,11 @@ mod tests {
         })
         .to_string();
 
-        handle_delivery_acknowledgement(&repo, &input);
+        // A local-only project's PM still owns the project's receipt store,
+        // even when repository identity falls back to distinct cwd hashes.
+        let pm_worktree = pm_registry::pm_worktree_path_for_repo_path(&repo);
+        std::fs::create_dir_all(&pm_worktree).unwrap();
+        handle_delivery_acknowledgement(&pm_worktree, &input);
 
         assert!(pm_registry::load_pm_delivery_receipts(&receipt_path)
             .expect("load receipt")

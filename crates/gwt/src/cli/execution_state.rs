@@ -3549,10 +3549,18 @@ fn worktree_binding_hash(worktree: &Path) -> String {
     sha256_hex(normalized)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static GENERATION_LEDGER_VALIDATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GENERATION_SNAPSHOT_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn validate_generation_ledger(
     ledger: &ExecutionGenerationLedger,
     expected_owner: ExecutionOwnerKey,
 ) -> io::Result<()> {
+    #[cfg(test)]
+    GENERATION_LEDGER_VALIDATION_COUNT.with(|count| count.set(count.get() + 1));
     if ledger.schema_version != GENERATION_LEDGER_SCHEMA_VERSION {
         return Err(invalid_generation_data(format!(
             "unsupported execution generation ledger schema {}",
@@ -3578,6 +3586,8 @@ fn validate_generation_ledger(
     }
 
     let mut generation_ids = std::collections::HashSet::new();
+    let mut effective_projections =
+        std::collections::HashMap::with_capacity(ledger.generations.len());
     for (index, generation) in ledger.generations.iter().enumerate() {
         if !generation_ids.insert(generation.identity.generation_id.as_str()) {
             return Err(invalid_generation_data(
@@ -3602,6 +3612,8 @@ fn validate_generation_ledger(
                 "execution generation failed integrity validation",
             ));
         }
+        #[cfg(test)]
+        GENERATION_SNAPSHOT_DECODE_COUNT.with(|count| count.set(count.get() + 1));
         let snapshot =
             serde_json::from_str::<ExecutionControlRecord>(&generation.execution_control_json)
                 .map(hydrate_recovery_envelopes)
@@ -3649,6 +3661,7 @@ fn validate_generation_ledger(
                 ));
             }
         }
+        effective_projections.insert(generation.identity.generation_id.as_str(), snapshot);
     }
 
     let mut previous_attempt_hash = "";
@@ -3980,17 +3993,6 @@ fn validate_generation_ledger(
                 generation.identity.generation_id.as_str(),
                 generation.status,
             )
-        })
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut effective_projections = ledger
-        .generations
-        .iter()
-        .map(|generation| {
-            let projection =
-                serde_json::from_str::<ExecutionControlRecord>(&generation.execution_control_json)
-                    .map(hydrate_recovery_envelopes)
-                    .expect("generation snapshots were validated above");
-            (generation.identity.generation_id.as_str(), projection)
         })
         .collect::<std::collections::HashMap<_, _>>();
     let mut projection_events = ledger
@@ -12064,7 +12066,7 @@ fn settle_locked(
                 | ExecutionSettlement::CompletedWithEvidence { .. }
                 | ExecutionSettlement::NoAction { .. }
         ) {
-            complete_matching_build_lifecycle(worktree, &record)?;
+            complete_matching_build_lifecycle(worktree, &record);
         }
         return Ok(SettleResult::AlreadySettled(record));
     }
@@ -12125,7 +12127,7 @@ fn settle_locked(
         // settled projection is returned from the transition itself.
         record
     };
-    complete_matching_build_lifecycle(worktree, &record)?;
+    complete_matching_build_lifecycle(worktree, &record);
     Ok(SettleResult::Settled(record))
 }
 
@@ -12133,12 +12135,9 @@ fn settle_locked(
 /// is terminal, a separate build.complete cannot rely on its live binding.
 /// Run after the durable transition, and on completion retries, so cleanup I/O
 /// failures never reopen or discard an execution that already completed.
-fn complete_matching_build_lifecycle(
-    worktree: &Path,
-    record: &ExecutionControlRecord,
-) -> io::Result<()> {
+fn complete_matching_build_lifecycle(worktree: &Path, record: &ExecutionControlRecord) {
     if record.status != ExecutionControlStatus::Completed {
-        return Ok(());
+        return;
     }
     if let Err(error) =
         crate::cli::verification_record::close_completed_work_event_obligation_locked(
@@ -12147,18 +12146,25 @@ fn complete_matching_build_lifecycle(
     {
         tracing::warn!(%error, "completed execution retains failed Work receipt cleanup for audit");
     }
-    let Some(mut state) = gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME)?
-    else {
-        return Ok(());
+    let mut state = match gwt_core::skill_state::load(worktree, crate::cli::build::SKILL_NAME) {
+        Ok(Some(state)) => state,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%error, "completed execution retains unreadable build bookkeeping for audit");
+            return;
+        }
     };
     if state.active
         && state.owner_spec == Some(record.owner_number)
         && state.session_id == record.primary_session_id
     {
         state.active = false;
-        gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)?;
+        if let Err(error) =
+            gwt_core::skill_state::save(worktree, crate::cli::build::SKILL_NAME, &state)
+        {
+            tracing::warn!(%error, "completed execution retains failed build bookkeeping cleanup for audit");
+        }
     }
-    Ok(())
 }
 
 /// Complete an active execution only when the exact plan/run snapshot is
@@ -13632,7 +13638,9 @@ fn diagnose_with_mode(
         number: record.owner_number,
     };
     match load_generation_ledger(worktree, owner) {
-        Ok(Some(ledger)) if generation_ledger_integrity_ok(&ledger) => {
+        // The strict loader has already validated this immutable ledger and
+        // its worktree pointer/projection. Revalidating adds no fresh facts.
+        Ok(Some(ledger)) => {
             snapshot.generation_id = Some(ledger.current_generation_id.clone());
             let mut continuation_evidence = Vec::new();
             if let Some(attempt) = ledger
@@ -13765,13 +13773,6 @@ fn diagnose_with_mode(
                     }
                 },
             }
-        }
-        Ok(Some(_)) => {
-            snapshot.binding_state = ExecutionBindingState::Corrupt;
-            snapshot.binding_cause = "generation_ledger_integrity_failure".to_string();
-            snapshot
-                .warnings
-                .push("generation ledger integrity validation failed".to_string());
         }
         Ok(None) => {
             snapshot.binding_state = ExecutionBindingState::Missing;
@@ -20612,6 +20613,54 @@ mod tests {
         assert!(marker.is_file(), "a false persist result must be recorded");
         assert_eq!(fs::read(session_path).unwrap(), session_before);
         assert_eq!(fs::read(sidecar).unwrap(), runtime_before);
+    }
+
+    #[test]
+    fn completed_exact_close_persists_terminal_session_without_changing_authority() {
+        let _env_lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _session_env = unset_live_session_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = ScopedEnvVar::set("HOME", home.path());
+        let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        let worktree = tempfile::tempdir().unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session_id = "completed-exact-close-3590";
+        let (identity, pty) = issue_3744_runtime(worktree.path(), session_id, 3590);
+        let _cleanup = Issue3744ChildCleanup(pty.clone());
+        assert!(matches!(
+            settle(worktree.path(), session_id, ExecutionSettlement::Completed).unwrap(),
+            SettleResult::Settled(_)
+        ));
+        let before = generation_authority_bytes(worktree.path(), generation_owner());
+        assert!(crate::session_finalizer::finalize_exact_close(
+            &sessions, &identity, 3591, &pty, session_id
+        )
+        .ok()
+        .flatten()
+        .is_none());
+        assert!(
+            pty.try_wait().unwrap().is_none(),
+            "a stale incarnation cannot signal the captured child"
+        );
+        assert_eq!(
+            crate::session_finalizer::finalize_exact_close(
+                &sessions, &identity, 3590, &pty, session_id
+            )
+            .unwrap(),
+            Some(())
+        );
+        assert!(issue_3744_stopped(&sessions, &identity, 3590));
+        assert!(
+            !gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml")))
+                .unwrap()
+                .restore_window_on_startup
+        );
+        assert_eq!(
+            generation_authority_bytes(worktree.path(), generation_owner()),
+            before
+        );
     }
 
     #[test]
@@ -29793,7 +29842,19 @@ exit 1
             );
             assert_projection_has_no_protected_recovery(&active);
 
+            GENERATION_LEDGER_VALIDATION_COUNT.with(|count| count.set(0));
+            GENERATION_SNAPSHOT_DECODE_COUNT.with(|count| count.set(0));
             let blocked = diagnose_for_projection(blocked_repo.path(), Some("projection-blocked"));
+            assert_eq!(
+                GENERATION_LEDGER_VALIDATION_COUNT.with(std::cell::Cell::get),
+                2,
+                "each strict load validates once; diagnosis must not revalidate its loaded ledger"
+            );
+            assert_eq!(
+                GENERATION_SNAPSHOT_DECODE_COUNT.with(std::cell::Cell::get),
+                2,
+                "each strict validation must decode its generation snapshot only once"
+            );
             assert_eq!(blocked.ecr_status, ExecutionDiagnosisState::Blocked);
             assert_eq!(blocked.binding_state, ExecutionBindingState::Terminal);
             assert_eq!(
@@ -34077,38 +34138,152 @@ exit 1
         }
 
         #[test]
-        fn complete_op_reports_build_cleanup_io_error_and_can_retry() {
+        fn complete_op_warns_on_build_cleanup_io_error_and_can_retry() {
             let _env_lock = crate::env_test_lock()
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let home = tempfile::tempdir().unwrap();
+            let _home = ScopedEnvVar::set("HOME", home.path());
+            let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+            let _session_env = unset_live_session_env();
             let _session = ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-op");
-            let dir = tempfile::tempdir().unwrap();
-            save(dir.path(), &active_record("sess-op")).unwrap();
-            save_build_state(dir.path(), "sess-op", Some(3248), true);
-            save_covering_evidence(dir.path(), "sess-op", false);
-            let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
-            let backup = path.with_extension("backup");
-            fs::rename(&path, &backup).unwrap();
-            fs::create_dir(&path).unwrap();
+            for read_failure in [true, false] {
+                let dir = tempfile::tempdir().unwrap();
+                save(dir.path(), &active_record("sess-op")).unwrap();
+                save_build_state(dir.path(), "sess-op", Some(3248), true);
+                save_covering_evidence(dir.path(), "sess-op", false);
+                let path = gwt_core::skill_state::state_path(dir.path(), "build-spec");
+                let backup = path.with_extension("backup");
+                let original_bytes = fs::read(&path).unwrap();
+                let permissions = fs::metadata(&path).unwrap().permissions();
+                if read_failure {
+                    fs::rename(&path, &backup).unwrap();
+                    fs::create_dir(&path).unwrap();
+                } else {
+                    let mut readonly = permissions.clone();
+                    readonly.set_readonly(true);
+                    fs::set_permissions(&path, readonly).unwrap();
+                    assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+                }
+                let complete_build = |spec| {
+                    let mut env = TestEnv::new(dir.path().to_path_buf());
+                    run_collect(
+                        &mut env,
+                        CliCommand::Build(crate::cli::SkillStateAction::Complete {
+                            spec,
+                            pr: None,
+                        }),
+                    )
+                };
+                if read_failure {
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "Active execution stays protected"
+                    );
+                }
 
-            assert!(
-                run_cmd(dir.path(), ExecutionCommand::Complete).is_err(),
-                "cleanup I/O errors must not be reported as successful completion"
-            );
-            let completed = load(dir.path()).unwrap().unwrap();
-            assert_eq!(completed.status, ExecutionControlStatus::Completed);
-            fs::remove_dir(&path).unwrap();
-            fs::rename(&backup, &path).unwrap();
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete)
+                    .expect("Completed build bookkeeping failures must only warn");
+                assert_eq!(code, 0, "{out}");
+                let completed = load(dir.path()).unwrap().unwrap();
+                assert_eq!(completed.status, ExecutionControlStatus::Completed);
+                let completed_bytes = record_contents(dir.path()).unwrap();
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                let output = crate::cli::hook::event_dispatcher::handle_with_input(
+                    "Stop",
+                    "{}",
+                    dir.path(),
+                    Some("sess-op"),
+                )
+                .unwrap();
+                let crate::cli::hook::HookOutput::SystemMessage(message) = output else {
+                    panic!("Stop must warn without blocking completed work: {output:?}");
+                };
+                assert!(
+                    message.contains("build") || message.contains("gwt-build-spec"),
+                    "{message}"
+                );
+                assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                if read_failure {
+                    assert!(
+                        complete_build(999).is_err(),
+                        "another owner stays protected"
+                    );
+                    {
+                        let _foreign =
+                            ScopedEnvVar::set(gwt_agent::GWT_SESSION_ID_ENV, "sess-foreign");
+                        assert!(
+                            complete_build(3248).is_err(),
+                            "another Session stays protected"
+                        );
+                    }
+                    let original = completed_bytes.as_deref().unwrap();
+                    let tampered = original.replace(&completed.content_hash, "tampered");
+                    fs::write(state_path(dir.path()), &tampered).unwrap();
+                    assert!(!integrity_ok(&load(dir.path()).unwrap().unwrap()));
+                    assert!(
+                        complete_build(3248).is_err(),
+                        "invalid integrity stays protected"
+                    );
+                    assert_eq!(
+                        record_contents(dir.path()).unwrap().as_deref(),
+                        Some(tampered.as_str())
+                    );
+                    fs::write(state_path(dir.path()), original).unwrap();
+                    for _ in 0..2 {
+                        let (code, out) = complete_build(3248).expect(
+                            "completed build replay must only warn on unreadable bookkeeping",
+                        );
+                        assert_eq!(code, 0, "{out}");
+                        assert!(out.contains("warning"), "{out}");
+                        assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                        assert!(path.is_dir());
+                        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                        assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+                    }
+                    crate::cli::action_obligation::mark_from_prompt(
+                        dir.path(),
+                        "sess-op",
+                        "Issue #1 にコメントを追加して",
+                    )
+                    .unwrap();
+                    let (code, out) = complete_build(3248).unwrap();
+                    assert_eq!(code, 2, "new prompt obligations stay protected: {out}");
+                    assert!(out.contains("open action obligations"), "{out}");
+                    assert_eq!(record_contents(dir.path()).unwrap(), completed_bytes);
+                    crate::cli::action_obligation::settle_kinds_best_effort(
+                        dir.path(),
+                        "sess-op",
+                        &[crate::cli::action_obligation::ObligationKind::IssueUpdate],
+                        "issue.comment fixture",
+                    );
+                    assert!(path.is_dir());
+                    assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+                    assert_eq!(fs::read(&backup).unwrap(), original_bytes);
+                    fs::remove_dir(&path).unwrap();
+                    fs::rename(&backup, &path).unwrap();
+                } else {
+                    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+                    assert!(
+                        gwt_core::skill_state::load(dir.path(), "build-spec")
+                            .unwrap()
+                            .unwrap()
+                            .active
+                    );
+                    fs::set_permissions(&path, permissions).unwrap();
+                }
 
-            let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
-            assert_eq!(code, 0, "{out}");
-            assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
-            assert!(
-                !gwt_core::skill_state::load(dir.path(), "build-spec")
-                    .unwrap()
-                    .unwrap()
-                    .active
-            );
+                let (code, out) = run_cmd(dir.path(), ExecutionCommand::Complete).unwrap();
+                assert_eq!(code, 0, "{out}");
+                assert_eq!(load(dir.path()).unwrap().unwrap(), completed);
+                assert!(
+                    !gwt_core::skill_state::load(dir.path(), "build-spec")
+                        .unwrap()
+                        .unwrap()
+                        .active
+                );
+            }
         }
 
         #[test]

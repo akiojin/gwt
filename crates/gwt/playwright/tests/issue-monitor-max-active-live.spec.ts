@@ -44,6 +44,8 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     await gotoLiveGwt(page, base, { enableTestBridge: true });
     // Opening Issues requests the Monitor snapshot in a fresh workspace.
     await page.locator('button[data-surface="issues"]').click();
+    const issueHost = page.locator('.split-pane[data-active="true"][data-surface="issues"] .workspace-window[data-preset="issue"]');
+    await issueHost.getByRole("button", { name: "Issues settings", exact: true }).click();
     const issues = page.locator('.workspace-window[data-preset="settings"] [data-settings-panel="issues"]');
     await expect(issues).toBeVisible();
     await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
@@ -59,10 +61,7 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     const preferences = join(home, ".gwt/projects", initial.project_store.hash, "project-state/issue-monitor.json");
     const prefs = async () => JSON.parse(await readFile(preferences, "utf8"));
 
-    const disclosure = issues.locator(".settings-issues-options");
-    if (!await disclosure.evaluate(element => (element as HTMLDetailsElement).open)) {
-      await disclosure.locator(":scope > summary").click();
-    }
+    await expect(issues.locator(".issue-bridge-root")).toHaveCount(0);
     const input = issues.getByLabel("Max active", { exact: true });
     const mode = issues.getByLabel("Max active mode", { exact: true });
     const apply = issues.getByRole("button", { name: "Apply Max active", exact: true });

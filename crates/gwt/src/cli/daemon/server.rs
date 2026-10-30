@@ -2889,6 +2889,11 @@ fn try_apply_issue_monitor_control(
             {
                 return None;
             }
+            if crate::agent_names::validate_registered_profiles(&monitor.prefs(), &profiles)
+                .is_err()
+            {
+                return None;
+            }
             let mut candidate = monitor.clone();
             // Same revocation as the GUI save: proposals prepared against the
             // previous pool must not commit under the new one.
@@ -6889,6 +6894,7 @@ fn scan_issue_monitor_once_blocking(
                 &scope.project_root,
                 &owner,
                 &repo,
+                &loaded.linked_prs,
             )
         },
     ) {
@@ -7059,6 +7065,7 @@ fn scan_issue_monitor_once_blocking(
                 loaded.issues.iter().filter(|issue| {
                     queued.contains(&issue.number) || dependencies.contains(&issue.number)
                 }),
+                &loaded.linked_prs,
             );
             let mut dependency_observations = std::collections::BTreeMap::new();
             for issue_number in dependencies {
@@ -10758,6 +10765,7 @@ exit 0
 
     fn sample_issue_monitor_profile() -> crate::IssueMonitorLaunchProfile {
         crate::IssueMonitorLaunchProfile {
+            agent_member_id: None,
             agent_id: "claude".to_string(),
             model: Some("sonnet".to_string()),
             reasoning: None,
@@ -14955,6 +14963,7 @@ exit 0
 
         let saved = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 model: Some("gpt-5.5".to_string()),
                 reasoning: Some("high".to_string()),
@@ -15072,6 +15081,7 @@ exit 0
         let seed = crate::IssueMonitorPrefs {
             enabled: true,
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "codex".to_string(),
                 ..sample_issue_monitor_profile()
             }),
@@ -21322,6 +21332,95 @@ exit 1
             Some("launch:effect-46")
         );
         assert!(cached_driver.pending_effects().is_empty());
+        let held = cached_driver.prefs();
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .all(|request| request.issue_number != 42));
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        let status = cached_driver.agent_status_at(&now);
+        let waiting = status
+            .inbox
+            .iter()
+            .find(|row| row.issue_number == 42)
+            .unwrap();
+        assert_eq!(waiting.readiness, crate::IssueMonitorReadiness::NotReady);
+        assert!(waiting
+            .exclusion_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("plan/tasks")));
+        assert_eq!(
+            cached_driver.prefs().pending_launch_deliveries,
+            held.pending_launch_deliveries
+        );
+        let mut ready = candidates[0].clone();
+        ready.readiness = crate::IssueMonitorReadiness::ReadyWithOpenTasks;
+        cached_driver.record_candidate(ready);
+        assert!(cached_driver
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert!(cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        // Readiness can change again after claim but before the pane exists.
+        cached_driver.record_candidate(candidates[0].clone());
+        assert!(!cached_driver.has_capacity_for_monitor_spawn(42, false));
+        assert!(!cached_driver.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| true
+        ));
+        // An exact existing pane can still be adopted and replay its ACK.
+        let mut existing = monitor.clone();
+        existing.record_candidate(candidates[0].clone());
+        existing.complete_active_launch(42, "tab-1::agent-42");
+        assert!(existing.claim_launch_delivery(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            42,
+            "tab-1::agent-42",
+            |_| false
+        ));
+        assert!(existing.mark_launch_delivery_materialized(
+            42,
+            "launch:effect-42",
+            "gui-42",
+            "tab-1::agent-42"
+        ));
+        assert!(existing
+            .take_pending_launch_requests()
+            .iter()
+            .any(|request| request.issue_number == 42));
+        assert_eq!(cached_driver.attempt_count(42), 1);
+        assert_eq!(
+            cached_driver
+                .prefs()
+                .pending_launch_deliveries
+                .iter()
+                .find(|delivery| delivery.issue_number == 42)
+                .unwrap()
+                .launch_session_strategy,
+            crate::IssueMonitorLaunchSessionStrategy::FreshRequired
+        );
         crate::save_issue_monitor_prefs(&prefs_path, &latest).unwrap();
         assert!(super::commit_issue_monitor_scan_if_current(
             temp.path(),
@@ -24126,6 +24225,7 @@ exit 1
         // The GUI wrote a launch_profile + custom tuning straight to disk.
         let on_disk = crate::IssueMonitorPrefs {
             launch_profile: Some(crate::IssueMonitorLaunchProfile {
+                agent_member_id: None,
                 agent_id: "claude".to_string(),
                 model: None,
                 reasoning: None,

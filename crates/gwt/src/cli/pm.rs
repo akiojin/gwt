@@ -916,6 +916,10 @@ mod tests {
         let planning_bytes = fs::read(&planning_path).unwrap();
         let status = invoke(&runtime, PmCommand::PlanStatus).unwrap();
         assert_eq!(
+            status["policy"].get("dependency_reachability"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
             status["policy"].get("dependency_observations"),
             Some(&serde_json::Value::Null)
         );
@@ -1097,6 +1101,12 @@ mod tests {
             assert_eq!(trace["observed_inbox_states"], serde_json::json!([]));
         }
         let roadmap = &status["policy"]["roadmap_items"][0];
+        for surface in ["roadmap_items", "goals", "milestones"] {
+            assert_eq!(
+                status["policy"][surface][0].get("dependency_reachability"),
+                Some(&serde_json::Value::Null)
+            );
+        }
         assert_eq!(
             roadmap.get("dependency_impacts"),
             Some(&serde_json::Value::Null)

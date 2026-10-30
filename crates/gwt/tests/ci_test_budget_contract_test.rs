@@ -679,6 +679,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt bin gwt scheduled_tick_advances_autonomous_launch_without_an_external_daemon -- --test-threads=1",
         "gwt bin gwt app_runtime_local_driver_ -- --test-threads=1",
         "gwt bin gwt app_runtime::tests::issue_monitor_claim_tests::app_runtime_full_issue_monitor_scan_migrates_legacy_git_failure_and_persists_marker -- --exact --test-threads=1",
+        "gwt bin gwt app_runtime::tests::issue_monitor_handoff_tests::issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor -- --exact --test-threads=1",
         "gwt lib gwt local_fallback_lease -- --test-threads=1",
         "gwt lib gwt cli::issue::tests::windows_launch_now_ -- --test-threads=1",
         "gwt lib gwt cli::issue::tests::immediate_scan_delivery_never_claims_an_unacknowledged_schedule -- --exact --test-threads=1",
@@ -722,7 +723,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 65);
+    assert_eq!(expected_filters.len(), 66);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

@@ -130,10 +130,10 @@ test("offline input is discarded while queued control messages retain project sc
   assert.equal(context.droppedInputs, 3, "every discarded input is surfaced immediately");
   assert.equal(sockets.length, 3);
   sockets[2].open();
-  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 }]);
+  assert.deepEqual(sockets[2].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-b", cols: 100, rows: 28 }, { kind: "get_system_settings" }]);
   select("0123456789abcdef");
   sockets[3].open();
-  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 }]);
+  assert.deepEqual(sockets[3].sent.filter((m) => m.kind !== "frontend_ready"), [{ kind: "update_terminal_grid", id: "pane-a", cols: 80, rows: 24 }, { kind: "get_system_settings" }]);
 });
 
 test("Hub socket refuses pane input before project scope is known", () => {
@@ -162,7 +162,7 @@ test("retained Hub processes catalog and navigation without duplicating global e
   assert.deepEqual(context.received.map((event) => event.kind), ["hub_state", "update_state"]);
   context.send({ kind: "reopen_recent_project", path: "/project-b" });
   assert.equal(sockets[0].sent.at(-1).path, "/project-b");
-  assert.equal(sockets[1].sent.length, 1);
+  assert.equal(sockets[1].sent.length, 2);
   select(projectB.project_key);
   assert.equal(sockets[0].readyState, 1);
   assert.equal(sockets[1].readyState, 3);
@@ -192,7 +192,7 @@ test("route-bound Project tab connects its scope from the URL before any catalog
   assert.equal(new URL(sockets[0].url).search, "");
   assert.equal(new URL(sockets[1].url).searchParams.get("repo_hash"), projectB.project_key);
   sockets[1].open();
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }], "full sync is requested on the scoped socket");
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "full sync is requested on the scoped socket");
   context.receiveHubState({ app_version: "1", projects: [projectA, projectB], recent_projects: [] });
   assert.equal(context.activeProjectTab().id, projectB.id, "the catalog entry for the route becomes active");
   assert.equal(sockets.length, 2, "catalog updates never rebind the scope");
@@ -208,7 +208,7 @@ test("route-bound Project tab reconnects to the same Project only", () => {
   assert.equal(context.attentionReportCount, 1, "fresh attention is reported for each opened Project connection");
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }], "reconnect re-requests only this client's full sync");
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "reconnect re-requests only this client's full sync");
   assert.equal(context.attentionReportCount, 2);
 });
 
@@ -222,7 +222,7 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   assert.equal(typeof old.onResync, "function", "overflow must have a snapshot recovery callback");
   old.onResync("overflow");
   assert.equal(sockets.length, 3, "overflow also fences the native receive backlog");
-  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets[1].sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   sockets.at(-1).open();
   assert.equal(sockets[1].readyState, 3, "the input handoff ends when recovery opens");
   assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
@@ -236,7 +236,7 @@ test("receive recovery requests pane and open surface snapshots only on the owni
   context.connectSocket();
   sockets.at(-1).open();
   old.onResync("visible");
-  assert.equal(sockets.at(-1).sent.length, 1, "a stale dispatcher cannot resync a replacement socket");
+  assert.equal(sockets.at(-1).sent.length, 2, "a stale dispatcher cannot resync a replacement socket");
 });
 
 test("native foreground recovery does not require an observed hidden event", () => {
@@ -357,7 +357,7 @@ test("recovery input handoff closes on a project switch and never crosses scopes
   assert.equal(context.send({ kind: "terminal_input", id: "pane-b", data: "x" }), "unavailable");
   assert.equal(old.sent.length, before, "the former project must never receive the new project's input");
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 
@@ -374,7 +374,7 @@ test("Reports history survives disconnect while the Project reconnects", () => {
   context.connectSocket();
   assert.equal(new URL(sockets.at(-1).url).searchParams.get("repo_hash"), projectA.project_key);
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 test("project not found stops every reconnect for the route", () => {
@@ -446,7 +446,7 @@ test("canvas readiness survives suspended frames and discards old connection cal
   context.sendStartupAutoResumeReady();
   const connection = sockets.at(-1);
   oldTimer(); oldFrame();
-  assert.deepEqual(connection.sent, [{ kind: "frontend_ready" }], "old callbacks cannot release a new backend");
+  assert.deepEqual(connection.sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }], "old callbacks cannot release a new backend");
   context.startupTimers.at(-1)(); // No animation frame runs in the background.
   context.startupFrames.at(-1)(); // Foregrounding later must not send twice.
   assert.equal(connection.sent.filter(message => message.kind === "startup_auto_resume_ready").length, 1);
@@ -497,7 +497,7 @@ test("offline acknowledgement is ephemeral and never replays against a fresh con
   assert.equal(context.pendingMessages.length, 0, "stale attention must never replay after reconnect");
   context.connectSocket();
   sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
 });
 
 
@@ -515,8 +515,15 @@ test("switch mutations never queue or replay, and a closed-socket race retains a
   assert.equal(context.send({ kind: "agent_switch", action: { kind: "cancel", operation_id: action.operation_id } }), "unavailable");
   assert.equal(context.pendingMessages.length, 0);
   context.connectSocket(); sockets.at(-1).open();
-  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }]);
+  assert.deepEqual(sockets.at(-1).sent, [{ kind: "frontend_ready" }, { kind: "get_system_settings" }]);
   sockets.at(-1).send = () => { throw new Error("connection closed during send"); };
   assert.doesNotThrow(() => assert.equal(context.send({ kind: "agent_switch", action }), "unavailable"));
   assert.equal(context.pendingMessages.length, 0);
+});
+
+
+test("first project connection reads saved Works settings without a Settings host", () => {
+  const { sockets, select } = fixture();
+  select("0123456789abcdef"); sockets.at(-1).open();
+  assert.equal(sockets.at(-1).sent.filter(message => message.kind === "get_system_settings").length, 1);
 });

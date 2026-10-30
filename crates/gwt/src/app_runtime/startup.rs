@@ -1800,7 +1800,7 @@ impl AppRuntime {
             .or_else(|| session.agent_name.clone());
         let reserved_member = if let Some(root) = member_root.as_ref() {
             let token = uuid::Uuid::new_v4().to_string();
-            let member = match gwt::agent_names::reserve_project_member(
+            let member = match gwt::agent_names::reserve_project_member_for_agent(
                 root,
                 &self.sessions_dir,
                 &token,
@@ -1810,6 +1810,8 @@ impl AppRuntime {
                 }),
                 None,
                 session.agent_member_id.as_deref(),
+                session.agent_id.command(),
+                None,
             ) {
                 Ok(member) => member,
                 Err(error) => {

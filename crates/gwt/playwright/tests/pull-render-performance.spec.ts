@@ -1081,7 +1081,7 @@ test('real AgentBootstrap measurement', async ({ page, browser }, info) => {
   const pageCdp = await page.context().newCDPSession(page);
   await pageCdp.send('Performance.enable');
   try {
-    await gotoLiveGwt(page, process.env.GWT_PLAYWRIGHT_BASE_URL!, { keepPresetModal: true });
+    await gotoLiveGwt(page, process.env.GWT_PLAYWRIGHT_BASE_URL!, {});
     await page.waitForFunction(() => (window as any).__gwtPlaywrightTestBridgeInstalled === true);
     await expect(page.locator('html')).toHaveAttribute('data-theme', manifest.theme);
     for (let index = 0; index < 5; index++) {

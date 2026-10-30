@@ -161,16 +161,23 @@ pub fn finalize_exact_close(
     pty: &PtyHandle,
     window_id: &str,
 ) -> std::io::Result<Option<()>> {
-    let proof = gwt_agent::ManualLaunchRuntimeProof {
-        host_pid: std::process::id(),
-        runtime_incarnation: incarnation,
-    };
-    crate::cli::execution_state::with_exact_active_manual_runtime_lease(
+    if incarnation == 0 {
+        return Ok(None);
+    }
+    crate::cli::execution_state::with_current_runtime_cleanup_session_execution_identity_lease(
         sessions_dir,
         identity,
-        proof,
-        false,
         || {
+            // Cleanup can follow Completed; it never grants producing authority.
+            // Recheck this Host's captured runtime while owner and Session are leased.
+            let runtime = gwt_agent::SessionRuntimeState::load(
+                &gwt_agent::runtime_state_path_for_pid(sessions_dir, std::process::id(), &identity.session_id),
+            )?;
+            if runtime.execution_identity.as_ref() != Some(identity)
+                || runtime.runtime_incarnation != Some(incarnation)
+            {
+                return Err(std::io::Error::other("captured runtime proof changed before close"));
+            }
             if !kill_and_reap(pty, window_id)? {
                 return Err(std::io::Error::other(
                     "detached PTY did not exit before the finalizer deadline",
@@ -197,7 +204,7 @@ pub fn finalize_exact_close(
             }
             Ok(())
         },
-    )
+    ).and_then(|result| result.transpose())
 }
 
 /// Stop under the exact runtime lease without waiting on the caller's event loop.

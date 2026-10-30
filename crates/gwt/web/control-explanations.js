@@ -11,12 +11,13 @@ export function setControlExplanation(node, text, key, focusable = true) {
   return node;
 }
 
-export function bindControlExplanations({ document, root, id }) {
+export function bindControlExplanations({ document, root, id, placement = "bottom", passThrough = false }) {
   const popup = document.createElement("div");
   popup.className = "op-runtime-health-detail issue-control-explanation";
   popup.id = id;
   popup.setAttribute("role", "tooltip");
   popup.hidden = true;
+  if (passThrough) popup.style.pointerEvents = "none";
   document.body.appendChild(popup);
   let anchor = null;
   let focused = null;
@@ -35,6 +36,13 @@ export function bindControlExplanations({ document, root, id }) {
     }
     anchor = null;
     popup.hidden = true;
+    if (passThrough) popupHovered = false;
+  };
+  const insidePopup = event => {
+    const rect = popup.getBoundingClientRect();
+    return Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      && event.clientX >= rect.left && event.clientX <= rect.right
+      && event.clientY >= rect.top && event.clientY <= rect.bottom;
   };
   const show = node => {
     if (!node?.isConnected || !root.contains(node) || node.closest("[hidden], .hidden")) { hide(); return; }
@@ -50,6 +58,20 @@ export function bindControlExplanations({ document, root, id }) {
     const viewport = document.defaultView || {};
     const width = viewport.innerWidth || 1024;
     const height = viewport.innerHeight || 768;
+    if (placement === "right") {
+      const boundary = root.getBoundingClientRect();
+      const beside = boundary.right <= width - 8;
+      const left = beside ? Math.max(8, boundary.right) : 8;
+      const top = beside ? rect.top : Math.max(8, boundary.bottom);
+      // Constrain before measuring: wrapping changes the popup's height.
+      // A full-width top strip uses its bottom edge to clear every control.
+      popup.style.maxWidth = `${Math.max(0, width - left - 8)}px`;
+      popup.style.maxHeight = `${Math.max(0, beside ? height - 16 : height - top - 8)}px`;
+      const size = popup.getBoundingClientRect();
+      popup.style.left = `${left}px`;
+      popup.style.top = `${beside ? Math.max(8, Math.min(top, height - size.height - 8)) : top}px`;
+      return;
+    }
     const size = popup.getBoundingClientRect?.() || { width: 0, height: 0 };
     popup.style.left = `${Math.max(8, Math.min(rect.left, width - size.width - 8))}px`;
     const top = rect.bottom + size.height <= height - 8
@@ -68,10 +90,11 @@ export function bindControlExplanations({ document, root, id }) {
   };
   const out = event => {
     if (!hovered) return;
-    const boundary = hovered.closest(".knowledge-row") || hovered;
+    const boundary = placement === "right" ? root : hovered.closest(".knowledge-row") || hovered;
     if (!boundary.contains(event.target) || boundary.contains(event.relatedTarget)) return;
     hovered = null;
     if (popup.contains(event.relatedTarget)) return;
+    if (passThrough && insidePopup(event)) { popupHovered = true; return; }
     if (focused) show(focused); else hide();
   };
   const focus = event => { focused = pointerActive ? null : target(event); if (focused && !restoringFocus) show(focused); };
@@ -97,6 +120,18 @@ export function bindControlExplanations({ document, root, id }) {
   };
   const pointerDown = () => { pointerActive = true; focused = null; hovered = null; hide(); };
   const pointerEnd = () => { pointerActive = false; };
+  const pointerMove = event => {
+    if (popup.hidden) return;
+    popupHovered = insidePopup(event);
+    if (root.contains(event.target) || popupHovered) return;
+    hovered = null;
+    if (focused) show(focused); else hide();
+  };
+  const outsideFocus = event => {
+    if (root.contains(event.target)) return;
+    focused = null; hovered = null; hide();
+  };
+  const outsidePress = event => { if (!root.contains(event.target)) pointerDown(); };
   const dragStart = () => { dragging = true; pointerDown(); };
   const dragEnd = () => { dragging = false; pointerEnd(); };
   const listeners = { mouseover: over, mouseout: out, focusin: focus, focusout: blur,
@@ -110,6 +145,11 @@ export function bindControlExplanations({ document, root, id }) {
   document.addEventListener("scroll", refresh, true);
   document.addEventListener("pointerup", pointerEnd);
   document.addEventListener("pointercancel", pointerEnd);
+  if (passThrough) {
+    document.addEventListener("pointermove", pointerMove);
+    document.addEventListener("focusin", outsideFocus, true);
+    document.addEventListener("pointerdown", outsidePress, true);
+  }
   document.defaultView?.addEventListener("resize", hide);
   return {
     get visible() { return !popup.hidden; },
@@ -127,6 +167,11 @@ export function bindControlExplanations({ document, root, id }) {
       document.removeEventListener("keydown", escape, true);
       document.removeEventListener("pointerup", pointerEnd);
       document.removeEventListener("pointercancel", pointerEnd);
+      if (passThrough) {
+        document.removeEventListener("pointermove", pointerMove);
+        document.removeEventListener("focusin", outsideFocus, true);
+        document.removeEventListener("pointerdown", outsidePress, true);
+      }
       document.defaultView?.removeEventListener("resize", hide);
       popup.remove();
     },

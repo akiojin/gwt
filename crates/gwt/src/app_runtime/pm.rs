@@ -32,7 +32,7 @@ use gwt::persistence::WindowProcessStatus;
 // `pm_registry::PM_CYCLE_REPORTING_CLAUSE` for why it is shared.
 use gwt::pm_registry::{
     self, PmLaunchProfile, PmRegistration, PM_CYCLE_REPORTING_CLAUSE,
-    PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_STEERING_WAKE_CLAUSE,
+    PM_GWTD_EXECUTION_WAKE_CLAUSE, PM_PERIODIC_WAKE_INSTRUCTION, PM_STEERING_WAKE_CLAUSE,
 };
 use gwt::PmAgentOption;
 
@@ -121,6 +121,32 @@ pub(crate) struct PmWakeDecision {
     pub(crate) window_id: String,
     pub(crate) prompt: String,
     idle_notifications: std::collections::BTreeMap<String, String>,
+    periodic_input: Option<PmPeriodicWakeInput>,
+}
+
+/// A periodic decision is valid only for the human input and runtime it saw.
+/// Selection-only diagnostics may lack a PTY; physical delivery fails closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PmPeriodicWakeInput {
+    session_id: String,
+    incarnation: Option<u64>,
+    revision: Option<u64>,
+}
+
+impl PmPeriodicWakeInput {
+    fn matches(
+        &self,
+        session: Option<&str>,
+        incarnation: u64,
+        pty: &gwt_terminal::PtyHandle,
+        interval_secs: u64,
+    ) -> bool {
+        session == Some(self.session_id.as_str())
+            && self.incarnation == Some(incarnation)
+            && self.revision.is_some()
+            && pty.quiet_ordinary_input_revision(Duration::from_secs(interval_secs))
+                == self.revision
+    }
 }
 
 /// Issue #3932: retain pane-scoped edges independently of the single composer
@@ -130,6 +156,7 @@ pub(crate) struct AgentIdleWakes {
     running: HashSet<String>,
     pending: std::collections::BTreeMap<String, String>,
     retry_scheduled: bool,
+    // All PM wake paths share the composer and its revocable delivery permit.
     delivery_in_flight: Option<(String, Arc<AtomicBool>)>,
 }
 
@@ -158,19 +185,84 @@ impl PmWakeDecision {
 
 /// Outcome of attempting to type a wake prompt into the PM pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PmWakeWrite {
+pub(super) enum PmWakeWrite {
     Injected,
+    Unconfirmed,
     Deferred,
     Queued,
     Discarded,
 }
 
+fn pm_wake_runtime_is_busy(path: &Path, incarnation: u64) -> bool {
+    let Ok(state) = gwt_agent::SessionRuntimeState::load(path) else {
+        // Preserve the bounded recovery of legacy/missing Stop observations.
+        return false;
+    };
+    if state.runtime_incarnation.is_none() {
+        return false;
+    }
+    if state.runtime_incarnation != Some(incarnation) {
+        return true;
+    }
+    match state.status {
+        // A quiet current turn can still be thinking or continuing a blocked
+        // Stop. Its age and an empty tool set do not establish an idle prompt.
+        gwt_agent::AgentStatus::Idle => {
+            state.source_event.as_deref() == Some("Stop")
+                && state
+                    .last_completed_hook_event_at
+                    .is_none_or(|at| at < state.updated_at)
+        }
+        _ => true,
+    }
+}
+
+fn release_acknowledged_wake(
+    decision: &PmWakeDecision,
+    session: Option<&str>,
+    expected: Option<&Arc<crate::PtyWriterEntry>>,
+) -> Result<bool, String> {
+    let (Some(operation_id), Some(session), Some(expected)) =
+        (decision.wake_id.as_deref(), session, expected)
+    else {
+        return Ok(false);
+    };
+    let receipt = pm_registry::pm_delivery_receipt_for_operation(
+        &pm_registry::pm_delivery_receipts_path_for_repo_path(&decision.project_root),
+        operation_id,
+    )
+    .map_err(|error| error.to_string())?;
+    if !receipt.is_some_and(|receipt| {
+        receipt.target_session_id == session
+            && receipt.target_window_id == decision.window_id
+            && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified
+    }) {
+        return Ok(false);
+    }
+    let released = {
+        let mut guard = expected
+            .pm_delivery_replay
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if guard.as_ref().is_some_and(|guard| {
+            guard.operation_id == operation_id && guard.target_session_id == session
+        }) {
+            guard.take()
+        } else {
+            None
+        }
+    };
+    // Drop can acquire the physical writer: never hold the replay mutex here.
+    drop(released);
+    Ok(true)
+}
+
 #[derive(Clone)]
 pub(crate) struct PmWakeDelivery {
-    context: super::ProjectContext,
-    decision: PmWakeDecision,
+    pub(super) context: super::ProjectContext,
+    pub(super) decision: PmWakeDecision,
     pane: Arc<Mutex<super::Pane>>,
-    result: Result<PmWakeWrite, String>,
+    pub(super) result: Result<PmWakeWrite, String>,
 }
 
 impl std::fmt::Debug for PmWakeDelivery {
@@ -938,6 +1030,9 @@ impl AppRuntime {
         if prefs.settings.paused {
             return None;
         }
+        if self.retry_held_pm_wake(project_root) {
+            return None;
+        }
         if self
             .project_state(&context)?
             .pm_agent_idle_wakes
@@ -1019,6 +1114,7 @@ impl AppRuntime {
         let mut reasons = fresh;
         reasons.truncate(5);
         Some(PmWakeDecision {
+            periodic_input: None,
             project_root: project_root.to_path_buf(),
             wake_id,
             window_id,
@@ -1121,6 +1217,16 @@ impl AppRuntime {
                 .insert(window_id.to_string(), label);
         }
         self.request_pm_agent_idle_wake(&context, false);
+        if current == WindowProcessStatus::Idle
+            || self.project_state(&context).is_some_and(|state| {
+                state
+                    .pending_pm_wakes
+                    .get(window_id)
+                    .is_some_and(|wake| self.pm_wake_owns_input(wake))
+            })
+        {
+            self.flush_pending_pm_wake(window_id);
+        }
     }
 
     pub(super) fn forget_pm_agent_idle_window(&mut self, window_id: &str) {
@@ -1227,7 +1333,9 @@ impl AppRuntime {
             .project_state(&context)?
             .pending_pm_wakes
             .get(&window_id)
-            .is_some_and(|wake| wake.wake_id != loop_state.last_wake_id)
+            .is_some_and(|wake| {
+                wake.wake_id != loop_state.last_wake_id && !self.pm_wake_owns_input(wake)
+            })
         {
             self.project_state_mut(&context)?
                 .pending_pm_wakes
@@ -1291,6 +1399,7 @@ impl AppRuntime {
         }
         prompt.push_str(". Reconcile pane.list and issue.monitor.status; steer the idle agents.\r");
         Some(PmWakeDecision {
+            periodic_input: None,
             project_root: project_root.to_path_buf(),
             window_id,
             prompt,
@@ -1332,7 +1441,7 @@ impl AppRuntime {
                 .pm_agent_idle_wakes
                 .delivery_in_flight = None;
             match result {
-                Ok(PmWakeWrite::Deferred | PmWakeWrite::Discarded) => {
+                Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed | PmWakeWrite::Discarded) => {
                     self.restore_pm_agent_idle_notifications(context, &decision)
                 }
                 Err(error) => tracing::warn!(%error, "Agent idle wake injection failed"),
@@ -1420,6 +1529,9 @@ impl AppRuntime {
         if prefs.settings.paused {
             return None;
         }
+        if self.retry_held_pm_wake(project_root) {
+            return None;
+        }
         let status = monitor.agent_status();
         // Issue #3655 AC-5: a standing unblock request is supervision work in
         // its own right. Without this the worst case parks itself — the queue
@@ -1441,6 +1553,22 @@ impl AppRuntime {
         let registration = prefs.registration?;
         let window_id = self.live_pm_window_id(&registration.session_id)?;
         let interval_secs = prefs.settings.loop_interval_secs_clamped();
+        let periodic_input = match self.runtimes.get(&window_id) {
+            Some(runtime) => PmPeriodicWakeInput {
+                session_id: registration.session_id,
+                incarnation: Some(runtime.incarnation),
+                revision: Some(
+                    runtime
+                        .pty
+                        .quiet_ordinary_input_revision(Duration::from_secs(interval_secs))?,
+                ),
+            },
+            None => PmPeriodicWakeInput {
+                session_id: registration.session_id,
+                incarnation: None,
+                revision: None,
+            },
+        };
         let loop_path = pm_registry::pm_loop_state_path_for_repo_path(project_root);
         let loop_state = pm_registry::load_pm_loop_state(&loop_path).unwrap_or_default();
         if !pm_wake_loop_is_quiet(&loop_state, interval_secs, now)
@@ -1461,15 +1589,13 @@ impl AppRuntime {
             return None;
         }
         Some(PmWakeDecision {
+            periodic_input: Some(periodic_input),
             project_root: project_root.to_path_buf(),
             wake_id,
             window_id,
             idle_notifications: Default::default(),
             prompt: format!(
-                "[gwt] Scheduled supervision tick: reconcile now — read a fresh \
-                 `issue.monitor.status` snapshot and inventory open PRs with `pr.list` \
-                 (stale / SUPERSEDED / owner-Issue-closed rows: digest escalations, never \
-                 auto-close). {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
+                "{PM_PERIODIC_WAKE_INSTRUCTION} {PM_STEERING_WAKE_CLAUSE} {PM_GWTD_EXECUTION_WAKE_CLAUSE} \
                  {PM_CYCLE_REPORTING_CLAUSE}\r",
             ),
         })
@@ -1528,7 +1654,7 @@ impl AppRuntime {
                     "periodic wake re-armed the resident PM from the scheduled snapshot"
                 );
             }
-            Ok(PmWakeWrite::Deferred) => {
+            Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "periodic wake deferred until the PM composer is empty"
@@ -1580,7 +1706,7 @@ impl AppRuntime {
                     "woke the resident PM for new Issue Monitor activity"
                 );
             }
-            Ok(PmWakeWrite::Deferred) => {
+            Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {
                 tracing::info!(
                     window_id = %decision.window_id,
                     "Issue Monitor wake deferred until the PM composer is empty"
@@ -2099,6 +2225,7 @@ impl AppRuntime {
                             target_session_id: delivery_target_session_id,
                             ordinary_revision,
                             transaction_revision: reservation.transaction_revision(),
+                            retained_input: None,
                         });
                 }
                 outcome
@@ -2364,12 +2491,70 @@ impl AppRuntime {
     ///
     /// Issue #3702: if the PM TUI composer already has unsent keystrokes,
     /// hold one coalesced prompt instead of splicing `[gwt]` into the line.
+    fn retry_held_pm_wake(&mut self, project_root: &Path) -> bool {
+        let pending = self
+            .project_state_for_root(project_root)
+            .and_then(|state| state.pending_pm_wakes.keys().next().cloned());
+        if let Some(window_id) = pending {
+            self.flush_pending_pm_wake(&window_id);
+        }
+        self.project_state_for_root(project_root)
+            .is_some_and(|state| {
+                !state.pending_pm_wakes.is_empty()
+                    || state.pm_agent_idle_wakes.delivery_in_flight.is_some()
+            })
+    }
+
+    fn pm_wake_owns_input(&self, decision: &PmWakeDecision) -> bool {
+        self.pty_writers
+            .read()
+            .ok()
+            .and_then(|writers| writers.get(&decision.window_id).cloned())
+            .is_some_and(|entry| {
+                entry.pm_delivery_replay.lock().is_ok_and(|guard| {
+                    guard.as_ref().is_some_and(|guard| {
+                        Some(&guard.operation_id) == decision.wake_id.as_ref()
+                            && guard.retained_input.is_some()
+                    })
+                })
+            })
+    }
+
     fn write_pm_wake_prompt(&mut self, decision: &PmWakeDecision) -> Result<PmWakeWrite, String> {
+        let owns_input = self.pm_wake_owns_input(decision);
         let prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
             &decision.project_root,
         ))
         .map_err(|error| error.to_string())?;
-        if prefs.settings.paused {
+        if !owns_input
+            && decision.periodic_input.as_ref().is_some_and(|input| {
+                self.runtimes
+                    .get(&decision.window_id)
+                    .is_none_or(|runtime| {
+                        !input.matches(
+                            prefs
+                                .registration
+                                .as_ref()
+                                .map(|registration| registration.session_id.as_str()),
+                            runtime.incarnation,
+                            &runtime.pty,
+                            prefs.settings.loop_interval_secs_clamped(),
+                        )
+                    })
+            })
+        {
+            if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                if state
+                    .pending_pm_wakes
+                    .get(&decision.window_id)
+                    .is_some_and(|held| held.wake_id == decision.wake_id)
+                {
+                    state.pending_pm_wakes.remove(&decision.window_id);
+                }
+            }
+            return Ok(PmWakeWrite::Discarded);
+        }
+        if prefs.settings.paused && !owns_input {
             if let Some(state) = self
                 .project_state_for_root_mut(&decision.project_root)
                 .filter(|_| decision.idle_notifications.is_empty())
@@ -2384,7 +2569,7 @@ impl AppRuntime {
             &pm_registry::pm_loop_state_path_for_repo_path(&decision.project_root),
         )
         .map_err(|error| error.to_string())?;
-        if loop_state.last_wake_id != decision.wake_id {
+        if loop_state.last_wake_id != decision.wake_id && !owns_input {
             if let Some(state) = self
                 .project_state_for_root_mut(&decision.project_root)
                 .filter(|_| decision.idle_notifications.is_empty())
@@ -2401,7 +2586,34 @@ impl AppRuntime {
             .lock()
             .map(|pane| pane.has_unsent_user_input())
             .unwrap_or(false);
-        if unsent {
+        let now = chrono::Utc::now();
+        let recent_output = self
+            .window_last_output_at
+            .get(&decision.window_id)
+            .is_some_and(|at| {
+                now.signed_duration_since(*at).num_seconds()
+                    < prefs
+                        .settings
+                        .loop_interval_secs_clamped()
+                        .saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS)
+                        as i64
+            });
+        let busy = matches!(
+            self.window_status(&decision.window_id),
+            Some(WindowProcessStatus::Waiting)
+        ) || (self.window_status(&decision.window_id)
+            == Some(WindowProcessStatus::Running)
+            && recent_output);
+        if (unsent || busy) && !owns_input {
+            // Fast-path input can arrive after the earlier periodic snapshot.
+            if unsent && decision.periodic_input.is_some() {
+                if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
+                    state.pending_pm_wakes.retain(|window, held| {
+                        window != &decision.window_id || held.wake_id != decision.wake_id
+                    });
+                }
+                return Ok(PmWakeWrite::Discarded);
+            }
             if !decision.idle_notifications.is_empty() {
                 return Ok(PmWakeWrite::Deferred);
             }
@@ -2418,19 +2630,63 @@ impl AppRuntime {
             .map(|state| state.context.clone())
             .ok_or_else(|| "PM wake project is closed".to_string())?;
         let proxy = self.proxy.for_project(context.clone());
+        let target_session = self
+            .active_agent_sessions
+            .get(&decision.window_id)
+            .map(|session| session.session_id.clone());
+        let runtime = &self.runtimes[&decision.window_id];
+        let incarnation = runtime.incarnation;
+        let output_seq = pane.lock().map_err(|error| error.to_string())?.output_seq();
+        let runtime_path = target_session
+            .as_ref()
+            .map(|session| gwt_agent::runtime_state_path(&self.sessions_dir, session));
+        let writers = Arc::clone(&self.pty_writers);
+        let expected = writers
+            .read()
+            .map_err(|error| error.to_string())?
+            .get(&decision.window_id)
+            .cloned();
         let idle_permit = if decision.idle_notifications.is_empty() {
-            None
+            let state = self.project_state_mut(&context).unwrap();
+            if state.pm_agent_idle_wakes.delivery_in_flight.is_some() {
+                state
+                    .pending_pm_wakes
+                    .insert(decision.window_id.clone(), decision.clone());
+                return Ok(PmWakeWrite::Deferred);
+            }
+            let permit = Arc::new(AtomicBool::new(true));
+            state.pm_agent_idle_wakes.delivery_in_flight =
+                Some((decision.window_id.clone(), Arc::clone(&permit)));
+            Some(permit)
         } else {
             self.project_state(&context)
                 .and_then(|state| state.pm_agent_idle_wakes.delivery_in_flight.as_ref())
                 .map(|(_, permit)| Arc::clone(permit))
         };
         let worker_decision = decision.clone();
-        self.blocking_tasks.try_spawn(move || {
+        let spawn = self.blocking_tasks.try_spawn(move || {
             // Resolve current subjects at physical delivery, after any time spent
             // queued. The captured pane is the exact original runtime; a later
             // pane at the same address must never receive this wake.
-            let result = pm_registry::with_active_pm_loop(
+            let operation_deadline = Instant::now() + Duration::from_secs(2);
+            let _operation_budget = worker_decision.idle_notifications.is_empty().then(|| {
+                gwt_core::operation_deadline::ScopedOperationDeadline::enter(operation_deadline)
+            });
+            let deadline = operation_deadline - PM_DELIVERY_TERMINAL_MARGIN;
+            let result = (|| {
+                if release_acknowledged_wake(&worker_decision, target_session.as_deref(), expected.as_ref())? {
+                    return Ok(PmWakeWrite::Injected);
+                }
+                if !owns_input {
+                    if let Some(input) = &worker_decision.periodic_input {
+                        let prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(&worker_decision.project_root))
+                            .map_err(|error| error.to_string())?;
+                        if expected.as_ref().is_none_or(|expected| !input.matches(target_session.as_deref(), incarnation, &expected.handle, prefs.settings.loop_interval_secs_clamped())) {
+                            return Ok(PmWakeWrite::Discarded);
+                        }
+                    }
+                }
+                pm_registry::with_active_pm_loop(
                 &pm_registry::pm_prefs_path_for_repo_path(&worker_decision.project_root),
                 || {
                     let loop_state = pm_registry::load_pm_loop_state(
@@ -2439,36 +2695,195 @@ impl AppRuntime {
                         ),
                     )
                     .map_err(|error| error.to_string())?;
-                    if loop_state.last_wake_id != worker_decision.wake_id {
+                    if loop_state.last_wake_id != worker_decision.wake_id && !owns_input {
                         return Ok(PmWakeWrite::Discarded);
                     }
                     pane.lock()
                         .map(|pane| pane.has_unsent_user_input())
                         .map_err(|error| error.to_string())
                         .and_then(|unsent| {
-                            if unsent
+                            if (unsent && !owns_input)
                                 || idle_permit
                                     .as_ref()
                                     .is_some_and(|permit| !permit.load(Ordering::Acquire))
                             {
-                                Ok(PmWakeWrite::Deferred)
-                            } else {
+                                Ok(if unsent && !owns_input && worker_decision.periodic_input.is_some() {
+                                    PmWakeWrite::Discarded
+                                } else {
+                                    PmWakeWrite::Deferred
+                                })
+                            } else if !worker_decision.idle_notifications.is_empty() {
                                 let prompt = worker_decision.delivery_prompt();
                                 super::pty_io::write_pane_input_and_submit_blocking(&pane, &prompt)
                                     .map(|()| PmWakeWrite::Injected)
+                            } else {
+                                let Some(target_session) = target_session.as_deref() else {
+                                    return Ok(PmWakeWrite::Discarded);
+                                };
+                                let Some(operation_id) = worker_decision.wake_id.as_deref() else {
+                                    return Ok(PmWakeWrite::Discarded);
+                                };
+                                let Some(expected) = expected.as_ref() else {
+                                    return Ok(PmWakeWrite::Discarded);
+                                };
+                                let busy = || runtime_path.as_ref().is_some_and(|path| pm_wake_runtime_is_busy(path, incarnation));
+                                let receipt_path = pm_registry::pm_delivery_receipts_path_for_repo_path(&worker_decision.project_root);
+                                let existing = pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id).map_err(|error| error.to_string())?;
+                                if existing.as_ref().is_some_and(|receipt| receipt.target_session_id == target_session && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified) {
+                                    let released = {
+                                        let mut guard = expected.pm_delivery_replay.lock().map_err(|error| error.to_string())?;
+                                        if guard.as_ref().is_some_and(|guard| guard.operation_id == operation_id) { guard.take() } else { None }
+                                    };
+                                    drop(released);
+                                    return Ok(PmWakeWrite::Injected);
+                                }
+                                if busy() {
+                                    return Ok(PmWakeWrite::Deferred);
+                                }
+                                let mut replay = if existing.is_some() {
+                                    let mut guard = expected.pm_delivery_replay.lock().map_err(|error| error.to_string())?;
+                                    if guard.as_ref().is_some_and(|guard| guard.operation_id == operation_id && guard.retained_input.as_ref().is_some_and(|(_, complete)| !complete)) {
+                                        return Ok(PmWakeWrite::Unconfirmed);
+                                    }
+                                    if guard.as_ref().is_some_and(|guard| guard.operation_id == operation_id && guard.target_session_id == target_session) { guard.take() } else { None }
+                                } else { None };
+                                if existing.is_some() && replay.is_none() {
+                                    return Ok(if existing.as_ref().is_some_and(|receipt| matches!(receipt.status, pm_registry::PmDeliveryReceiptStatus::Refused | pm_registry::PmDeliveryReceiptStatus::Lost)) {
+                                        PmWakeWrite::Discarded
+                                    } else {
+                                        PmWakeWrite::Unconfirmed
+                                    });
+                                }
+                                let ordinary_revision = replay.as_ref().map(|guard| guard.ordinary_revision)
+                                    .or_else(|| worker_decision.periodic_input.as_ref().and_then(|input| input.revision))
+                                    .or_else(|| expected.handle.ordinary_input_revision())
+                                    .ok_or("PM wake input revision unavailable")?;
+                                let retained = replay.as_mut().and_then(|guard| guard.retained_input.take());
+                                let continuing = retained.is_some();
+                                if !continuing && (expected.handle.has_unsent_user_input() || expected.handle.ordinary_input_revision() != Some(ordinary_revision)) {
+                                    return Ok(PmWakeWrite::Discarded);
+                                }
+                                let reservation = match retained {
+                                    Some((reservation, _)) => reservation,
+                                    None => Arc::clone(&expected.handle).reserve_input_transaction().map_err(|error| error.to_string())?,
+                                };
+                                if !continuing && replay.as_ref().is_some_and(|guard| reservation.previous_transaction_revision() != guard.transaction_revision) {
+                                    return Ok(PmWakeWrite::Discarded);
+                                }
+                                let (prompt, body_sha256) = if let Some(receipt) = existing {
+                                    if receipt.target_session_id != target_session || receipt.target_window_id != worker_decision.window_id {
+                                        return Ok(PmWakeWrite::Discarded);
+                                    }
+                                    ("\r".to_string(), receipt.body_sha256)
+                                } else {
+                                    if pane.lock().map_err(|error| error.to_string())?.output_seq() != output_seq {
+                                        return Ok(PmWakeWrite::Deferred);
+                                    }
+                                    let prompt = worker_decision.delivery_prompt();
+                                    let body = prompt.trim_end_matches('\r');
+                                    let body_sha256 = pm_registry::pm_delivery_prompt_sha256(body);
+                                    let prepared = pm_registry::PmDeliveryReceipt {
+                                        operation_id: operation_id.to_string(),
+                                        recorded_at: chrono::Utc::now().to_rfc3339(),
+                                        status: pm_registry::PmDeliveryReceiptStatus::Prepared,
+                                        principal_session_id: format!("gwt-wake:{operation_id}"),
+                                        target_window_id: worker_decision.window_id.clone(),
+                                        target_session_id: target_session.to_string(),
+                                        body_sha256: body_sha256.clone(),
+                                        reason: None,
+                                    };
+                                    if !matches!(pm_registry::prepare_pm_delivery_receipt(&receipt_path, &prepared).map_err(|error| error.to_string())?, pm_registry::PmDeliveryPrepareOutcome::Prepared) {
+                                        return Ok(PmWakeWrite::Unconfirmed);
+                                    }
+                                    (format!("{body} [gwt-delivery:{operation_id}:{body_sha256}]\r"), body_sha256)
+                                };
+                                let mut body_written = false;
+                                let mut body_attempted = false;
+                                let result = super::pty_io::drive_verified_pane_submit(
+                                    &prompt, reservation.bracketed_paste_enabled(), 2,
+                                    |bytes| {
+                                        if busy() || idle_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+                                            return Err("PM wake held by newer turn activity".to_string());
+                                        }
+                                        let current = writers.read().map_err(|error| error.to_string())?;
+                                        if !current.get(&worker_decision.window_id).is_some_and(|entry| Arc::ptr_eq(entry, expected)) {
+                                            return Err("PM wake target generation changed".to_string());
+                                        }
+                                        reservation.write_input_authorized(bytes, |commit| {
+                                            let fail = |details: &str| gwt_terminal::TerminalError::PtyIoError { details: details.into() };
+                                            if Instant::now() >= deadline {
+                                                return Err(fail("PM wake deadline expired before physical commit"));
+                                            }
+                                            let current_prefs = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(&worker_decision.project_root))
+                                                .map_err(|error| fail(&error.to_string()))?;
+                                            let current_pm = current_prefs.registration;
+                                            if busy() || idle_permit.as_ref().is_some_and(|permit| !permit.load(Ordering::Acquire)) {
+                                                return Err(fail("PM wake held by newer activity at physical commit"));
+                                            }
+                                            if Instant::now() >= deadline || current_pm.as_ref().is_none_or(|registration| registration.session_id != target_session) {
+                                                return Err(fail("registered PM changed before physical commit"));
+                                            }
+                                            let mut mark_attempted = || body_attempted |= bytes != b"\r";
+                                            if body_written || continuing {
+                                                commit(&mut mark_attempted)
+                                            } else {
+                                                let quiet_for = if worker_decision.periodic_input.is_some() {
+                                                    Duration::from_secs(current_prefs.settings.loop_interval_secs_clamped())
+                                                } else { Duration::ZERO };
+                                                reservation.with_quiet_ordinary_input(ordinary_revision, quiet_for, || commit(&mut mark_attempted))
+                                            }
+                                        }).map_err(|error| error.to_string())?;
+                                        body_written |= bytes != b"\r";
+                                        Ok(())
+                                    },
+                                    |settle| thread::sleep(settle.min(deadline.saturating_duration_since(Instant::now()))),
+                                    || pm_registry::pm_delivery_receipt_for_operation(&receipt_path, operation_id)
+                                        .map(|receipt| receipt.is_some_and(|receipt| receipt.target_session_id == target_session && receipt.body_sha256 == body_sha256 && receipt.status == pm_registry::PmDeliveryReceiptStatus::Verified))
+                                        .map_err(|error| error.to_string()),
+                                );
+                                let status = await_pm_delivery_status(&receipt_path, operation_id, deadline);
+                                if status.as_ref().is_ok_and(|status| *status == pm_registry::PmDeliveryReceiptStatus::Verified) {
+                                    return Ok(PmWakeWrite::Injected);
+                                }
+                                if body_attempted || continuing {
+                                    let guard = crate::PmDeliveryReplayGuard {
+                                        operation_id: operation_id.to_string(), target_session_id: target_session.to_string(), ordinary_revision,
+                                        transaction_revision: reservation.transaction_revision(), retained_input: Some((reservation, body_written || continuing)),
+                                    };
+                                    let previous = expected.pm_delivery_replay.lock().map_err(|error| error.to_string())?.replace(guard);
+                                    drop(previous);
+                                }
+                                status?;
+                                let reason = result.err().unwrap_or_else(|| PM_DELIVERY_UNCONFIRMED_REASON.to_string());
+                                let reason = if body_attempted && !body_written {
+                                    format!("PM wake body write was incomplete; recovery is readback-only: {reason}")
+                                } else { reason };
+                                pm_registry::finish_pm_delivery_receipt(&receipt_path, operation_id, target_session, &body_sha256,
+                                    if body_attempted || replay.is_some() { pm_registry::PmDeliveryReceiptStatus::Unconfirmed } else { pm_registry::PmDeliveryReceiptStatus::Refused }, Some(&reason))
+                                    .map_err(|error| error.to_string())?;
+                                tracing::warn!(operation_id, %reason, "PM wake has no exact turn acknowledgement");
+                                Ok(if body_attempted || replay.is_some() { PmWakeWrite::Unconfirmed } else { PmWakeWrite::Discarded })
                             }
                         })
                 },
             )
             .map_err(|error| error.to_string())
-            .and_then(|result| result.unwrap_or(Ok(PmWakeWrite::Deferred)));
+            .and_then(|result| result.unwrap_or(Ok(PmWakeWrite::Deferred)))
+            })();
             proxy.send(UserEvent::PmWakeDeliveryComplete(PmWakeDelivery {
                 context,
                 decision: worker_decision,
                 pane,
                 result,
             }));
-        })?;
+        });
+        if spawn.is_err() && decision.idle_notifications.is_empty() {
+            self.project_state_for_root_mut(&decision.project_root)
+                .unwrap()
+                .pm_agent_idle_wakes
+                .delivery_in_flight = None;
+        }
+        spawn?;
         if decision.idle_notifications.is_empty() {
             if let Some(state) = self.project_state_for_root_mut(&decision.project_root) {
                 state.pending_pm_wakes.remove(&decision.window_id);
@@ -2531,10 +2946,21 @@ impl AppRuntime {
             self.request_pm_agent_idle_wake(&delivery.context, true);
             return;
         }
+        self.project_state_mut(&delivery.context)
+            .unwrap()
+            .pm_agent_idle_wakes
+            .delivery_in_flight = None;
         if !same_pane {
             return;
         }
         match delivery.result {
+            Ok(PmWakeWrite::Unconfirmed) => {
+                self.project_state_mut(&delivery.context)
+                    .unwrap()
+                    .pending_pm_wakes
+                    .entry(delivery.decision.window_id.clone())
+                    .or_insert(delivery.decision);
+            }
             Ok(PmWakeWrite::Deferred) => {
                 let window_id = delivery.decision.window_id.clone();
                 let Some(state) = self.project_state_mut(&delivery.context) else {
@@ -2547,7 +2973,24 @@ impl AppRuntime {
                     .or_insert(delivery.decision);
                 // The user may already have cleared the composer before this
                 // completion arrived. That input event could not flush this slot.
-                self.flush_pending_pm_wake(&window_id);
+                let busy = self
+                    .active_agent_sessions
+                    .get(&window_id)
+                    .zip(self.runtimes.get(&window_id))
+                    .is_some_and(|(session, runtime)| {
+                        pm_wake_runtime_is_busy(
+                            &gwt_agent::runtime_state_path(&self.sessions_dir, &session.session_id),
+                            runtime.incarnation,
+                        )
+                    });
+                let paused = pm_registry::load_pm_prefs(&pm_registry::pm_prefs_path_for_repo_path(
+                    &delivery.context.project_root,
+                ))
+                .map(|prefs| prefs.settings.paused)
+                .unwrap_or(true);
+                if !busy && !paused {
+                    self.flush_pending_pm_wake(&window_id);
+                }
             }
             Ok(PmWakeWrite::Injected) => {
                 tracing::info!(
@@ -2557,6 +3000,11 @@ impl AppRuntime {
             }
             Ok(PmWakeWrite::Queued | PmWakeWrite::Discarded) => {}
             Err(error) => {
+                self.project_state_mut(&delivery.context)
+                    .unwrap()
+                    .pending_pm_wakes
+                    .entry(delivery.decision.window_id.clone())
+                    .or_insert_with(|| delivery.decision.clone());
                 tracing::warn!(
                     %error,
                     window_id = %delivery.decision.window_id,
@@ -2578,7 +3026,7 @@ impl AppRuntime {
         else {
             return;
         };
-        if self.pane_has_unsent_user_input(window_id) {
+        if self.pane_has_unsent_user_input(window_id) && !self.pm_wake_owns_input(&decision) {
             return;
         }
         match self.write_pm_wake_prompt(&decision) {
@@ -2589,7 +3037,7 @@ impl AppRuntime {
                     "delivered a PM wake held while the composer was busy"
                 );
             }
-            Ok(PmWakeWrite::Deferred) => {}
+            Ok(PmWakeWrite::Deferred | PmWakeWrite::Unconfirmed) => {}
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -2633,8 +3081,8 @@ impl AppRuntime {
     /// Issue #4258: whether the live PM pane is mid-turn (Running) or at a
     /// prompt (Waiting), where an injected wake would splice into the turn or
     /// be read as the prompt's answer. Both wake paths hold — never drop —
-    /// their wake while this is true. A pane Running past the deferral bound
-    /// is treated as stuck and woken; a Waiting one is only reported.
+    /// their wake while this is true. The old bounded recovery applies only
+    /// when no current runtime still confirms the turn is busy.
     fn pm_wake_pane_is_busy(
         &self,
         window_id: &str,
@@ -2654,7 +3102,26 @@ impl AppRuntime {
             interval_secs.saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS),
             now,
         );
-        if !past_bound {
+        let recent_output = self.window_last_output_at.get(window_id).is_some_and(|at| {
+            chrono::DateTime::parse_from_rfc3339(now).is_ok_and(|now| {
+                now.signed_duration_since(*at).num_seconds()
+                    < interval_secs.saturating_mul(PM_WAKE_BUSY_DEFER_MAX_INTERVALS) as i64
+            })
+        });
+        if !past_bound || recent_output {
+            return true;
+        }
+        if self
+            .active_agent_sessions
+            .get(window_id)
+            .zip(self.runtimes.get(window_id))
+            .is_some_and(|(session, runtime)| {
+                pm_wake_runtime_is_busy(
+                    &gwt_agent::runtime_state_path(&self.sessions_dir, &session.session_id),
+                    runtime.incarnation,
+                )
+            })
+        {
             return true;
         }
         if status == Some(WindowProcessStatus::Waiting) {
@@ -2666,7 +3133,7 @@ impl AppRuntime {
         }
         tracing::warn!(
             window_id,
-            "PM pane has been Running past the wake deferral bound; waking it anyway"
+            "PM Running observation passed the wake bound without current busy evidence; attempting protected recovery"
         );
         false
     }
@@ -3224,6 +3691,7 @@ mod delivery_tests {
         let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let held = PmWakeDecision {
+            periodic_input: None,
             project_root: repo.clone(),
             window_id: window_id.clone(),
             prompt: "HELD-WAKE\r".into(),
@@ -3236,6 +3704,7 @@ mod delivery_tests {
             .pending_pm_wakes
             .insert(window_id.clone(), held.clone());
         let idle = PmWakeDecision {
+            periodic_input: None,
             prompt: "[gwt] Agent idle: worker\r".into(),
             idle_notifications: [("worker".into(), "worker".into())].into(),
             ..held.clone()
@@ -3269,6 +3738,7 @@ mod delivery_tests {
             "stale idle delivery must preserve the regular slot"
         );
         let idle = PmWakeDecision {
+            periodic_input: None,
             wake_id: pm_registry::load_pm_loop_state(
                 &pm_registry::pm_loop_state_path_for_repo_path(&repo),
             )
@@ -3309,6 +3779,7 @@ mod delivery_tests {
             };
             pm_registry::save_pm_loop_state(&loop_path, &state).unwrap();
             let decision = PmWakeDecision {
+                periodic_input: None,
                 project_root: repo.clone(),
                 window_id,
                 prompt: "[gwt] Agent idle: worker\r".into(),
@@ -3366,6 +3837,88 @@ mod delivery_tests {
         }
     }
 
+    fn normal_wake(project_root: PathBuf, window_id: String) -> PmWakeDecision {
+        let wake_id = Some(uuid::Uuid::new_v4().to_string());
+        pm_registry::save_pm_loop_state(
+            &pm_registry::pm_loop_state_path_for_repo_path(&project_root),
+            &pm_registry::PmLoopState {
+                last_wake_id: wake_id.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        PmWakeDecision {
+            periodic_input: None,
+            project_root,
+            window_id,
+            wake_id,
+            prompt: "WORKER-WAKE\r".into(),
+            idle_notifications: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pm_wake_worker_defers_a_turn_started_after_enqueue() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+        let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+        let (spawner, tasks) = BlockingTaskSpawner::queued();
+        runtime.blocking_tasks = spawner;
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
+        let capture = PromptCapture::begin();
+        let decision = normal_wake(repo, window_id.clone());
+        runtime.write_pm_wake_prompt(&decision).unwrap();
+        let mut state = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+        state.runtime_incarnation = Some(runtime.runtimes[&window_id].incarnation);
+        state.active_tool_calls = Some(Default::default());
+        state.source_event = Some("Stop".into());
+        state.last_activity_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        state
+            .save(&gwt_agent::runtime_state_path(
+                &runtime.sessions_dir,
+                "pm-session-live",
+            ))
+            .unwrap();
+        tasks.lock().unwrap().remove(0)();
+        assert!(
+            capture.prompts().is_empty(),
+            "a busy PM must retain the wake outside its composer"
+        );
+        let event = recorded.lock().unwrap().pop().unwrap();
+        let UserEvent::ProjectCompletion { event, .. } = event else {
+            panic!("project completion")
+        };
+        let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+            panic!("wake completion")
+        };
+        assert_eq!(delivery.result, Ok(PmWakeWrite::Deferred));
+        runtime.pm_wake_delivery_complete(delivery);
+        assert!(
+            tasks.lock().unwrap().is_empty(),
+            "a silent active tool must not cause a retry task storm"
+        );
+        state.status = gwt_agent::AgentStatus::Idle;
+        state.active_tool_calls = Some(Default::default());
+        state.last_completed_hook_event_at = Some(state.updated_at);
+        state
+            .save(&gwt_agent::runtime_state_path(
+                &runtime.sessions_dir,
+                "pm-session-live",
+            ))
+            .unwrap();
+        runtime.flush_pending_pm_wake(&window_id);
+        assert_eq!(
+            tasks.lock().unwrap().len(),
+            1,
+            "idle resumes the same held wake"
+        );
+    }
+
     #[test]
     fn pm_wake_delivery_prepares_subjects_only_on_worker() {
         let _env_lock = env_lock()
@@ -3377,14 +3930,10 @@ mod delivery_tests {
         let _pane = attach_live_pm_pane(&mut runtime, &window_id);
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
+        let (proxy, recorded) = AppEventProxy::stub();
+        runtime.proxy = proxy;
         let capture = PromptCapture::begin();
-        let decision = PmWakeDecision {
-            idle_notifications: Default::default(),
-            project_root: repo,
-            wake_id: None,
-            window_id: window_id.clone(),
-            prompt: "WORKER-WAKE\r".to_string(),
-        };
+        let decision = normal_wake(repo, window_id.clone());
 
         runtime.write_pm_wake_prompt(&decision).unwrap();
 
@@ -3400,6 +3949,82 @@ mod delivery_tests {
         drop(reservation);
         let task = tasks.lock().unwrap().remove(0);
         task();
+        assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
+        let event = recorded.lock().unwrap().pop().unwrap();
+        let UserEvent::ProjectCompletion { event, .. } = event else {
+            panic!("project completion")
+        };
+        let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+            panic!("wake completion")
+        };
+        assert_eq!(
+            delivery.result,
+            Ok(PmWakeWrite::Unconfirmed),
+            "physical CR is not a turn ACK"
+        );
+        runtime.pm_wake_delivery_complete(delivery);
+        runtime.terminal_input_events(&window_id, "separate user input");
+        assert!(tasks.lock().unwrap().is_empty());
+        assert!(
+            runtime.runtimes[&window_id]
+                .pty
+                .reserve_input_transaction()
+                .is_err(),
+            "queued user bytes stay behind the unconfirmed wake transaction"
+        );
+        // A late exact hook must release those bytes even after Pause changes
+        // the wake id. It must never stage another copy of the notification.
+        pm_registry::set_pm_paused(&decision.project_root, true).unwrap();
+        let operation_id = decision.wake_id.as_deref().unwrap();
+        let body = decision.prompt.trim_end_matches('\r');
+        let _session =
+            gwt_core::test_support::ScopedEnvVar::set("GWT_SESSION_ID", "pm-session-live");
+        let input = serde_json::json!({"prompt": format!("{body} [gwt-delivery:{operation_id}:{}]", pm_registry::pm_delivery_prompt_sha256(body))}).to_string();
+        gwt::cli::hook::pm_loop_stop_check::handle_delivery_acknowledgement(
+            &decision.project_root,
+            &input,
+        );
+        runtime
+            .window_hook_states
+            .insert(window_id.clone(), WindowProcessStatus::Running);
+        let mut ack = crate::app_runtime::tests::runtime_hook_state_for_event(
+            "running",
+            "UserPromptSubmit",
+            "pm-session-live",
+        );
+        ack.project_root = Some(decision.project_root.to_string_lossy().into_owned());
+        ack.branch = Some(
+            runtime.active_agent_sessions[&window_id]
+                .branch_name
+                .clone(),
+        );
+        runtime.handle_runtime_hook_event(ack);
+        for task in std::mem::take(&mut *tasks.lock().unwrap()) {
+            task();
+        }
+        let mut completions = std::mem::take(&mut *recorded.lock().unwrap())
+            .into_iter()
+            .filter_map(|event| {
+                if let UserEvent::ProjectCompletion { event, .. } = event {
+                    if let UserEvent::PmWakeDeliveryComplete(delivery) = *event {
+                        return Some(delivery);
+                    }
+                }
+                None
+            });
+        let delivery = completions
+            .next()
+            .expect("an unchanged-Running hook must recover the late ACK while paused");
+        assert!(
+            completions.next().is_none(),
+            "only one wake delivery is scheduled"
+        );
+        assert_eq!(delivery.result, Ok(PmWakeWrite::Injected));
+        runtime.pm_wake_delivery_complete(delivery);
+        runtime.runtimes[&window_id]
+            .pty
+            .reserve_input_transaction()
+            .expect("exact ACK releases user input");
         assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
     }
 
@@ -3418,13 +4043,7 @@ mod delivery_tests {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         let capture = PromptCapture::begin();
-        let decision = PmWakeDecision {
-            idle_notifications: Default::default(),
-            project_root: repo,
-            wake_id: None,
-            window_id: window_id.clone(),
-            prompt: "WORKER-WAKE\r".to_string(),
-        };
+        let decision = normal_wake(repo, window_id.clone());
         runtime.terminal_input_events(&window_id, "draft");
         assert_eq!(
             runtime.write_pm_wake_prompt(&decision).unwrap(),
@@ -3463,13 +4082,7 @@ mod delivery_tests {
         let (spawner, tasks) = BlockingTaskSpawner::queued();
         runtime.blocking_tasks = spawner;
         let capture = PromptCapture::begin();
-        let decision = PmWakeDecision {
-            idle_notifications: Default::default(),
-            project_root: repo,
-            wake_id: None,
-            window_id: window_id.clone(),
-            prompt: "WORKER-WAKE\r".to_string(),
-        };
+        let decision = normal_wake(repo, window_id.clone());
         runtime.write_pm_wake_prompt(&decision).unwrap();
         runtime.terminal_input_events(&window_id, "draft");
         let task = tasks.lock().unwrap().remove(0);
@@ -3495,6 +4108,83 @@ mod delivery_tests {
         let task = tasks.lock().unwrap().remove(0);
         task();
         assert_eq!(capture.prompts(), vec!["WORKER-WAKE\r"]);
+    }
+
+    #[test]
+    fn periodic_pm_wake_discards_input_after_decision_even_after_full_quiet() {
+        let _env_lock = env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for clear in ["\r", "\u{0003}"] {
+            let temp = tempfile::tempdir().unwrap();
+            let _home = ScopedGwtHome::set(temp.path());
+            let (repo, mut runtime, window_id) = pm_wake_fixture(&temp);
+            let _pane = attach_live_pm_pane(&mut runtime, &window_id);
+            let (spawner, tasks) = BlockingTaskSpawner::queued();
+            runtime.blocking_tasks = spawner;
+            let (proxy, recorded) = AppEventProxy::stub();
+            runtime.proxy = proxy;
+            let capture = PromptCapture::begin();
+            let monitor = gwt::IssueMonitorState::with_prefs(
+                gwt::IssueMonitorConfig::default(),
+                gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(&repo))
+                    .unwrap(),
+            );
+            // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; no real-time ordering assertion, kept behind the production operation budget.
+            let start = Instant::now() - Duration::from_secs(1000);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+            runtime.pm_periodic_wake_events_for_prepared_monitor_at(
+                &repo,
+                &monitor,
+                "2026-10-10T01:00:00Z",
+                true,
+            );
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+                start + Duration::from_secs(1),
+            );
+            runtime.terminal_input_events(&window_id, "new human input");
+            runtime.terminal_input_events(&window_id, clear);
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(
+                start + Duration::from_secs(120),
+            );
+            tasks.lock().unwrap().remove(0)();
+            let event = recorded.lock().unwrap().pop().unwrap();
+            let UserEvent::ProjectCompletion { event, .. } = event else {
+                panic!("project completion");
+            };
+            let UserEvent::PmWakeDeliveryComplete(delivery) = *event else {
+                panic!("wake completion");
+            };
+            assert_eq!(delivery.result, Ok(PmWakeWrite::Discarded));
+            runtime.pm_wake_delivery_complete(delivery);
+            assert!(
+                capture.prompts().is_empty(),
+                "the old tick must never be staged"
+            );
+            assert!(runtime
+                .project_state(&runtime.test_context())
+                .unwrap()
+                .pending_pm_wakes
+                .is_empty());
+
+            let decision = runtime
+                .pm_periodic_wake_decision_for_monitor_with_standing_work_at(
+                    &repo,
+                    &monitor,
+                    "2026-10-10T01:10:00Z",
+                    Some(true),
+                )
+                .expect("a fresh tick after the full quiet interval");
+            runtime.runtimes.get_mut(&window_id).unwrap().incarnation += 1;
+            assert_eq!(
+                runtime.write_pm_wake_prompt(&decision).unwrap(),
+                PmWakeWrite::Discarded
+            );
+            assert!(
+                tasks.lock().unwrap().is_empty(),
+                "the old incarnation cannot be queued"
+            );
+        }
     }
 
     #[test]

@@ -33,6 +33,7 @@ test("the settings form renders its sets from the backend view", () => {
   assert.match(body, /pool\.active_index/, "the open set comes from the backend");
   assert.match(body, /pool\.add_disabled_reason/);
   assert.match(body, /pool\.remove_disabled_reason/);
+  assert.match(body, /The first member in the list fixes the launch tool\. Only selected members using that tool are tried in order\. If none is available, new launches wait; tools never switch automatically\./);
 });
 
 test("every set edit is a wizard action the backend applies", () => {
@@ -67,4 +68,13 @@ test("the sets are styled with Operator design tokens only", () => {
     "no raw hex / rgb colors: Operator tokens only",
   );
   assert.match(block, /var\(--color-border\)/);
+});
+
+
+test("Issue Monitor settings selects member identity while generic launch keeps provider selection", () => {
+  assert.match(surface, /launchWizard\.issue_monitor_pool[\s\S]*?launchWizard\.agent_member_options/);
+  assert.match(surface, /launchWizard\.selected_agent_member_id/);
+  assert.match(surface, /kind:\s*"set_agent_member",\s*agent_member_id:\s*value/);
+  assert.match(surface, /block\.dataset\.agentMemberId\s*=\s*set\.agent_member_id/);
+  assert.match(surface, /kind:\s*"set_agent",\s*agent_id:\s*value/);
 });

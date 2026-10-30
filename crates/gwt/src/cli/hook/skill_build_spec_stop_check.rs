@@ -4,6 +4,7 @@
 //! Uses the shared state-file gate for `stop_hook_active`, session isolation,
 //! and fail-open policy. A stranded Blocked build whose abort is unreachable
 //! releases this gate with a durable diagnostic, retaining its active marker.
+//! Completed executions retain failed build bookkeeping as a nonblocking warning.
 
 use std::{
     io::{self, Read},
@@ -50,31 +51,31 @@ pub fn handle_with_input(
                         state.owner_spec,
                     )
             });
-        if waiting || release_unabortable_build(worktree, current_session_id) {
+        if waiting {
             return HookOutput::Silent;
+        }
+        if let Some(released) = release_terminal_build(worktree, current_session_id) {
+            return released;
         }
     }
     output
 }
 
-/// A Blocked execution can retain an active compatibility build marker when
-/// canonical Work authority makes abort unreachable. Preserve that marker;
-/// releasing this gate neither terminalizes Work nor claims successful delivery.
-fn release_unabortable_build(worktree: &Path, current_session_id: Option<&str>) -> bool {
+/// Preserve an exact terminal execution's stranded compatibility build marker.
+/// Releasing this gate neither rewrites bookkeeping nor terminalizes Work.
+fn release_terminal_build(worktree: &Path, current_session_id: Option<&str>) -> Option<HookOutput> {
     use crate::cli::{
         execution_state::{self, ExecutionControlStatus},
         governance::RecoveryProbeState,
     };
 
-    let Some(session) = current_session_id.filter(|session| !session.trim().is_empty()) else {
-        return false;
-    };
+    let session = current_session_id.filter(|session| !session.trim().is_empty())?;
     let Ok(Some(state)) = gwt_core::skill_state::load(worktree, SKILL_NAME) else {
-        return false;
+        return None;
     };
     let resolved = gwt_core::paths::resolve_current_worktree_root(worktree);
     let Ok(Some(record)) = execution_state::load(&resolved) else {
-        return false;
+        return None;
     };
     // The recovery probe describes the Blocked-only abort path. In Active
     // executions it also returns unavailable/retryable:false (blocked_build_abort_recovery_not_applicable),
@@ -83,19 +84,24 @@ fn release_unabortable_build(worktree: &Path, current_session_id: Option<&str>) 
         || state.session_id != session
         || record.primary_session_id != session
         || state.owner_spec != Some(record.owner_number)
-        || record.status != ExecutionControlStatus::Blocked
         || !execution_state::integrity_ok(&record)
     {
-        return false;
+        return None;
+    }
+    if record.status == ExecutionControlStatus::Completed {
+        return Some(HookOutput::system_message(
+            "Warning: completed execution retains active build bookkeeping. Stop is not blocked by this cleanup failure.",
+        ));
+    }
+    if record.status != ExecutionControlStatus::Blocked {
+        return None;
     }
     let diagnosis = execution_state::diagnose(&resolved, Some(session));
-    let Some(probe) = diagnosis.recovery_probes.iter().find(|probe| {
+    let probe = diagnosis.recovery_probes.iter().find(|probe| {
         probe.operation == "build.abort"
             && probe.state == RecoveryProbeState::Unavailable
             && probe.governance.retryable == Some(false)
-    }) else {
-        return false;
-    };
+    })?;
     super::diagnostics::record_stop_gate_decision(
         &resolved,
         serde_json::json!({
@@ -113,7 +119,7 @@ fn release_unabortable_build(worktree: &Path, current_session_id: Option<&str>) 
             "abort_probe": probe,
         }),
     );
-    true
+    Some(HookOutput::Silent)
 }
 
 #[cfg(test)]
@@ -312,6 +318,68 @@ mod tests {
                 HookOutput::StopBlock { .. }
             ),
             "the build-spec gate fires uniformly after the lane removal"
+        );
+    }
+
+    #[test]
+    fn completed_execution_only_releases_its_own_build_bookkeeping() {
+        use crate::cli::execution_state::{self, ExecutionControlStatus};
+
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let dir = tempfile::tempdir().unwrap();
+        crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
+        let mut record: execution_state::ExecutionControlRecord =
+            serde_json::from_value(serde_json::json!({
+                "owner_kind": "spec", "owner_number": 1935, "primary_session_id": "sess-1",
+                "entrypoint": "$gwt-execute", "status": "active", "launched_at": Utc::now(),
+            }))
+            .unwrap();
+        execution_state::save(dir.path(), &record).unwrap();
+        save(dir.path(), SKILL_NAME, &active_state("sess-1", "pr")).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+
+        record.status = ExecutionControlStatus::Completed;
+        execution_state::save(dir.path(), &record).unwrap();
+        let before =
+            std::fs::read(gwt_core::skill_state::state_path(dir.path(), SKILL_NAME)).unwrap();
+        let output = handle_with_input(dir.path(), "{}", Some("sess-1"));
+        assert!(
+            matches!(output, HookOutput::SystemMessage(ref message) if message.contains("completed execution")),
+            "{output:?}"
+        );
+        assert_eq!(
+            std::fs::read(gwt_core::skill_state::state_path(dir.path(), SKILL_NAME)).unwrap(),
+            before
+        );
+
+        record.primary_session_id = "foreign".to_string();
+        execution_state::save(dir.path(), &record).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+        record.primary_session_id = "sess-1".to_string();
+        record.owner_number = 42;
+        execution_state::save(dir.path(), &record).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
+        );
+        record.owner_number = 1935;
+        execution_state::save(dir.path(), &record).unwrap();
+        let mut tampered = execution_state::load(dir.path()).unwrap().unwrap();
+        tampered.content_hash = "tampered".to_string();
+        let path = crate::cli::trusted_store::trusted_dir_for_worktree(dir.path())
+            .unwrap()
+            .join("execution-control.json");
+        std::fs::write(path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        assert_block_with(
+            handle_with_input(dir.path(), "{}", Some("sess-1")),
+            &["still active"],
         );
     }
 }

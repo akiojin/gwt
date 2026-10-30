@@ -22,16 +22,17 @@ async function fixture(telemetry = null, initialCatalog = catalog(windows)) {
   const windowCatalogModel = createUiStateStore({ catalog: initialCatalog }, options);
   const activityModel = createUiStateStore({ agents: live, count: 2 }, options);
   const rosterModel = createUiStateStore({ members: [{ member_id: "m1", name: "One", enabled: true, assignment: { session_id: "s1" } }] }, options);
-  const runtimes = new Map(), mounts = [], previews = new Set(), selected = [], focused = [];
-  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel,
+  const runtimes = new Map(), mounts = [], previews = new Set(), previewMounts = [], selected = [], focused = [];
+  const systemSettingsModel = createUiStateStore({ worksPreviewLines: 3 }, options);
+  const surface = createWorksSurface({ document, windowCatalogModel, activityModel, rosterModel, systemSettingsModel,
     windowDisplayTitle: w => `${w.agent_name || w.title || "Agent"}${w.dynamic_title ? ` — ${w.dynamic_title}` : ""}`,
     mountTerminal(id, root, options) { let input = runtimes.get(id); if (!input) { input = document.createElement("textarea"); runtimes.set(id, input); } root.appendChild(input); mounts.push({ id, root, readOnly: options?.readOnly }); },
-    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); if (root.classList.contains("work-tail")) assert.equal(options?.tailLines, 3); return () => { previews.delete(pre); pre.remove(); }; },
+    mountPreview(id, root, options) { const pre = document.createElement("pre"); pre.textContent = `${id} output`; root.appendChild(pre); previews.add(pre); previewMounts.push({ id, root, lines: options?.tailLines }); return () => { previews.delete(pre); pre.remove(); }; },
     onFocus: id => focused.push(id), onLayout() {}, onSelectMember: id => selected.push(id), getTelemetry: () => telemetry,
   });
   document.querySelector("main").append(surface.element); surface.sync();
   const flush = () => { for (const frame of [...frames]) { frames.delete(frame); frame(); } };
-  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, selected, focused };
+  return { surface, document, window, windowCatalogModel, activityModel, rosterModel, frames, flush, runtimes, mounts, previews, previewMounts, systemSettingsModel, selected, focused };
 }
 
 test("Works implements the approved list and native terminal API", () => {
@@ -49,6 +50,9 @@ test("Works joins exact local-live sessions, places PM first and keeps unknown t
   assert.match(surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
   assert.equal(surface.element.querySelector('[data-metric="today-cost"]').textContent, "—");
   assert.equal(surface.element.querySelector('[data-metric="today-total"]')?.textContent, "—");
+  assert.match(surface.element.querySelector('[data-availability="today"]')?.textContent || "", /No data/);
+  assert.match(surface.element.querySelector('[data-availability="fleet"]')?.textContent || "", /No data/);
+  assert.match(surface.element.querySelector(".works-source-note")?.textContent || "", /Cost.*per-session USD.*Landed PRs.*daily merge data/s);
   assert.match(rows[1].textContent, /Context remaining.*Branch.*Verification.*Last action/s);
   assert.equal(rows[0].querySelector(".work-member"), null, "PM is a role, not a fictional member link");
   assert.equal(rows[0].querySelector(".work-name").textContent, "Manager");
@@ -216,9 +220,14 @@ test("Works batches bursts, resolves synchronous navigation and rejects ended or
 test("Works distinguishes measured zero from unavailable tokens and thirty-minute graph gaps", async () => {
   const values = [...Array(29).fill(null), 0];
   const telemetry = { today: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, cost_usd: 0, landed_pr_count: 0 }, fleet_tokens_per_minute: values, by_window: { one: { input_tokens: 0, cache_tokens: 0, output_tokens: 0, context_remaining_percent: 0, ahead_of_develop: 0, tokens_per_minute: values } } };
+  telemetry.availability = { today: { state: "measured", detail: "Measured: all project session tokens are available." },
+    fleet: { state: "partial", detail: "Partial: some live agent minutes are missing." } };
   const f = await fixture(telemetry);
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]')?.textContent, "0");
   assert.equal(f.surface.element.querySelector('[data-metric="today-cost"]').textContent, "$0.00");
+  assert.equal(f.surface.element.querySelector('[data-availability="today"]')?.dataset.state, "measured");
+  assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').textContent, telemetry.availability.fleet.detail);
+  assert.equal(f.surface.element.querySelector(".works-source-note").hidden, true);
   assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
   const graph = f.surface.element.querySelector('[data-window-id="one"] svg');
   assert.equal(graph.dataset.knownCount, "1");
@@ -228,6 +237,25 @@ test("Works distinguishes measured zero from unavailable tokens and thirty-minut
   assert.equal(f.surface.element.querySelector('[data-window-id="pm"] svg').dataset.knownCount, "0");
   telemetry.today = { ...telemetry.today, input_tokens: 12, cache_tokens: 10, output_tokens: 3 }; f.surface.sync();
   assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "15", "cached input is already included in input and must not be added twice");
+  const row = f.surface.element.querySelector('[data-window-id="one"]');
+  telemetry.today = { input_tokens: null, cache_tokens: null, output_tokens: null };
+  telemetry.fleet_tokens_per_minute = Array(30).fill(null);
+  for (const state of ["unavailable", "partial"]) {
+    telemetry.availability = { today: { state, detail: `${state}: project session measurements are missing.` },
+      fleet: { state, detail: `${state}: live agent measurements are missing.` } };
+    f.surface.sync();
+    assert.equal(f.surface.element.querySelector('[data-availability="today"]').textContent, telemetry.availability.today.detail);
+    assert.equal(f.surface.element.querySelector('[data-availability="fleet"]').dataset.state, state);
+    assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "—");
+    assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "—");
+  }
+  telemetry.today = { input_tokens: 0, cache_tokens: 0, output_tokens: 0 };
+  telemetry.fleet_tokens_per_minute = Array(30).fill(0);
+  telemetry.availability = { today: { state: "measured", detail: "Measured project tokens." }, fleet: { state: "measured", detail: "Measured live agent minutes." } };
+  f.surface.sync();
+  assert.equal(f.surface.element.querySelector('[data-metric="today-total"]').textContent, "0");
+  assert.equal(f.surface.element.querySelector('[data-metric="fleet-now"]').textContent, "0");
+  assert.equal(f.surface.element.querySelector('[data-window-id="one"]'), row);
   f.surface.dispose();
 });
 
@@ -279,8 +307,42 @@ test("Works and Agents CSS uses Operator tokens, responsive wrapping and an in-s
   const css = readFileSync(new URL("../styles/works-agents.css", import.meta.url), "utf8");
   assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|position:\s*fixed/i);
   assert.match(css, /var\(--font-mono\)/);
+  assert.match(css, /height:\s*calc\(var\(--works-preview-lines,\s*3\)/);
   assert.match(css, /@media\s*\(max-width:\s*[^)]+\)/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /data-state="waiting"[^}]*\.work-spark[^}]*--color-state-needs-input/s);
   assert.match(css, /\.works-full[\s\S]*min-height:\s*0/);
+  assert.match(css, /\.works-availability[^}]*var\(--type-xs\)[^}]*overflow-wrap:\s*anywhere/s);
+});
+
+
+test("Works output line settings update both lists without replacing the native terminal", async () => {
+  const f = await fixture();
+  const host = f.document.createElement("aside"); f.document.querySelector("main").append(host);
+  f.surface.setPreviewHost(host);
+  const row = f.surface.element.querySelector('.work-row[data-window-id="one"]');
+  const native = f.runtimes.get("one");
+  assert.ok(f.previewMounts.every(mount => mount.lines === 3));
+  row.querySelector(".work-tail pre").dispatchEvent(new f.window.Event("click", { bubbles: true }));
+  assert.equal(f.surface.element.querySelector(".works-full").hidden, true, "reading or selecting output does not open its terminal");
+  for (const lines of [5, 10]) {
+    f.systemSettingsModel.update(state => ({ ...state, worksPreviewLines: lines })); f.flush();
+    assert.equal(f.surface.element.style.getPropertyValue("--works-preview-lines"), String(lines));
+    assert.equal(host.querySelector(".works-surface").style.getPropertyValue("--works-preview-lines"), String(lines));
+    for (const root of [f.surface.element, host]) {
+      const tail = root.querySelector('.work-row[data-window-id="one"] .work-tail');
+      assert.equal(f.previewMounts.filter(mount => mount.root === tail).at(-1).lines, lines);
+      assert.equal(tail.querySelectorAll("pre").length, 1, "old text subscription is disposed");
+    }
+    assert.equal(f.surface.element.querySelector('.work-row[data-window-id="one"]'), row);
+    assert.equal(f.runtimes.get("one"), native);
+    assert.equal(f.surface.element.querySelectorAll(".work-row").length, 2);
+    assert.match(f.surface.element.textContent, /Today.*Input.*Cache.*Output.*Landed PRs/s);
+  }
+  f.surface.openWork("one");
+  f.systemSettingsModel.update(state => ({ ...state, worksPreviewLines: 3 })); f.flush();
+  assert.ok(f.surface.element.querySelector(".works-terminal-host").contains(native));
+  f.surface.dispose();
+  assert.equal(f.previews.size, 0);
+  assert.equal(f.frames.size, 0);
 });

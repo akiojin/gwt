@@ -322,8 +322,6 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
     fixture
         .runtime
         .handle_launch_complete_and_drain(fresh_window.clone(), Ok(completion));
-    let (spawner, _) = BlockingTaskSpawner::queued();
-    fixture.runtime.blocking_tasks = spawner;
     let mut ready = runtime_hook_state_for_event("Working", "SessionStart", &session_id);
     ready.continuation_readiness_nonce = Some(readiness_nonce);
     ready.project_root = Some(fixture.project_root.display().to_string());
@@ -364,6 +362,114 @@ fn issue_3852_stop_close_requeue_launch_now_materializes_an_active_successor() {
             .unwrap(),
         gwt_terminal::PaneStatus::Running
     ));
+    let runtime = &fixture.runtime.runtimes[&fresh_window];
+    let child_pid = runtime.pty.process_id().expect("live PTY child");
+    assert_ne!(child_pid, std::process::id());
+    let incarnation = runtime.incarnation;
+
+    // Keep the launch's queued scheduler: replacing it would strand its
+    // independent observer and leave only a vacuous, empty-candidate test.
+    drain_queued_blocking_tasks(&tasks);
+    let (context, activity) = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { context, events } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::LocalAgentActivity { activity } => {
+                        Some((context.clone(), activity.clone()))
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("launch schedules an independent local census dispatch");
+    assert_eq!(
+        fixture.runtime.project_key_for_tab(&context.tab_id),
+        Some(&context.project_key)
+    );
+    assert_eq!(activity.project_key, context.project_key.to_string());
+    let agents = activity.agents.expect("current launch can be observed");
+    assert_eq!(agents.len(), 1, "the real successor must be nonempty");
+    let agent = &agents[0];
+    assert_eq!(agent.window_id, fresh_window);
+    assert_eq!(agent.session_id, session_id);
+    assert_eq!(agent.runtime_incarnation, incarnation);
+    assert_eq!(agent.issue_number, Some(3165));
+    assert!(!agent.is_pm);
+
+    fixture.runtime.agent_roster_events(
+        &context,
+        &"operator".into(),
+        gwt::agent_names::AgentRosterAction::Read,
+        None,
+        Some("read-successor".into()),
+    );
+    drain_queued_blocking_tasks(&tasks);
+    let roster = fixture
+        .recorded_events
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match recorded_project_payload(event) {
+            UserEvent::ProjectDispatch { events, .. } => {
+                events.iter().find_map(|event| match &event.event {
+                    BackendEvent::AgentRoster { roster, request_id } => {
+                        assert_eq!(request_id.as_deref(), Some("read-successor"));
+                        Some(roster.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("roster reply for the live successor");
+    assert!(roster.error.is_none(), "{:?}", roster.error);
+    assert_eq!(roster.project_key, activity.project_key);
+    let member = roster
+        .members
+        .iter()
+        .find(|member| {
+            member
+                .member
+                .assignment
+                .as_ref()
+                .and_then(|assignment| assignment.session_id.as_deref())
+                == Some(session_id.as_str())
+        })
+        .expect("observed Session binds a roster member");
+    assert!(member.member.enabled);
+    assert_eq!(
+        candidate.agent_member_id.as_deref(),
+        Some(member.member.agent_member_id.as_str())
+    );
+    let catalog_window = fixture
+        .runtime
+        .tabs
+        .iter()
+        .flat_map(|tab| {
+            tab.workspace
+                .persisted()
+                .windows
+                .iter()
+                .map(move |window| (tab, window))
+        })
+        .find(|(tab, window)| combined_window_id(&tab.id, &window.id) == fresh_window)
+        .map(|(_, window)| window)
+        .expect("observed window remains in the catalog");
+    assert_eq!(
+        catalog_window.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        catalog_window.agent_name.as_deref(),
+        Some(member.member.name.as_str())
+    );
     settle_test_pane_child(&fixture.runtime, &fresh_window);
 }
 
@@ -740,12 +846,13 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
         agent_project_root: fixture.worktree.display().to_string(),
         ..sample_active_agent_session("tab-1", "predecessor-window")
     };
+    let historical_owner = (case != "4777-ownerless-root").then_some(fixture.execution_owner);
     save_workspace_launch_projection(
         &fixture.project_root,
         &predecessor_active,
         Some("origin/develop"),
-        Some(fixture.execution_owner.number),
-        Some(fixture.execution_owner),
+        historical_owner.map(|owner| owner.number),
+        historical_owner,
         None,
         WorkspaceLaunchProjectionKind::StartWork,
         Some(&HashSet::from([fixture.source_session_id.clone()])),
@@ -866,12 +973,26 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             Some(PathBuf::from(r"E:\gwt\work\issue-3165"));
     }
     if case == "4777-ownerless-root" {
-        history
+        let root = history
             .work_items
-            .iter_mut()
+            .iter()
             .find(|work| work.id == predecessor_id)
-            .unwrap()
-            .owner = None;
+            .unwrap();
+        assert_eq!(root.owner, None, "{case}: seed ownerless projection");
+        let start = root
+            .events
+            .iter()
+            .find(|event| event.kind == gwt_core::workspace_projection::WorkEventKind::Start)
+            .unwrap();
+        assert_eq!(start.owner, None, "{case}: seed ownerless source event");
+        assert!(
+            gwt_core::workspace_projection::workspace_work_event_shard_matches(
+                &fixture.worktree,
+                start,
+            )
+            .unwrap(),
+            "{case}: immutable source matches the ownerless fixture"
+        );
     }
     if case.starts_with("4249") || case.starts_with("4777") || case.starts_with("5082") {
         let mut start = history
@@ -910,12 +1031,17 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             if case == "4777-missing-historical-owner" || case.contains("ownerless") {
                 // Real historical chains can lose owners at the root,
                 // terminal middle generations, or active latest Work.
-                history
+                let middle = history
                     .work_items
                     .iter_mut()
                     .find(|work| work.id == predecessor_id)
-                    .unwrap()
-                    .owner = None;
+                    .unwrap();
+                middle.owner = None;
+                // Shared intake refolds inline events. Seed the historical
+                // owner consistently instead of racing it back from Start.
+                for event in &mut middle.events {
+                    event.owner = None;
+                }
                 if case == "5082-ownerless-current" {
                     start.id = format!("{case}-middle-start");
                     start.work_item_id =
@@ -934,6 +1060,9 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
                 start.work_item_id =
                     gwt_core::workspace_projection::successor_work_id(&predecessor_id);
                 start.related_work_item_id = Some(predecessor_id.clone());
+                if case == "4777-ownerless-root" {
+                    start.owner = Some(format!("SPEC-{}", fixture.execution_owner.number));
+                }
                 history.apply_event(start);
             }
         }
@@ -1377,6 +1506,16 @@ fn assert_monitor_fresh_terminal_predecessor_materializes_usable_successor_work(
             staged_diff,
             "{case}: retain staged source bytes"
         );
+    }
+    if case == "4777-missing-historical-owner" {
+        // Exercise the background refold before comparing history, regardless
+        // of whether the launch thread happened to finish its intake first.
+        let intake = crate::work_events_ingest::ingest_project_work_events_paths(
+            &fixture.project_root,
+            &works_path,
+            &gwt_core::paths::gwt_workspace_work_events_intake_state_path(&project_key),
+        );
+        assert!(intake.load_error.is_none(), "{case}: {intake:?}");
     }
     let updated = gwt_core::workspace_projection::load_workspace_work_items(&fixture.project_root)
         .unwrap()
@@ -4540,11 +4679,9 @@ fn app_runtime_issue_monitor_profile_save_switches_the_pool_head() {
 
 #[test]
 fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement() {
-    // Issue #4079 AC-2: with more than one provider in the pool the per-Issue
-    // form must say which candidate the save writes, and its preview of the
-    // resulting pool summary must be what the Monitor reports afterwards.
-    // (Issue #4911: the settings form edits every set instead; this form still
-    // switches the head.)
+    // AC41: the per-Issue form edits registered people and previews the full
+    // candidate pool. Reordering its head must save the same member order and
+    // summary that the operator saw, including people with the same tool.
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4555,8 +4692,11 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     fs::create_dir_all(&repo).expect("create repo");
     init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
-    let mut seeded = gwt::IssueMonitorPrefs::default();
-    seeded.set_launch_profile_pool(vec![pool_profile("claude"), pool_profile("codex")]);
+    let mut seeded = gwt::IssueMonitorPrefs {
+        max_active_agents: 2,
+        ..Default::default()
+    };
+    seeded.set_launch_profile_pool(vec![pool_profile("codex")]);
     gwt::save_issue_monitor_prefs(&prefs_path, &seeded).expect("seed pool");
     let tab = sample_project_tab("tab-1", "Repo", repo.clone(), ProjectKind::Git, &[]);
     let (mut runtime, recorded_events) =
@@ -4568,6 +4708,23 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
             issue_number: 3165,
             linked_issue_kind: Some(LinkedIssueKind::Spec),
         },
+    );
+    let registered_pool = gwt::load_issue_monitor_prefs(&prefs_path)
+        .expect("migrated registered pool")
+        .launch_profile_pool();
+    assert_eq!(registered_pool.len(), 2);
+    let expected_members = vec![
+        registered_pool[1].agent_member_id.clone(),
+        registered_pool[0].agent_member_id.clone(),
+    ];
+    assert!(expected_members.iter().all(Option::is_some));
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::MoveAgentSettingsSet { index: 1, to: 0 },
+    );
+    runtime.handle_launch_wizard_action(
+        &runtime.test_context(),
+        LaunchWizardAction::SelectAgentSettingsSet { index: 0 },
     );
     let events = runtime.handle_launch_wizard_action(
         &runtime.test_context(),
@@ -4586,22 +4743,29 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
         view.fast_mode,
         "profile editing honors its own Fast preference"
     );
-    let impact = view
-        .issue_monitor_pool_impact
+    let pool = view
+        .issue_monitor_pool
         .as_ref()
-        .expect("Agent Settings must preview its effect on the candidate pool");
-    assert_eq!(impact.action, "replace_head");
-    assert_eq!(impact.agent_id, "codex");
+        .expect("Agent Settings must preview the registered candidate pool");
+    assert_eq!(pool.active_index, 0);
     assert_eq!(
-        impact.replaced_agent_id.as_deref(),
-        Some("claude"),
-        "the operator must see which candidate is switched out"
+        pool.sets
+            .iter()
+            .map(|profile| profile.agent_member_id.clone())
+            .collect::<Vec<_>>(),
+        expected_members,
+        "the preview retains the selected people in launch order"
     );
-    assert!(
-        impact.detail.contains(&impact.resulting_summary),
-        "the note states the summary the Monitor will report: {impact:?}"
+    assert_eq!(view.selected_agent_member_id, expected_members[0]);
+    assert_eq!(view.selected_agent_id, "codex");
+    assert_eq!(
+        pool.sets
+            .iter()
+            .map(|profile| profile.agent_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["codex", "codex"]
     );
-    let previewed_summary = impact.resulting_summary.clone();
+    let previewed_summary = pool.resulting_summary.clone();
 
     runtime.handle_launch_wizard_action(&runtime.test_context(), LaunchWizardAction::Submit);
     wait_for_recorded_event(
@@ -4650,6 +4814,15 @@ fn app_runtime_issue_monitor_configure_issue_previews_the_pool_head_replacement(
     );
 
     let prefs = gwt::load_issue_monitor_prefs(&prefs_path).expect("load prefs");
+    assert_eq!(
+        prefs
+            .launch_profile_pool()
+            .iter()
+            .map(|profile| profile.agent_member_id.clone())
+            .collect::<Vec<_>>(),
+        expected_members,
+        "saving preserves the exact previewed member order"
+    );
     assert!(prefs.launch_profile.as_ref().expect("saved head").fast_mode);
     let saved_summary = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), prefs)
         .status_view()

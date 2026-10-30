@@ -151,6 +151,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       import { createPmChat, createPmWindowModel } from "/pm-chat.js";
       import { shouldSkipTerminalFocusActivation } from "/clone-modal-focus-guard.js";
       import { createUiTraceProfiler } from "/ui-trace-profiler.js";
+      import { bindControlExplanations, setControlExplanation } from "/control-explanations.js";
       import { UI_TRACE_EVENT, createUiTraceWiring } from "/ui-trace-wiring.js";
       // SPEC-3015 — window runtime state normalization extracted from app.js;
       // backed by the generated protocol enum contract (/protocol-enums.js).
@@ -201,13 +202,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       };
 
       const uiTraceProfiler = createUiTraceProfiler();
-
-      // SPEC-3064 Phase 3 (E7): the project-shell chrome element refs
-      // (project tabs strip, open-project button + split-button menu,
-      // picker/onboarding elements, recent project list, window list
-      // button/panel) moved to /project-shell-surface.js; app.js keeps the
-      // toolbar buttons whose click listeners stay wired here.
-      const addButton = document.getElementById("add-button");
+      const rail = document.getElementById("op-rail");
+      for (const control of rail.querySelectorAll("button[title]")) {
+        setControlExplanation(control, control.title);
+      }
+      const railExplanations = bindControlExplanations({ document, root: rail, id: "rail-control-explanation", placement: "right", passThrough: true });
 
       // The rail owns PM navigation and launches a missing PM.
       for (const id of ["op-pm-entry"]) {
@@ -217,8 +216,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         });
       }
 
-      const modal = document.getElementById("preset-modal");
-      const closeModalButton = document.getElementById("close-modal");
       // SPEC-3064 Phase 3 (E5): the other wizard chrome element refs
       // (dialog/title/meta/summary/body/error/back/cancel/submit) moved to
       // /launch-wizard-surface.js; app.js keeps wizardModal for the modal
@@ -264,8 +261,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           runtime.terminal.write(text, onWritten);
         },
-        // Hidden Agents tabs still feed the shared buffer used by Issue previews.
-        canWrite: (windowId) => (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
+        // Reports hides the PM renderer, but its VT buffer must keep consuming
+        // output at the current grid. Replaying it only after reveal can apply
+        // old-width wraps and relative erases to an already resized terminal.
+        // Hidden Agents likewise feed the buffer used by Issue previews.
+        canWrite: (windowId) => pmChatViews.has(windowId) || (worksHost && worksSurface?.contains(windowId)) || canRefreshTerminalViewport(windowId),
         onFlush: (windowId) => {
           const runtime = terminalMap.get(windowId);
           if (runtime?.snapshotWriteCoordinator?.shouldDeferOutput() === true) {
@@ -380,23 +380,17 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         }),
         projectState: Object.freeze({
           owner: "project-workspace-shell",
-          // SPEC-3064 Phase 3 (E7): windowListOpen / windowListEntries are
-          // backed by /project-shell-surface.js; the remaining state stays
-          // in app.js and is exposed to the surface through accessors.
           state: Object.freeze([
             "appState",
             "versionState",
             "projectError",
             "viewport",
-            "windowListOpen",
-            "windowListEntries",
           ]),
           mutatedBy: Object.freeze([
             "renderAppState",
             "renderWorkspace",
             "renderProjectPicker",
             "renderProjectOnboarding",
-            "renderWindowList",
           ]),
         }),
       });
@@ -426,7 +420,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // Project and workspace actions never change the URL.
       const routeProjectKey = parseFrontendRoute(window.location.pathname).projectKey;
       const { model: agentActivityModel, applyAgentActivitySnapshot, clearAgentActivity } = createAgentActivityModel(routeProjectKey);
-      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage } = createAgentRosterModel(routeProjectKey);
+      const { model: rosterModel, applyAgentRosterSnapshot, applyAgentRosterError, applyAgentRosterUsage,
+        editAgentMemberName, retryAgentMemberName, clearAgentRosterRename } = createAgentRosterModel(routeProjectKey, {
+        onRename: request => {
+          if (send(request) !== "sent") applyAgentRosterError({ project_key: routeProjectKey,
+            request_id: request.request_id, message: "Name could not be sent. Retry when connected." });
+        },
+      });
       const { model: scheduleModel, applyAgentScheduleSnapshot, applyAgentScheduleError,
         beginAgentScheduleRequest, clearAgentSchedule } = createAgentScheduleModel(routeProjectKey);
       const { model: switchModel, beginAgentSwitchRequest, applyAgentSwitchSnapshot, applyAgentSwitchError, clearAgentSwitch } = createAgentSwitchModel(routeProjectKey);
@@ -457,8 +457,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         createAgentKanbanPendingPlacementController();
       // SPEC-3064 Phase 3 (E6b): branchCleanupWindowId and the synthetic
       // workspace-cleanup window id moved to /branches-cleanup-surface.js.
-      // Window List visibility stays in the shell; its snapshot gate lives in
-      // the shared catalog model below.
       let appState = {
         app_version: "",
         tabs: [],
@@ -467,7 +465,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       };
       const windowCatalogModel = createUiStateStore({
         catalog: { appState, runtimeStates: {}, focusedId: null, version: 0 },
-        listEntries: [],
       });
       let reconcilingWindowCatalog = false;
 
@@ -496,18 +493,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             version: state.catalog.version + 1,
           } };
         });
-      }
-
-      // Existing shell callers request a catalog commit; they cannot repaint
-      // just the List while leaving another catalog subscriber stale.
-      function renderWindowList() {
-        publishWindowCatalog();
-      }
-
-      function catalogRuntimeStateForWindow(windowData) {
-        const states = windowCatalogModel.read().catalog.runtimeStates;
-        const sourceState = Object.hasOwn(states, windowData.id) ? states[windowData.id] : windowData.status;
-        return normalizeWindowRuntimeState(sourceState, windowData.preset);
       }
 
       function publishWindowCatalogRuntime(windowId, status) {
@@ -593,6 +578,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           appendRenderKeyPart(parts, windowData?.agent_id || "");
           appendRenderKeyPart(parts, "agent_name");
           appendRenderKeyPart(parts, windowData?.agent_name || "");
+          appendRenderKeyPart(parts, "display_title");
+          appendRenderKeyPart(parts, windowDisplayTitle(windowData));
           appendRenderKeyPart(parts, "session_id");
           appendRenderKeyPart(parts, windowData?.session_id || "");
           appendRenderKeyPart(parts, "is_pm");
@@ -613,8 +600,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         return parts.join("");
       }
 
-      // SPEC-3064 Phase 3 (E7): windowListRenderKey moved to
-      // /project-shell-surface.js with the Window List dropdown renderer.
       function windowRuntimeStatusRenderKey(windowId, runtimeState, effectiveDetail, windowData) {
         const parts = [];
         appendRenderKeyPart(parts, "id");
@@ -753,7 +738,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-3064 Phase 3 (E7): projectPickerRenderKey /
-      // projectOnboardingRenderKey / actionAvailabilityRenderKey and the
+      // projectOnboardingRenderKey and the
       // migration / clone-project modal state moved to
       // /project-shell-surface.js with their renderers.
       let versionState = { current: "", latest: "" };
@@ -882,7 +867,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       function knowledgeKindForPreset(preset) {
-        if (["settings", "issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
+        if (["issue", "issue_monitor", "spec", "work", "workspace", "branches"].includes(preset)) {
           return "issue";
         }
         return null;
@@ -911,9 +896,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           connectionOverlay.reportInputDropped();
           return "unavailable";
         }
-        // A switch is valid only on this live Host connection. Never replay
-        // an unacknowledged request or cancellation after a Host restart.
-        if (message.kind === "agent_switch" && message.action.kind !== "read") {
+        // Revisioned names and switches belong to this live connection.
+        // Never replay an unacknowledged write after reconnect.
+        if ((message.kind === "agent_switch" && message.action.kind !== "read") ||
+            (message.kind === "agent_roster" && message.action.kind === "rename")) {
           if (!socket || socket.readyState !== WebSocket.OPEN || socketProjectKey !== activeProjectKey()) return "unavailable";
           try { socket.send(JSON.stringify(message)); return "sent"; } catch (_err) { return "unavailable"; }
         }
@@ -998,8 +984,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             }
           },
         });
-        // SPEC-2356 Anshin Addendum (FR-042): STOP ALL is reachable from the
-        // palette as well as the rail.
+        // #4777: all-agent stop remains in the palette after its rail entry retires.
         window.__operatorShell.palette.register({
           id: "stop-all-agents",
           label: "Agents: Stop All Running Agents",
@@ -1170,7 +1155,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       });
 
       function setConnectionState(connected) {
-        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); }
+        if (!connected) { clearAgentActivity(); clearAgentSchedule(); clearAgentSwitch(); clearAgentRosterRename(); }
         connectionOverlay.setConnected(connected);
         handleLaunchWizardTransportChange(connected);
         // SPEC #3170 AS-17.2: disconnect invalidates every silent semantic
@@ -1326,6 +1311,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // every cleanup event emitted while it was away. Re-subscribe to the
         // operations it still shows as running.
         if (recoverSnapshots === true) resyncSocketSurfaces();
+        else if (socketProjectKey) send({ kind: "get_system_settings" });
         syncRunningBranchCleanups();
         requestVisiblePmReports(true);
         requestSupportedAgentRefresh();
@@ -1575,8 +1561,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
       // SPEC-3064 Phase 3 (E7): sendOpenProjectDialog, the clone-project
-      // modal glue (open/close/render + state), and
-      // updateActionAvailability moved to /project-shell-surface.js.
+      // modal glue (open/close/render + state) moved to /project-shell-surface.js.
 
       function presetLabel(preset) {
         return preset
@@ -1715,7 +1700,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return String(windowData?.agent_name || "").trim() || PM_WINDOW_TITLE;
         }
         if (isAgentWindowPreset(windowData?.preset)) {
-          const name = String(windowData?.agent_name || "").trim();
+          const member = windowData?.session_id && rosterModel.read().members.find(member => !member.is_pm
+            && member.assignment?.session_id === windowData.session_id);
+          const name = String(member?.name || windowData?.agent_name || "").trim();
           const purpose = String(windowData?.dynamic_title || windowData?.purpose_title || "").trim();
           if (name) return purpose ? `${name} — ${purpose}` : name;
         }
@@ -1747,10 +1734,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       }
 
 
-      // SPEC-3064 Phase 3 (E7): escapeHtml moved to
-      // /project-shell-surface.js with the Window List renderer (its only
-      // remaining caller).
-
       function runtimeStateForWindow(windowData) {
         const sourceState = windowRuntimeStateMap.has(windowData.id)
           ? windowRuntimeStateMap.get(windowData.id)
@@ -1763,10 +1746,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           ? windowRuntimeStateMap.get(windowData.id)
           : windowData.status;
       }
-
-      // SPEC-3064 Phase 3 (E7): the Window List dropdown
-      // (requestWindowList / renderWindowList / toggleWindowList) lives in
-      // /project-shell-surface.js.
 
       // SPEC-3064 Phase 3 (E7): renderProjectTabs, the close-project-tab
       // confirm modal (state + render + requestCloseProjectTab), the project
@@ -1796,7 +1775,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderAppState({ ...appState, app_version: hub.app_version });
       }
 
-      function renderAppState(nextState) {
+      function renderAppState(nextState, incomingRuntimeStatus = false) {
         dismissOperatorBriefing();
         return traceMeasure(
           UI_TRACE_EVENT.renderAppState,
@@ -1811,157 +1790,39 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             });
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
+            if (incomingRuntimeStatus) {
+              const wasReconciling = reconcilingWindowCatalog;
+              reconcilingWindowCatalog = true;
+              try {
+                for (const tab of nextState?.tabs || []) for (const window of tab.workspace?.windows || []) {
+                  applyStatus(window.id, window.status, detailMap.get(window.id));
+                }
+              } finally {
+                reconcilingWindowCatalog = wasReconciling;
+              }
+            }
             setVersionState(appState.app_version, versionState.latest);
             const tab = activeProjectTab();
             document.getElementById("split-view-button").disabled = !tab;
             renderProjectPicker(tab);
-            updateActionAvailability(tab);
             renderProjectOnboarding(tab);
             renderWorkspace(tab?.workspace || emptyWorkspace());
             syncCurrentProjectWorkspaceIds(
               deriveCurrentProjectWorkspaceIds(tab?.workspace || {}),
             );
-            renderWindowList();
+            publishWindowCatalog();
           },
         );
       }
 
-      let presetModalFocusReturn = null;
-      let presetModalFocusTrapRelease = null;
-      // SPEC-2356 "Surface Deck" — arrow-key roving across the 2-column
-      // preset grid. Buttons are walked in document order; ←→ step within a
-      // row, ↑↓ jump a full row (columns = 2). `.is-active` mirrors the
-      // currently-focused tile so the keyboard glow tracks the cursor.
-      // SPEC-2356 landscape weighted deck — roving is geometry direction-nearest
-      // (not a fixed column-count jump) so the 45/33/22 weighted columns and the
-      // uneven per-column row counts navigate intuitively. The handler reads real
-      // tile geometry; a too-diagonal candidate (>~63°) is rejected so pressing
-      // Down at the bottom of a short column clamps instead of leaping columns.
-      function findGeometryNeighbor(buttons, current, key) {
-        const src = buttons[current].getBoundingClientRect();
-        const sx = src.left + src.width / 2;
-        const sy = src.top + src.height / 2;
-        const AXIS_BIAS = 2.5;
-        let best = -1;
-        let bestScore = Infinity;
-        buttons.forEach((btn, i) => {
-          if (i === current) return;
-          const r = btn.getBoundingClientRect();
-          const dx = r.left + r.width / 2 - sx;
-          const dy = r.top + r.height / 2 - sy;
-          const inDirection =
-            (key === "ArrowRight" && dx > 1) ||
-            (key === "ArrowLeft" && dx < -1) ||
-            (key === "ArrowDown" && dy > 1) ||
-            (key === "ArrowUp" && dy < -1);
-          if (!inDirection) return;
-          const horizontal = key === "ArrowRight" || key === "ArrowLeft";
-          const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
-          const secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
-          if (secondary > primary * 2) return;
-          const score = primary + secondary * AXIS_BIAS;
-          if (score < bestScore) {
-            bestScore = score;
-            best = i;
-          }
-        });
-        return best;
-      }
-      function presetRovingButtons() {
-        return [...modal.querySelectorAll(".preset-button")];
-      }
-      function setActivePresetButton(buttons, index) {
-        if (!buttons.length) return;
-        const clamped = Math.max(0, Math.min(index, buttons.length - 1));
-        buttons.forEach((button, i) => {
-          button.classList.toggle("is-active", i === clamped);
-        });
-        const target = buttons[clamped];
-        if (target && typeof target.focus === "function") {
-          try { target.focus({ preventScroll: true }); }
-          catch { target.focus(); }
-        }
-      }
-      function handlePresetRovingKeydown(event) {
-        const key = event.key;
-        if (
-          key !== "ArrowRight" &&
-          key !== "ArrowLeft" &&
-          key !== "ArrowUp" &&
-          key !== "ArrowDown" &&
-          key !== "Enter"
-        ) {
-          return;
-        }
-        const buttons = presetRovingButtons();
-        if (!buttons.length) return;
-        let current = buttons.indexOf(document.activeElement);
-        if (current < 0) {
-          current = buttons.findIndex((button) =>
-            button.classList.contains("is-active"),
-          );
-          if (current < 0) current = 0;
-        }
-        if (key === "Enter") {
-          event.preventDefault();
-          buttons[current].click();
-          return;
-        }
-        event.preventDefault();
-        const next = findGeometryNeighbor(buttons, current, key);
-        if (next >= 0) setActivePresetButton(buttons, next);
-      }
-      function openModal() {
-        // SPEC-2356 — capture trigger BEFORE adding .open so we can
-        // restore focus on close. The preset modal is invoked via the
-        // "+" Add Window button; without restore, focus falls to body.
-        presetModalFocusReturn = document.activeElement;
-        modal.classList.add("open");
-        modal.removeAttribute("aria-hidden");
-        const presetShell = modal.querySelector(".modal-shell");
-        if (presetShell && typeof presetShell.focus === "function") {
-          try { presetShell.focus({ preventScroll: true }); }
-          catch { presetShell.focus(); }
-        }
-        // SPEC-2356 — trap Tab inside the modal so keyboard users can't
-        // escape into background content while the modal is open.
-        if (presetShell) {
-          presetModalFocusTrapRelease = createFocusTrap(presetShell, { document });
-        }
-        // SPEC-2356 "Surface Deck" — drop focus onto the first preset tile so
-        // arrow-key roving works immediately without a stray Tab.
-        const buttons = presetRovingButtons();
-        if (buttons.length) {
-          setActivePresetButton(buttons, 0);
-        }
-      }
-
-      function closeModal() {
-        const wasOpenPreset = modal.classList.contains("open");
-        modal.classList.remove("open");
-        modal.setAttribute("aria-hidden", "true");
-        if (wasOpenPreset) {
-          if (typeof presetModalFocusTrapRelease === "function") {
-            presetModalFocusTrapRelease();
-            presetModalFocusTrapRelease = null;
-          }
-          if (presetModalFocusReturn && typeof presetModalFocusReturn.focus === "function") {
-            try { presetModalFocusReturn.focus({ preventScroll: true }); }
-            catch { presetModalFocusReturn.focus(); }
-          }
-          presetModalFocusReturn = null;
-          // SPEC-2356 — clear the roving highlight so a re-open starts clean.
-          for (const button of presetRovingButtons()) {
-            button.classList.remove("is-active");
-          }
-        }
-      }
-
-
+      let initialSurfaceTabId = null;
+      let initialSurfaceSelected = false;
       // Issue #4777: fixed surfaces share the rail and optional split host.
       function openSurface(surface) {
         windowCatalogModel.update(state => state.pendingSurface ? { ...state, pendingSurface: null } : state);
         if (splitSurfaces?.show(surface)) {
+          // Late initial windows must not override an explicit surface choice.
+          initialSurfaceSelected = true;
           // A rail choice supersedes navigation still awaiting a window.
           pendingFrameWindowId = null;
           pendingPmFrame = false;
@@ -2098,7 +1959,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return false;
         }
         if (
-          modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
           cloneProjectModal?.classList.contains("open") ||
           document.querySelector(".modal-backdrop.open")
@@ -2402,7 +2262,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           const shouldFocus = !shouldSkipTerminalFocusActivation({
             doc: document,
             modalElements: [
-              modal,
               wizardModal,
               cloneProjectModal,
               document.getElementById("open-project-path-modal"),
@@ -2515,12 +2374,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         appendRenderKeyPart(parts, counts?.done ?? null);
         appendRenderKeyPart(parts, "agents");
         appendRenderKeyPart(parts, counts?.agents ?? null);
-        // SPEC-3038 (2026-06-20): include the window count so the rail Windows
-        // badge refreshes when only surface (non-agent) windows are added or
-        // removed. Agent-count fields alone do not change for surfaces, which
-        // otherwise short-circuits the badge update via the shared cache key.
-        appendRenderKeyPart(parts, "windows");
-        appendRenderKeyPart(parts, counts?.windows ?? null);
         appendRenderKeyPart(parts, "branches");
         appendRenderKeyPart(parts, counts?.branches ?? null);
         appendRenderKeyPart(parts, "git");
@@ -2598,10 +2451,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       function recomputeOperatorTelemetry() {
 
         if (!window.__operatorShell?.applyTelemetryCounts) return;
-        // SPEC-3038 AS-1.4 (2026-06-20): the rail Windows item badges the
-        // open-window count across all project tabs, matching the cross-tab
-        // Windows popover. windowMap only holds windows mounted in visited
-        // tabs, so it undercounts; allProjectWindowIds() is the true total.
         const counts = {
           running: 0,
           // Issue #3884 AC-3: running agents whose `issue_preview` placement keeps
@@ -2615,7 +2464,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           error: 0,
           done: 0,
           agents: 0,
-          windows: allProjectWindowIds().length,
         };
         // The same host census supplies Agents and Works membership. Catalog
         // state enriches that proof; a historical Work never creates an agent.
@@ -4046,7 +3894,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         installWizardChrome,
       } = createLaunchWizardSurface({
         createNode,
-        closeModal,
         sendWizardAction,
         requestWorkAdvisory,
       });
@@ -4148,9 +3995,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       // SPEC-3064 Phase 3 (E7): the project & workspace shell chrome surface
       // (project tabs + close-tab confirm modal + tab cues, Recent Projects,
       // Open Project split-button menu, picker/onboarding renderers, action
-      // availability, Window List dropdown + render key, open/clone project
-      // modal glue, migration modal glue,
-      // the window_list / clone_* / migration_* receive bodies, and the
+      // open/clone project and migration modal glue,
+      // clone_* / migration_* receive bodies, and the
       // project-shell chrome listeners) moved to /project-shell-surface.js.
       // app.js keeps renderAppState (the central render orchestrator), the
       // receive() case arms, the frontendUnits registry entries, and the
@@ -4158,9 +4004,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       const {
         sendOpenProjectDialog,
         closeCloneProjectModal,
-        updateActionAvailability,
-        requestWindowList,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -4170,7 +4013,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         clearPickerPending,
         applyMigrationReceiveEvent,
         handleMigrationModalEscape,
-        handleWindowListEscape,
         installProjectShellChrome,
         dispose: disposeProjectShellSurface,
       } = createProjectShellSurface({
@@ -4179,30 +4021,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // appState / projectError are reassigned in app.js, so the surface
         // reads them through accessors.
         getAppState: () => appState,
-        windowCatalogModel,
         getProjectError: () => projectError,
         activeProjectTab,
-        activeWorkspace,
-        windowMap,
         appendRenderKeyPart,
-        runtimeStateForWindow: catalogRuntimeStateForWindow,
-        windowDisplayTitle,
-        windowTitleTooltip,
-        windowRoleBadgeLabel,
-        shouldShowRuntimeStatus,
-        presetSurface,
-        focusWindowRemotely,
-        // Window-list rows select the live view in its surface.
-        frameWindow,
-        scheduleTerminalFit,
-        addButton,
 
         cloneProjectModal,
         cloneProjectDialog,
         migrationModal,
         migrationDialog,
         isModalOpen: () =>
-          modal.classList.contains("open") ||
           wizardModal.classList.contains("open") ||
           branchCleanupModal?.classList.contains("open"),
       });
@@ -4228,7 +4055,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             requestKnowledgeDetail(windowId, knowledgeKind, issueNumber);
             return;
           }
-          pendingIndexOpenTargetsByPreset.set("settings", { knowledgeKind, number: issueNumber });
+          pendingIndexOpenTargetsByPreset.set("issue", { knowledgeKind, number: issueNumber });
         }
       }
 
@@ -4537,6 +4364,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         applyGlobalUpdateSettings,
         applyIssueSettingsStatus,
         applyIssueMonitorProfiles,
+        refreshProfilesAfterRoster,
         applyIssueMonitorProfilesError,
         applyAgentBackendsReceiveEvent,
         systemSettingsInteractionGuard,
@@ -4556,6 +4384,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderIndexPanelInAllSettingsWindows,
         requestFullIndexStatusRefresh,
         setSettingsStatus,
+        supportedAgentsModel,
+        customAgentsModel,
+        systemSettingsModel,
       } = createSettingsSurface({
         send,
         createNode,
@@ -4565,10 +4396,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         renderUsagePanel,
         getIndexStatus,
         pmSettingsPanel,
-        mountIssues: (data, host) => {
-          mountKnowledgeWindow(data, host);
-          send({ kind: "request_remote_start_work_branches", id: data.id });
-        },
+        rosterModel,
       });
 
       function ensureWindow(windowData) {
@@ -4673,7 +4501,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         // SPEC-3671 FR-007: keep the Issue preview pane in step with workspace
         // state. Re-render the bridge (not the whole body) so list state, scroll,
         // and the mounted terminal survive.
-        if (surface === "knowledge" || surface === "settings") {
+        if (surface === "knowledge") {
           const nextIssuePreviewBodyKey = issuePreviewBodyRenderKey(windowData);
           if (renderedIssuePreviewBodyKeys.get(windowData.id) !== nextIssuePreviewBodyKey) {
             renderedIssuePreviewBodyKeys.set(windowData.id, nextIssuePreviewBodyKey);
@@ -4707,7 +4535,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         } else {
           delete element.dataset.agentColor;
         }
-        applyStatus(windowData.id, windowData.status, detailMap.get(windowData.id));
+        const status = windowRuntimeStateMap.has(windowData.id)
+          ? windowRuntimeStateMap.get(windowData.id) : windowData.status;
+        applyStatus(windowData.id, status, detailMap.get(windowData.id));
         renderedWindowElementKeys.set(windowData.id, nextWindowElementKey);
         if (presetSurface(windowData.preset) === "terminal") {
           scheduleTerminalFit(windowData.id, true);
@@ -4799,6 +4629,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
                     clearBranchCleanupForWindow(windowId);
 
                     pmSettingsPanel.unmount(element.querySelector('[data-settings-panel="project-manager"]'));
+                    element.querySelector(".window-body")?.settingsExplanations?.dispose();
                     element.remove();
                     windowMap.delete(windowId);
                   });
@@ -4855,10 +4686,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         activeWorkspace,
         workspaceWindowById,
         sendOpenProjectDialog,
-        requestWindowList,
-        renderWindowList,
         windowDisplayTitle,
-        toggleWindowList,
         renderRecentProjects,
         renderProjectPicker,
         renderProjectOnboarding,
@@ -5123,7 +4951,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       workspaceStateModel.subscribe(state => state, snapshot => {
         if (!snapshot) return;
         projectError = "";
-        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace);
+        frontendUnits.projectWorkspaceShell.renderAppState(snapshot.workspace, true);
         projectPageMetadata.setProjectName(activeProjectTab()?.title);
         // Keep launcher, pending navigation and startup ACKs in render order.
         updatePmLauncher(activeWorkspace());
@@ -5193,14 +5021,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
             applyAgentActivitySnapshot(event.activity);
             break;
           // The backend snapshot gates only the List; both views read the catalog.
-          case "window_list":
-            windowCatalogModel.update(state => ({ ...state, listEntries: event.windows || [] }));
-            break;
           case "agent_roster_error":
             applyAgentRosterError(event);
             break;
           case "agent_roster":
-            applyAgentRosterSnapshot(event.roster);
+            applyAgentRosterSnapshot(event.roster, event.request_id);
+            refreshProfilesAfterRoster(event.roster);
             break;
           case "agent_switch":
             applyAgentSwitchSnapshot(event.snapshot);
@@ -5529,6 +5355,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
         worksSurface?.dispose();
         agentsSurface?.dispose();
+        railExplanations.dispose();
         splitSurfaces?.dispose();
         windowCatalogModel.dispose();
         agentActivityModel.dispose();
@@ -5556,24 +5383,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       // SPEC-3064 Phase 3 (E7): the project-shell chrome listeners (Open
       // Project button + picker/onboarding entry points, the Open Project
-      // split-button menu wiring, the Windows dropdown trigger, and the
-      // dropdown outside-click close) moved into the project shell surface.
+      // split-button menu wiring) moved into the project shell surface.
       // Installed here so the menu Esc listener keeps registering before the
       // global Esc handler below.
       installProjectShellChrome();
-      addButton.addEventListener("click", () => {
-        if (addButton.disabled) {
-          return;
-        }
-        openModal();
-      });
-
-      closeModalButton.addEventListener("click", closeModal);
-      modal.addEventListener("click", (event) => {
-        if (event.target === modal) {
-          closeModal();
-        }
-      });
       // SPEC-3064 Phase 3 (E5): the wizard chrome listeners (footer
       // Cancel/Back/Submit + the wizardBody/wizardModal interaction-guard
       // wiring) moved into the launch wizard surface.
@@ -5685,6 +5498,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         requestAnimationFrame(() => renderWorkspace(activeWorkspace()));
       }
       worksSurface = createWorksSurface({
+        systemSettingsModel,
         document,
         windowCatalogModel,
         activityModel: agentActivityModel,
@@ -5743,6 +5557,12 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         updateWorksTelemetry(sessions);
       });
       rosterModel.subscribe(state => state, () => updateWorksTelemetry());
+      let renderedRosterNames = null;
+      rosterModel.subscribeFrame(state => JSON.stringify(state.members.map(member =>
+        [member.member_id, member.name, member.assignment?.session_id])), names => {
+        if (renderedRosterNames !== null) renderWorkspace(activeWorkspace());
+        renderedRosterNames = names;
+      });
       rosterModel.subscribe(state => state.revision, () => {
         if (rosterHost && !scheduleModel.read().pending) requestAgentSchedule();
       });
@@ -5771,7 +5591,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         const targetHost = host || document.querySelector(".surface-area");
         if (agentsSurface.element.parentElement !== targetHost) targetHost.appendChild(agentsSurface.element);
         agentsSurface.setPreviewHost(previewHost);
-        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch(); }
+        if (host && changed) { agentsSurface.sync(); requestAgentRoster(); requestAgentSchedule(); requestAgentSwitch();
+          send({ kind: "list_supported_agents" }); send({ kind: "list_custom_agents" }); }
       }
       function openAssignedWork(assignment) {
         const live = agentActivityModel.read().agents.find(agent => agent.window_id === assignment?.window_id
@@ -5780,8 +5601,13 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         openSurface("works");
         return worksSurface.openWork(live);
       }
-      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel,
-        onAddMember: () => requestAgentRoster({ kind: "add" }),
+      agentsSurface = createAgentsSurface({ document, rosterModel, scheduleModel, switchModel, activityModel: agentActivityModel, windowCatalogModel, supportedAgentsModel, customAgentsModel,
+        onRenameMember: editAgentMemberName,
+        onRetryName: retryAgentMemberName,
+        onAddMember: (agentId, name) => {
+          applyAgentRosterError({ project_key: routeProjectKey, message: null });
+          requestAgentRoster({ kind: "add", agent_id: agentId, name });
+        },
         onRestMember: memberId => requestAgentRoster({ kind: "rest", member_id: memberId }),
         onSwitch: requestAgentSwitch,
         onOpenSavedWork: () => openSurface("works"),
@@ -5804,7 +5630,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         onAgentsHost: setRosterHost,
 
         openSurface: (surface) => {
-          const preset = surface === "issues" ? "settings" : surface;
+          const preset = surface === "issues" ? "issue" : surface;
           send({ kind: "create_window", preset });
         },
         onChange: () => {
@@ -5813,7 +5639,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           refreshVisibleKnowledgeWindows();
         },
         onLayout: (ids) => {
-          for (const id of ids) activateTerminalOnReveal(id);
+          for (const id of ids) {
+            activateTerminalOnReveal(id);
+            windowMap.get(id)?.querySelector(".window-body")?.settingsExplanations?.refresh();
+          }
         },
       });
       document.getElementById("split-view-button").addEventListener("click", () => {
@@ -5845,8 +5674,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       pmLauncherModel.subscribe(state => state, () => {
         if (splitSurfaces.activeSurface() === "pm") document.getElementById("split-view-button").disabled = true;
       });
-      let initialSurfaceTabId = null;
-      let initialSurfaceSelected = false;
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
@@ -5897,14 +5724,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         if (handleWizardEscapeKeydown(event)) {
           return;
         }
-        if (modal.classList.contains("open")) {
-          // SPEC-2356 — preset (Add Window) modal also needs Esc-close.
-          // closeModal() handles both the .open class flip and the focus
-          // restore via the WeakMap-style closure variables.
-          closeModal();
-          event.preventDefault();
-          return;
-        }
         if (cloneProjectModal && cloneProjectModal.classList.contains("open")) {
           closeCloneProjectModal();
           event.preventDefault();
@@ -5926,18 +5745,11 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           return;
         }
         // SPEC-2017 US-9 — Esc dismisses the Kanban Drawer. Checked
-        // before the windowList dropdown because the Drawer is a
-        // modal surface and outranks the dropdown affordance.
+        // through the shared modal Escape path.
         const kanbanDrawer = document.getElementById("kanban-drawer");
         if (kanbanDrawer && kanbanDrawer.dataset.open === "true") {
           closeKanbanDrawer();
           event.preventDefault();
-          return;
-        }
-        // SPEC-3064 Phase 3 (E7): the Windows dropdown Esc path (close +
-        // focus restore to the trigger button) lives in the project shell
-        // surface. Returns true when it consumed the event.
-        if (handleWindowListEscape(event)) {
           return;
         }
       });
@@ -5952,9 +5764,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         terminalIds: () => terminalMap.keys(),
         canRefreshViewport: canRefreshTerminalViewport,
         fitTerminal: scheduleTerminalFit,
-        beforeFan: () => {
-          frontendUnits.projectWorkspaceShell.renderWindowList();
-        },
       });
       observeTerminalFontMetricsReady({
         fontsReady: document.fonts?.ready,
@@ -5980,22 +5789,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         refreshVisibleKnowledgeWindows();
       });
       window.addEventListener("pageshow", () => requestVisiblePmReports(true));
-      for (const button of modal.querySelectorAll("[data-preset]")) {
-        button.addEventListener("click", () => {
-          focusOrSpawnPreset(button.dataset.preset);
-          closeModal();
-        });
-      }
-
-      // SPEC-2356 "Surface Deck" — arrow-key roving + Enter-to-deploy. Esc is
-      // already handled by the global modal close handler, so the roving
-      // listener only needs the directional keys and Enter.
-      modal.addEventListener("keydown", handlePresetRovingKeydown);
-
       // SPEC-2356 — bridge Command Palette + hotkey commands into existing
       // surface dispatch. Each command either focuses an existing window or
-      // creates a new one through the same socket transport the preset
-      // buttons use, so they share the legacy invariants.
+      // creates a new one through the existing socket transport.
 
       function isSingletonSurfacePreset(preset) {
         const sessionPresets = new Set(["agent", "shell", "claude", "codex"]);
@@ -6023,10 +5819,6 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
 
       function focusOrSpawnPreset(preset, { surfaceOwner = null } = {}) {
         preset = normalizeSurfacePreset(preset);
-        if (preset === "issue") {
-          document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "issues" } }));
-          return (activeWorkspace().windows || []).find(w => w.preset === "settings" && !w.surface_owner)?.id || null;
-        }
         const allWindows = activeWorkspace().windows || [];
         const existing = isSingletonSurfacePreset(preset)
           ? allWindows.find((w) => normalizeSurfacePreset(w.preset) === preset
@@ -6069,11 +5861,15 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           case "open-branches":
             focusOrSpawnPreset("work");
             return;
+          case "open-profile":
+            focusOrSpawnPreset("profile");
+            return;
           case "open-index":
             focusOrSpawnPreset("index");
             return;
           case "open-issue-monitor":
             focusOrSpawnPreset("issue");
+            send({ kind: "open_issue_monitor" });
             return;
           case "open-recovery-center":
             recoveryCenterController?.open();

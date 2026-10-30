@@ -277,7 +277,7 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
   });
 });
 
-async function projectWindows(page: Page): Promise<Array<{ id: string; preset: string }>> {
+async function projectWindows(page: Page): Promise<Array<{ id: string; preset: string; z_index?: number }>> {
   return page.evaluate(() => {
     const workspace = (window as any).__gwtPlaywrightMessages.findLast((entry: any) => entry.payload.kind === "workspace_state").payload.workspace;
     return workspace.tabs.flatMap((tab: any) => tab.workspace.windows);
@@ -288,10 +288,9 @@ async function showShell(page: Page, id: string) {
   const windows = await projectWindows(page);
   const index = windows.findIndex(window => window.id === id);
   expect(index, "the exact Shell is in the project catalog").toBeGreaterThanOrEqual(0);
-  await page.locator("#window-list-button").click();
-  const rows = page.locator("#window-list-panel .window-list-row");
-  await expect(rows).toHaveCount(windows.length);
-  await rows.nth(index).click();
+  await sendLiveGwtEvent(page, { kind: "focus_window", id });
+  await expect.poll(async () => (await projectWindows(page)).reduce((top, window) => !top || (window.z_index || 0) > (top.z_index || 0) ? window : top, null as { id: string; preset: string; z_index?: number } | null)?.id).toBe(id);
+  await page.reload();
   await expect(page.locator(`.split-pane .workspace-window[data-id="${id}"]`)).toBeVisible();
 }
 

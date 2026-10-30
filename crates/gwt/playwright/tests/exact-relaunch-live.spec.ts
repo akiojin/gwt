@@ -14,8 +14,11 @@ import { startExactRelaunchFixture, type ExactRelaunchInvocation } from "./_help
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
 
 type AgentWindow = { id: string; session_id: string; status: string; agent_id: string };
-type RosterMember = { agent_member_id: string; name: string; enabled: boolean;
-  assignment: { session_id: string | null; issue_number: number | null } | null };
+type RosterMember = { agent_member_id: string; agent_id: string; name: string; enabled: boolean;
+  assignment: { session_id: string | null; issue_number: number | null } | null;
+  saved_manual_profile?: { agent_id: string; agent_member_id: string; model: string | null; reasoning: string | null } | null;
+  saved_manual_revision?: string | null;
+  history: { session_id: string; name: string | null; provider: string | null; model: string | null }[] };
 type AgentRoster = { project_key: string; revision: number; capacity: number; members: RosterMember[]; error: string | null };
 
 async function rosterAfter(page: Page, after: number, previousRevision = -1): Promise<AgentRoster> {
@@ -78,9 +81,16 @@ async function codexWindows(page: Page): Promise<AgentWindow[]> {
 }
 
 async function liveCodexWindow(page: Page, sessionId: string): Promise<AgentWindow> {
-  await expect.poll(async () => (await codexWindows(page))
-    .find((entry) => entry.session_id === sessionId && ["running", "idle"].includes(entry.status)),
-  { timeout: 60_000, message: `window bound to Session ${sessionId}` }).toBeTruthy();
+  await expect.poll(async () => {
+    const entry = (await codexWindows(page)).find(entry => entry.session_id === sessionId && ["running", "idle"].includes(entry.status));
+    const activity = await page.evaluate(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .map(({ payload }: any) => payload.kind === "local_agent_activity" ? payload.activity : payload.projection?.local_agent_activity)
+      .filter((snapshot: any) => snapshot?.project_key === location.pathname.split("/")[2] && snapshot.host_id
+        && Number.isFinite(Date.parse(snapshot.observed_at)))
+      .sort((left: any, right: any) => Date.parse(left.observed_at) - Date.parse(right.observed_at)).at(-1));
+    return entry && activity?.agents?.some((agent: any) => agent.window_id === entry.id
+      && agent.session_id === sessionId && agent.runtime_incarnation > 0);
+  }, { timeout: 60_000, message: `live child and window bound to Session ${sessionId}` }).toBeTruthy();
   return (await codexWindows(page)).find((entry) => entry.session_id === sessionId)!;
 }
 
@@ -154,6 +164,356 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     }
   });
 
+  test("named registration and inline rename persist their UUID through rejection, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    const name = surface.getByRole("textbox", { name: "Name for new member", exact: true });
+    const register = surface.locator('.roster-capacity [data-action="add"]');
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      await expect(register).toBeDisabled();
+      await name.fill(` ${before.members[0].name.toLowerCase()} `);
+      await expect(name).toHaveAttribute("aria-invalid", "true");
+      await expect(register).toBeDisabled();
+      await name.fill("  Maple contributor  ");
+      await surface.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      const sequence = await cursor(page);
+      await register.click();
+      const added = await rosterAfter(page, sequence, before.revision);
+      expect(added.error).toBeNull();
+      expect(added.members).toHaveLength(before.members.length + 1);
+      let member = added.members.find(member => member.name === "Maple contributor")!;
+      expect(member.agent_member_id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(member.agent_id).toBe("codex");
+      expect(member.assignment).toBeNull();
+      await expect(name).toHaveValue("");
+      // A stale writer must not replace the registered identity or this draft.
+      await name.fill("Retry contributor");
+      const staleSequence = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "agent_roster", expected_revision: before.revision,
+        action: { kind: "add", agent_id: "codex", name: "Retry contributor" } });
+      const rejected: AgentRoster = await page.waitForFunction(after =>
+        (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.sequence > after
+          && entry.payload.kind === "agent_roster" && entry.payload.roster.error?.includes("changed"))?.payload.roster,
+      staleSequence).then(handle => handle.jsonValue());
+      expect(rejected.error).toContain("changed");
+      expect(rejected.revision).toBe(added.revision);
+      expect(rejected.members).toEqual(added.members);
+      await expect(name).toHaveValue("Retry contributor");
+      const retrySequence = await cursor(page);
+      await register.click();
+      const retried = await rosterAfter(page, retrySequence, added.revision);
+      expect(retried.error).toBeNull();
+      expect(retried.members.find(member => member.name === "Retry contributor")?.agent_member_id).toBeTruthy();
+      await surface.locator(`.roster-row[data-member-id="${member.agent_member_id}"]`).click();
+      const displayName = surface.getByRole("textbox", { name: "Display name", exact: true });
+      const renameSequence = await cursor(page);
+      await displayName.fill("  Maple renamed  ");
+      const renamed = await rosterAfter(page, renameSequence, retried.revision);
+      expect(renamed.error).toBeNull();
+      const updated = renamed.members.find(value => value.agent_member_id === member.agent_member_id)!;
+      expect(updated).toEqual({ ...member, name: "Maple renamed" });
+      member = updated;
+      await expect(surface.locator(".roster-name-status")).toHaveText("Saved");
+      await expect(displayName).toHaveValue("Maple renamed");
+      await displayName.fill(" Retry contributor ");
+      await expect(displayName).toHaveAttribute("aria-invalid", "true");
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      await expect(displayName).toHaveValue(" Retry contributor ");
+      await displayName.fill("Maple renamed");
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await expect.poll(() => surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      await displayName.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: info.outputPath(`named-registration-${theme}.png`) });
+      await page.reload();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      expect((await readRoster(page)).members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const restored = await readRoster(page);
+      expect(restored.members.find(value => value.agent_member_id === member.agent_member_id)).toEqual(member);
+      expect(restored.members.find(value => value.name === "Retry contributor")?.agent_member_id)
+        .toBe(retried.members.find(value => value.name === "Retry contributor")?.agent_member_id);
+      expect(errors, "actual registration/rename/reload/restart console and page errors").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
+  test("saved manual settings and recorded assignment facts stay separate through rename, reload and native restart", async ({ page }, info) => {
+    const fixture = await startExactRelaunchFixture(info);
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => {
+      if (location.protocol === "http:" || location.protocol === "https:") localStorage.setItem("gwt:ui:theme", theme);
+    }, theme);
+    const surface = page.locator(".agents-surface:not(.agents-surface--preview)");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const window = await liveCodexWindow(page, launch.gwt_session_id);
+      const record = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const memberId = tomlString(record, "agent_member_id")!;
+      const facts = { name: tomlString(record, "agent_name"), provider: "codex", model: tomlString(record, "model") };
+      expect(memberId).toBeTruthy(); expect(facts.name).toBeTruthy();
+      const expected = `Recorded name: ${facts.name} · Tool: ${facts.provider} · Recorded model: ${facts.model || "—"}`;
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await readRoster(page);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      const savedCandidate = { agent_id: "codex", agent_member_id: memberId, model: "gpt-6-sol", reasoning: "medium", runtime_target: "Host", skip_permissions: false };
+      expect(savedCandidate.model).not.toBe(facts.model);
+      const beforeSave = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477752, profiles: [savedCandidate] });
+      const savedReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477752
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeSave).then(handle => handle.jsonValue());
+      expect(savedReply.kind, savedReply.message).toBe("issue_monitor_profiles");
+      expect(savedReply.profiles).toContainEqual(expect.objectContaining(savedCandidate));
+      let savedRevision: string | undefined;
+      const revisionInput = surface.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
+      const assertSaved = async () => {
+        const roster = await readRoster(page);
+        const member = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect(member.saved_manual_profile).toMatchObject(savedCandidate);
+        expect(member.saved_manual_revision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
+        savedRevision ??= member.saved_manual_revision!;
+        expect(member.saved_manual_revision).toBe(savedRevision);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Model: gpt-6-sol");
+        await expect(surface.locator(".roster-saved-settings")).toContainText(`Reasoning: ${savedCandidate.reasoning}`);
+        await expect(surface.locator(".roster-saved-settings")).toContainText("Permissions: Ask");
+        await expect(revisionInput).toHaveValue(savedRevision!);
+        await expect(revisionInput).toHaveAttribute("readonly", "");
+        expect(await revisionInput.evaluate((node: HTMLInputElement) => node.readOnly)).toBe(true);
+      };
+      await assertSaved();
+      await revisionInput.focus();
+      await page.keyboard.press("End");
+      expect(await revisionInput.evaluate((node: HTMLInputElement) => node.selectionStart)).toBe(savedRevision!.length);
+      await readRoster(page);
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      await expect(revisionInput).toBeFocused();
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));
+      const settings = page.locator('.workspace-window[data-preset="settings"] [data-settings-candidates]');
+      await expect(settings).toBeVisible();
+      await page.getByRole("button", { name: "Split view", exact: true }).click();
+      await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: medium");
+      await surface.evaluate(node => { (window as any).__savedCandidateRoster = node; });
+      const beforeInlineSave = await cursor(page);
+      const reasoning = settings.locator(`fieldset[data-agent-member-id="${memberId}"] [data-profile-field="reasoning"]`);
+      await reasoning.focus();
+      await expect(reasoning).toBeFocused();
+      await reasoning.selectOption("high");
+      const inlineReply = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && Number.isInteger(entry.payload.request_id)
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeInlineSave).then(handle => handle.jsonValue());
+      expect(inlineReply.kind, inlineReply.message).toBe("issue_monitor_profiles");
+      expect(inlineReply.profiles).toContainEqual(expect.objectContaining({ ...savedCandidate, reasoning: "high" }));
+      // No manual read, host change or reload can mask a missing ACK invalidation.
+      await expect(surface.locator(".roster-saved-settings")).toContainText("Reasoning: high");
+      await expect(revisionInput).not.toHaveValue(savedRevision!);
+      savedRevision = await revisionInput.inputValue();
+      expect(savedRevision).toMatch(/^manual-profile-v1:[a-f0-9]{64}$/);
+      await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      expect(await surface.evaluate(node => node === (window as any).__savedCandidateRoster)).toBe(true);
+      savedCandidate.reasoning = "high";
+      await page.getByRole("button", { name: "Close split", exact: true }).click();
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const afterSaveRecord = await sessionRecord(fixture.home, launch.gwt_session_id);
+      expect(tomlString(afterSaveRecord, "model")).toBe(facts.model);
+      expect(tomlString(afterSaveRecord, "reasoning_level")).toBe(tomlString(record, "reasoning_level"));
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertSaved(); await expect(surface.locator(".roster-current-config")).toHaveText(expected);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-saved-settings").scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`saved-current-native-${theme}.png`) });
+      await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_EXIT\r" });
+      await expect.poll(async () => tomlString(await sessionRecord(fixture.home, launch.gwt_session_id), "status"),
+        { timeout: 60_000 }).toBe("Stopped");
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      const before = await readRoster(page);
+      const member = before.members.find(value => value.agent_member_id === memberId)!;
+      expect(member.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+      await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+      const beforeRename = await sessionRecord(fixture.home, launch.gwt_session_id);
+      const sequence = await cursor(page);
+      await surface.getByRole("textbox", { name: "Display name", exact: true }).fill("Current renamed member");
+      const renamed = await rosterAfter(page, sequence, before.revision);
+      expect(renamed.error).toBeNull();
+      expect(renamed.members.find(value => value.agent_member_id === memberId)?.history).toEqual(member.history);
+      expect(await sessionRecord(fixture.home, launch.gwt_session_id)).toBe(beforeRename);
+      const assertHistory = async () => {
+        await assertSaved();
+        const roster = await readRoster(page);
+        const saved = roster.members.find(value => value.agent_member_id === memberId)!;
+        expect(saved.name).toBe("Current renamed member");
+        expect(saved.history.find(value => value.session_id === launch.gwt_session_id)).toMatchObject(facts);
+        await surface.locator(`.roster-row[data-member-id="${memberId}"]`).click();
+        await expect(surface.locator(".roster-history-config")).toContainText([expected]);
+      };
+      await assertHistory();
+      await page.reload(); await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      await page.goto("about:blank");
+      const restarted = await fixture.restart();
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="agents"]').click();
+      await assertHistory();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      await surface.locator(".roster-history-config").first().scrollIntoViewIfNeeded();
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath(`recorded-history-native-${theme}.png`) });
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      await page.getByRole("button", { name: "Split view", exact: true }).click();
+      await page.getByRole("combobox", { name: "Right pane surface", exact: true }).selectOption("agents");
+      const preview = page.locator(".agents-surface--preview");
+      const previewRevision = preview.getByRole("textbox", { name: "Saved manual candidate revision", exact: true });
+      await expect(previewRevision).toHaveValue(savedRevision!);
+      await expect(previewRevision).toBeDisabled();
+      await page.setViewportSize({ width: 400, height: 1000 });
+      expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.getByRole("button", { name: "Close split", exact: true }).click();
+      await page.setViewportSize({ width: 1280, height: 1000 });
+      await expect(revisionInput).toHaveValue(savedRevision!);
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "actual recorded-history/rename/reload/restart console and page errors").toEqual([]);
+    } finally { await fixture.stop(); }
+  });
+
+  test("Works output lines survive saved settings, reload and owned native restart", async ({ page }, info) => {
+    const lines = ["body01", "body02", "body03", "body04", "body05", "body06", "body07", "body08", "<x>raw", "footer", "> input", "last"];
+    const fixture = await startExactRelaunchFixture(info, {
+      async prepare({ bin }) {
+        const path = join(bin, "codex");
+        const provider = await readFile(path, "utf8");
+        const command = "  if (line.trim() === 'GWT_FIXTURE_EXIT')";
+        expect(provider).toContain(command);
+        await writeFile(path, provider.replace(command, `  if (line.trim() === 'GWT_FIXTURE_LINES') {
+    process.stdout.write('\\u001b[2J\\u001b[H');
+    for (const text of ${JSON.stringify(lines)}) console.log(text);
+    return;
+  }
+` + command));
+      },
+    });
+    const errors = capture(page);
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+    const surface = page.locator(".works-surface:not(.works-surface--preview)");
+    const config = join(fixture.home, ".gwt", "config.toml");
+    try {
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "3");
+      await page.locator('.op-rail__surface[data-surface="settings"]').click();
+      const setting = page.getByRole("spinbutton", { name: "Works output lines", exact: true });
+      await expect(setting).toHaveValue("3");
+      await setting.fill("10"); await setting.press("Tab");
+      await expect(page.locator('[data-role="system-settings-status"]')).toContainText("Saved system settings");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await page.screenshot({ path: info.outputPath("settings-native-works-output-lines.png") });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await launchCodex(page, fixture.branch);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      const session = launch.gwt_session_id!;
+      expect(session).toBeTruthy();
+      const checkOutput = async (stage: string, observedSession = session) => {
+        const window = await liveCodexWindow(page, observedSession);
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        if (await surface.locator(".works-full").isVisible()) await surface.locator('[data-action="back"]').click();
+        const row = surface.locator(`.work-row[data-window-id="${window.id}"]`);
+        await expect(row).toBeVisible({ timeout: 60_000 });
+        await sendLiveGwtEvent(page, { kind: "terminal_input", id: window.id, data: "GWT_FIXTURE_LINES\r" });
+        await expect(row.locator(".terminal-text-preview")).toHaveText(lines.slice(-10).join("\n"), { useInnerText: false });
+        await expect(row.locator(".terminal-text-preview x")).toHaveCount(0);
+        await expect(surface).toHaveCSS("--works-preview-lines", "10");
+        await expect(surface.locator(".works-counts [data-count]")).toHaveCount(4);
+        await expect(surface.locator(".works-today [data-metric]")).toHaveCount(6);
+        await expect(row.locator(".work-stats [data-stat]")).toHaveCount(8);
+        await row.locator(".work-tail").click(); await expect(surface.locator(".works-full")).toBeHidden();
+        await row.getByRole("button", { name: "Open terminal" }).click();
+        await expect(surface.locator(".works-full .xterm-helper-textarea")).toBeVisible();
+        await surface.locator('[data-action="back"]').click();
+        await page.screenshot({ path: info.outputPath(`works-output-lines-native-${stage}.png`) });
+      };
+      await checkOutput("saved");
+      // Remove only this fixture's non-agent Settings host. A restored host
+      // would fetch System settings on its own and mask Works-only bootstrap.
+      const beforeClose = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "list_windows" });
+      const windowList = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || [])
+        .findLast((entry: any) => entry.sequence > after && entry.payload.kind === "window_list")?.payload.windows,
+      beforeClose).then(handle => handle.jsonValue());
+      const settingsHost = windowList.filter((window: any) => window.preset === "settings");
+      expect(settingsHost).toHaveLength(1);
+      expect(settingsHost[0].session_id ?? null).toBeNull();
+      expect(settingsHost[0].agent_id ?? null).toBeNull();
+      expect(settingsHost[0].is_pm ?? false).toBe(false);
+      const currentWindow = await liveCodexWindow(page, session);
+      const launchesBeforeClose = (await fixture.launches()).length;
+      const closeCursor = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "close_window", id: settingsHost[0].id });
+      await page.waitForFunction(({ after, id }) => ((window as any).__gwtPlaywrightMessages || []).some((entry: any) =>
+        entry.sequence > after && entry.payload.kind === "workspace_state"
+        && !entry.payload.workspace.tabs.flatMap((tab: any) => tab.workspace.windows).some((window: any) => window.id === id)),
+      { after: closeCursor, id: settingsHost[0].id });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      expect((await liveCodexWindow(page, session)).id).toBe(currentWindow.id);
+      expect((await fixture.launches()).length).toBe(launchesBeforeClose);
+      await page.reload();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      await checkOutput("reload");
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      const oldPid = fixture.ownedPid;
+      const restarted = await fixture.restart();
+      expect(fixture.ownedPid).not.toBe(oldPid);
+      await gotoLiveGwt(page, restarted, { enableTestBridge: true });
+      await page.locator('.op-rail__surface[data-surface="works"]').click();
+      await expect(surface).toHaveCSS("--works-preview-lines", "10");
+      expect(await readFile(config, "utf8")).toMatch(/^works_preview_lines\s*=\s*10$/m);
+      await expect.poll(async () => (await fixture.launches()).length, { timeout: 90_000 }).toBe(2);
+      const resumed = (await fixture.launches())[1];
+      expect(resumed.gwt_session_id).toBeTruthy();
+      expect(resumed.gwt_session_id).not.toBe(session);
+      expect(resumed.resume_session_id).toBe(launch.provider_session_id);
+      expect(resumed.provider_session_id).toBe(launch.provider_session_id);
+      await checkOutput("restart", resumed.gwt_session_id!);
+      const restoredRecord = await sessionRecord(fixture.home, resumed.gwt_session_id!);
+      expect(tomlString(restoredRecord, "agent_session_id")).toBe(launch.provider_session_id);
+      expect(tomlString(restoredRecord, "restore_source_session_id")).toBe(session);
+      expect(tomlString(restoredRecord, "launch_origin")).toBe("automatic_restore");
+      await info.attach("works-output-lines-restore-continuity", { body: JSON.stringify({
+        source_session: session, restored_session: resumed.gwt_session_id,
+        native_conversation: resumed.provider_session_id, settings_host_restored: false,
+      }), contentType: "application/json" });
+      await expect(page.locator('.workspace-window[data-preset="settings"]')).toHaveCount(0);
+      await page.setViewportSize({ width: 400, height: 1000 });
+      expect(await surface.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: info.outputPath("works-output-lines-native-400.png") });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect(errors, "real settings/terminal/restart console and page errors").toEqual([]);
+    } finally {
+      await fixture.stop();
+    }
+  });
+
   test("Works shows the real PM and four implementation children after reload", async ({ page }, info) => {
     test.setTimeout(420_000);
     const purpose = "Review active work and coordinate delivery";
@@ -185,7 +545,6 @@ test.describe("Exact relaunch continuity (isolated checkout)", () => {
     console.log('WORKS_STATE ' + event); return;
   }
   if (line.trim() === 'GWT_FIXTURE_EXIT')`);
-        await writeFile(join(bin, "codex"), provider);
         let claude = provider.replace("codex-cli 0.116.0", "2.1.0 (Claude Code)")
           .replace("'.codex', 'hooks.json'", "'.claude', 'settings.local.json'")
           .replace("const resumed = resumeAt < 0 ? null :", "const resumed = option('--resume') || (resumeAt < 0 ? null :")
@@ -204,6 +563,16 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
         await writeFile(join(bin, "claude"), claude);
         await chmod(join(bin, "claude"), 0o755);
         execFileSync(process.execPath, ["--check", join(bin, "claude")]);
+        // All five real children need measured transcript data before a fleet total is known.
+        provider = provider.replace("// Like the real provider,", `
+for (const [index, age] of [60000, 0].entries()) fs.appendFileSync(rollout, JSON.stringify({
+  timestamp:new Date(Date.now()-age).toISOString(),type:'event_msg',payload:{type:'token_count',info:{
+    total_token_usage:{input_tokens:100*(index+1),cached_input_tokens:20*(index+1),output_tokens:10*(index+1)},
+    last_token_usage:{input_tokens:100,cached_input_tokens:20,output_tokens:10},model_context_window:1000}}
+}) + '\\n');
+// Like the real provider,`);
+        await writeFile(join(bin, "codex"), provider);
+        execFileSync(process.execPath, ["--check", join(bin, "codex")]);
       },
     });
     const errors = capture(page);
@@ -211,6 +580,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
     const main = page.getByRole("region", { name: "Main pane", exact: true });
     const rows = main.locator(".works-surface:not(.works-surface--preview) .work-row");
     let workspace: any = null, activity: any = null, usage: any = null;
+    const activityObservations: any[] = [];
     // Observe the real wire independently of the bridge's bounded event log.
     page.on("websocket", socket => {
       if (!new URL(socket.url()).searchParams.has("repo_hash")) return;
@@ -218,8 +588,10 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
         try {
           const event = JSON.parse(String(payload));
           if (event.kind === "workspace_state") workspace = event.workspace;
-          if (event.kind === "local_agent_activity") activity = event.activity;
-          if (event.projection?.local_agent_activity) activity = event.projection.local_agent_activity;
+          const snapshot = event.kind === "local_agent_activity" ? event.activity : event.projection?.local_agent_activity;
+          if (snapshot) activityObservations.push({ kind: event.kind, activity: snapshot });
+          if (snapshot && Number.isFinite(Date.parse(snapshot.observed_at))
+            && (!activity || Date.parse(snapshot.observed_at) >= Date.parse(activity.observed_at))) activity = snapshot;
           if (event.kind === "provider_usage") usage = event.sessions;
         }
         catch { /* Native binary terminal frames are unrelated to membership. */ }
@@ -228,6 +600,34 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
     const windows = async () => workspace?.tabs.flatMap((tab: any) => tab.workspace.windows)
       .filter((window: any) => window.session_id) ?? [];
     const input = (id: string, command: string) => sendLiveGwtEvent(page, { kind: "terminal_input", id, data: command + "\r" });
+    const assertAggregates = async () => {
+      await expect.poll(() => usage?.filter((session: any) => session.state.kind === "ok"
+        && session.telemetry?.quality === "measured").length, { timeout: 45_000 }).toBe(5);
+      const format = (value: number) => new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+      await expect.poll(async () => {
+        const sum = (key: string) => usage.reduce((total: number, session: any) => total + session.telemetry[key], 0);
+        const input = sum("today_input_tokens"), output = sum("today_output_tokens");
+        const cache = sum("today_cache_read_tokens") + usage.filter((session: any) => session.provider === "claude_code")
+          .reduce((total: number, session: any) => total + session.telemetry.today_cache_creation_tokens, 0);
+        const buckets = activity?.agents.map((agent: any) => usage.find((session: any) => session.session_id === agent.session_id)
+          ?.telemetry.minute_buckets.at(-1)) ?? [];
+        if (buckets.length !== 5 || buckets.some((bucket: any) => !Number.isFinite(bucket?.tokens))
+          || new Set(buckets.map((bucket: any) => bucket.started_at)).size !== 1) return false;
+        const expected = { "today-total": input + output, "today-input": input, "today-cache": cache,
+          "today-output": output, "fleet-now": buckets.reduce((total: number, bucket: any) => total + bucket.tokens, 0) };
+        for (const [metric, value] of Object.entries(expected)) {
+          if (await main.locator('[data-metric="' + metric + '"]').textContent() !== format(value)) return false;
+        }
+        return true;
+      }, { timeout: 45_000, message: "Today and Fleet match all five measured wire conversations" }).toBe(true);
+      await expect(main.locator('[data-metric="today-cost"]')).toHaveText("—");
+      await expect(main.locator('[data-metric="today-landed"]')).toHaveText("—");
+      await expect(main.locator('[data-availability="today"]')).toHaveAttribute("data-state", "measured");
+      await expect(main.locator('[data-availability="fleet"]')).toHaveAttribute("data-state", "partial");
+      await expect(main.locator(".works-source-note")).toContainText("per-session USD");
+      await expect(main.locator(".works-source-note")).toContainText("daily merge data");
+      await expect.poll(async () => Number(await main.locator(".works-fleet svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
+    };
     try {
       await page.setViewportSize({ width: 1600, height: 1500 });
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
@@ -262,6 +662,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await expect(main.locator(".works-active")).toHaveText("Active 5");
       await expect(first.locator(".work-model")).toHaveText("claude-sonnet-4-5", { timeout: 45_000 });
       for (const metric of ["input", "cache", "output"]) await expect(first.locator(`[data-stat="${metric}"]`)).toHaveText(/^[1-9]/);
+      await assertAggregates();
       await expect.poll(async () => Number(await first.locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => first.locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
       const pmWorktree = tomlString(await sessionRecord(fixture.home, pm.session_id), "worktree_path");
@@ -278,6 +679,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await expect(first).toHaveAttribute("data-state", "idle");
       await input(pm.id, "GWT_FIXTURE_PM_BEGIN");
       await expect(first).toHaveAttribute("data-state", "running");
+      usage = null; activity = null;
       await page.reload();
       await expect(rows).toHaveCount(5, { timeout: 60_000 });
       await expect(rows.first().locator(".work-name")).toHaveText(pmName);
@@ -286,7 +688,8 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await expect(rows.first().locator(".work-identity")).toHaveText("PM · claude");
       await expect(rows.first()).toHaveAttribute("data-state", "running");
       await expect(main.locator(".works-active")).toHaveText("Active 5");
-      const restarted = await fixture.restart(); workspace = null;
+      await assertAggregates();
+      const restarted = await fixture.restart(); workspace = null; usage = null; activity = null;
       await gotoLiveGwt(page, restarted, { enableTestBridge: true, suppressProjectSurfaces: true });
       await page.locator('.op-rail__surface[data-surface="works"]').click();
       await expect(rows).toHaveCount(5, { timeout: 90_000 });
@@ -300,6 +703,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await expect.poll(async () => Number(await rows.first().locator("svg").getAttribute("data-known-count"))).toBeGreaterThan(0);
       await expect.poll(() => rows.first().locator("svg circle").evaluateAll(nodes => nodes.some(node => Number(node.getAttribute("cy")) < 53))).toBe(true);
       await expect(rows.first().locator('[data-stat="branch"]')).toHaveText(pmBranch);
+      await assertAggregates();
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       expect(errors).toEqual([]);
       await page.screenshot({ path: info.outputPath("works-live-five-reloaded.png") });
@@ -323,6 +727,13 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
           await expect(rows.first().locator(".work-name-host .window-role-badge")).toHaveText("PM");
         }
         images.push({ name: surface, image: (await page.screenshot({ path: info.outputPath(`pm-identity-${surface}.png`) })).toString("base64") });
+        if (surface !== "pm") {
+          await page.setViewportSize({ width: 400, height: 1000 });
+          expect(await main.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true);
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+          await page.screenshot({ path: info.outputPath(`native-${surface}-400.png`) });
+          await page.setViewportSize({ width: 1600, height: 1500 });
+        }
       }
       const sheet = await page.context().newPage();
       try {
@@ -340,7 +751,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await info.attach("real-child-membership", { body: JSON.stringify({ windows: current, children }), contentType: "application/json" });
     } finally {
       try {
-        await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage }), contentType: "application/json" });
+        await info.attach("works-source-state", { body: JSON.stringify({ workspace, activity, usage, activityObservations }), contentType: "application/json" });
       } finally { await fixture.stop(); }
     }
   });
@@ -381,8 +792,17 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       const memberName = tomlString(firstRecord, "agent_name")!;
       expect(memberId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
       expect(memberName?.trim()).toBeTruthy();
+      const savedCandidate = { agent_member_id: memberId, agent_id: "codex", model: "gpt-6-sol", reasoning: "medium" };
+      const beforeCandidateSave = await cursor(page);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_profiles_set", request_id: 477743, profiles: [savedCandidate] });
+      const saved = await page.waitForFunction(after => ((window as any).__gwtPlaywrightMessages || []).find((entry: any) =>
+        entry.sequence > after && entry.payload.request_id === 477743
+        && ["issue_monitor_profiles", "issue_monitor_profiles_write_failed"].includes(entry.payload.kind))?.payload,
+      beforeCandidateSave).then(handle => handle.jsonValue());
+      expect(saved.kind, saved.message).toBe("issue_monitor_profiles");
+      expect(saved.profiles).toContainEqual(expect.objectContaining(savedCandidate));
       const identities = (roster: AgentRoster) => roster.members.map(member => ({
-        agent_member_id: member.agent_member_id, name: member.name, enabled: member.enabled,
+        agent_member_id: member.agent_member_id, agent_id: member.agent_id, name: member.name, enabled: member.enabled,
       })).sort((left, right) => left.agent_member_id.localeCompare(right.agent_member_id));
       const assertCapacity = async (roster: AgentRoster) => {
         expect(roster.error).toBeFalsy();
@@ -390,12 +810,15 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
         const preferences = join(fixture.home, ".gwt", "projects", roster.project_key, "project-state", "issue-monitor.json");
         await expect.poll(async () => JSON.parse(await readFile(preferences, "utf8")).max_active_agents,
           { timeout: 30_000, message: "persisted max_active equals the latest roster capacity" }).toBe(roster.capacity);
+        expect(JSON.parse(await readFile(preferences, "utf8")).launch_profiles,
+          "selected member, fixed tool and model settings survive native restart").toContainEqual(expect.objectContaining(savedCandidate));
       };
       const checkMemberLinks = async (target: Page, currentWindow: AgentWindow, sessionId: string, stage: string) => {
         const roster = await readRoster(target);
         await assertCapacity(roster);
         const member = roster.members.find(member => member.agent_member_id === memberId)!;
-        expect(member).toMatchObject({ name: memberName, enabled: true });
+        expect(member).toMatchObject({ name: memberName, agent_id: "codex", enabled: true });
+        expect(currentWindow.agent_id).toBe("codex");
         const nativeHost = target.locator(`.works-full .works-terminal[data-window-id="${currentWindow.id}"]`);
         await expect(nativeHost).toBeVisible();
         await expect(target.locator(".works-full-name .work-member")).toHaveText(memberName);
@@ -419,6 +842,9 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
         return roster;
       };
       const row = page.locator(`.work-row[data-window-id="${firstWindow.id}"]`);
+      await expect(row).toHaveCount(1);
+      if (await page.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await page.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await expect(row.locator(".terminal-text-preview")).toBeVisible();
       await row.getByRole("button", { name: "Open terminal", exact: true }).click();
       await expect(page.locator(`.works-full .works-terminal[data-window-id="${firstWindow.id}"] .xterm-helper-textarea`)).toBeVisible();
@@ -426,6 +852,8 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       const initialRoster = await checkMemberLinks(page, firstWindow, first.gwt_session_id!, "initial");
       await page.getByRole("button", { name: "Agents", exact: true }).click();
       const enabledBefore = new Set(initialRoster.members.filter(member => member.enabled).map(member => member.agent_member_id));
+      await page.getByRole("combobox", { name: "Tool for new member", exact: true }).selectOption("codex");
+      await page.getByLabel("Name for new member", { exact: true }).fill("Relaunch helper");
       const beforeAdd = await cursor(page);
       await page.locator('.roster-capacity [data-action="add"]').click();
       const added = await rosterAfter(page, beforeAdd, initialRoster.revision);
@@ -433,6 +861,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await expect(page.locator(".roster-count")).toHaveText(String(added.capacity));
       const addedMember = added.members.find(member => member.enabled && !enabledBefore.has(member.agent_member_id))!;
       expect(addedMember?.name.trim()).toBeTruthy();
+      expect(addedMember.agent_id).toBe("codex");
       await page.locator(`.roster-row[data-member-id="${addedMember.agent_member_id}"]`).click();
       const beforeRest = await cursor(page);
       await page.locator('.roster-detail [data-action="rest"]').click();
@@ -440,7 +869,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       expect(rested.capacity).toBe(initialRoster.capacity); await assertCapacity(rested);
       await expect(page.locator(".roster-count")).toHaveText(String(rested.capacity));
       expect(rested.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, enabled: false });
+        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
       const savedRosterIdentities = identities(rested);
       await page.getByRole("button", { name: "Works", exact: true }).click();
       if (!await page.locator(".works-full:not([hidden])").isVisible()) await row.locator(".work-open").click();
@@ -504,13 +933,14 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       await gotoLiveGwt(restored, fixture.url, { enableTestBridge: true });
       await expect(restored.locator("html")).toHaveAttribute("data-theme", theme);
       await restored.getByRole("button", { name: "Works", exact: true }).click();
-      if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
-        await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       const third = await launchAt(3);
       expect(third.argv.slice(third.argv.indexOf("resume"))).toContain(native);
       expect(third.resume_session_id).toBe(native);
       expect(third.provider_session_id).toBe(native);
       const thirdWindow = await liveCodexWindow(restored, third.gwt_session_id!);
+      await expect(restored.locator(`.work-row[data-window-id="${thirdWindow.id}"]`)).toHaveCount(1);
+      if (await restored.locator(".works-surface:not(.works-surface--preview) .works-full:not([hidden])").isVisible())
+        await restored.locator('.works-surface:not(.works-surface--preview) [data-action="back"]').click();
       await expect(restored.locator(`.work-row[data-window-id="${thirdWindow.id}"] .terminal-text-preview`)).toBeVisible();
       const thirdRecord = await syncedResumeId(third.gwt_session_id!);
       expect(tomlString(thirdRecord, "agent_session_id")).toBe(native);
@@ -525,7 +955,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
       const restoredRoster = await checkMemberLinks(restored, thirdWindow, third.gwt_session_id!, "app-restored");
       expect(identities(restoredRoster)).toEqual(savedRosterIdentities);
       expect(restoredRoster.members.find(member => member.agent_member_id === addedMember.agent_member_id))
-        .toMatchObject({ name: addedMember.name, enabled: false });
+        .toMatchObject({ name: addedMember.name, agent_id: "codex", enabled: false });
       await testInfo.attach("agent-member-continuity", { body: JSON.stringify({ member_id: memberId, name: memberName,
         sessions: [first.gwt_session_id, second.gwt_session_id, third.gwt_session_id], capacity: restoredRoster.capacity,
         retained_resting_member: addedMember.agent_member_id }), contentType: "application/json" });
@@ -536,7 +966,7 @@ for (const age of [60000, 0]) fs.appendFileSync(rollout, JSON.stringify({
         for (const current of [page, restored]) if (current && !current.isClosed()) {
           await testInfo.attach("local-agent-observations", { body: JSON.stringify(await current.evaluate(() =>
             ((window as any).__gwtPlaywrightMessages ?? [])
-              .filter((entry: any) => entry.payload.kind === "workspace_state" || entry.payload.projection?.local_agent_activity)
+              .filter((entry: any) => ["workspace_state", "local_agent_activity", "agent_roster"].includes(entry.payload.kind) || entry.payload.projection?.local_agent_activity)
               .slice(-10)), null, 2), contentType: "application/json" });
         }
         if (restored && !restored.isClosed()) await restored.close();

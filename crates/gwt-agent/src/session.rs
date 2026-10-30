@@ -968,18 +968,48 @@ impl Session {
         let content = serialize_session_toml(self)?;
         let expected_content = serialize_session_toml(expected)?;
         with_session_lock(dir, &self.id, || {
-            let path = session_file_path(dir, &self.id);
-            let durable = match inspect_session_path(&path) {
-                SessionPathState::Present(session) => session,
-                SessionPathState::Missing => return Ok(false),
-                SessionPathState::Error(error) => return Err(error),
-            };
-            if serialize_session_toml(&durable)? != expected_content {
-                return Ok(false);
-            }
-            write_session_toml_atomic(&path, &content)?;
-            Ok(true)
+            self.commit_if_unchanged_under_lease(dir, &content, &expected_content)
         })
+    }
+
+    /// Use the caller's already-held lease for this exact Session, retaining
+    /// the ordinary canonical snapshot CAS instead of entering a nested lease.
+    pub fn save_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        expected: &Session,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        validate_session_id_path_component(&self.id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.id != expected.id {
+            return Ok(false);
+        }
+        self.commit_if_unchanged_under_lease(
+            dir,
+            &serialize_session_toml(self)?,
+            &serialize_session_toml(expected)?,
+        )
+    }
+
+    fn commit_if_unchanged_under_lease(
+        &self,
+        dir: &Path,
+        content: &str,
+        expected_content: &str,
+    ) -> std::io::Result<bool> {
+        require_current_thread_session_lease()?;
+        let path = session_file_path(dir, &self.id);
+        let durable = match inspect_session_path(&path) {
+            SessionPathState::Present(session) => session,
+            SessionPathState::Missing => return Ok(false),
+            SessionPathState::Error(error) => return Err(error),
+        };
+        if serialize_session_toml(&durable)? != expected_content {
+            return Ok(false);
+        }
+        write_session_toml_atomic(&path, content)?;
+        Ok(true)
     }
 
     /// Create this Session when absent, or replace one exact pre-mutation
@@ -1283,6 +1313,38 @@ where
     }
 }
 
+/// Ordered Session path locks held until this guard is dropped.
+/// Acquire owner leases first and do not persist these Sessions while held.
+#[must_use]
+pub struct SessionPathLeases {
+    files: Vec<File>,
+    _thread_guard: Option<SessionLeaseThreadGuard>,
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl SessionPathLeases {
+    fn unlock(self) -> io::Result<()> {
+        let mut result = Ok(());
+        for file in self.files.iter().rev() {
+            if let Err(error) = file.unlock() {
+                if result.is_ok() {
+                    result = Err(error);
+                }
+            }
+        }
+        result
+    }
+}
+
+/// Hold sorted, deduplicated Session path leases across an external transaction.
+/// An empty set takes no lock and may be used inside an existing Session lease.
+pub fn acquire_session_path_leases(
+    sessions_dir: &Path,
+    session_ids: &[&str],
+) -> io::Result<SessionPathLeases> {
+    acquire_session_path_leases_wait(sessions_dir, session_ids, SESSION_LEASE_WAIT)
+}
+
 /// Hold the per-Session lease while classifying its durable path and running
 /// one operation without releasing the lease after a `Missing` observation.
 ///
@@ -1310,48 +1372,76 @@ pub fn with_session_path_lease_wait<T, F>(
 where
     F: FnOnce(SessionPathState) -> io::Result<T>,
 {
-    let _thread_guard = SessionLeaseThreadGuard::enter()?;
-    validate_session_id_path_component(session_id)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    fs::create_dir_all(sessions_dir)?;
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .truncate(false)
-        .write(true)
-        .open(session_lock_path(sessions_dir, session_id))?;
-    let deadline = Instant::now() + wait;
-    let is_contended = |error: &io::Error| {
-        error.kind() == io::ErrorKind::WouldBlock
-            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-    };
-    loop {
-        match lock_file.try_lock_exclusive() {
-            Ok(()) => break,
-            Err(error) if is_contended(&error) => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Session lease is held by another gwt operation; retry after it settles",
-                    ));
-                }
-                std::thread::sleep(SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let leases = acquire_session_path_leases_wait(sessions_dir, &[session_id], wait)?;
     let result = operation(inspect_session_path(&session_file_path(
         sessions_dir,
         session_id,
     )));
-    match lock_file.unlock() {
+    match leases.unlock() {
         Ok(()) => result,
         Err(unlock_error) => match result {
             Ok(_) => Err(unlock_error),
             Err(operation_error) => Err(operation_error),
         },
     }
+}
+
+fn acquire_session_path_leases_wait(
+    sessions_dir: &Path,
+    session_ids: &[&str],
+    wait: Duration,
+) -> io::Result<SessionPathLeases> {
+    let ids: BTreeSet<_> = session_ids.iter().copied().collect();
+    let mut leases = SessionPathLeases {
+        files: Vec::new(),
+        _thread_guard: if ids.is_empty() {
+            None
+        } else {
+            Some(SessionLeaseThreadGuard::enter()?)
+        },
+        _not_send: std::marker::PhantomData,
+    };
+    if ids.is_empty() {
+        return Ok(leases);
+    }
+    for id in &ids {
+        validate_session_id_path_component(id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    }
+    fs::create_dir_all(sessions_dir)?;
+    let deadline = Instant::now() + wait;
+    let is_contended = |error: &io::Error| {
+        error.kind() == io::ErrorKind::WouldBlock
+            || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    };
+    for id in ids {
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .truncate(false)
+            .write(true)
+            .open(session_lock_path(sessions_dir, id))?;
+        loop {
+            match lock_file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if is_contended(&error) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Session lease is held by another gwt operation; retry after it settles",
+                    ));
+                    }
+                    std::thread::sleep(
+                        SESSION_LEASE_POLL.min(deadline.saturating_duration_since(now)),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        leases.files.push(lock_file);
+    }
+    Ok(leases)
 }
 
 /// Hold the per-Session lease while reading one exact durable Session and
@@ -3414,6 +3504,32 @@ display_name = "Codex"
             .save_if_execution_identity_matches(dir.path(), &identity)
             .expect("reject replacement"));
         assert_eq!(fs::read(path).expect("read retained replacement"), before);
+    }
+
+    #[test]
+    fn held_lease_snapshot_cas_rejects_unleased_and_stale_name_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Session::new(dir.path(), "main", AgentId::Codex);
+        original.save(dir.path()).unwrap();
+        let mut named = original.clone();
+        named.agent_name = Some("Ada".into());
+        assert!(named
+            .save_if_unchanged_under_lease(dir.path(), &original)
+            .is_err());
+        with_session_lease(dir.path(), &original.id, |_| {
+            assert!(named.save_if_unchanged_under_lease(dir.path(), &original)?);
+            let mut stale = original.clone();
+            stale.agent_name = Some("Bert".into());
+            assert!(!stale.save_if_unchanged_under_lease(dir.path(), &original)?);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            Session::load(&dir.path().join(format!("{}.toml", original.id)))
+                .unwrap()
+                .agent_name,
+            Some("Ada".into())
+        );
     }
 
     #[test]

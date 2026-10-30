@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createAgentActivityModel } from "../agent-activity-model.js";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -132,11 +133,8 @@ test("non-coalesce kinds preserve order and multiplicity", () => {
   assert.deepEqual(coalesced, queue);
 });
 
-// Issue #3164 retired the only production members of
-// DEFAULT_ORDERED_STATE_KINDS, so these fence tests exercise the generic
-// "activation state must precede scoped outcomes" mechanism with an
-// explicit ordered-state kind set rather than relying on the (now empty)
-// default.
+// These fence tests exercise caller-supplied scoped outcomes independently
+// of the production census snapshot's default ordered-state policy.
 const SAMPLE_ORDERED_STATE_KINDS = new Set([
   "project_scoped_notice",
   "project_scoped_alert",
@@ -228,7 +226,6 @@ test("latest workspace activation stays ahead of outcomes across rapid project s
 test("default coalescing policy mirrors backend latest-wins event policy", () => {
   for (const kind of [
     "workspace_state",
-    "local_agent_activity",
     "active_work_projection",
     "window_list",
     "runtime_health",
@@ -247,6 +244,7 @@ test("default coalescing policy mirrors backend latest-wins event policy", () =>
     "terminal_output",
     "terminal_snapshot",
     "runtime_hook_event",
+    "local_agent_activity",
   ]) {
     assert.equal(
       DEFAULT_COALESCE_KINDS.has(kind),
@@ -530,6 +528,30 @@ test("string idempotent events coalesce before full JSON.parse", () => {
   } finally {
     JSON.parse = originalParse;
   }
+});
+
+test("raw live census reaches its timestamp authority before an older empty replay", () => {
+  const scheduler = manualScheduler(), received = [];
+  const { model, applyAgentActivitySnapshot } = createAgentActivityModel("project");
+  const fresh = { project_key: "project", host_id: "host", observed_at: "2026-10-26T02:25:02.118Z",
+    agents: [{ window_id: "one", session_id: "session", runtime_incarnation: 4, issue_number: 4777, is_pm: false }] };
+  const old = { ...fresh, observed_at: "2026-10-26T02:25:01.666Z", agents: [] };
+  const dispatcher = createSocketReceiveDispatcher({ schedule: scheduler.schedule, now: () => 0,
+    receive(event) { received.push(event); applyAgentActivitySnapshot(event.activity ?? event.projection?.local_agent_activity); } });
+  for (const event of [{ kind: "local_agent_activity", activity: fresh }, { kind: "workspace_state" },
+    { kind: "local_agent_activity", activity: old }, { kind: "active_work_projection", projection: { local_agent_activity: old } }]) {
+    dispatcher.handle({ data: JSON.stringify(event) });
+  }
+  scheduler.runAll();
+  assert.equal(received[0].kind, "workspace_state", "activate the project before scoped observations");
+  assert.equal(model.read().count, 1, "an older replay cannot discard unseen live proof in the receive buffer");
+  assert.deepEqual(received.filter(event => event.kind === "local_agent_activity").map(event => event.activity.observed_at),
+    [fresh.observed_at, old.observed_at], "both observations reach the model in arrival order");
+  dispatcher.handle({ data: JSON.stringify({ kind: "local_agent_activity", activity: { ...fresh, observed_at: "2026-10-26T02:25:03.000Z", agents: null } }) });
+  dispatcher.handle({ data: JSON.stringify({ kind: "local_agent_activity", activity: fresh }) });
+  scheduler.runAll();
+  assert.equal(model.read().count, null, "new observed unknown must reach the same timestamp authority");
+  dispatcher.dispose(); model.dispose();
 });
 
 test("flushNow synchronously drains pending events without waiting for the scheduler", () => {

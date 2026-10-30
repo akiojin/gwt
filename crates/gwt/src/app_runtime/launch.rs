@@ -1976,6 +1976,7 @@ fn prepare_host_update_drain_launch_hold(
 
 #[derive(Debug, Clone)]
 struct AgentWindowSpawnOptions {
+    selected_agent_member_id: Option<String>,
     inherited_agent_name: Option<String>,
     workspace_resume_context: Option<WorkspaceResumeContext>,
     launch_feedback_context: Option<LaunchFeedbackContext>,
@@ -4034,7 +4035,7 @@ impl AppRuntime {
                 .tab(tab_id)
                 .and_then(|tab| tab.workspace.window(raw_id))
                 .and_then(|window| window.linked_issue_number);
-            let member = match gwt::agent_names::reserve_project_member(
+            let member = match gwt::agent_names::reserve_project_member_for_agent(
                 &project_root,
                 &self.sessions_dir,
                 &reservation_id,
@@ -4044,6 +4045,12 @@ impl AppRuntime {
                 }),
                 None,
                 inherited.as_deref(),
+                if preset == WindowPreset::Claude {
+                    "claude"
+                } else {
+                    "codex"
+                },
+                None,
             ) {
                 Ok(member) => member,
                 Err(error) => {
@@ -4354,12 +4361,38 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: None,
                 agent_kanban_target: None,
                 continuation: None,
                 prepared_monitor_admission: None,
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_agent_window_for_selected_monitor_member(
+        &mut self,
+        tab_id: &str,
+        config: gwt_agent::LaunchConfig,
+        workspace_resume_context: Option<WorkspaceResumeContext>,
+        launch_feedback_context: LaunchFeedbackContext,
+        prepared_monitor_admission: Option<PreparedIssueMonitorSpawnAdmission>,
+        selected_agent_member_id: Option<String>,
+    ) -> Result<Vec<OutboundEvent>, String> {
+        self.spawn_agent_window_with_options(
+            tab_id,
+            config,
+            AgentWindowSpawnOptions {
+                selected_agent_member_id,
+                inherited_agent_name: None,
+                workspace_resume_context,
+                launch_feedback_context: Some(launch_feedback_context),
+                agent_kanban_target: None,
+                continuation: None,
+                prepared_monitor_admission,
             },
         )
     }
@@ -4375,6 +4408,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -4398,6 +4432,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context: Some(launch_feedback_context),
@@ -4420,6 +4455,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context,
                 launch_feedback_context,
@@ -4441,6 +4477,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name,
                 workspace_resume_context,
                 launch_feedback_context: None,
@@ -4462,6 +4499,7 @@ impl AppRuntime {
             tab_id,
             config,
             AgentWindowSpawnOptions {
+                selected_agent_member_id: None,
                 inherited_agent_name: None,
                 workspace_resume_context: Some(workspace_resume_context),
                 launch_feedback_context: None,
@@ -4564,6 +4602,7 @@ impl AppRuntime {
             .project_context(tab_id)
             .ok_or_else(|| "Project tab not found".to_string())?;
         let AgentWindowSpawnOptions {
+            selected_agent_member_id,
             inherited_agent_name,
             workspace_resume_context,
             launch_feedback_context,
@@ -4875,7 +4914,7 @@ impl AppRuntime {
             let delivery_id = launch_feedback_context
                 .as_ref()
                 .and_then(|feedback| feedback.issue_monitor_delivery_id.as_deref());
-            let member = gwt::agent_names::reserve_project_member(
+            let member = gwt::agent_names::reserve_project_member_for_agent(
                 &project_root_path,
                 &self.sessions_dir,
                 &reservation_id,
@@ -4887,6 +4926,8 @@ impl AppRuntime {
                     .get("GWT_AGENT_MEMBER_ID")
                     .filter(|_| inherited_agent_name.is_some() || continuation.is_some())
                     .map(String::as_str),
+                config.agent_id.command(),
+                selected_agent_member_id.as_deref(),
             )?;
             let assignment = member.assignment.as_ref().expect("reserved assignment");
             config

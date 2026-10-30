@@ -33,7 +33,7 @@ test("shared migration state preserves tab fences and modal actions", async ({ p
   const detected = { kind: "migration_detected", tab_id: "migration-fixture", project_root: "/fixture/project", branch: "develop" };
   const modal = page.locator("#migration-modal");
   const dialog = modal.locator(".modal-shell");
-  const trigger = page.locator("#window-list-button");
+  const trigger = page.locator("#op-palette-button");
   await trigger.focus();
   await inject({ ...detected, has_locked: true });
   await expect(modal).toHaveClass(/open/);

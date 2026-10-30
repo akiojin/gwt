@@ -59,7 +59,6 @@ crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit_windows|while
 crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit|letdeadline=std::time::Instant::now()+Duration::from_secs(2)|1
 crates/gwt-core/src/process_console/spawn.rs|wait_for_process_exit|whilestd::time::Instant::now()<deadline|1
 crates/gwt-core/src/runtime.rs|runtime_command_obeys_ambient_operation_deadline|letstart=std::time::Instant::now()+std::time::Duration::from_secs(3600)|1
-crates/gwt-core/src/runtime.rs|runtime_probe_lock_obeys_ambient_operation_deadline|assert!(started.elapsed()<std::time::Duration::from_millis(1_000))|1
 crates/gwt-core/src/update.rs|pending_manifest_staging_waits_for_writer_while_defer_and_clear_refuse|assert!(matches!(finished_rx.recv_timeout(std::time::Duration::from_secs(1)),Err(std::sync::mpsc::RecvTimeoutError::Timeout)))|1
 crates/gwt-core/tests/env_lock_reentrancy.rs|run_bounded|matchrx.recv_timeout(BUDGET)|1
 crates/gwt-core/tests/index_coordinator.rs|poll_until|whilestart.elapsed()<deadline|1
@@ -442,7 +441,6 @@ crates/gwt/src/cli/json_envelope.rs|pane_name_waits_for_its_exact_assigned_resul
 crates/gwt/src/cli/pane.rs|read_pane_snapshot_uses_one_absolute_completion_deadline|assert!(started.elapsed()<Duration::from_millis(500),)|1
 crates/gwt/src/cli/pane.rs|request_window_list_outlasts_a_multi_second_backend_stall|matchtokio::time::timeout(Duration::from_millis(200),socket.next()).await|1
 crates/gwt/src/cli/pane.rs|self_pane_close_absolute_deadline_is_not_extended_by_unrelated_frames|assert!(started.elapsed()<Duration::from_millis(500),,started.elapsed())|1
-crates/gwt/src/cli/pr/mod.rs|issue_4850_pr_edit_returns_with_a_warning_when_the_work_items_lock_is_held|assert!(elapsed<std::time::Duration::from_secs(5),)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|assert!(std::time::Instant::now()<deadline,)|1
 crates/gwt/src/cli/search.rs|run_reports_stale_metadata_and_not_ready_exit|letdeadline=std::time::Instant::now()+std::time::Duration::from_secs(20)|1
 crates/gwt/src/cli/trusted_store.rs|write_lease_refuses_second_writer_with_explicit_retry|let_=release_rx.recv_timeout(Duration::from_secs(10))|1

@@ -64,9 +64,11 @@ test.describe("Issue Monitor automatic tiers", () => {
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
       await expect(page.locator("#close-project-button")).toBeVisible();
-      const issueWindows = page.locator('.workspace-window[data-preset="settings"]');
+      const issueWindows = page.locator('.workspace-window[data-preset="issue"]');
       let windowId = await issueWindows.count() ? await issueWindows.first().getAttribute("data-id") : null;
       const createdWindow = !windowId;
+      const settingsWindows = page.locator('.workspace-window[data-preset="settings"]');
+      const createdSettings = !(await settingsWindows.count());
       if (!windowId) {
         await sendLiveGwtEvent(page, { kind: "create_window", preset: "issue", bounds: { x: 60, y: 50, width: 1040, height: 820 } });
         await expect(issueWindows.first()).toBeVisible();
@@ -99,7 +101,7 @@ test.describe("Issue Monitor automatic tiers", () => {
         const issues = settingsWindow.locator('[data-settings-panel="issues"]');
         await expect(issues).toBeVisible();
         await expect(settingsWindow).toHaveCount(1);
-        await expect(issues.locator(".settings-issues-options")).toHaveAttribute("open", "");
+        await expect(settingsWindow.locator(".issue-bridge-root")).toHaveCount(0);
         await expect(issues.getByLabel("Max active", { exact: true })).toHaveValue(String(status.max_active_agents));
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
         await page.screenshot({ path: join(CHECK_HOME, `auto-tiers-${testInfo.project.name}.png`), fullPage: true });
@@ -108,6 +110,14 @@ test.describe("Issue Monitor automatic tiers", () => {
         expect(after.autonomous_mode).toBe(false);
         expect(after.active_launches).toEqual([]);
       } finally {
+        if (!page.isClosed() && (createdWindow || createdSettings)) {
+          await page.locator('button[data-surface="agents"]').click();
+          if (createdSettings) {
+            for (const id of await settingsWindows.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")))) {
+              await sendLiveGwtEvent(page, { kind: "close_window", id });
+            }
+          }
+        }
         if (createdWindow && !page.isClosed()) await sendLiveGwtEvent(page, { kind: "close_window", id: windowId });
       }
       expect(errors).toEqual([]);

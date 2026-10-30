@@ -71,8 +71,8 @@ test.describe("Issue #5601 web cleanup (isolated live checkout)", () => {
       await expect(settings.locator('[data-settings-panel="system"]')).toBeVisible();
       await expect(settings.getByLabel("Output Language", { exact: true })).toBeEnabled({ timeout: 30_000 });
       await info.attach(`${phase}-settings-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
-      await settings.getByRole("tab", { name: "Issues", exact: true }).click();
-      await expect(settings.getByRole("tab", { name: "Issues", exact: true })).toHaveAttribute("aria-selected", "true");
+      await settings.getByRole("tab", { name: "Issues execution settings", exact: true }).click();
+      await expect(settings.getByRole("tab", { name: "Issues execution settings", exact: true })).toHaveAttribute("aria-selected", "true");
       await expect(settings.locator('[data-settings-panel="issues"]')).toBeVisible();
       await entry("agents").click();
       await expect(entry("agents")).toHaveAttribute("aria-pressed", "true");

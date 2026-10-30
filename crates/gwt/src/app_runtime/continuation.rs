@@ -8,7 +8,7 @@ pub(super) use gwt::project_runtime::launch_finalization::{
 };
 use gwt::project_runtime::launch_finalization::{
     compensate_genesis_workspace_projection, durable_fresh_execution_candidate,
-    genesis_initial_execution_binding_matches, path_matches,
+    genesis_initial_execution_binding_matches, path_matches, reconcile_genesis_roster,
     resolve_split_workspace_state_external_commit_with_retry_hint, DurableFreshExecutionCandidate,
     GenesisCompensationAuthority,
 };
@@ -2641,6 +2641,10 @@ impl AppRuntime {
             }
         }
         self.launch_wizard_cache.forget_session(&receipt.session_id);
+        if let Err(error) = reconcile_genesis_roster(&receipt.project_root, &self.sessions_dir) {
+            tracing::warn!(session_id = %receipt.session_id, error = %error, "genesis roster recovery remains pending");
+            return;
+        }
         let _ = clear_durable_launch_recovery(&self.sessions_dir, &receipt.session_id);
     }
 

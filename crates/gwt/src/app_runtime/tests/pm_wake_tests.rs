@@ -868,10 +868,46 @@ fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
     runtime
         .window_hook_states
         .insert(pm_window_id.clone(), WindowProcessStatus::Running);
+    runtime.window_last_output_at.insert(
+        pm_window_id.clone(),
+        "2026-08-10T00:59:59Z".parse().unwrap(),
+    );
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_none(),
+        "an old loop clock must not interrupt a PM that is still producing output"
+    );
+    runtime.window_last_output_at.remove(&pm_window_id);
     let decision = runtime
         .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .expect("a Running pane past the deferral bound is woken anyway");
     assert_eq!(decision.window_id, pm_window_id);
+    assert!(
+        decision.prompt.is_ascii(),
+        "the canonical system prompt must survive the real Windows provider unchanged"
+    );
+
+    seed_quiet_standing_supervision(&repo);
+    let _pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
+    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "pm-session-live");
+    let mut observed = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    observed.runtime_incarnation = Some(runtime.runtimes[&pm_window_id].incarnation);
+    observed.source_event = Some("Stop".into());
+    observed.last_activity_at = "2026-08-10T00:00:00Z".parse().unwrap();
+    observed.active_tool_calls = Some(Default::default());
+    observed.save(&runtime_path).unwrap();
+    assert!(runtime.pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z").is_none(),
+        "a real Running turn, including resident Stop continuation, must not be aged into an idle prompt");
+    observed.status = gwt_agent::AgentStatus::Idle;
+    observed.last_completed_hook_event_at = Some(observed.updated_at);
+    observed.save(&runtime_path).unwrap();
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
+            .is_some(),
+        "an exact completed Idle sidecar recovers a stale GUI Running observation"
+    );
 }
 
 #[test]
@@ -1853,9 +1889,9 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
         .expect("delivery completion includes the physical submit and releases its reservation");
 }
 
-/// Issue #3702 AC-2: a held tick is delivered once (coalesced) after submit.
+/// SPEC-3431: periodic ticks are discarded while typing; submit starts a full quiet interval.
 #[test]
-fn held_supervision_tick_is_delivered_after_the_composer_submits() {
+fn held_supervision_tick_is_discarded_until_a_full_interval_after_submit() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1865,50 +1901,28 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
     let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
+    // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; all quiet boundaries advance that clock rather than waiting.
+    let start = Instant::now() - Duration::from_secs(1000);
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
 
     let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
-    assert_eq!(
-        runtime
-            .project_state(&runtime.test_context())
-            .unwrap()
-            .pending_pm_wakes
-            .len(),
-        1
-    );
     assert!(
         runtime
             .project_state(&runtime.test_context())
             .unwrap()
             .pending_pm_wakes
-            .get(&pm_window_id)
-            .is_some_and(|decision| decision.prompt.contains("Scheduled supervision tick")),
-        "the held prompt must be the scheduled tick"
+            .is_empty(),
+        "a periodic tick must be discarded instead of held behind human input"
     );
 
-    // A second tick while still composing stays one pending entry.
-    let loop_path = gwt::pm_registry::pm_loop_state_path_for_repo_path(&repo);
-    gwt::pm_registry::save_pm_loop_state(
-        &loop_path,
-        &gwt::pm_registry::PmLoopState {
-            consecutive_continuations: 12,
-            last_continued_at: Some("2026-08-10T00:00:00Z".to_string()),
-            ..gwt::pm_registry::PmLoopState::default()
-        },
-    )
-    .expect("re-quiet the loop");
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(59));
+    runtime.terminal_input_events(&pm_window_id, "ますか？");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
-    assert_eq!(
-        runtime
-            .project_state(&runtime.test_context())
-            .unwrap()
-            .pending_pm_wakes
-            .len(),
-        1,
-        "ticks must coalesce"
-    );
-
-    let _ = runtime.terminal_input_events(&pm_window_id, "ますか？\r");
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(60));
+    runtime.terminal_input_events(&pm_window_id, "\r");
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         runtime
@@ -1916,23 +1930,26 @@ fn held_supervision_tick_is_delivered_after_the_composer_submits() {
             .unwrap()
             .pending_pm_wakes
             .is_empty(),
-        "submit must deliver and clear the held tick"
+        "submit must not revive either skipped tick"
     );
-    let pty = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("live PM pane")
-        .pane
-        .lock()
-        .expect("pane lock")
-        .shared_pty();
-    pty.reserve_input_transaction()
-        .expect("the held tick completes its physical submit before its worker returns");
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(119));
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
+        .is_none());
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(120));
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
+            .is_some(),
+        "a new tick becomes eligible exactly one full interval after submit"
+    );
 }
 
-/// Issue #3702 AC-2: clearing the composer (Ctrl+C) also releases the tick.
+/// SPEC-3431: clear starts the current full interval, excluding protected machine input.
 #[test]
-fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
+fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1942,18 +1959,23 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
     let (repo, mut runtime, pm_window_id) = pm_wake_fixture(&temp);
     seed_quiet_standing_supervision(&repo);
     let _pm_pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
+    // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; all quiet boundaries advance that clock rather than waiting.
+    let start = Instant::now() - Duration::from_secs(1000);
+    let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
 
     let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
-    assert_eq!(
+    assert!(
         runtime
             .project_state(&runtime.test_context())
             .unwrap()
             .pending_pm_wakes
-            .len(),
-        1
+            .is_empty(),
+        "the composing tick must not remain pending"
     );
 
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(30));
     let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
@@ -1962,7 +1984,49 @@ fn held_supervision_tick_is_delivered_after_the_composer_is_cleared() {
             .unwrap()
             .pending_pm_wakes
             .is_empty(),
-        "Ctrl+C must deliver the held tick"
+        "Ctrl+C must not deliver a skipped tick"
+    );
+    let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
+    let mut prefs: serde_json::Value =
+        serde_json::from_slice(&fs::read(&prefs_path).unwrap()).unwrap();
+    prefs["settings"]["loop_interval_secs"] = 120.into();
+    fs::write(prefs_path, serde_json::to_vec(&prefs).unwrap()).unwrap();
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(29));
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
+            .is_none(),
+        "a clock before the last human input is not quiet"
+    );
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(149));
+    let pty = runtime.runtimes[&pm_window_id].pty.clone();
+    pty.write_machine_input(b"automated prompt\r").unwrap();
+    pty.write_input(b"\x1b[1;1R").unwrap();
+    let pane = &runtime.runtimes[&pm_window_id].pane;
+    crate::app_runtime::pty_io::write_pane_input_then_submit(pane, "\u{0003}").unwrap();
+    crate::app_runtime::pty_io::write_pane_input_and_submit_blocking(pane, "\u{0015}").unwrap();
+    let reservation = pty.reserve_input_transaction().unwrap();
+    reservation.write_input(b"machine prompt\r").unwrap();
+    let revision = pty.ordinary_input_revision().unwrap();
+    reservation
+        .with_quiet_ordinary_input(revision, Duration::from_secs(120), || Ok(()))
+        .expect_err("the physical commit needs the entire current interval");
+    assert!(runtime
+        .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
+        .is_none());
+    let _clock =
+        gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(150));
+    reservation
+        .with_quiet_ordinary_input(revision, Duration::from_secs(120), || Ok(()))
+        .expect("physical commit is allowed at the exact full boundary");
+    drop(reservation);
+    assert!(
+        runtime
+            .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
+            .is_some(),
+        "the current interval is measured from human clear, not machine input"
     );
 }
 

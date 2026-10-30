@@ -5516,111 +5516,7 @@ export function createKnowledgeKanbanSurface({
             break;
           }
           case "knowledge_entries": {
-            const state = knowledgeBridgeStateMap.get(event.id);
-            if (
-              !state ||
-              normalizeKnowledgeKind(event.knowledge_kind) !==
-                normalizeKnowledgeKind(state.kind)
-            ) {
-              break;
-            }
-            if (event.request_id && !state.ownedLoadRequestIds.has(event.request_id)) {
-              break;
-            }
-            // Issue #3297: a response that lost the race against the 5s
-            // recovery timer carries a superseded request_id, but while the
-            // window still has no data it is strictly better than the empty
-            // view — apply it; a newer in-flight response overwrites it.
-            if (
-              event.request_id &&
-              event.request_id !== state.loadRequestId &&
-              !knowledgeEntriesAreEmpty(state)
-            ) {
-              break;
-            }
-            const queuedQuery = state.query.trim();
-            const previousNumber = state.selectedNumber;
-            const incomingEntries = event.entries || [];
-            const previousSelectedEntry = state.baseEntries.find(entry => entry.number === previousNumber);
-            const incomingSelectedEntry = incomingEntries.find(entry => entry.number === previousNumber);
-            const relatedSnapshot = entry => JSON.stringify([
-              entry.related_work_refs || [], entry.related_work_count || 0,
-              entry.related_session_count || 0,
-            ]);
-            const refreshSelectedDetail = state.selectionGeneration > 0 &&
-              previousSelectedEntry && incomingSelectedEntry &&
-              relatedSnapshot(previousSelectedEntry) !== relatedSnapshot(incomingSelectedEntry);
-            const entriesContent = JSON.stringify(incomingEntries);
-            const unchangedEntries = !state.error && !state.renderError &&
-              ((typeof event.revision === "string" && event.revision.length > 0 &&
-                event.revision === state.entriesRevision) || entriesContent === state.entriesContent);
-            // Legacy senders without revisions also preserve identical rows.
-            state.entriesContent = entriesContent;
-            state.entriesRevision = event.revision || null;
-            const keepSelectedNumber =
-              state.selectedNumber &&
-              incomingEntries.some((entry) => entry.number === state.selectedNumber);
-            state.baseEntries = incomingEntries;
-            state.cacheRevision = event.cache_revision ?? null;
-            if (state.autoRefreshChanged && state.cacheRevision !== null &&
-                state.cacheRevision === state.autoRefreshRevision) {
-              state.autoRefreshChanged = false;
-              state.autoRefreshDirty = false;
-            }
-            state.baseEmptyMessage = event.empty_message || "";
-            if (!queuedQuery) {
-              state.entries = state.baseEntries.slice();
-              state.emptyMessage = state.baseEmptyMessage;
-              state.searching = false;
-            }
-            // FR-101: an initial-load / list completion may refresh rows
-            // but must never move an explicit selection.
-            if (
-              state.selectionGeneration > 0 ||
-              (event.request_id === state.loadRequestId &&
-                state.loadSelectionGeneration !== state.selectionGeneration)
-            ) {
-              // keep state.selectedNumber untouched
-            } else {
-              state.selectedNumber = keepSelectedNumber
-                ? state.selectedNumber
-                : event.selected_number ?? null;
-            }
-            state.refreshEnabled = Boolean(event.refresh_enabled);
-            state.refreshedAt = Date.now();
-            state.error = "";
-            // A cache-first list can precede the related-work snapshot used by
-            // an explicit selection. Refresh its detail without selecting anew.
-            if (refreshSelectedDetail) {
-              knowledgeCompletionViewModel.update(() => ({
-                windowId: event.id, detailRefreshNumber: previousNumber,
-              }));
-            }
-            const renderCompletion = () => {
-              knowledgeCompletionViewModel.update(() => ({
-                windowId: event.id, unchangedEntries, previousNumber,
-              }));
-            };
-            if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
-              renderCompletion();
-              break;
-            }
-            if (queuedQuery) {
-              if (unchangedEntries) {
-                if (!state.inFlightSearchIntent && state.pendingSearchTimer === null) {
-                  queueKnowledgeSearch(event.id, state,
-                    updateKnowledgeSearchIntent(state, event.knowledge_kind, queuedQuery));
-                }
-                renderCompletion();
-                break;
-              }
-              scheduleKnowledgeSearch(
-                event.id,
-                event.knowledge_kind,
-              );
-              break;
-            }
-            renderCompletion();
+            knowledgeCompletionViewModel.update(() => ({ windowId: event.id, entriesReceipt: event }));
             break;
           }
           case "knowledge_search_results": {
@@ -5631,13 +5527,6 @@ export function createKnowledgeKanbanSurface({
             knowledgeCompletionViewModel.update(() => ({ windowId: event.id, detailReceipt: event }));
             break;
           }
-          // SPEC-3064 Phase 3 (E6b): branch cleanup state and rendering
-          // live in the branches cleanup surface.
-          case "branch_cleanup_result":
-          case "branch_cleanup_progress":
-          case "branch_error":
-            applyBranchCleanupReceiveEvent(event);
-            break;
           case "knowledge_bridge_phase_updated": {
             // SPEC-2017 US-8 — phase write-back response. On Ok we
             // overwrite the optimistic card with fresh_entry and clear
@@ -5737,7 +5626,7 @@ export function createKnowledgeKanbanSurface({
       });
       // Receive commits completion state; the synchronous view owns list,
       // selection and detail rendering, including the open Drawer.
-      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, unchangedEntries, previousNumber, detailRefreshNumber, detailReceipt, errorReceipt, terminalPreview, searchReceipt }) => {
+      knowledgeCompletionViewModel.subscribe(model => model, ({ windowId, previousNumber, entriesReceipt, detailReceipt, errorReceipt, terminalPreview, searchReceipt }) => {
         if (terminalPreview) {
           const text = terminalPreviewText.get(windowId);
           for (const element of windowMap.values()) {
@@ -5751,6 +5640,119 @@ export function createKnowledgeKanbanSurface({
         }
         const state = knowledgeBridgeStateMap.get(windowId);
         if (!state) return;
+        if (entriesReceipt) {
+          const event = entriesReceipt;
+          if (
+            normalizeKnowledgeKind(event.knowledge_kind) !==
+              normalizeKnowledgeKind(state.kind)
+          ) {
+            return;
+          }
+          if (event.request_id && !state.ownedLoadRequestIds.has(event.request_id)) {
+            return;
+          }
+          // Issue #3297: a response that lost the race against the 5s
+          // recovery timer carries a superseded request_id, but while the
+          // window still has no data it is strictly better than the empty
+          // view — apply it; a newer in-flight response overwrites it.
+          if (
+            event.request_id &&
+            event.request_id !== state.loadRequestId &&
+            !knowledgeEntriesAreEmpty(state)
+          ) {
+            return;
+          }
+          const queuedQuery = state.query.trim();
+          const previousNumber = state.selectedNumber;
+          const incomingEntries = event.entries || [];
+          const previousSelectedEntry = state.baseEntries.find(entry => entry.number === previousNumber);
+          const incomingSelectedEntry = incomingEntries.find(entry => entry.number === previousNumber);
+          const relatedSnapshot = entry => JSON.stringify([
+            entry.related_work_refs || [], entry.related_work_count || 0,
+            entry.related_session_count || 0,
+          ]);
+          const refreshSelectedDetail = state.selectionGeneration > 0 &&
+            previousSelectedEntry && incomingSelectedEntry &&
+            relatedSnapshot(previousSelectedEntry) !== relatedSnapshot(incomingSelectedEntry);
+          const entriesContent = JSON.stringify(incomingEntries);
+          const unchangedEntries = !state.error && !state.renderError &&
+            ((typeof event.revision === "string" && event.revision.length > 0 &&
+              event.revision === state.entriesRevision) || entriesContent === state.entriesContent);
+          // Legacy senders without revisions also preserve identical rows.
+          state.entriesContent = entriesContent;
+          state.entriesRevision = event.revision || null;
+          const keepSelectedNumber =
+            state.selectedNumber &&
+            incomingEntries.some((entry) => entry.number === state.selectedNumber);
+          // Phase ACKs and optimistic moves replace slots in the local lists.
+          state.baseEntries = incomingEntries.slice();
+          state.cacheRevision = event.cache_revision ?? null;
+          if (state.autoRefreshChanged && state.cacheRevision !== null &&
+              state.cacheRevision === state.autoRefreshRevision) {
+            state.autoRefreshChanged = false;
+            state.autoRefreshDirty = false;
+          }
+          state.baseEmptyMessage = event.empty_message || "";
+          if (!queuedQuery) {
+            state.entries = state.baseEntries.slice();
+            state.emptyMessage = state.baseEmptyMessage;
+            state.searching = false;
+          }
+          // FR-101: an initial-load / list completion may refresh rows
+          // but must never move an explicit selection.
+          if (
+            state.selectionGeneration > 0 ||
+            (event.request_id === state.loadRequestId &&
+              state.loadSelectionGeneration !== state.selectionGeneration)
+          ) {
+            // keep state.selectedNumber untouched
+          } else {
+            state.selectedNumber = keepSelectedNumber
+              ? state.selectedNumber
+              : event.selected_number ?? null;
+          }
+          state.refreshEnabled = Boolean(event.refresh_enabled);
+          state.refreshedAt = Date.now();
+          state.error = "";
+          // A cache-first list can precede the related-work snapshot used by
+          // an explicit selection. Refresh its detail without selecting anew.
+          if (refreshSelectedDetail) {
+            dispatchKnowledgeDetailRequest(windowId, state.kind, previousNumber, { explicit: false });
+          }
+          const renderCompletion = () => {
+            if (!unchangedEntries) {
+              renderKnowledgeBridge(windowId);
+              return;
+            }
+            const refresh = windowMap.get(windowId)?.querySelector("[data-action='refresh-knowledge']");
+            if (refresh) {
+              refresh.disabled = !state.refreshEnabled ||
+                (state.loading && !knowledgeEntriesAreEmpty(state));
+            }
+            renderKnowledgeSelection(windowId, state, previousNumber);
+          };
+          if (finishKnowledgeLoad(state, event.id, event.knowledge_kind)) {
+            renderCompletion();
+            return;
+          }
+          if (queuedQuery) {
+            if (unchangedEntries) {
+              if (!state.inFlightSearchIntent && state.pendingSearchTimer === null) {
+                queueKnowledgeSearch(event.id, state,
+                  updateKnowledgeSearchIntent(state, event.knowledge_kind, queuedQuery));
+              }
+              renderCompletion();
+              return;
+            }
+            scheduleKnowledgeSearch(
+              event.id,
+              event.knowledge_kind,
+            );
+            return;
+          }
+          renderCompletion();
+          return;
+        }
         if (errorReceipt) {
           const event = errorReceipt;
           const isSearchError =
@@ -5918,20 +5920,7 @@ export function createKnowledgeKanbanSurface({
           }
           return;
         }
-        if (detailRefreshNumber) {
-          dispatchKnowledgeDetailRequest(windowId, state.kind, detailRefreshNumber, { explicit: false });
-          return;
-        }
-        if (!unchangedEntries) {
-          renderKnowledgeBridge(windowId);
-          return;
-        }
-        const refresh = windowMap.get(windowId)?.querySelector("[data-action='refresh-knowledge']");
-        if (refresh) {
-          refresh.disabled = !state.refreshEnabled ||
-            (state.loading && !knowledgeEntriesAreEmpty(state));
-        }
-        renderKnowledgeSelection(windowId, state, previousNumber);
+        renderKnowledgeBridge(windowId);
       });
       issueWindowViewModel.subscribe(model => model, ({ windowId, detailOnly, focusPreview }) => {
         const element = windowMap.get(windowId);

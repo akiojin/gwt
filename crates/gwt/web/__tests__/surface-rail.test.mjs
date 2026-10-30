@@ -58,7 +58,7 @@ test("surfaceForWindow puts the PM apart from the agents by its role marker", as
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: true }), "pm");
   assert.equal(surfaceForWindow({ preset: "claude", is_pm: false }), "works");
   assert.equal(surfaceForWindow({ preset: "board" }), "board");
-  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "settings");
   assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "system" }), "settings");
   assert.equal(surfaceForWindow(null), null);
 });
@@ -70,7 +70,7 @@ test("surface ownership retains authoritative roles and only routes the dedicate
     assert.equal(surfaceForWindow({ preset, surface_owner: "pm", agent_name: null }), "works");
   }
   assert.equal(surfaceForWindow({ preset: "settings", surface_owner: "pm", settingsSection: "issues" }), "pm");
-  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "issues", "legacy Settings retains its existing section classification");
+  assert.equal(surfaceForWindow({ preset: "settings", settingsSection: "issues" }), "settings", "legacy settings section stays a configuration route");
   assert.equal(surfaceForWindow({ preset: "shell", surface_owner: "agents" }), "settings");
   assert.equal(surfaceForWindow({ preset: "shell" }), "settings", "ordinary Shell has a rail host");
 });
