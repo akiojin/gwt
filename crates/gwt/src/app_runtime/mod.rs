@@ -7368,7 +7368,20 @@ impl AppRuntime {
             }
         }
         match monitor_result {
-            WindowCloseMonitorResult::Noop => {}
+            WindowCloseMonitorResult::Noop => {
+                if let Some(context) = owner
+                    .as_ref()
+                    .filter(|_| !window_id_reused && closing_session_id.is_some())
+                {
+                    // Accepted GUI close already removed the native event's alias.
+                    // Reobserve after its exact close ACK; do not retime cached proof.
+                    self.schedule_runtime_hook_active_work_projection_refresh(
+                        &context.project_root,
+                        "window_close_finalized",
+                        "closed",
+                    );
+                }
+            }
             WindowCloseMonitorResult::Failed(error) => {
                 tracing::warn!(
                     error = %error,

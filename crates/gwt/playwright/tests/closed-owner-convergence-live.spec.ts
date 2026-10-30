@@ -158,8 +158,37 @@ test.describe("Issue #3590 closed owner terminal convergence", () => {
         contentType: "application/json",
       });
       expect(errors, "console/page errors across the actual observer close").toEqual([]);
+    } catch (error) {
+      // Keep the original assertion and capture its actual page before cleanup.
+      try {
+        await info.attach("closed-owner-failure-" + theme, {
+          body: await page.screenshot(), contentType: "image/png",
+        });
+      } catch { /* Preserve the original assertion if its page already closed. */ }
+      throw error;
     } finally {
-      try { await page.close(); } finally { await fixture.stop(); }
+      try {
+        const projectionEvidence = await page.evaluate(() => {
+          const kinds = ["local_agent_activity", "active_work_projection",
+            "active_work_projection_patch", "workspace_state", "issue_monitor_status"];
+          const messages = (window as any).__gwtPlaywrightMessages ?? [];
+          return {
+            projections: Object.fromEntries(kinds.map(kind => [kind,
+              messages.filter((entry: any) => entry.payload.kind === kind).slice(-40)])),
+            rows: Array.from(document.querySelectorAll(".work-row"), row => ({
+              windowId: row.getAttribute("data-window-id"), text: row.textContent,
+            })),
+            active: document.querySelector(".works-active")?.textContent,
+          };
+        });
+        await info.attach("closed-owner-projection-events-" + theme, {
+          body: JSON.stringify(projectionEvidence, null, 2), contentType: "application/json",
+        });
+      } catch {
+        // Diagnostic collection must preserve the original result and cleanup.
+      } finally {
+        try { await page.close(); } finally { await fixture.stop(); }
+      }
     }
     expect(errors, "console/page errors including owned fixture cleanup").toEqual([]);
   });
