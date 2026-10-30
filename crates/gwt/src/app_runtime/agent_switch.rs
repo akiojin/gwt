@@ -464,8 +464,12 @@ fn drive_switch(
             )?;
             return Ok(false);
         }
-        if !gwt::issue_monitor::observe_agent_switch_cwd(&proof.execution_identity.worktree_path)
-            .is_clear()
+        if !gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+            &proof.execution_identity.worktree_path,
+            proof.child_pid,
+            proof.child_started_at,
+        )
+        .is_clear()
         {
             set_switch_reason(root, intent, "Waiting for background work and a complete activity observation. Current work is kept.")?;
             return Ok(false);
@@ -579,8 +583,10 @@ fn drive_switch(
                     }
                     if !exact_writer_is_current(writers, intent, entry)
                         || !current_switch_runtime(root, intent, sessions).unwrap_or(false)
-                        || !gwt::issue_monitor::observe_agent_switch_cwd(
+                        || !gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
                             &proof.execution_identity.worktree_path,
+                            proof.child_pid,
+                            proof.child_started_at,
                         )
                         .is_clear()
                     {

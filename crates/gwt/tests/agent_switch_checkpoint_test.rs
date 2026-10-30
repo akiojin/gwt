@@ -111,6 +111,23 @@ fn switch_cwd_observation_counts_the_provider_in_a_worktree_subdirectory() {
         !observation.is_clear(),
         "an idle provider still owns its cwd"
     );
+    let started_at = gwt::process::host_process_start_time(child.0.id()).unwrap();
+    let checkpoint = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+        temp.path(),
+        child.0.id(),
+        started_at,
+    );
+    assert!(!checkpoint.matching_pids.contains(&child.0.id()));
+    assert!(!checkpoint.unknown_pids.contains(&child.0.id()));
+    let reused = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+        temp.path(),
+        child.0.id(),
+        started_at + 1,
+    );
+    assert!(
+        !reused.complete,
+        "a changed source identity never proves clear"
+    );
 }
 
 #[test]

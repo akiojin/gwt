@@ -20,8 +20,9 @@ impl AgentSwitchCwdObservation {
 
 fn collect_cwd_observation(
     worktree: &Path,
-    processes: impl IntoIterator<Item = (u32, Option<PathBuf>)>,
+    processes: impl IntoIterator<Item = (u32, u64, Option<PathBuf>)>,
     (enumerated_count, captured_count, supported_with_self): (usize, usize, bool),
+    source: Option<(u32, u64)>,
 ) -> AgentSwitchCwdObservation {
     let mut observation = AgentSwitchCwdObservation {
         matching_pids: Vec::new(),
@@ -32,13 +33,19 @@ fn collect_cwd_observation(
         observation.complete = false;
         return observation;
     };
-    for (pid, cwd) in processes {
+    let mut source_confirmed = source.is_none();
+    for (pid, started_at, cwd) in processes {
+        let exact_source = pid != 0 && started_at != 0 && source == Some((pid, started_at));
+        source_confirmed |= exact_source;
         match cwd.and_then(|cwd| dunce::canonicalize(cwd).ok()) {
-            Some(cwd) if cwd.starts_with(&worktree) => observation.matching_pids.push(pid),
+            Some(cwd) if cwd.starts_with(&worktree) && !exact_source => {
+                observation.matching_pids.push(pid)
+            }
             Some(_) => {}
             None => observation.unknown_pids.push(pid),
         }
     }
+    observation.complete &= source_confirmed;
     observation.matching_pids.sort_unstable();
     observation.unknown_pids.sort_unstable();
     observation
@@ -47,6 +54,21 @@ fn collect_cwd_observation(
 /// Observe all live process cwd values, including the source provider itself.
 /// This is a cwd observation, not filesystem containment or a process freeze.
 pub fn observe_agent_switch_cwd(worktree: &Path) -> AgentSwitchCwdObservation {
+    observe_cwd(worktree, None)
+}
+
+/// Before checkpoint delivery or verified stop, the exact idle source may
+/// remain alive. Its cwd must still be readable, and no descendant is exempt.
+/// The caller separately verifies Session, runtime, writer and input authority.
+pub fn observe_agent_switch_checkpoint_cwd(
+    worktree: &Path,
+    source_pid: u32,
+    source_started_at: u64,
+) -> AgentSwitchCwdObservation {
+    observe_cwd(worktree, Some((source_pid, source_started_at)))
+}
+
+fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObservation {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
     let mut system = System::new();
     let enumerated_count = system.refresh_processes_specifics(
@@ -69,12 +91,21 @@ pub fn observe_agent_switch_cwd(worktree: &Path) -> AgentSwitchCwdObservation {
                     ProcessStatus::Dead | ProcessStatus::Zombie
                 )
             })
-            .map(|(pid, process)| (pid.as_u32(), process.cwd().map(Path::to_path_buf))),
+            .map(|(pid, process)| {
+                let pid = pid.as_u32();
+                let started_at = if source.is_some_and(|(source_pid, _)| source_pid == pid) {
+                    crate::process::snapshot_process_start_identity(pid, process)
+                } else {
+                    0
+                };
+                (pid, started_at, process.cwd().map(Path::to_path_buf))
+            }),
         (
             enumerated_count,
             system.processes().len(),
             supported_with_self,
         ),
+        source,
     )
 }
 
@@ -240,6 +271,71 @@ pub fn verify_switch_git_checkpoint(worktree: &Path, expected_head: &str) -> io:
 mod tests {
     use super::*;
 
+    fn checkpoint_cwd_observation(
+        worktree: &Path,
+        processes: impl IntoIterator<Item = (u32, u64, Option<PathBuf>)>,
+        counts: (usize, usize, bool),
+        source: (u32, u64),
+    ) -> AgentSwitchCwdObservation {
+        collect_cwd_observation(worktree, processes, counts, Some(source))
+    }
+
+    #[test]
+    fn switch_checkpoint_cwd_allows_the_exact_source_in_a_complete_census() {
+        let root = tempfile::tempdir().unwrap();
+        let source = [(11, 42, Some(root.path().to_path_buf()))];
+        assert!(checkpoint_cwd_observation(root.path(), source, (1, 1, true), (11, 42)).is_clear());
+    }
+
+    #[test]
+    fn switch_checkpoint_cwd_keeps_missing_reused_and_unknown_sources_blocked() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        for processes in [
+            vec![],
+            vec![(11, 43, Some(outside.path().to_path_buf()))],
+            vec![(11, 0, Some(outside.path().to_path_buf()))],
+            vec![(12, 42, Some(outside.path().to_path_buf()))],
+            vec![(11, 42, None)],
+            vec![(11, 42, Some(root.path().join("missing")))],
+        ] {
+            let count = processes.len();
+            assert!(!checkpoint_cwd_observation(
+                root.path(),
+                processes,
+                (count, count, true),
+                (11, 42)
+            )
+            .is_clear());
+        }
+        let processes = [(11, 42, Some(root.path().to_path_buf()))];
+        assert!(
+            !checkpoint_cwd_observation(root.path(), processes.clone(), (1, 1, true), (11, 0))
+                .is_clear()
+        );
+        assert!(
+            !checkpoint_cwd_observation(root.path(), processes, (1, 0, true), (11, 42)).is_clear()
+        );
+    }
+
+    #[test]
+    fn switch_checkpoint_cwd_keeps_other_processes_blocked() {
+        let root = tempfile::tempdir().unwrap();
+        let observation = checkpoint_cwd_observation(
+            root.path(),
+            [
+                (11, 42, Some(root.path().to_path_buf())),
+                (12, 0, Some(root.path().to_path_buf())),
+                (13, 0, None),
+            ],
+            (3, 3, true),
+            (11, 42),
+        );
+        assert_eq!(observation.matching_pids, [12]);
+        assert_eq!(observation.unknown_pids, [13]);
+        assert!(!observation.is_clear());
+    }
+
     #[test]
     fn switch_cwd_collector_retains_unreadable_and_uncanonicalizable_processes() {
         let root = tempfile::tempdir().unwrap();
@@ -248,20 +344,21 @@ mod tests {
         let observation = collect_cwd_observation(
             root.path(),
             [
-                (11, Some(root.path().to_path_buf())),
-                (12, Some(nested)),
-                (13, None),
-                (14, Some(root.path().join("missing"))),
+                (11, 0, Some(root.path().to_path_buf())),
+                (12, 0, Some(nested)),
+                (13, 0, None),
+                (14, 0, Some(root.path().join("missing"))),
             ],
             (4, 4, true),
+            None,
         );
         assert_eq!(observation.matching_pids, [11, 12]);
         assert_eq!(observation.unknown_pids, [13, 14]);
         assert!(!observation.is_clear());
-        assert!(collect_cwd_observation(root.path(), [], (0, 0, true)).is_clear());
-        assert!(!collect_cwd_observation(root.path(), [], (0, 0, false)).is_clear());
+        assert!(collect_cwd_observation(root.path(), [], (0, 0, true), None).is_clear());
+        assert!(!collect_cwd_observation(root.path(), [], (0, 0, false), None).is_clear());
         assert!(
-            !collect_cwd_observation(root.path(), [], (1, 0, true)).is_clear(),
+            !collect_cwd_observation(root.path(), [], (1, 0, true), None).is_clear(),
             "a PID omitted from the captured process map makes the census incomplete"
         );
     }
