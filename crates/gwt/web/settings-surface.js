@@ -1025,8 +1025,9 @@ export function createSettingsSurface({
         const availableMembers = rosterModel?.read().revision == null ? null : rosterModel.read().members;
         for (const [section, render] of [["issues", renderIssuesSettingsPanel], ["agents", renderAgentsSettingsPanel]]) {
           const panel = body.querySelector(section === "issues" ? "[data-settings-issues-controls]" : "[data-settings-candidates]");
+          // A field's focusout can flush here between a button's mousedown and click.
           const editing = panel?.contains(document.activeElement)
-            && document.activeElement?.matches(section === "agents" ? "input, select, textarea" : "input:not([type=checkbox]), select, textarea");
+            && document.activeElement?.matches(section === "agents" ? "input, select, textarea, button" : "input:not([type=checkbox]), select, textarea");
           if (editing) body.dataset.issuesRenderDeferred = "true";
           if (panel && !editing && !(section === "agents" && panel.dataset.dirty === "true")) render(panel, {
             project, status: current.status, profiles: current.profiles, choices: current.choices, send: dispatch, launchControls,
@@ -1408,12 +1409,17 @@ export function createSettingsSurface({
         });
         settingsWindowBodies.add(body);
         renderUpdateStatus(body, globalUpdateModel.read());
-        body.addEventListener("focusout", () => queueMicrotask(() => {
-          if (body.dataset.issuesRenderDeferred === "true") {
-            delete body.dataset.issuesRenderDeferred;
-            renderProjectSettings(body);
-          }
-        }));
+        body.addEventListener("focusout", event => {
+          // activeElement can still be BODY until the next focusin fires.
+          const candidates = event.target.closest?.("[data-settings-candidates]");
+          if (candidates && event.relatedTarget?.closest?.("[data-settings-candidates]") === candidates) return;
+          queueMicrotask(() => {
+            if (body.dataset.issuesRenderDeferred === "true") {
+              delete body.dataset.issuesRenderDeferred;
+              renderProjectSettings(body);
+            }
+          });
+        });
         renderProjectSettings(body);
         requestSettingsSnapshots();
         renderSystemPanel(systemContent);

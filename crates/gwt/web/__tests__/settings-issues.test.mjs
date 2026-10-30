@@ -476,7 +476,7 @@ test("structural saves wait for their correlated response before allowing row ed
     "structural ACK requests an authoritative redraw");
 });
 
-test("Candidates follow the shared roster before version metadata and retain dirty controls", () => {
+test("Candidates follow the shared roster and retain dirty or focused controls", async () => {
   const { document, Event } = parseHTML("<html><body><main></main></body></html>");
   const window = document.defaultView, sent = [];
   const frames = new Set(), flush = () => { for (const fn of [...frames]) { frames.delete(fn); fn(); } };
@@ -543,6 +543,33 @@ test("Candidates follow the shared roster before version metadata and retain dir
   surface.applyIssueMonitorProfiles({ ...ack, project_root: "/B", request_id: 702 });
   surface.applyIssueMonitorProfilesError({ project_root: "/A", request_id: 703, message: "save rejected" }); flush();
   assert.equal(rosterReads().length, beforeProfileAck + 1, "unrelated roots and failed writes cannot request a roster read");
+
+  Object.defineProperty(document, "activeElement", { value: document.body, configurable: true });
+  panel.dataset.dirty = "false";
+  surface.applyIssueMonitorProfiles({ project_root: "/A", profiles: [
+    { agent_member_id: "m-claude", agent_id: "claude" },
+    { agent_member_id: "m-codex", agent_id: "codex" },
+  ], choices: candidateChoices }); flush();
+  const input = panel.querySelector('[data-profile-field="model"]');
+  Object.defineProperty(document, "activeElement", { value: input, configurable: true });
+  surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A"); flush();
+  const body = panel.closest("[data-settings-project-root]");
+  assert.equal(body.dataset.issuesRenderDeferred, "true");
+  const move = panel.querySelector('fieldset[data-agent-id="claude"] [data-action="down"]');
+  Object.defineProperty(document, "activeElement", { value: document.body, configurable: true });
+  const focusout = new Event("focusout", { bubbles: true });
+  Object.assign(focusout, { relatedTarget: move });
+  input.dispatchEvent(focusout);
+  await Promise.resolve();
+  assert.equal(move.isConnected, true, "focusout must preserve the button until its native click");
+  Object.defineProperty(document, "activeElement", { value: move, configurable: true });
+  surface.applyIssueSettingsStatus({ enabled: false, autonomous_mode: false }, "/A"); flush();
+  assert.equal(move.isConnected, true, "status must preserve the now-focused button");
+  const writes = () => sent.filter(message => message.kind === "issue_monitor_profiles_set");
+  const beforeMove = writes().length;
+  move.click();
+  assert.equal(writes().length, beforeMove + 1);
+  assert.deepEqual(writes().at(-1).profiles.map(profile => profile.agent_id), ["codex", "claude"]);
 });
 
 test("Candidates disable addition with an accessible reason when the catalog is exhausted", () => {
