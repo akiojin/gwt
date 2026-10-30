@@ -473,17 +473,11 @@ test("T24 Issues and Settings keep independent hosts, inputs and preview at 1280
   await expect(settings.getByRole("tablist", { name: "Settings sections" })).toHaveAttribute("aria-orientation", "vertical");
   await expect(settings.locator(".settings-tabs")).toContainText("Application settings");
   await expect(settings.locator(".settings-tabs")).toContainText("Project settings");
-  const mode = controls.getByLabel("Max active mode", { exact: true });
-  const max = controls.getByLabel("Max active", { exact: true });
-  await expect(mode).toHaveValue("auto");
-  await expect(max).toBeDisabled();
-  await mode.selectOption("manual");
-  await max.fill("3");
-  await max.press("Tab");
-  await controls.getByRole("button", { name: "Apply Max active", exact: true }).click();
-  await expect(controls.getByRole("status").filter({hasText:"This project allocation:"})).toContainText("This project allocation: 3");
-  await mode.selectOption("auto");
-  await expect(max).toBeDisabled();
+  for (const name of ["Max active", "Max active mode", "Apply Max active"]) {
+    await expect(controls.getByLabel(name, { exact: true })).toHaveCount(0);
+  }
+  await expect(controls.getByLabel("Autonomous", { exact: true })).toBeVisible();
+  await expect(controls.getByLabel("Monitoring", { exact: true })).toBeVisible();
   await expect(settings.locator('[data-settings-panel="system"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(1);
   await expect(settings.locator('[data-settings-panel="issues"]').getByLabel("Auto-apply updates", { exact: true })).toHaveCount(0);
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("settings:open", { detail: { section: "agents" } })));

@@ -504,7 +504,7 @@ Common windows include:
   or unavailable. The setting is global and persisted under `[ai].language`
   in `~/.gwt/config.toml`. UI labels stay English (see SPEC-1933 NFR-005).
   Application settings and project settings are labeled separately. Open
-  `Issues execution settings` for Autonomous, Max active, queue refill, allowed
+  `Issues execution settings` for Autonomous, Monitoring, queue refill, allowed
   labels, launch profiles, and candidate order/preferences.
   Candidate edits save automatically when committed; text fields save when focus
   leaves the field. Rejected values stay visible with an inline error.
@@ -578,16 +578,14 @@ a linked capacity notice, Auto-refill beside Autonomous, Start / Stop, and
 **Issues settings**. The switches show the server-confirmed On / Off state.
 Only current failures appear red; error details and history stay in the notification center.
 Use **Issues settings** to open **Settings → Project → Issues execution settings**.
-It contains **Launch control** (Autonomous, Max active, Monitoring), **Refill**
+It contains **Launch control** (Autonomous, Monitoring), **Refill**
 (Auto-refill and its limit), and **Target** (Allowed labels), followed by candidate
 profiles. Issues and Settings have independent views and can appear side by side
 in Split view, preserving Issue search/selection and unfinished settings edits.
-Auto-apply updates is in **System**. For projects with an Agents roster, **Max active**
-edits the enabled member count; **Apply** resizes the roster and **Auto** is unavailable.
-Legacy projects without a roster retain **Manual** to edit Max active. **Auto** disables editing
-and shows the effective limit, with **Measuring capacity…** while measurement is pending.
-Lowering the limit below the active count keeps existing agents running; new launches
-wait until the active count falls below the limit. Auto-refill is
+Auto-apply updates is in **System**. Register or rest members in **Agents**;
+Project settings does not edit member counts or machine capacity.
+Machine safety limits still govern new launches, and changing registration does
+not stop existing agents. Auto-refill is
 **off by default**; enabling it adds eligible open Issues up to the configured
 queue limit. An empty queue starts no new work; already-running work continues.
 
@@ -621,11 +619,9 @@ expired, Auto retains its last accepted limit or the saved limit (one for new
 settings). Missing or still-scanning `target` directories do not stop launches.
 A complete measurement can still reduce the limit to zero; status and the error
 ledger explain which resource or live-agent consumption reduced capacity.
-Before a roster is created, the legacy **Max active** control can select a **Manual**
-override or **Auto** to follow the recommendation. This machine policy is shared
-by all projects on this machine. Manual is a total worker limit; each project receives
-the remaining capacity after other projects' workers, while PM windows stay separate.
-Settings shows this project's allocation and other projects' worker consumption.
+The Auto/Manual machine policy is shared by all projects on this machine.
+Manual is a total worker limit; each project receives the remaining capacity
+after other projects' workers, while PM windows stay separate.
 See [SPEC #3200](https://github.com/akiojin/gwt/issues/3200) for the shared capacity policy. Values above
 the recommendation are allowed, with a warning that verification may not finish and
 timing-dependent test failures may block unrelated PRs. In roster projects, automation uses

@@ -285,15 +285,17 @@ fn embedded_web_issue_monitor_is_integrated_into_the_issue_surface() {
 }
 
 #[test]
-fn embedded_web_issue_surface_exposes_monitor_priority_and_concurrency_controls() {
+fn embedded_web_issue_surface_exposes_monitor_priority_and_project_controls() {
     let surface_js = root_js_module_source("/knowledge-kanban-surface.js");
     let settings_js = settings_surface_js();
 
     assert!(
         surface_js.contains("settings:open")
             && surface_js.contains(r#"section: "issues""#)
-            && settings_js.contains("set_issue_monitor_max_active_agents"),
-        "Issues must delegate monitor concurrency controls to Settings Issues"
+            && settings_js.contains("set_issue_monitor_autonomous_mode")
+            && settings_js.contains("set_issue_monitor_enabled")
+            && !settings_js.contains("set_issue_monitor_max_active_agents"),
+        "Issues must delegate project controls to Settings without duplicate capacity editing"
     );
     assert!(
         surface_js.contains("issue_monitor_queue_move"),

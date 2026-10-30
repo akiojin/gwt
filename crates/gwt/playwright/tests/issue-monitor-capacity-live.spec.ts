@@ -1,4 +1,4 @@
-/* Issue #3620 — machine-aware capacity and manual override through the real
+/* Issue #3620 — machine-aware capacity observations through the real
  * checkout backend. Run headed in both themes against browser-check's fresh
  * HOME. CHECK_HOME/issue-3620-isolated.json contains {project, repo_hash, url};
  * CHECK_HOME/url identifies the served checkout process. No agents are launched.
@@ -49,13 +49,17 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
   test.setTimeout(900_000);
   test.use({ viewport: { width: 1440, height: 1100 } });
 
-  test("displays machine usage, allows manual excess and restores Auto after reload", async ({ page }, testInfo) => {
+  test("displays live machine diagnostics and preserves capacity through read-only Project settings", async ({ page }, testInfo) => {
     await withLiveGwtBackendLock(BASE, testInfo, async () => {
       const preferences = await isolatedPreferences();
       const machinePreferences = join(CHECK_HOME, ".gwt/machine-state/agent-settings.json");
-      const errors: string[] = [];
+      const errors: string[] = [], capacityWrites: unknown[] = [];
       page.on("pageerror", error => errors.push(error.message));
       page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+        const message = JSON.parse(String(payload));
+        if (message.kind === "set_issue_monitor_max_active_agents") capacityWrites.push(message.max_active_agents);
+      }));
       await gotoLiveGwt(page, BASE, { enableTestBridge: true });
       await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
         .some(({ payload }: any) => payload.kind === "workspace_state"));
@@ -71,40 +75,45 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
       const settings = page.locator('.workspace-window[data-preset="settings"]');
       const createdSettings = !(await settings.count());
       const issues = settings.locator('[data-settings-panel="issues"]');
-      const input = issues.getByLabel("Max active", { exact: true });
-      const mode = issues.getByLabel("Max active mode", { exact: true });
       const showIssues = () => page.getByRole("button", { name: "Issues", exact: true }).click();
       const openIssuesSettings = async () => {
+        const savedPolicy = await readFile(machinePreferences, "utf8"), writes = capacityWrites.length;
         await showIssues();
         await surface.getByRole("button", { name: "Issues settings", exact: true }).click();
         await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute("aria-selected", "true");
         await expect(issues).toBeVisible();
         await expect(settings.locator(".issue-bridge-root")).toHaveCount(0);
+        await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
+        await expect(issues.getByLabel("Max active mode", { exact: true })).toHaveCount(0);
+        await expect(issues.getByRole("button", { name: "Apply Max active", exact: true })).toHaveCount(0);
+        await expect(issues.locator(".settings-issues-capacity")).toHaveCount(0);
+        expect(await readFile(machinePreferences, "utf8")).toBe(savedPolicy);
+        expect(capacityWrites).toHaveLength(writes);
       };
       const notice = page.locator('.notification-center__item[data-error-key="issue-monitor:capacity"]');
       const budget = notice.locator(".notification-center__details");
       const warning = surface.locator(".knowledge-monitor-capacity-badge");
       // Initial target measurement advances in bounded background ticks; this
       // checkout took 419s cold. Keep UI action deadlines separate at 75s.
-      await expect.poll(() => latestStatus(page), { timeout: 600_000 })
+      await expect.poll(async () => {
+        const cursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+        await sendLiveGwtEvent(page, { kind: "list_issue_monitor" });
+        return page.waitForFunction(cursor => ((window as any).__gwtPlaywrightMessages ?? [])
+          .find(({ sequence, payload }: any) => sequence > cursor && payload.kind === "issue_monitor_status")?.payload.status,
+        cursor, { timeout: 75_000 }).then(handle => handle.jsonValue());
+      }, { timeout: 600_000 })
         .toMatchObject({ enabled: false, agent_capacity: { measurement_complete: true } });
       const before = await latestStatus(page);
+      const machineBefore = await readFile(machinePreferences, "utf8");
+      const projectBefore = JSON.parse(await readFile(preferences, "utf8"));
       try {
         await openIssuesSettings();
-        await expect(issues).toContainText("All projects on this machine.");
-        await expect.poll(() => latestStatus(page)).toMatchObject({ max_active_agents_scope: "machine" });
-        if (before.max_active_agents_override !== null) {
-          await mode.selectOption("auto");
-          await expectOverride(page, null);
-        }
-        await expect(mode).toHaveValue("auto");
-        await expect(input).toBeDisabled();
-        const automatic = await latestStatus(page);
-        const capacity = automatic.agent_capacity;
-        await expect(input).toHaveValue(String(automatic.max_active_agents));
-        await expect(issues).toContainText(`This project allocation: ${automatic.max_active_agents}`);
-        await expect(issues).toContainText(`Other project workers: ${Math.max(0, capacity.other_live_agents - capacity.other_pm_agents)}`);
+        await testInfo.attach(`readonly-capacity-settings-${testInfo.project.name}`, {
+          body: await issues.screenshot(), contentType: "image/png",
+        });
         await showIssues();
+        await warning.evaluate(element => element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }));
+        await expect(warning).toBeInViewport({ ratio: 1 });
         await warning.click();
         await budget.locator("summary").click();
         // Measurements remain live during the journey; compare the rendered
@@ -130,136 +139,33 @@ test.describe("Issue Monitor machine capacity (live backend)", () => {
           return current.constraints.map((constraint: any) => constraint.resource).sort().join(",") === "cpu,disk,ram"
             && expected.every(value => text.includes(value));
         }, windowId)).toBe(true);
-        await page.getByRole("button", { name: "Close notifications", exact: true }).click();
-
-        // GUI CPU usage can change during the journey. Stay above the physical
-        // CPU ceiling so the warning remains required for every fresh sample.
-        const machine = JSON.parse(await readFile(join(CHECK_HOME, ".gwt/machine-state/agent-capacity.json"), "utf8"));
-        expect(machine.performance_cores).toBeGreaterThan(0);
-        const manual = Math.max(machine.performance_cores, capacity.recommended_worker_limit) + 2;
-        await openIssuesSettings();
-        await mode.selectOption("manual");
-        await expect(input).toBeEnabled();
-        await input.fill(String(manual));
-        await input.press("Tab");
-        await issues.getByRole("button", { name: "Apply Max active", exact: true }).click();
-        await expectOverride(page, manual);
-        await expect(mode).toHaveValue("manual");
-        await expect(input).toHaveValue(String(manual));
-        await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
-          .toMatchObject({ mode: "manual", manual_limit: manual });
-        await expect.poll(async () => Object.keys(JSON.parse(await readFile(preferences, "utf8"))))
-          .not.toContain("max_active_agents_mode");
-        await testInfo.attach(`shared-agent-settings-${testInfo.project.name}`, {
-          body: await issues.screenshot(), contentType: "image/png",
-        });
-        await showIssues();
-        await expect(warning).toBeVisible();
-        await expect.poll(() => page.evaluate(({ id, value }) => {
-          const status = ((window as any).__gwtPlaywrightMessages ?? [])
-            .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
-          const current = status?.agent_capacity;
-          const text = document.querySelector('.notification-center__item[data-error-key="issue-monitor:capacity"] .notification-center__message')?.textContent ?? "";
-          const machineWorkers = current && Math.max(0, current.machine_budget
-            - current.other_pm_agents - Math.max(current.own_pm_agents, 1));
-          return !!current && text.includes(`${value - machineWorkers} over recommended`);
-        }, { id: windowId, value: manual })).toBe(true);
-        await expect(notice).toContainText("Lower Max active if slow.");
-        await expect(warning).toHaveAttribute("data-tone", "info");
-        await expect(budget).toContainText("Verification may not finish. Timing-dependent test failures may block unrelated PRs.");
-        await expect(warning).toBeInViewport({ ratio: 1 });
         await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
-        await testInfo.attach(`agent-capacity-warning-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
+        await testInfo.attach(`agent-capacity-diagnostics-${testInfo.project.name}`, {
+          body: await page.screenshot(), contentType: "image/png",
+        });
+        await page.getByRole("button", { name: "Close notifications", exact: true }).click();
         await page.setViewportSize({ width: 1120, height: 1080 });
         await expect.poll(() => surface.evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(850);
         await testInfo.attach(`agent-capacity-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
-
+        await openIssuesSettings();
         await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .some(({ payload }: any) => payload.kind === "workspace_state"));
-        await expectOverride(page, manual);
+        await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+          .some(({ payload }: any) => payload.kind === "workspace_state"));
+        await expectOverride(page, before.max_active_agents_override);
         await openIssuesSettings();
-        await expect(mode).toHaveValue("manual");
-        await expect(input).toHaveValue(String(manual));
-        await test.step("Issue #5227: grouped diagnostics preserve saved Manual 9", async () => {
-          // The UI edit/save/reload path is covered above. Establish this
-          // diagnostic fixture through the real backend before projecting it.
-          await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 9 });
-          await expectOverride(page, 9);
-          await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
-            .toMatchObject({ mode: "manual", manual_limit: 9 });
-          await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .some(({ payload }: any) => payload.kind === "workspace_state"));
-          const saved = await expectOverride(page, 9);
-          await openIssuesSettings();
-          await expect(mode).toHaveValue("manual");
-          await expect(input).toHaveValue("9");
-          await showIssues();
-          const diskReason = "Disk measurement unavailable; check that the worktree volume is mounted and free at least 4 GiB.";
-          const reason = `inventory_uncertain: child_identity_missing ×37; ${diskReason}`;
-          try {
-            // Exercise the existing incoming-status renderer. Rust tests cover
-            // inventory aggregation; the real backend above owns persistence.
-            await page.evaluate(status => {
-              const socket = (window as any).__gwtPlaywrightSockets.find((candidate: WebSocket) =>
-                candidate.readyState === WebSocket.OPEN && candidate.url.includes("repo_hash="));
-              if (!socket) throw new Error("the live Project socket is unavailable");
-              const fixture = new MessageEvent("message", { data: JSON.stringify({ kind: "issue_monitor_status", status }) });
-              // Keep periodic live measurements from replacing this projection
-              // during assertions. Navigation below removes the page-local filter.
-              socket.addEventListener("message", (event: MessageEvent) => {
-                if (event !== fixture && JSON.parse(String(event.data)).kind === "issue_monitor_status") {
-                  event.stopImmediatePropagation();
-                }
-              }, { capture: true });
-              socket.dispatchEvent(fixture);
-            }, { ...saved, agent_capacity: {
-              ...saved.agent_capacity, measurement_complete: false, machine_budget: null,
-              recommended_worker_limit: 0, reason,
-              constraints: [{ resource: "disk", capacity: null, binding: true, reason: diskReason }],
-            } });
-            await expect(warning).toBeVisible();
-            await expect(notice).toContainText("Manual limit 9; no action needed.");
-            await expect(warning).not.toContainText(reason);
-            await expect(warning).toHaveAttribute("data-tone", "info");
-            const text = await warning.textContent() ?? "";
-            expect([...text].length, "compact default summary").toBeLessThanOrEqual(130);
-            expect(text).not.toContain("child_identity_missing");
-            await expect(budget).toContainText(reason);
-            await expect(mode).toHaveValue("manual");
-            await expect(input).toHaveValue("9");
-            await expect(warning).toBeInViewport({ ratio: 1 });
-            await expect(page.locator("html")).toHaveAttribute("data-theme", testInfo.project.name.endsWith("light") ? "light" : "dark");
-            await testInfo.attach(`grouped-capacity-warning-${testInfo.project.name}`, { body: await surface.screenshot(), contentType: "image/png" });
-          } finally {
-            await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .some(({ payload }: any) => payload.kind === "workspace_state"));
-            await expectOverride(page, 9);
-          }
-        });
-        await openIssuesSettings();
-        await mode.selectOption("auto");
-        const restored = await expectOverride(page, null);
-        await expect(mode).toHaveValue("auto");
-        await expect(input).toBeDisabled();
-        await expect(input).toHaveValue(String(restored.max_active_agents));
-        await showIssues();
-        await expect(warning).toHaveText(/Capacity \d+ · Details/);
-        await expect.poll(async () => JSON.parse(await readFile(machinePreferences, "utf8")))
-          .toMatchObject({ mode: "auto", manual_limit: null });
-        await gotoLiveGwt(page, BASE, { enableTestBridge: true });
-      await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
-        .some(({ payload }: any) => payload.kind === "workspace_state"));
-        await expectOverride(page, null);
-        await openIssuesSettings();
-        await expect(mode).toHaveValue("auto");
-        await expect(input).toBeDisabled();
+        expect(await readFile(machinePreferences, "utf8")).toBe(machineBefore);
+        const projectAfter = JSON.parse(await readFile(preferences, "utf8"));
+        expect(projectAfter.agent_roster).toEqual(projectBefore.agent_roster);
+        expect(projectAfter.max_active_agents).toBe(projectBefore.max_active_agents);
+        expect(projectAfter.max_active_agents_mode).toBe(projectBefore.max_active_agents_mode);
+        expect(projectAfter.max_active_last_change).toEqual(projectBefore.max_active_last_change);
+        expect(capacityWrites).toEqual([]);
         expect((await latestStatus(page)).enabled).toBe(false);
       } finally {
-        await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: before.max_active_agents_override });
-        await expectOverride(page, before.max_active_agents_override);
+        if (!page.isClosed()) {
+          const closeNotifications = page.getByRole("button", { name: "Close notifications", exact: true });
+          if (await closeNotifications.isVisible()) await closeNotifications.click();
+        }
         if (!page.isClosed() && (createdSettings || created)) await page.locator('button[data-surface="agents"]').click();
         if (createdSettings && !page.isClosed()) {
           for (const id of await settings.evaluateAll(windows => windows.map(window => window.getAttribute("data-id")))) {
