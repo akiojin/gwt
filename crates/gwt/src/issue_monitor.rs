@@ -41,8 +41,8 @@ pub use switch::{
     AgentSwitchRequest, AgentSwitchSnapshot, AgentSwitchSource, AgentSwitchStage, AgentSwitchView,
 };
 pub use switch_checkpoint::{
-    observe_agent_switch_cwd, verify_switch_continuation, verify_switch_git_checkpoint,
-    AgentSwitchCwdObservation,
+    observe_agent_switch_checkpoint_cwd, observe_agent_switch_cwd, verify_switch_continuation,
+    verify_switch_git_checkpoint, AgentSwitchCwdObservation,
 };
 
 mod urgent;
