@@ -95,6 +95,26 @@ test("member name autosave serializes latest drafts and accepts only correlated 
   assert.equal(model.read().name_edits.m1.value, "Current canonical name", "a completed draft follows a later canonical rename");
 });
 
+test("member name autosave preserves a word separator through ACK, no-op and readback", () => {
+  const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot, flush } = nameController(sent);
+  applyAgentRosterSnapshot(namedRoster(3));
+  editAgentMemberName("m1", "Maple ");
+  assert.equal(sent[0].action.name, "Maple", "only the saved name is trimmed");
+  applyAgentRosterSnapshot(namedRoster(4, "Maple"), sent[0].request_id);
+  flush();
+  assert.equal(model.read().name_edits.m1.value, "Maple ", "ACK preserves the next word's separator");
+  editAgentMemberName("m1", "Maple  ");
+  applyAgentRosterSnapshot(namedRoster(4, "Maple"));
+  flush();
+  assert.equal(sent.length, 1, "whitespace-only edits do not send another write");
+  assert.equal(model.read().name_edits.m1.value, "Maple  ", "no-op and readback preserve the raw draft");
+  editAgentMemberName("m1", `${model.read().name_edits.m1.value}renamed`);
+  assert.equal(sent[1].action.name, "Maple  renamed");
+  applyAgentRosterSnapshot(namedRoster(5, "Maple  renamed"), sent[1].request_id);
+  applyAgentRosterSnapshot(namedRoster(6, "Changed elsewhere"));
+  assert.equal(model.read().name_edits.m1.value, "Changed elsewhere", "a different canonical name still updates the completed draft");
+});
+
 test("member names preserve invalid and composing drafts without submitting them", () => {
   const sent = [], { model, editAgentMemberName, applyAgentRosterSnapshot } = nameController(sent);
   applyAgentRosterSnapshot(namedRoster(3));
