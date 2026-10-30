@@ -39,7 +39,7 @@ fn board_notice_owner_fixture(
             if cfg!(windows) {
                 "@echo off\r\nif \"%1\"==\"--version\" (echo 1.2.3& exit /b 0)\r\npowershell -NoProfile -Command \"while ($null -ne ($line = [Console]::ReadLine())) { [Console]::WriteLine($line) }\"\r\n"
             } else {
-                "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; exec cat\n"
+                "#!/bin/sh\ncase \"$*\" in *--version*) printf '1.2.3\\n'; exit 0;; *'features list'*) exit 0;; esac\nstty -echo -icanon -isig; printf 'GWT_BOARD_FIXTURE_READY\\n'; exec cat\n"
             },
         );
         (runner.display().to_string(), Vec::new())
@@ -56,7 +56,13 @@ fn board_notice_owner_fixture(
             .collect(),
         )
     } else {
-        long_running_test_command()
+        (
+            "/bin/sh".into(),
+            vec![
+                "-c".into(),
+                "stty -echo -icanon -isig; printf 'GWT_BOARD_FIXTURE_READY\\n'; exec cat".into(),
+            ],
+        )
     };
     config.command = command;
     config.args = args;
@@ -74,6 +80,29 @@ fn board_notice_owner_fixture(
     let incarnation = receipt["incarnation"].as_u64().unwrap();
     let probe = owner_fixture_block_on(owner.probe(&id, incarnation)).unwrap();
     let session = probe.session.as_ref().unwrap();
+    #[cfg(unix)]
+    {
+        // test-hygiene: allow-wall-clock-deadline Bounds real fixture TTY initialization; the output marker establishes readiness.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if probe
+                .pane
+                .lock()
+                .unwrap()
+                .screen()
+                .contents()
+                .contains("GWT_BOARD_FIXTURE_READY")
+            {
+                break;
+            }
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Bounds the same actual TTY initialization, not a scheduling assertion.
+                Instant::now() < deadline,
+                "the Board fixture must initialize its TTY before reporting Idle"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     let mut idle = runtime_hook_state_for_event("idle", "Stop", &session.id);
     idle.project_root = Some(repo.display().to_string());
     idle.branch = Some(session.branch.clone());
