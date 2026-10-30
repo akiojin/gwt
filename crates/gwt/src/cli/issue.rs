@@ -4737,7 +4737,7 @@ fn run_monitor_config_set<E: CliEnv>(
                 caller_is_resident_pm,
             )?;
             let requested = candidate.max_active_last_change.as_ref()
-                .filter(|_| (max_active.is_some() || max_active_auto) && candidate.agent_roster.is_none());
+                .filter(|_| max_active.is_some() || max_active_auto);
             shared_write_started = requested.is_some();
             let policy = crate::machine_agent_settings::checked_update(
                 prefs, expected_config_token, requested, &control_id,
@@ -14140,7 +14140,22 @@ mod tests {
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let path = crate::issue_monitor_prefs_path_for_repo_path(&repo);
-        crate::save_issue_monitor_prefs(&path, &crate::IssueMonitorPrefs::default()).unwrap();
+        let seed = crate::IssueMonitorPrefs {
+            max_active_agents: 3,
+            agent_roster: Some(
+                serde_json::from_value(serde_json::json!({
+                    "schema_version": 1, "revision": 1,
+                    "members": [{
+                        "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                        "name": "Ada", "enabled": true, "agent_id": "codex",
+                        "created_at": "2026-10-22T00:00:00Z"
+                    }]
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        crate::save_issue_monitor_prefs(&path, &seed).unwrap();
         let before = std::fs::read(&path).unwrap();
         let super::super::CliCommand::Issue(command) =
             super::super::json_envelope::parse_operation(
@@ -14163,6 +14178,7 @@ mod tests {
         );
         assert!(out.is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), before);
+        let machine_before = std::fs::read(crate::machine_agent_settings::path()).unwrap();
         let observed = crate::load_issue_monitor_prefs(&path)
             .unwrap()
             .config_token();
@@ -14182,6 +14198,18 @@ mod tests {
         let saved = crate::load_issue_monitor_prefs(&path).unwrap();
         let reply: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(saved.max_active_agents, 3);
+        assert_eq!(saved.agent_roster.as_ref().unwrap().enabled_count(), 3);
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(3)
+        );
+        assert_ne!(
+            std::fs::read(crate::machine_agent_settings::path()).unwrap(),
+            machine_before
+        );
         assert_eq!(saved.allowed_labels, ["backend"]);
         assert_eq!(reply["saved_config"], saved.config_observation());
         assert_eq!(reply["config_token"], saved.config_token());
