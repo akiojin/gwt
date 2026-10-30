@@ -58,11 +58,15 @@ test.describe("mobile project chrome", () => {
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
       await page.screenshot({ path: testInfo.outputPath(`mobile-chrome-${width}-${theme}.png`) });
     }
-    await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
-      detail: { kind: "workspace_state_notice", notice: {
-        kind: "load_error", path: "/fixture/workspace.json", message: "Workspace state needs attention",
-      } },
-    })));
+    await page.setViewportSize({ width: 320, height: 568 });
+    const diagnostic = {
+      kind: "load_error",
+      path: "/Users/example/nested-project-state-directory/nested-project-state-directory/.gwt/projects/99a8660247f5bc49/workspace/current.json",
+      message: "This legacy HOME layout is no longer imported (upgrade floor: v9.72.1). Install v9.106.0 and open each project to migrate its state before upgrading again.",
+    };
+    await page.evaluate(notice => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
+      detail: { kind: "workspace_state_notice", notice },
+    })), diagnostic);
     const notice = page.locator(".workspace-state-notice");
     await expect(notice).toBeVisible();
     const noticeBounds = await notice.boundingBox();
@@ -70,6 +74,25 @@ test.describe("mobile project chrome", () => {
       const bounds = await control.boundingBox();
       expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(noticeBounds!.y);
     }
+    expect((await page.locator(".surface-area").boundingBox())!.height).toBeGreaterThan(0);
+    const detail = notice.locator("span");
+    await expect(detail).toHaveText(`${diagnostic.path}: ${diagnostic.message}`);
+    const retry = notice.getByRole("button", { name: "Retry" });
+    await expect(retry).toBeInViewport({ ratio: 1 });
+    const retryBounds = await retry.boundingBox();
+    const scrolled = await detail.evaluate(element => {
+      element.scrollTop = element.scrollHeight;
+      const text = element.firstChild!;
+      const range = document.createRange();
+      range.setStart(text, text.textContent!.length - 1);
+      range.setEnd(text, text.textContent!.length);
+      const end = range.getBoundingClientRect();
+      const viewport = element.getBoundingClientRect();
+      return { top: element.scrollTop, endVisible: end.top >= viewport.top && end.bottom <= viewport.bottom + 1 };
+    });
+    expect(scrolled.top).toBeGreaterThan(0);
+    expect(scrolled.endVisible).toBe(true);
+    expect(await retry.boundingBox()).toEqual(retryBounds);
     await page.evaluate(() => window.dispatchEvent(new CustomEvent("__gwt_test_inject", {
       detail: { kind: "workspace_state_notice", notice: null },
     })));

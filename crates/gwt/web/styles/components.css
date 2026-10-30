@@ -5957,6 +5957,10 @@ button.workspace-board-ref:focus-visible {
   #app:has(> .workspace-state-notice) {
     grid-template-rows: auto auto auto minmax(0, 1fr) 28px;
   }
+  .workspace-state-notice span {
+    max-height: 25vh;
+    overflow-y: auto;
+  }
 }
 .terminal-text-preview { margin: 0; padding: var(--space-2); overflow: auto; height: 100%; white-space: pre; font-family: var(--font-mono); color: var(--color-text); background: var(--color-surface); }
 
