@@ -4685,6 +4685,254 @@ fn accepted_agent_self_close_does_not_remove_same_address_same_session_successor
 }
 
 #[test]
+fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home_env = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let foreign = temp.path().join("foreign");
+    fs::create_dir_all(&foreign).unwrap();
+    let active_binding = materialize_active_agent_pane_binding(&project, "active-name");
+    let mut tab = sample_project_tab(
+        "own",
+        "Repo",
+        project.clone(),
+        ProjectKind::Git,
+        &[WindowPreset::Agent; 6],
+    );
+    let sessions = [
+        "review",
+        "unnamed",
+        "ambiguous",
+        "ambiguous",
+        "pm",
+        "active-name",
+    ];
+    let ids = tab
+        .workspace
+        .persisted()
+        .windows
+        .iter()
+        .map(|w| w.id.clone())
+        .collect::<Vec<_>>();
+    for (id, session) in ids.iter().zip(sessions) {
+        tab.workspace.set_session_id(id, Some(session.into()));
+        if session != "unnamed" && session != "active-name" {
+            tab.workspace
+                .set_agent_name(id, Some(format!("Assigned-{session}-2")));
+        }
+    }
+    let mut foreign_tab = sample_project_tab_with_window_at(
+        "foreign",
+        "agent",
+        foreign,
+        WindowPreset::Agent,
+        WindowProcessStatus::Running,
+    );
+    foreign_tab
+        .workspace
+        .set_session_id("agent", Some("foreign-only".into()));
+    foreign_tab
+        .workspace
+        .set_agent_name("agent", Some("Foreign private name".into()));
+    let (mut app, _) = sample_runtime_with_events(temp.path(), vec![tab, foreign_tab], Some("own"));
+    let context = app.project_context("own").unwrap();
+    app.project_state_mut(&context)
+        .unwrap()
+        .pm_sessions
+        .insert(project.clone(), "pm".into());
+    // Normal fresh reviews have a Session and a preassigned window name, but
+    // no producing owner/binding. Leave Session.agent_name absent deliberately:
+    // invoking the assignment helper would silently persist it during a read.
+    let mut session = gwt_agent::Session::new(&project, "work/review", gwt_agent::AgentId::Codex);
+    session.id = "review".into();
+    session.review_dispatch = true;
+    session.save(&app.sessions_dir).unwrap();
+    let original_tabs = app
+        .tabs
+        .iter()
+        .map(|t| serde_json::to_value(t.workspace.persisted()).unwrap())
+        .collect::<Vec<_>>();
+    let original_files = snapshot_optional_files(&[
+        app.sessions_dir.join("review.toml"),
+        app.session_state_path.clone(),
+        workspace_state_path(&project),
+        gwt_core::paths::gwt_project_dir_for_repo_path(&project).join("agent-names.jsonl"),
+        gwt::issue_monitor_prefs_path_for_repo_path(&project),
+    ]);
+    let original_authority =
+        snapshot_optional_files(&current_generation_authority_artifacts(&project));
+    let original_work = tracked_workspace_work_store_snapshot(&project);
+    let tokio = TokioRuntime::new().unwrap();
+    let (proxy, recorded) = AppEventProxy::stub();
+    app.proxy = proxy.clone();
+    let clients = crate::embedded_server::ClientHub::default();
+    let mut server = crate::embedded_server::EmbeddedServer::start(
+        &tokio,
+        proxy,
+        clients.clone(),
+        Arc::clone(&app.pty_writers),
+        AttachmentUploadStore::in_system_temp(),
+    )
+    .unwrap();
+    let issuer = server.agent_capability_issuer();
+    app.agent_capability_issuer = Some(issuer.clone());
+    let active_token = issuer
+        .issue_bound(&project, "active-name", active_binding)
+        .unwrap()
+        .token;
+    let queued_token = issuer.issue(&project, "revoked-queued").unwrap().token;
+    let outbound_token = issuer.issue(&project, "revoked-outbound").unwrap().token;
+    let driver_tokens = (queued_token.clone(), outbound_token.clone());
+    let driver_issuer = issuer.clone();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let driver_home = temp.path().to_path_buf();
+    let driver_project = project.clone();
+    let driver = thread::spawn(move || {
+        let _home = ScopedGwtHome::set(&driver_home);
+        let mut read_only_checked = false;
+        loop {
+            if !matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                break;
+            }
+            let event = {
+                let mut events = recorded.lock().unwrap();
+                events
+                    .iter()
+                    .position(|e| {
+                        matches!(recorded_project_payload(e), UserEvent::AgentFrontend { .. })
+                    })
+                    .map(|index| events.remove(index))
+            };
+            if let Some(UserEvent::AgentFrontend {
+                client_id,
+                grant,
+                request,
+            }) = event.and_then(|e| app.accept_project_completion(e))
+            {
+                if grant.principal().session_id() == "active-name" {
+                    // All observation requests finished. Check their originals
+                    // before the legacy Active allocation is allowed to mutate.
+                    assert_eq!(
+                        original_tabs,
+                        app.tabs
+                            .iter()
+                            .map(|t| serde_json::to_value(t.workspace.persisted()).unwrap())
+                            .collect::<Vec<_>>()
+                    );
+                    assert_optional_files_unchanged(&original_files);
+                    assert_optional_files_unchanged(&original_authority);
+                    assert_eq!(
+                        original_work,
+                        tracked_workspace_work_store_snapshot(&driver_project)
+                    );
+                    assert!(
+                        gwt_agent::Session::load(&app.sessions_dir.join("review.toml"))
+                            .unwrap()
+                            .execution_binding
+                            .is_none()
+                    );
+                    read_only_checked = true;
+                }
+                let queued_revoke = grant.principal().session_id() == "revoked-queued";
+                let outbound_revoke = grant.principal().session_id() == "revoked-outbound";
+                if queued_revoke {
+                    assert!(driver_issuer.revoke_token(&driver_tokens.0));
+                }
+                let outcome =
+                    app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
+                if outbound_revoke {
+                    assert!(driver_issuer.revoke_token(&driver_tokens.1));
+                    // A result must survive a stale fence even when another
+                    // queued message precedes the name reply.
+                    crate::apply_agent_frontend_dispatch_outcome(
+                        &clients,
+                        &client_id,
+                        super::super::AgentFrontendDispatchOutcome::Dispatched(vec![
+                            OutboundEvent::reply(
+                                client_id.clone(),
+                                BackendEvent::PaneCloseResult {
+                                    ok: false,
+                                    window_id: "unrelated".into(),
+                                    reason: None,
+                                },
+                            ),
+                        ]),
+                    );
+                }
+                crate::apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
+            } else {
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        (app, read_only_checked)
+    });
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tokio.block_on(async {
+        for (session_id, expected_error) in [
+            ("review", None),
+            ("unnamed", Some("assigned")),
+            ("missing", Some("not bound")),
+            ("foreign-only", Some("not bound")),
+            ("ambiguous", Some("multiple")),
+            ("pm", Some("PM")),
+            ("revoked", Some("capability")),
+            ("revoked-queued", Some("capability")),
+            ("revoked-outbound", Some("capability")),
+            ("forged", Some("forbidden")),
+            ("active-name", None),
+        ] {
+            let token = match session_id {
+                "revoked-queued" => queued_token.clone(),
+                "revoked-outbound" => outbound_token.clone(),
+                "active-name" => active_token.clone(),
+                _ => issuer.issue(&project, session_id).unwrap().token,
+            };
+            let grant = issuer.grant_for_test(&token).unwrap();
+            assert_eq!(grant.principal().authorizes_producing_mutation(), session_id == "active-name");
+            let mut request = issuer.agent_pane_websocket_url().into_client_request().unwrap();
+            request.headers_mut().insert(axum::http::header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+            let (mut socket, _) = connect_async(request).await.unwrap();
+            if session_id == "revoked" { assert!(issuer.revoke_token(&token)); }
+            let mut payload = serde_json::json!({"kind":"pane_name", "candidate":"Must not assign", "request_id":session_id});
+            if session_id == "forged" { payload["window_id"] = serde_json::json!("foreign::agent"); }
+            socket.send(WebSocketMessage::Text(payload.to_string().into())).await.unwrap();
+            let reply = next_test_agent_websocket_event(&mut socket, "pane_name_result", Duration::from_secs(5)).await;
+            assert_eq!(reply["request_id"], session_id);
+            if let Some(error) = expected_error {
+                assert_eq!(reply["ok"], false, "{reply}");
+                assert!(reply["agent_name"].is_null(), "{reply}");
+                assert!(reply["error"].as_str().unwrap().contains(error), "{reply}");
+            } else {
+                assert_eq!(reply["ok"], true, "{reply}");
+                if session_id == "review" {
+                    assert_eq!(reply["agent_name"], "Assigned-review-2");
+                } else {
+                    assert!(!reply["agent_name"].as_str().unwrap().is_empty());
+                    assert_ne!(reply["agent_name"], "Must not assign");
+                }
+                assert!(issuer.grant_is_current(&grant));
+                assert_eq!(issuer.grant_for_test(&token).unwrap().principal().authorizes_producing_mutation(), session_id == "active-name");
+            }
+            let _ = socket.close(None).await;
+        }
+    })
+    }));
+    drop(stop_tx);
+    let (_app, read_only_checked) = driver.join().unwrap();
+    server.shutdown();
+    result.unwrap();
+    assert!(
+        read_only_checked,
+        "read-only originals were checked before Active assignment"
+    );
+}
+
+#[test]
 fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

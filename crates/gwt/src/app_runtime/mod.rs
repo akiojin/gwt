@@ -14596,6 +14596,50 @@ impl AppRuntime {
                     },
                 )
             }
+            AgentFrontendRequest::ReadName { request_id } => {
+                let name = (|| {
+                    let window_id = self.agent_principal_session_window(&principal)?;
+                    let address = self
+                        .window_lookup
+                        .get(&window_id)
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    let tab = self
+                        .tab(&address.tab_id)
+                        .ok_or_else(|| "Project is closed".to_string())?;
+                    let window = tab
+                        .workspace
+                        .window(&address.raw_id)
+                        .ok_or_else(|| "Agent window is missing".to_string())?;
+                    if window.is_pm
+                        || self
+                            .pm_session_for_root(&tab.project_root)
+                            .is_some_and(|pm| pm == principal.session_id())
+                    {
+                        return Err("PM windows keep their fixed identity".to_string());
+                    }
+                    if !window.preset.is_agent_terminal() {
+                        return Err("Session is not bound to an Agent window".to_string());
+                    }
+                    window
+                        .agent_name
+                        .clone()
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| "Agent name has not been assigned".to_string())
+                })();
+                let (agent_name, error) = match name {
+                    Ok(name) => (Some(name), None),
+                    Err(error) => (None, Some(error)),
+                };
+                vec![OutboundEvent::reply(
+                    client_id,
+                    BackendEvent::PaneNameResult {
+                        request_id,
+                        ok: error.is_none(),
+                        agent_name,
+                        error,
+                    },
+                )]
+            }
             AgentFrontendRequest::Name {
                 candidate: _,
                 request_id,
