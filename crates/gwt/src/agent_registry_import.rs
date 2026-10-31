@@ -132,6 +132,16 @@ fn save(stored: &InactiveImports) -> io::Result<()> {
     crate::issue_monitor::durable_atomic_write(&path(), &bytes)
 }
 
+fn missing_source(source: &ProjectKey) -> io::Result<Option<ImportedProject>> {
+    if let Some(previous) = load()?.and_then(|mut stored| stored.sources.remove(source.as_str())) {
+        return Err(invalid(format!(
+            "Agent import source {} missing: imported {}; reconcile before registry cutover",
+            source, previous.preferences_sha256
+        )));
+    }
+    Ok(None)
+}
+
 /// Explicitly stage one existing source without initializing or normalizing it.
 /// This API is deliberately not wired to launch, UI, or a background scanner.
 /// Missing/rosterless projects remain unimported. Changed sources require an
@@ -141,17 +151,7 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
         gwt_core::paths::gwt_project_dir(source).join("project-state/issue-monitor.json");
     match fs::metadata(&prefs_path) {
         Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            if let Some(previous) =
-                load()?.and_then(|mut stored| stored.sources.remove(source.as_str()))
-            {
-                return Err(invalid(format!(
-                    "Agent import source {} missing: imported {}; reconcile before registry cutover",
-                    source, previous.preferences_sha256
-                )));
-            }
-            return Ok(None);
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return missing_source(source),
         Err(error) => return Err(error),
     }
     // Same stable sibling inode as the current project writer. Never use a
@@ -162,8 +162,11 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
         &source_lock_path,
         "Agent import source preferences",
     )?;
-    let raw = fs::read_to_string(&prefs_path)?;
-    let roster = source_roster(&raw)?;
+    let raw = match fs::read_to_string(&prefs_path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return missing_source(source),
+        Err(error) => return Err(error),
+    };
     let observed_hash = fingerprint(&raw);
     let import_path = path();
     gwt_config::home::assert_test_path(&import_path);
@@ -188,7 +191,7 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
         save(&stored)?;
         return Ok(Some(previous));
     }
-    let Some(roster) = roster else {
+    let Some(roster) = source_roster(&raw)? else {
         return Ok(None);
     };
     let imported = ImportedProject {
@@ -339,6 +342,17 @@ mod tests {
         );
         assert_eq!(fs::read(path()).unwrap(), bytes);
         assert_eq!(fs::read(&changed_path).unwrap(), changed);
+        fs::write(&changed_path, "{").unwrap();
+        let error = import_project(&ProjectKey::parse(A).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(A)
+                && error.contains(&first.preferences_sha256)
+                && error.contains("observed")
+                && error.contains("reconcile"),
+            "{error}"
+        );
         fs::write(&changed_path, r#"{"schema_version":1,"agent_roster":null}"#).unwrap();
         let error = import_project(&ProjectKey::parse(A).unwrap())
             .unwrap_err()
@@ -353,6 +367,45 @@ mod tests {
             "{error}"
         );
         assert_eq!(fs::read(path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn source_disappearing_while_waiting_for_its_writer_lock_uses_missing_source_diagnostic() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let prefs_path = source(A, "custom-a");
+        let first = import(A);
+        let lock_path = prefs_path.with_extension("lock");
+        let writer =
+            gwt_core::operation_deadline::NamedFileLock::acquire(&lock_path, "test source writer")
+                .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+                let _contention =
+                    gwt_core::operation_deadline::ScopedNamedLockContentionObserver::set(
+                        &lock_path,
+                        move || tx.send(()).unwrap(),
+                    );
+                import_project(&ProjectKey::parse(A).unwrap())
+            });
+            gwt_core::test_support::recv_event(&rx, "import reader reached the source writer lock");
+            fs::remove_file(prefs_path).unwrap();
+            drop(writer);
+            let error = reader.join().unwrap().unwrap_err().to_string();
+            assert!(
+                error.contains(A)
+                    && error.contains(&first.preferences_sha256)
+                    && error.contains("missing")
+                    && error.contains("reconcile"),
+                "{error}"
+            );
+        });
+        assert_eq!(load().unwrap().unwrap().sources[A], first);
     }
 
     #[test]
@@ -417,6 +470,11 @@ mod tests {
         import(A);
         let mut stored: serde_json::Value =
             serde_json::from_slice(&fs::read(path()).unwrap()).unwrap();
+        let digest = stored["sources"][A]["preferences_sha256"].clone();
+        stored["sources"][A]["preferences_sha256"] = json!("tampered");
+        fs::write(path(), serde_json::to_vec(&stored).unwrap()).unwrap();
+        assert!(load().is_err());
+        stored["sources"][A]["preferences_sha256"] = digest;
         stored["sources"][A]["member_aliases"] = json!({});
         fs::write(path(), serde_json::to_vec(&stored).unwrap()).unwrap();
         assert!(load().is_err());
