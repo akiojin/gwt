@@ -30,7 +30,7 @@ pub enum PaneStatus {
 /// instead of a wall-clock budget (Issue #3988).
 pub const SNAPSHOT_SCROLLBACK_REPLAY_LIMIT: usize = 5_000;
 /// Upper bound for the incomplete output prefix a snapshot carries
-/// (Issue #4095); longer prefixes are abandoned string sequences.
+/// (Issue #4095); longer OSC payloads retain only inert parser context.
 const MAX_INCOMPLETE_OUTPUT_TAIL: usize = 1_024;
 /// Process-wide source for [`Pane::output_seq`] (Issue #4095). Positions stay
 /// monotonic across pane restarts that reuse a window id, so a client queue
@@ -252,7 +252,8 @@ fn incomplete_output_suffix(bytes: &[u8]) -> &[u8] {
         };
         let complete = match kind {
             b'[' => body.iter().any(|byte| !(0x20..=0x3f).contains(byte)),
-            b']' | b'P' | b'X' | b'^' | b'_' => body.contains(&0x07),
+            b']' => body.iter().any(|byte| matches!(byte, 0x07 | 0x18 | 0x1a)),
+            b'P' | b'X' | b'^' | b'_' => body.contains(&0x07),
             0x20..=0x2f => body.iter().any(|byte| !(0x20..=0x2f).contains(byte)),
             _ => true,
         };
@@ -505,9 +506,16 @@ impl Pane {
             incomplete_output_suffix(&carried).to_vec()
         };
         if self.incomplete_output_tail.len() > MAX_INCOMPLETE_OUTPUT_TAIL {
-            // A string sequence this long is not one the PTY split; treat it
-            // as abandoned rather than letting the tail grow unbounded.
-            self.incomplete_output_tail.clear();
+            if self.incomplete_output_tail.starts_with(b"\x1b]") {
+                // Dropping an OSC's payload must not drop its parser context:
+                // future payload is still invisible until the OSC terminates.
+                // An invalid selector prevents replayed title/clipboard effects.
+                let utf8 = incomplete_output_suffix(&self.incomplete_output_tail[2..]).to_vec();
+                self.incomplete_output_tail = b"\x1b]_".to_vec();
+                self.incomplete_output_tail.extend_from_slice(&utf8);
+            } else {
+                self.incomplete_output_tail.clear();
+            }
         }
     }
 
@@ -1797,6 +1805,61 @@ mod tests {
             pane.screen()
                 .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT)
         );
+        let _ = pane.kill();
+    }
+
+    #[test]
+    fn test_snapshot_bytes_preserves_overlong_osc_context() {
+        #[derive(Default)]
+        struct ReplayCallbacks {
+            side_effects: usize,
+        }
+        impl vt100::Callbacks for ReplayCallbacks {
+            fn set_window_title(&mut self, _: &mut vt100::Screen, _: &[u8]) {
+                self.side_effects += 1;
+            }
+            fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _: &[u8], _: &[u8]) {
+                self.side_effects += 1;
+            }
+        }
+
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("test-osc-tail", 6, sleep_command("60"));
+        for terminator in [b"\x07".as_slice(), b"\x18", b"\x1a", b"\x1b\\"] {
+            pane.process_owner_output(b"\x1bc before \x1b]0;");
+            pane.process_owner_output(&vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1]);
+            // Overflow again mid-scalar, preserving the streaming decoder prefix.
+            let mut overflow = vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1];
+            overflow.push(0xf0);
+            pane.process_owner_output(&overflow);
+            assert!(pane.snapshot_bytes().ends_with(b"\xf0"));
+            pane.process_owner_output(b"\x9f\xa6\x80");
+            pane.process_owner_output(&vec![b'x'; MAX_INCOMPLETE_OUTPUT_TAIL + 1]);
+            // A bare OSC introducer would turn this payload into a title command.
+            pane.process_owner_output(b"2;title\xf0\x9f\xa6");
+            assert!(pane.incomplete_output_tail.len() <= MAX_INCOMPLETE_OUTPUT_TAIL);
+            let mut replay = vt100::Parser::new_with_callbacks(
+                6,
+                80,
+                SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+                ReplayCallbacks::default(),
+            );
+            replay.process(&pane.snapshot_bytes());
+            let rest = [b"\x80".as_slice(), terminator, b" after"].concat();
+            replay.process(&pane.process_owner_output(&rest).data);
+            assert_eq!(pane.screen().contents(), " before  after");
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            assert_eq!(
+                replay.screen().cursor_position(),
+                pane.screen().cursor_position()
+            );
+            assert_eq!(replay.callbacks().side_effects, 0);
+            // A snapshot after termination must not re-enter the discarded OSC.
+            replay.process(&pane.snapshot_bytes());
+            replay.process(&pane.process_owner_output(" 🦀".as_bytes()).data);
+            assert_eq!(replay.screen().contents(), pane.screen().contents());
+            assert!(pane.incomplete_output_tail.is_empty());
+        }
         let _ = pane.kill();
     }
 

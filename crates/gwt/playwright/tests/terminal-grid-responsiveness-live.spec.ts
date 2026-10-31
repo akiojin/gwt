@@ -219,6 +219,13 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await expect.poll(bufferText).toContain("snapshot: 🦀 complete");
         expect(await bufferText()).not.toContain("\uFFFD");
         expect(await bufferText()).not.toContain("old stream:");
+        // An overlong OSC snapshot carries an inert introducer, retaining only
+        // its parser context and streaming UTF-8 prefix. Its payload stays hidden.
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hosc: \x1b]_"), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, 0x07, ...Buffer.from("complete 🦀\r\n")]);
+        await expect.poll(bufferText).toContain("osc: complete 🦀");
+        expect(await bufferText()).not.toContain("osc: 🦀");
+        expect(await bufferText()).not.toContain("\uFFFD");
         const screenshot = info.outputPath(`utf8-snapshot-${theme}.png`);
         await page.locator(`.workspace-window[data-id="${id}"]`).screenshot({ path: screenshot });
         await info.attach("UTF-8 snapshot continuation", { path: screenshot, contentType: "image/png" });
