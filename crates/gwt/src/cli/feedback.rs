@@ -1214,6 +1214,23 @@ mod tests {
 
         #[test]
         fn real_http_issue_and_comment_crash_cancel_and_success() {
+            #[cfg(windows)]
+            let system_root = {
+                use std::os::windows::ffi::OsStringExt;
+                let mut buffer = [0_u16; 32768];
+                // SAFETY: the API receives a writable, initialized slice and
+                // its fixed capacity; only the checked returned range is used.
+                let length = unsafe {
+                    windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW(Some(
+                        &mut buffer,
+                    ))
+                } as usize;
+                assert!(
+                    length > 0 && length < buffer.len(),
+                    "test OS runtime metadata unavailable"
+                );
+                std::ffi::OsString::from_wide(&buffer[..length])
+            };
             for comment in [false, true] {
                 for outcome in ["crash", "cancel", "success"] {
                     let home = tempfile::tempdir().unwrap();
@@ -1262,6 +1279,10 @@ mod tests {
                         .stdin(Stdio::piped())
                         .stdout(Stdio::null())
                         .stderr(Stdio::null());
+                    // Winsock provider paths may use this OS runtime value.
+                    // Never copy parent environment or expose the directory.
+                    #[cfg(windows)]
+                    command.env("SystemRoot", &system_root);
                     let mut child = ExactChild(command.spawn().unwrap());
                     let input = serde_json::to_vec(&ChildInput {
                         home: home.path().to_path_buf(),
