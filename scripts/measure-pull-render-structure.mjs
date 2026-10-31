@@ -117,7 +117,8 @@ export function measureModules(modules) {
       const root = { file, root: name, line: node.loc.start.line, switch_labels: [], if_statements: 0 };
       walk(node.body, child => {
         if (child.type === 'SwitchCase' && child.test?.type === 'Literal') {
-          root.switch_labels.push({ value: child.test.value, line: child.loc.start.line });
+          const value = typeof child.test.value === 'bigint' ? child.test.value.toString() : child.test.value;
+          root.switch_labels.push({ value, line: child.loc.start.line });
         }
         if (child.type === 'IfStatement') root.if_statements += 1;
       });
@@ -149,7 +150,7 @@ export function measureStructure({ after = 'HEAD' } = {}) {
       guard: 'scripts/check-pull-render.mjs:scanModule', guard_sha256: hash('./check-pull-render.mjs'),
       tool_sha256: hash('./measure-pull-render-structure.mjs'), acorn_version: acornVersion,
       receiver_roots: rootPattern.source,
-      root_inventory: 'All modules; named functions and variable-bound function expressions use the guard naming convention (an explicit function name takes precedence). Switch literal labels and if statements include nested callbacks, may overlap across roots, and are syntax inventories, not unique event counts or proof of reachability.',
+      root_inventory: 'All modules; named functions and variable-bound function expressions use the guard naming convention (an explicit function name takes precedence). Switch literal labels and if statements include nested callbacks, may overlap across roots, and are syntax inventories, not unique event counts or proof of reachability. BigInt literal values are decimal strings to keep the report JSON serializable without losing precision.',
       guard_limitations: 'Scoped syntax guard, not whole-program/type analysis. Follows local named helpers and up to two hops of named imports/factory return aliases; known data API spellings are trusted. Other unresolved calls remain findings. Model notifications enter subscribed renderers by design; zero findings means no bypass found within the named-root scope. WebSocket entrypoint routing must also be inspected.',
       xterm: 'new Terminal/terminal.open entry sites are listed separately; vendor renderer internals are outside the original top-level scope.',
       receiver_history: 'pm_conversation was replaced by durable pm_reports; the common audit includes both spellings and the two RAW events. Before findings may be unresolved calls, not direct DOM-write findings.',
