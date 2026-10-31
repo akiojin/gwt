@@ -2627,6 +2627,13 @@ impl AgentDispatchCapture {
         #[cfg(any(test, feature = "test-gh-guard"))]
         let _trace = super::agent_frontend::enter_owner_agent_trace(&grant, &request);
         use crate::agent_capability::AgentFrontendRequest;
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        super::agent_frontend::run_owner_agent_dispatch_test_hook(
+            &grant,
+            super::agent_frontend::OwnerAgentDispatchTestStage::BeforeDispatch,
+        );
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        let result_grant = grant.clone();
         // Name's machine-local guard always precedes ECR/Session and grant
         // locks. It stays held through the durable row publication below.
         let prepared_name = matches!(request, AgentFrontendRequest::Name { .. })
@@ -2757,6 +2764,59 @@ impl AgentDispatchCapture {
                                         &self.physical,
                                         &sessions,
                                     ),
+                                },
+                            )]
+                        }
+                        AgentFrontendRequest::ReadName { request_id } => {
+                            let name = (|| {
+                                let id = principal_session_window(&self.panes, &principal)?;
+                                let pane = self
+                                    .panes
+                                    .iter()
+                                    .find(|pane| pane.window.id == id)
+                                    .ok_or("Agent window is missing")?;
+                                if pane.window.is_pm
+                                    || crate::pm_registry::session_is_registered_pm(
+                                        &crate::pm_registry::pm_prefs_path_for_repo_path(
+                                            &pane.project_root,
+                                        ),
+                                        principal.session_id(),
+                                    )
+                                    || gwt_agent::Session::load(
+                                        &self
+                                            .sessions_dir
+                                            .join(format!("{}.toml", principal.session_id())),
+                                    )
+                                    .is_ok_and(|session| {
+                                        crate::pm_registry::is_canonical_pm_worktree(
+                                            &session.worktree_path,
+                                        )
+                                    })
+                                {
+                                    return Err("PM windows keep their fixed identity".to_string());
+                                }
+                                if !pane.window.preset.is_agent_terminal() {
+                                    return Err(
+                                        "Session is not bound to an Agent window".to_string()
+                                    );
+                                }
+                                pane.window
+                                    .agent_name
+                                    .clone()
+                                    .filter(|name| !name.trim().is_empty())
+                                    .ok_or_else(|| "Agent name has not been assigned".to_string())
+                            })();
+                            let (agent_name, error) = match name {
+                                Ok(name) => (Some(name), None),
+                                Err(error) => (None, Some(error)),
+                            };
+                            vec![OutboundEvent::reply(
+                                client_id,
+                                BackendEvent::PaneNameResult {
+                                    request_id,
+                                    ok: error.is_none(),
+                                    agent_name,
+                                    error,
                                 },
                             )]
                         }
@@ -2919,6 +2979,11 @@ impl AgentDispatchCapture {
                     }
                 }
             },
+        );
+        #[cfg(any(test, feature = "test-gh-guard"))]
+        super::agent_frontend::run_owner_agent_dispatch_test_hook(
+            &result_grant,
+            super::agent_frontend::OwnerAgentDispatchTestStage::BeforeDispatchResult,
         );
         completion
     }

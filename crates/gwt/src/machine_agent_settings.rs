@@ -144,6 +144,18 @@ pub(crate) fn checked_update(
         if let Some(applied) = stored.applied_controls.get(control_id) {
             validate_replay(applied, change)?;
             &applied.previous_policy
+        } else if prefs
+            .last_control_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.control_id == control_id)
+        {
+            // Older roster writers could commit only the project receipt.
+            // Replaying it must not create a new shared-machine intent.
+            tracing::warn!(control_id, "project receipt has no matching machine control; read current settings and submit a fresh explicit Max active change");
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR,
+            ));
         } else {
             &stored.policy
         }

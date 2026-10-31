@@ -306,6 +306,8 @@ fn run_agent_dispatch_test_hook(slot: &'static std::thread::LocalKey<AgentDispat
 #[cfg(any(test, feature = "test-gh-guard"))]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum OwnerAgentDispatchTestStage {
+    BeforeDispatch,
+    BeforeDispatchResult,
     AfterDurableCheck,
     LeasedMutation,
     PeerCloseAccepted,
@@ -355,7 +357,7 @@ pub fn set_owner_agent_dispatch_test_hook(
     OwnerAgentDispatchTestHookGuard(key)
 }
 #[cfg(any(test, feature = "test-gh-guard"))]
-fn run_owner_agent_dispatch_test_hook(
+pub(crate) fn run_owner_agent_dispatch_test_hook(
     grant: &AgentCapabilityGrant,
     stage: OwnerAgentDispatchTestStage,
 ) {

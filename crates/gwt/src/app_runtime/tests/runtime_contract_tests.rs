@@ -1124,8 +1124,43 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     let mut config = super::pane_control_tests::control_launch_config(&repo, 42);
     config.pending_initial_prompt =
         Some("Retain this actual launch prompt until physical exit.".into());
+    config.args = if cfg!(windows) {
+        vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            "[Console]::WriteLine('GWT_INPUT_CLOSE_PROVIDER_READY'); while ($null -ne [Console]::ReadLine()) {}".into(),
+        ]
+    } else {
+        vec![
+            "-c".into(),
+            "stty -echo -icanon -isig; printf 'GWT_INPUT_CLOSE_PROVIDER_READY\\n'; exec cat >/dev/null".into(),
+        ]
+    };
     let worktree = config.working_dir.clone().unwrap();
     let probe = super::pane_control_tests::control_owner_launch(&owner, "diagnostic", config);
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the actual provider, rather than killing its pre-exec start gate; the marker establishes ordering.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let snapshot = owner
+                    .command(OwnerCommand::Snapshot {
+                        id: probe.id.clone(),
+                        incarnation: probe.incarnation,
+                    })
+                    .await
+                    .unwrap();
+                if snapshot["screen"]
+                    .as_str()
+                    .is_some_and(|screen| screen.contains("GWT_INPUT_CLOSE_PROVIDER_READY"))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual diagnostic provider must start");
+    });
     let tab = sample_project_tab(
         "tab-1",
         "Repo",
@@ -1206,9 +1241,18 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
         "an unconfirmed transport error must retain the prompt"
     );
 
-    probe.pane.lock().unwrap().kill().unwrap();
-    probe.pty.wait().unwrap();
-    probe.pane.lock().unwrap().check_status().unwrap();
+    {
+        // Keep EOF from copying a pre-reap Running status while the actual
+        // process exits; terminal retirement must not depend on that race.
+        let mut exited = probe.pane.lock().unwrap();
+        assert!(probe
+            .pty
+            .terminate_and_wait_for_tree(Duration::from_secs(2))
+            .unwrap());
+        probe.pty.wait().unwrap();
+        exited.check_status().unwrap();
+    }
+    assert_ne!(probe.pane.lock().unwrap().last_exit().unwrap().exit_code, 0);
     owner_fixture_block_on(
         owner.pane_event(gwt::pane_runtime::PaneRuntimeEvent::Status {
             id: probe.id.clone(),
@@ -1220,7 +1264,49 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
     )
     .unwrap();
     owner_fixture_block_on(async {
-        // test-hygiene: allow-wall-clock-deadline Await the actual exact Closed receipt, not a scheduling delay after the child's exit.
+        // test-hygiene: allow-wall-clock-deadline Observe confirmed exit before testing the retained diagnostic; recovery intentionally waits for an explicit close.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let event = observed.recv().await.unwrap();
+                let terminal = matches!(&event, OwnerEvent::Status { id, incarnation, exit_confirmed: true, .. }
+                    if id == &probe.id && *incarnation == probe.incarnation);
+                gui.handle_project_owner_event(&context, 1, &identity, event);
+                if terminal {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the exact native diagnostic exit must be confirmed");
+    });
+    let retained = owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).unwrap();
+    assert!(retained.policy.recoverable_error);
+    assert!(retained.writer.is_none());
+    assert!(probe.pty.try_wait().unwrap().is_some());
+    assert!(gui.tracked_window_exists(&gui_id));
+    assert_eq!(gui.runtimes[&gui_id].incarnation, probe.incarnation);
+    assert_eq!(gui.runtimes[&gui_id].owner_pane_id, probe.id);
+    let reconnect =
+        gui.handle_frontend_event("diagnostic-client".into(), FrontendEvent::FrontendReady);
+    assert!(
+        reconnect.iter().any(|event| matches!(&event.event,
+        BackendEvent::TerminalSnapshot { id, .. } if id == &gui_id)),
+        "the read-only diagnostic screen must survive the physical process exit"
+    );
+    assert!(
+        !prompt_path.exists(),
+        "confirmed exit must release the prompt even while diagnostics remain"
+    );
+    assert!(generation
+        .write_input(b"late input after confirmed exit")
+        .is_err());
+    owner_fixture_block_on(owner.command(OwnerCommand::Close {
+        id: probe.id.clone(),
+        incarnation: probe.incarnation,
+    }))
+    .unwrap();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Await the exact explicit-close receipt after all retained-diagnostic assertions.
         tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
             loop {
                 let event = observed.recv().await.unwrap();
@@ -1233,24 +1319,10 @@ fn terminal_agent_error_invalidates_input_even_when_pane_is_kept_for_diagnostics
             }
         })
         .await
-        .expect("the exact native diagnostic exit must complete");
+        .expect("the exact retained diagnostic must close");
     });
     assert!(owner_fixture_block_on(owner.probe(&probe.id, probe.incarnation)).is_err());
-    assert!(gui.tracked_window_exists(&gui_id));
-    assert_eq!(gui.runtimes[&gui_id].incarnation, probe.incarnation);
-    assert_eq!(gui.runtimes[&gui_id].owner_pane_id, probe.id);
     assert!(!gui.active_agent_sessions.contains_key(&gui_id));
-    let reconnect =
-        gui.handle_frontend_event("diagnostic-client".into(), FrontendEvent::FrontendReady);
-    assert!(
-        reconnect.iter().any(|event| matches!(&event.event,
-        BackendEvent::TerminalSnapshot { id, .. } if id == &gui_id)),
-        "the read-only diagnostic screen must survive the physical runtime's retirement"
-    );
-    assert!(
-        !prompt_path.exists(),
-        "confirmed exit must release the prompt even while diagnostics remain"
-    );
     assert!(generation.write_input(b"late input after Closed").is_err());
     owner_fixture_block_on(owner.shutdown());
 }

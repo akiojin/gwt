@@ -3616,6 +3616,292 @@ fn accepted_agent_self_close_does_not_remove_same_address_same_session_successor
 }
 
 #[test]
+fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment() {
+    use gwt::project_runtime::agent_frontend::{
+        set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+    };
+    use gwt::project_runtime::events::OwnerCommand;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home_env = ScopedEnvVar::set("HOME", temp.path());
+    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let foreign = temp.path().join("foreign");
+    control_init_repo(&project);
+    control_init_repo(&foreign);
+    seed_owner_fixture_roster(&project, 8);
+    // Retained rows are metadata owned by the same native registry. Leave the
+    // Sessions absent during startup so its ordinary backfill cannot name them.
+    let rows = [
+        "review",
+        "unnamed",
+        "ambiguous",
+        "ambiguous",
+        "pm",
+        "canonical-pm",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, session)| {
+        let mut row = sample_window(
+            &format!("metadata-{index}"),
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        row.session_id = Some(session.into());
+        if session != "unnamed" {
+            row.agent_name = Some(format!("Assigned-{session}-2"));
+        }
+        row
+    })
+    .collect();
+    save_legacy_name_rows(&project, rows);
+    let mut foreign_row = sample_window("agent", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    foreign_row.session_id = Some("foreign-only".into());
+    foreign_row.agent_name = Some("Foreign private name".into());
+    save_legacy_name_rows(&foreign, vec![foreign_row]);
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+        pm_registration_fixture("pm", &project),
+        |_| false,
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    let foreign_owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&foreign),
+    )
+    .unwrap();
+    let active = control_owner_launch(&owner, "active-name", control_launch_config(&project, 42));
+    let issuer = active.issuer.clone();
+    let active_session = active.session.as_ref().unwrap();
+    let active_request = active.agent_pane_request().unwrap();
+    let active_token = active_request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    // A fresh reviewer has an assigned row and Session but no producing
+    // binding. An assignment helper would silently persist this absent name.
+    let mut session = gwt_agent::Session::new(&project, "work/review", gwt_agent::AgentId::Codex);
+    session.id = "review".into();
+    session.review_dispatch = true;
+    session.save(&sessions_dir).unwrap();
+    let mut canonical_pm = gwt_agent::Session::new(&project, "work/pm", gwt_agent::AgentId::Codex);
+    canonical_pm.id = "canonical-pm".into();
+    canonical_pm.worktree_path = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+    fs::create_dir_all(&canonical_pm.worktree_path).unwrap();
+    assert!(gwt::pm_registry::is_canonical_pm_worktree(
+        &canonical_pm.worktree_path
+    ));
+    assert!(!gwt::pm_registry::session_is_registered_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+        &canonical_pm.id,
+    ));
+    canonical_pm.save(&sessions_dir).unwrap();
+    let original_rows = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap()
+        ["canonical_rows"]
+        .clone();
+    let original_foreign_rows =
+        owner_fixture_block_on(foreign_owner.command(OwnerCommand::ListPanes)).unwrap()
+            ["canonical_rows"]
+            .clone();
+    let original_files = snapshot_optional_files(&[
+        sessions_dir.join("review.toml"),
+        sessions_dir.join("canonical-pm.toml"),
+        temp.path().join(".gwt/session.json"),
+        workspace_state_path(&project),
+        workspace_state_path(&foreign),
+        gwt_core::paths::gwt_project_dir_for_repo_path(&project).join("agent-names.jsonl"),
+        gwt::issue_monitor_prefs_path_for_repo_path(&project),
+    ]);
+    let mut authority_paths = current_generation_authority_artifacts(&project);
+    authority_paths.extend(current_generation_authority_artifacts(
+        &active_session.worktree_path,
+    ));
+    let original_authority = snapshot_optional_files(&authority_paths);
+    let original_work = tracked_workspace_work_store_snapshot(&project);
+    let queued_token = issuer.issue(&project, "revoked-queued").unwrap().token;
+    let outbound_token = issuer.issue(&project, "revoked-outbound").unwrap().token;
+    let mut read_only_checked = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        owner_fixture_block_on(async {
+            for (session_id, expected_error) in [
+                ("review", None),
+                ("unnamed", Some("assigned")),
+                ("missing", Some("not bound")),
+                ("foreign-only", Some("not bound")),
+                ("ambiguous", Some("multiple")),
+                ("pm", Some("PM")),
+                ("canonical-pm", Some("PM")),
+                ("revoked", Some("capability")),
+                ("revoked-queued", Some("capability")),
+                ("revoked-outbound", Some("capability")),
+                ("forged", Some("forbidden")),
+                ("active-name", None),
+            ] {
+                if session_id == "active-name" {
+                    // All observations completed before the Active request is
+                    // allowed to publish its own assigned identity.
+                    owner.agent_dispatch_barrier().await.unwrap();
+                    assert_eq!(
+                        original_rows,
+                        owner.command(OwnerCommand::ListPanes).await.unwrap()["canonical_rows"]
+                    );
+                    assert_eq!(
+                        original_foreign_rows,
+                        foreign_owner
+                            .command(OwnerCommand::ListPanes)
+                            .await
+                            .unwrap()["canonical_rows"]
+                    );
+                    assert_optional_files_unchanged(&original_files);
+                    assert_optional_files_unchanged(&original_authority);
+                    assert_eq!(
+                        original_work,
+                        tracked_workspace_work_store_snapshot(&project)
+                    );
+                    assert!(gwt_agent::Session::load(&sessions_dir.join("review.toml"))
+                        .unwrap()
+                        .execution_binding
+                        .is_none());
+                    read_only_checked = true;
+                }
+                let token = match session_id {
+                    "revoked-queued" => queued_token.clone(),
+                    "revoked-outbound" => outbound_token.clone(),
+                    "active-name" => active_token.clone(),
+                    _ => issuer.issue(&project, session_id).unwrap().token,
+                };
+                let grant = issuer.grant_for_test(&token).unwrap();
+                assert_eq!(
+                    grant.principal().authorizes_producing_mutation(),
+                    session_id == "active-name"
+                );
+                let _queued_hook = (session_id == "revoked-queued").then(|| {
+                    let issuer = issuer.clone();
+                    let token = token.clone();
+                    set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatch,
+                        move || {
+                            assert!(issuer.revoke_token(&token));
+                        },
+                    )
+                });
+                let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let _result_hook = (session_id == "revoked-outbound").then(|| {
+                    set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatchResult,
+                        move || {
+                            ready_tx.send(()).unwrap();
+                            // Dropping the sender also releases this exact
+                            // worker on assertion failure and fixture cleanup.
+                            let _ = release_rx.recv();
+                        },
+                    )
+                });
+                let mut request = issuer
+                    .agent_pane_websocket_url()
+                    .into_client_request()
+                    .unwrap();
+                request.headers_mut().insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {token}").parse().unwrap(),
+                );
+                let (mut socket, _) = connect_async(request).await.unwrap();
+                if session_id == "revoked" {
+                    assert!(issuer.revoke_token(&token));
+                }
+                let mut payload = serde_json::json!({"kind":"pane_name", "candidate":"Must not assign", "request_id":session_id});
+                if session_id == "forged" {
+                    payload["window_id"] = serde_json::json!("foreign::agent");
+                }
+                socket
+                    .send(WebSocketMessage::Text(payload.to_string().into()))
+                    .await
+                    .unwrap();
+                let _outbound_fence_hook = if session_id == "revoked-outbound" {
+                    gwt_core::test_support::recv_event(
+                        &ready_rx,
+                        "native name reply prepared before outbound revocation",
+                    );
+                    let issuer = issuer.clone();
+                    let token = token.clone();
+                    let hook = set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatchResult,
+                        move || {
+                            assert!(issuer.revoke_token(&token));
+                        },
+                    );
+                    // A real unrelated response precedes the held name reply.
+                    // Its stale fence must still answer the pending correlation.
+                    socket
+                        .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+                        .await
+                        .unwrap();
+                    Some(hook)
+                } else {
+                    None
+                };
+                let reply = next_test_agent_websocket_event(
+                    &mut socket,
+                    "pane_name_result",
+                    Duration::from_secs(5),
+                )
+                .await;
+                drop(release_tx);
+                assert_eq!(reply["request_id"], session_id);
+                if let Some(error) = expected_error {
+                    assert_eq!(reply["ok"], false, "{reply}");
+                    assert!(reply["agent_name"].is_null(), "{reply}");
+                    assert!(reply["error"].as_str().unwrap().contains(error), "{reply}");
+                } else {
+                    assert_eq!(reply["ok"], true, "{reply}");
+                    if session_id == "review" {
+                        assert_eq!(reply["agent_name"], "Assigned-review-2");
+                    } else {
+                        assert!(!reply["agent_name"].as_str().unwrap().is_empty());
+                        assert_ne!(reply["agent_name"], "Must not assign");
+                    }
+                    assert!(issuer.grant_is_current(&grant));
+                    assert_eq!(
+                        issuer
+                            .grant_for_test(&token)
+                            .unwrap()
+                            .principal()
+                            .authorizes_producing_mutation(),
+                        session_id == "active-name"
+                    );
+                }
+                let _ = socket.close(None).await;
+            }
+        })
+    }));
+    control_close(&owner, &active);
+    result.unwrap();
+    assert!(
+        read_only_checked,
+        "read-only originals were checked before Active assignment"
+    );
+}
+
+#[test]
 fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());

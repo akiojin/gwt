@@ -4010,7 +4010,29 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                                 "invalid replayed Max active change",
                             ));
                         }
-                        intent.persist_machine_max_active_change(&accepted.control_id)?;
+                        let change = intent.prefs().max_active_last_change.ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "Max active change provenance is missing",
+                            )
+                        })?;
+                        crate::machine_agent_settings::checked_update(
+                            disk,
+                            None,
+                            Some(&change),
+                            &accepted.control_id,
+                        )
+                        .inspect_err(|error| {
+                            if error.to_string()
+                                == crate::issue_monitor::ISSUE_MONITOR_CONFIG_CONFLICT_ERROR
+                            {
+                                config_conflict = true;
+                                candidate.rebase_daemon_driver_prefs(disk);
+                                if let Ok(Some(policy)) = crate::machine_agent_settings::load() {
+                                    candidate.apply_machine_policy(&policy);
+                                }
+                            }
+                        })?;
                     }
                     let policy = crate::machine_agent_settings::load()?.ok_or_else(|| {
                         io::Error::new(
@@ -4139,7 +4161,7 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                         let requested = candidate
                             .prefs()
                             .max_active_last_change
-                            .filter(|_| explicit_max_active && disk.agent_roster.is_none());
+                            .filter(|_| explicit_max_active);
                         let policy = crate::machine_agent_settings::checked_update(
                             disk,
                             expected_config_token.as_deref(),
@@ -11731,6 +11753,7 @@ exit 0
 
     #[test]
     fn machine_max_active_receipt_replay_preserves_a_later_project_change() {
+        let _prefs_budget = pin_prefs_hang_guard();
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11741,15 +11764,41 @@ exit 0
         for path in [&a, &b] {
             crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
         }
+        let mut roster_prefs = crate::load_issue_monitor_prefs(&a).unwrap();
+        roster_prefs.max_active_agents = 10;
+        roster_prefs.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada", "enabled": true, "agent_id": "codex",
+                    "created_at": "2026-10-22T00:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&a, &roster_prefs).unwrap();
+        let initial_policy = crate::machine_agent_settings::set(
+            Some(4),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
         let mut monitor = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&a).unwrap(),
         );
+        monitor.apply_machine_policy(&initial_policy);
+        monitor.set_agent_capacity(crate::agent_capacity::AgentCapacity {
+            other_live_agents: 4,
+            ..Default::default()
+        });
+        assert_eq!(monitor.effective_max_active_agents(), 0);
         let mut stale = monitor.clone();
         let payload = crate::runtime_daemon_events::issue_monitor_payload(
             "control",
             serde_json::json!({
-                "max_active_agents": 5,
+                "max_active_agents": 10,
                 "control_id": uuid::Uuid::new_v4().to_string(),
                 "changed_at": "2026-10-22T00:00:00Z",
             }),
@@ -11766,6 +11815,15 @@ exit 0
             apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
+        assert_eq!(monitor.effective_max_active_agents(), 6);
+        assert_eq!(monitor.prefs().agent_roster.unwrap().enabled_count(), 10);
         let mut other = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&b).unwrap(),
@@ -11786,7 +11844,8 @@ exit 0
             apply_accepted_control_for_test(&a, &mut stale, replay.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
-        assert_eq!(stale.max_active_agents_override(), Some(3));
+        assert_eq!(stale.max_active_agents_override(), Some(10));
+        assert_eq!(stale.effective_max_active_agents(), 0);
         assert_eq!(
             crate::machine_agent_settings::load()
                 .unwrap()
@@ -11797,15 +11856,91 @@ exit 0
         assert_eq!(
             crate::load_issue_monitor_prefs(&a)
                 .unwrap()
-                .max_active_last_change,
+                .max_active_agents,
+            10
+        );
+        assert_eq!(
             crate::load_issue_monitor_prefs(&b)
                 .unwrap()
-                .max_active_last_change
+                .max_active_agents,
+            3
         );
+        // The old roster writer committed this project receipt without a
+        // machine journal entry. Recreate only that legacy on-disk shape.
+        let machine_path = crate::machine_agent_settings::path();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&machine_path).unwrap()).unwrap();
+        legacy["applied_controls"]
+            .as_object_mut()
+            .unwrap()
+            .remove(&replay.control_id);
+        fs::write(&machine_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let machine_before = fs::read(&machine_path).unwrap();
+        let project_before = fs::read(&a).unwrap();
+        let hub = BroadcastHub::new();
+        let mut permit = super::IssueMonitorEffectPermit::new();
+        let mut pending = None;
+        let old_control = super::IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents: Some(10),
+            control_id: replay.control_id.clone(),
+            changed_at: replay.processed_at.clone(),
+        };
+        stale = monitor.clone();
+        assert_eq!(stale.effective_max_active_agents(), 6);
+        assert_eq!(
+            super::apply_or_queue_issue_monitor_control(
+                &hub,
+                &a,
+                &mut stale,
+                old_control,
+                &mut permit,
+                &mut pending,
+                None,
+            ),
+            super::IssueMonitorControlCommit::ConfigConflict
+        );
+        assert!(
+            pending.is_none(),
+            "unproven legacy receipt must not trap the control lane"
+        );
+        assert_eq!(
+            stale.effective_max_active_agents(),
+            0,
+            "conflict adopts today's machine policy"
+        );
+        assert_eq!(fs::read(&machine_path).unwrap(), machine_before);
+        assert_eq!(fs::read(&a).unwrap(), project_before);
+        let fresh_control = super::IssueMonitorControl::IdentifiedMaxActiveAgents {
+            max_active_agents: Some(10),
+            control_id: uuid::Uuid::new_v4().to_string(),
+            changed_at: "2026-10-22T00:02:00Z".into(),
+        };
+        let fresh = super::AcceptedIssueMonitorControl::new(fresh_control.clone());
+        assert!(matches!(
+            super::apply_or_queue_issue_monitor_control(
+                &hub,
+                &a,
+                &mut stale,
+                fresh_control,
+                &mut permit,
+                &mut pending,
+                None,
+            ),
+            super::IssueMonitorControlCommit::Committed { .. }
+        ));
+        assert!(pending.is_none());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
+        assert_eq!(stale.effective_max_active_agents(), 6);
         fs::remove_file(crate::machine_agent_settings::path()).unwrap();
         assert_eq!(
             super::try_apply_accepted_issue_monitor_control_with_disk_migration(
-                &a, &mut stale, replay
+                &a, &mut stale, fresh
             ),
             super::IssueMonitorControlCommit::RetryableFailure,
             "a durable project receipt cannot ACK a missing machine policy"
@@ -11814,6 +11949,7 @@ exit 0
 
     #[test]
     fn machine_guarded_config_retry_preserves_a_later_project_change() {
+        let _prefs_budget = pin_prefs_hang_guard();
         let _env_lock = crate::env_test_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -11824,13 +11960,33 @@ exit 0
         for path in [&a, &b] {
             crate::save_issue_monitor_prefs(path, &crate::IssueMonitorPrefs::default()).unwrap();
         }
+        let mut roster_prefs = crate::load_issue_monitor_prefs(&a).unwrap();
+        roster_prefs.max_active_agents = 10;
+        roster_prefs.agent_roster = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1, "revision": 1,
+                "members": [{
+                    "agent_member_id": "00000000-0000-4000-8000-000000000001",
+                    "name": "Ada", "enabled": true, "agent_id": "codex",
+                    "created_at": "2026-10-22T00:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        );
+        crate::save_issue_monitor_prefs(&a, &roster_prefs).unwrap();
+        crate::machine_agent_settings::set(
+            Some(4),
+            crate::issue_monitor::IssueMonitorMaxActiveChangeSource::Gui,
+            "2026-10-22T00:00:00Z",
+        )
+        .unwrap();
         let initial = crate::load_issue_monitor_prefs(&a).unwrap();
         let control = decode_issue_monitor_control_for_test(
             crate::runtime_daemon_events::issue_monitor_payload(
                 "control",
                 serde_json::json!({"config_set_if_matches": {
                     "expected_config_token": initial.config_token(),
-                    "max_active_agents": 5,
+                    "max_active_agents": 10,
                     "allowed_labels": ["guarded-a"],
                 }}),
                 std::process::id() + 1,
@@ -11860,6 +12016,13 @@ exit 0
             .unwrap()
             .last_control_receipt
             .is_none());
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(10)
+        );
         let mut other = test_monitor_with_prefs(
             crate::IssueMonitorConfig::default(),
             crate::load_issue_monitor_prefs(&b).unwrap(),
@@ -11878,7 +12041,14 @@ exit 0
             apply_accepted_control_for_test(&a, &mut monitor, first.clone()),
             super::IssueMonitorControlCommit::Committed { .. }
         ));
-        assert_eq!(monitor.max_active_agents_override(), Some(3));
+        assert_eq!(monitor.max_active_agents_override(), Some(10));
+        assert_eq!(
+            crate::machine_agent_settings::load()
+                .unwrap()
+                .unwrap()
+                .manual_limit,
+            Some(3)
+        );
         assert_eq!(
             crate::load_issue_monitor_prefs(&a).unwrap().allowed_labels,
             vec!["guarded-a"]

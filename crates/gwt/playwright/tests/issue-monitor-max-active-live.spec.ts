@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { gotoLiveGwt, withLiveGwtBackendLock } from "./_helpers/live-gwt";
+import { gotoLiveGwt, sendLiveGwtEvent, withLiveGwtBackendLock } from "./_helpers/live-gwt";
 
 const base = process.env.GWT_PLAYWRIGHT_BASE_URL ?? "";
 const home = process.env.GWT_PLAYWRIGHT_CHECK_HOME ?? "";
@@ -17,7 +17,7 @@ test.afterEach(async ({ page }, info) => {
   });
 });
 
-test("Max active commits the final stepper value once and Auto never saves numbers", async ({ page }, info) => {
+test("Project settings and normal project saves preserve machine capacity across reload", async ({ page }, info) => {
   test.skip(!base || !home, "requires browser-check's isolated checkout backend");
   test.setTimeout(180_000);
   expect(base).not.toBe("");
@@ -50,72 +50,54 @@ test("Max active commits the final stepper value once and Auto never saves numbe
     await expect(issues).toBeVisible();
     await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
       .some(({ payload }: any) => payload.kind === "issue_monitor_status"));
-    const waitForLimit = (override: number | null) => page.waitForFunction(expected =>
-      ((window as any).__gwtPlaywrightMessages ?? [])
-        .filter(({ payload }: any) => payload.kind === "issue_monitor_status")
-        .at(-1)?.payload.status.max_active_agents_override === expected, override);
-    operation("issue.monitor.config.set", { max_active: 6 });
-    await waitForLimit(6);
+    await sendLiveGwtEvent(page, { kind: "agent_roster", action: { kind: "read" }, expected_revision: null });
+    await page.waitForFunction(() => ((window as any).__gwtPlaywrightMessages ?? [])
+      .some(({ payload }: any) => payload.kind === "agent_roster" && payload.roster.members.length > 0));
     const initial = operation("issue.monitor.status");
-    expect(JSON.parse(initial.output).max_active_last_change).toMatchObject({ source: "json_operation" });
     const preferences = join(home, ".gwt/projects", initial.project_store.hash, "project-state/issue-monitor.json");
+    const machinePreferences = join(home, ".gwt/machine-state/agent-settings.json");
+    const machineBefore = await readFile(machinePreferences, "utf8");
     const prefs = async () => JSON.parse(await readFile(preferences, "utf8"));
+    const before = await prefs();
+    expect(before.agent_roster).toBeTruthy();
+    const capacity = (value: any) => ({
+      agent_roster: value.agent_roster,
+      max_active_agents: value.max_active_agents,
+      max_active_last_change: value.max_active_last_change,
+    });
 
     await expect(issues.locator(".issue-bridge-root")).toHaveCount(0);
-    const input = issues.getByLabel("Max active", { exact: true });
-    const mode = issues.getByLabel("Max active mode", { exact: true });
-    const apply = issues.getByRole("button", { name: "Apply Max active", exact: true });
-    await expect(mode).toHaveValue("manual");
-    await expect(input).toHaveValue("6");
-    await input.fill("2");
-    operation("issue.monitor.config.set", { max_active_mode: "auto" });
-    await waitForLimit(null);
-    await expect(mode).toHaveValue("auto");
-    await expect(input).toBeDisabled();
-    await expect(apply).toBeDisabled();
-    await apply.evaluate(button => (button as HTMLButtonElement).click());
+    await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
+    await expect(issues.getByLabel("Max active mode", { exact: true })).toHaveCount(0);
+    await expect(issues.getByRole("button", { name: "Apply Max active", exact: true })).toHaveCount(0);
+    await expect(issues.locator(".settings-issues-capacity")).toHaveCount(0);
+    // A normal project save causes a real status redraw without a capacity write.
+    // Explicit Manual/Auto setter semantics belong to the machine-policy owner.
+    const saveCursor = await page.evaluate(() => (window as any).__gwtPlaywrightMessageSequence);
+    operation("issue.monitor.config.set", { allowed_labels: ["t26-settings"] });
+    const waitForLabels = (cursor = 0) => page.waitForFunction(cursor =>
+      ((window as any).__gwtPlaywrightMessages ?? [])
+        .some(({ sequence, payload }: any) => sequence > cursor
+          && payload.kind === "issue_monitor_status"
+          && payload.status.allowed_labels?.join(",") === "t26-settings"), cursor);
+    await waitForLabels(saveCursor);
+    await expect.poll(prefs).toMatchObject({ allowed_labels: ["t26-settings"] });
+    await page.locator('button[data-surface="issues"]').click();
+    await issueHost.getByRole("button", { name: "Issues settings", exact: true }).click();
+    await expect(issues).toBeVisible();
+    expect(capacity(await prefs())).toEqual(capacity(before));
+    expect(await readFile(machinePreferences, "utf8")).toBe(machineBefore);
     expect(saves).toEqual([]);
-    expect((await prefs()).max_active_last_change.source).toBe("json_operation");
-    operation("issue.monitor.config.set", { max_active: 6 });
-    await waitForLimit(6);
-    await expect(mode).toHaveValue("manual");
-    await expect(input).toHaveValue("6");
-    await expect(apply).toBeDisabled();
-    await input.focus();
-    await input.press("ArrowDown");
-    await input.press("ArrowDown");
-    await input.press("ArrowDown");
-    await expect(input).toHaveValue("3");
-    expect(saves).toEqual([]);
-    expect((await prefs()).max_active_agents).toBe(6);
-    await apply.click();
-    expect(saves).toEqual([3]);
-    await expect.poll(prefs, { timeout: 30_000 }).toMatchObject({ max_active_agents: 3,
-      max_active_last_change: { source: "gui", max_active_agents_override: 3 } });
-    await expect(apply).toBeDisabled();
-    expect(saves).toEqual([3]);
-    const after = JSON.parse(operation("issue.monitor.status").output);
-    expect(after.max_active_last_change.source).toBe("gui");
-    expect(Number.isFinite(Date.parse(after.max_active_last_change.changed_at))).toBe(true);
 
-    await mode.selectOption("auto");
-    await expect.poll(prefs, { timeout: 30_000 }).toMatchObject({ max_active_agents_mode: "auto" });
-    await expect(input).toBeDisabled();
-    await expect(apply).toBeDisabled();
-    await expect.poll(() => page.evaluate(() => {
-      const status = ((window as any).__gwtPlaywrightMessages ?? [])
-        .filter(({ payload }: any) => payload.kind === "issue_monitor_status").at(-1)?.payload.status;
-      const capacity = document.querySelector('[data-settings-issues-controls] .settings-issues-capacity');
-      const input = capacity?.querySelector('input[aria-label="Max active"]') as HTMLInputElement | null;
-      return status?.max_active_agents_override == null && input?.disabled
-        && input.value === String(status.max_active_agents)
-        && capacity!.textContent!.includes("Measuring capacity") === !status.agent_capacity?.measurement_complete;
-    })).toBe(true);
-    await input.dispatchEvent("change");
-    await input.dispatchEvent("input");
-    expect(saves).toEqual([3, null]);
-    const status = JSON.parse(operation("issue.monitor.status").output);
-    expect(status.max_active_last_change).toMatchObject({ source: "gui", max_active_agents_override: null });
+    await gotoLiveGwt(page, base, { enableTestBridge: true });
+    await page.locator('button[data-surface="issues"]').click();
+    await issueHost.getByRole("button", { name: "Issues settings", exact: true }).click();
+    await expect(issues).toBeVisible();
+    await waitForLabels();
+    await expect(issues.getByLabel("Max active", { exact: true })).toHaveCount(0);
+    expect(capacity(await prefs())).toEqual(capacity(before));
+    expect(await readFile(machinePreferences, "utf8")).toBe(machineBefore);
+    expect(saves).toEqual([]);
     await expect(page.locator("html")).toHaveAttribute("data-theme", info.project.name.endsWith("light") ? "light" : "dark");
     const screenshot = info.outputPath(`max-active-${info.project.name}.png`);
     await issues.screenshot({ path: screenshot });

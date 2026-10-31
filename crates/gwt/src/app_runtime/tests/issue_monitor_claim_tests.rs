@@ -6390,7 +6390,17 @@ fn issue_monitor_delivery_into_a_worktree_with_a_live_agent_pane_adopts_it() {
                 cols: 80,
                 rows: 24,
             }))
-            .expect("the actual native holder is admitted before its delivery replay");
+            .unwrap_or_else(|error| {
+                let cached = gwt::issue_monitor_worker::load_cached_issue_monitor_candidate(
+                    &issue_cache_root(&repo),
+                    3165,
+                );
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                panic!(
+                    "the actual native holder is admitted before its delivery replay: {error}; cached={cached:?}; pending={:?}",
+                    prefs.pending_launch_deliveries
+                );
+            });
             let pane = owner_fixture_block_on(
                 owner.probe(&owner_id, receipt["incarnation"].as_u64().unwrap()),
             )

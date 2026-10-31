@@ -4,6 +4,7 @@ pub mod agent_capacity;
 pub mod agent_maintenance;
 pub mod agent_names;
 pub(crate) mod agent_project_state;
+pub mod agent_registry_import;
 pub mod agent_resource_policy;
 pub mod docker_launch;
 pub mod launch_runtime;

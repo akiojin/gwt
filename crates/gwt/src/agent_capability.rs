@@ -98,6 +98,10 @@ pub enum AgentFrontendRequest {
         candidate: String,
         request_id: String,
     },
+    /// Read an already assigned identity without allocating or repairing it.
+    ReadName {
+        request_id: String,
+    },
     CloseWindow {
         id: String,
         request_id: Option<String>,
@@ -140,6 +144,9 @@ impl std::fmt::Debug for AgentFrontendRequest {
                 formatter.write_str("AgentFrontendRequest::CloseWork(<redacted>)")
             }
             Self::Name { .. } => formatter.write_str("AgentFrontendRequest::Name(<redacted>)"),
+            Self::ReadName { .. } => {
+                formatter.write_str("AgentFrontendRequest::ReadName(<redacted>)")
+            }
             Self::CloseWindow { .. } => {
                 formatter.write_str("AgentFrontendRequest::CloseWindow(<redacted>)")
             }
