@@ -115,8 +115,16 @@ struct Arena {
 
 impl Arena {
     fn new() -> Self {
+        // FIFO fixtures exercise admission order independently of host disk pressure.
+        let home = tempfile::tempdir().expect("home tempdir");
+        std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        std::fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\nslots=1\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         Self {
-            home: tempfile::tempdir().expect("home tempdir"),
+            home,
             worktree: tempfile::tempdir().expect("worktree tempdir"),
         }
     }
