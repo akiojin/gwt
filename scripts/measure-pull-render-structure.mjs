@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// AC-6 source audit only. This tool never starts the AC-17 performance harness.
+// AC-6/11 source audit only. This tool never starts the AC-17 performance harness.
 import { parse, version as acornVersion } from 'acorn';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -7,7 +7,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { scanModule } from './check-pull-render.mjs';
+import { rootPattern, scanModule } from './check-pull-render.mjs';
 
 const repositoryRoot = dirname(dirname(realpathSync(fileURLToPath(import.meta.url))));
 const beforeSha = '046f94d660ba3fa823f244dc1ac92774b0215fbf';
@@ -33,9 +33,9 @@ export function readSourceTree(revision, repository = repositoryRoot) {
   return { sha, modules: new Map(files.map(file => [file, git(['show', `${sha}:${file}`], repository)])) };
 }
 
-function walk(node, visit) {
-  visit(node);
-  for (const child of children(node)) walk(child, visit);
+function walk(node, visit, parent = null) {
+  visit(node, parent);
+  for (const child of children(node)) walk(child, visit, node);
 }
 
 function findNode(node, predicate, label) {
@@ -107,8 +107,26 @@ export function measureModules(modules) {
       && finding.context.split(/[\/|]/).includes(arm.test.value));
     return { event_kind: arm.test.value, detected: detected.length > 0, findings: detected };
   });
+  const all_receiver_audit = { scanned_modules: modules.size, roots: [], findings: [] };
+  for (const [file, source] of modules) {
+    const ast = asts.get(file) || parse(source, { ecmaVersion: 'latest', sourceType: 'module', locations: true });
+    walk(ast, (node, parent) => {
+      if (!/^(FunctionDeclaration|FunctionExpression|ArrowFunctionExpression)$/.test(node.type)) return;
+      const name = node.id?.name || (parent?.type === 'VariableDeclarator' && parent.id.type === 'Identifier' ? parent.id.name : '<callback>');
+      if (!rootPattern.test(name)) return;
+      const root = { file, root: name, line: node.loc.start.line, switch_labels: [], if_statements: 0 };
+      walk(node.body, child => {
+        if (child.type === 'SwitchCase' && child.test?.type === 'Literal') {
+          root.switch_labels.push({ value: child.test.value, line: child.loc.start.line });
+        }
+        if (child.type === 'IfStatement') root.if_statements += 1;
+      });
+      all_receiver_audit.roots.push(root);
+    });
+    all_receiver_audit.findings.push(...scanModule(source, file, { modules }));
+  }
   return { files: modules.size, lexical_totals, lexical_files, dom_scopes,
-    receiver_audit: { event_kinds, findings, bypass_probes, probes_modify_committed_source: false } };
+    receiver_audit: { event_kinds, findings, bypass_probes, probes_modify_committed_source: false }, all_receiver_audit };
 }
 
 export function measureStructure({ after = 'HEAD' } = {}) {
@@ -130,7 +148,9 @@ export function measureStructure({ after = 'HEAD' } = {}) {
       dom_operation_sites: 'DOM property writes and method spellings recognized by the existing guard; inventories may include non-DOM objects with the same spelling.',
       guard: 'scripts/check-pull-render.mjs:scanModule', guard_sha256: hash('./check-pull-render.mjs'),
       tool_sha256: hash('./measure-pull-render-structure.mjs'), acorn_version: acornVersion,
-      guard_limitations: 'Scoped syntax guard, not whole-program/type analysis. Follows local named helpers and one-hop named factory return aliases; known data API spellings are trusted. Other unresolved calls remain findings. Model notifications enter subscribed renderers by design; zero findings means no bypass found within this scope.',
+      receiver_roots: rootPattern.source,
+      root_inventory: 'All modules; named functions and variable-bound function expressions use the guard naming convention (an explicit function name takes precedence). Switch literal labels and if statements include nested callbacks, may overlap across roots, and are syntax inventories, not unique event counts or proof of reachability.',
+      guard_limitations: 'Scoped syntax guard, not whole-program/type analysis. Follows local named helpers and up to two hops of named imports/factory return aliases; known data API spellings are trusted. Other unresolved calls remain findings. Model notifications enter subscribed renderers by design; zero findings means no bypass found within the named-root scope. WebSocket entrypoint routing must also be inspected.',
       xterm: 'new Terminal/terminal.open entry sites are listed separately; vendor renderer internals are outside the original top-level scope.',
       receiver_history: 'pm_conversation was replaced by durable pm_reports; the common audit includes both spellings and the two RAW events. Before findings may be unresolved calls, not direct DOM-write findings.',
     },
