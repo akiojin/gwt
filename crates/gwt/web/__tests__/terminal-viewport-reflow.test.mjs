@@ -278,6 +278,12 @@ test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8
     "後続ライブ",
     "post-snapshot live output must decode through a fresh streaming decoder",
   );
+
+  const partial = decodeTerminalSnapshotBoundary(Uint8Array.of(
+    ...new TextEncoder().encode("snapshot: "), 0xf0, 0x9f, 0xa6,
+  ));
+  assert.equal(partial.snapshotText, "snapshot: ", "a snapshot must retain its own incomplete UTF-8 prefix");
+  assert.equal(partial.nextLiveDecoder.decode(Uint8Array.of(0x80), { stream: true }), "🦀");
 });
 
 test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {

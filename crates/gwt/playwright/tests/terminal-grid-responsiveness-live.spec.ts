@@ -188,6 +188,51 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
     });
   });
 
+  test("snapshot preserves split UTF-8 output through the live terminal pipeline", async ({ page }, info) => {
+    await withLiveGwtBackendLock(base!, info, async () => {
+      const errors: string[] = [];
+      const created: string[] = [];
+      const theme = info.project.name.includes("light") ? "light" : "dark";
+      page.on("pageerror", error => errors.push(error.message));
+      page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+      await gotoLiveGwt(page, base!, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      try {
+        const id = await createShell(page, created);
+        const bufferText = () => page.evaluate(id => window.__gwtTerminalTestApi.bufferText(id), id);
+        const emit = (kind: string, bytes: number[]) => page.evaluate(({ id, kind, bytes }) => {
+          const socket = [...((window as any).__gwtPlaywrightSockets as WebSocket[])].reverse()
+            .find(candidate => candidate.readyState === WebSocket.OPEN
+              && new URL(candidate.url).pathname === "/ws"
+              && new URL(candidate.url).searchParams.has("repo_hash"));
+          if (!socket) throw new Error("no live project socket");
+          socket.dispatchEvent(new MessageEvent("message", {
+            data: JSON.stringify({ kind, id, data_base64: btoa(String.fromCharCode(...bytes)) }),
+          }));
+        }, { id, kind, bytes });
+        // Controlled inbound packets exercise the real decoder, snapshot barrier
+        // and xterm buffer. This is not a natural PTY throughput measurement.
+        await emit("terminal_output", [...Buffer.from("\r\nold stream: "), 0xe3]);
+        await expect.poll(bufferText).toContain("old stream: ");
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hsnapshot: "), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, ...Buffer.from(" complete\r\n")]);
+        await expect.poll(bufferText).toContain("snapshot: 🦀 complete");
+        expect(await bufferText()).not.toContain("\uFFFD");
+        expect(await bufferText()).not.toContain("old stream:");
+        const screenshot = info.outputPath(`utf8-snapshot-${theme}.png`);
+        await page.locator(`.workspace-window[data-id="${id}"]`).screenshot({ path: screenshot });
+        await info.attach("UTF-8 snapshot continuation", { path: screenshot, contentType: "image/png" });
+      } finally {
+        await page.locator('.op-rail__surface[data-surface="works"]').click();
+        for (const id of created.reverse()) {
+          await sendLiveGwtEvent(page, { kind: "close_window", id });
+          await expect(page.locator(`.workspace-window[data-id="${id}"]`)).toHaveCount(0);
+        }
+      }
+      expect(errors, "console and page errors").toEqual([]);
+    });
+  });
+
   test("grid queue wait p95 stays within 500ms under rendering and frontend traffic", async ({ page }, info) => {
     await withLiveGwtBackendLock(base!, info, async () => {
       const errors: string[] = [];
