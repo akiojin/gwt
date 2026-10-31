@@ -137,10 +137,21 @@ pub fn launch_config_from_persisted_session(
     }
 
     let mut config = builder.build();
-    if let Some(member_id) = session.agent_member_id.as_ref() {
+    // Retained records keep their original bytes. A proven migration alias
+    // also identifies Sessions that predate the member-ID field.
+    let member_id = crate::agent_names::registered_session_member_id(session)
+        .map_err(|error| {
+            tracing::warn!(session_id = %session.id, %error,
+                "restored Agent identity could not be resolved")
+        })
+        .ok()
+        .flatten()
+        // Keep an unresolved recorded ID so reservation fails closed.
+        .or_else(|| session.agent_member_id.clone());
+    if let Some(member_id) = member_id {
         config
             .env_vars
-            .insert("GWT_AGENT_MEMBER_ID".into(), member_id.clone());
+            .insert("GWT_AGENT_MEMBER_ID".into(), member_id);
     }
     if !session.display_name.is_empty() {
         config.display_name = session.display_name.clone();

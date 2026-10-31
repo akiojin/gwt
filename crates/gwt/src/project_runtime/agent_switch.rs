@@ -672,6 +672,9 @@ fn drive_switch(
                     .and_then(|member| member.assignment.as_ref())
                     .is_some_and(|assignment| {
                         assignment.issue_number == Some(intent.request.target_issue_number)
+                            && assignment.project_key.as_deref().is_none_or(|key| {
+                                prefs.agent_registry_project_key.as_deref() == Some(key)
+                            })
                             && assignment.session_id.is_some()
                             && assignment.session_id != intent.source.assignment.session_id
                     })
@@ -705,6 +708,117 @@ fn drive_switch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launching_next_requires_the_new_assignment_to_belong_to_this_project() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path().join("home"));
+        let a_root = temp.path().join("project-a");
+        let b_root = temp.path().join("project-b");
+        std::fs::create_dir_all(&a_root).unwrap();
+        std::fs::create_dir_all(&b_root).unwrap();
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let roster = gwt::agent_names::read_project_roster(&a_root, &sessions).unwrap();
+        gwt::agent_names::read_project_roster(&b_root, &sessions).unwrap();
+        let member_id = roster.members[0].agent_member_id.clone();
+        let a_key = gwt_core::paths::project_scope_hash(&a_root).to_string();
+        let b_key = gwt_core::paths::project_scope_hash(&b_root).to_string();
+        let a_path = gwt::issue_monitor_prefs_path_for_repo_path(&a_root);
+        let b_path = gwt::issue_monitor_prefs_path_for_repo_path(&b_root);
+        let operation = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let host = gwt::process::current_hostname();
+        let assignment = serde_json::from_value(serde_json::json!({
+            "reservation_id":"next-reservation", "session_id":"new-session",
+            "project_key":b_key, "issue_number":42, "spec_number":null,
+            "delivery_id":"next-delivery", "host_id":host,
+            "host_pid":std::process::id(), "host_started_at":1
+        }))
+        .unwrap();
+        gwt::try_mutate_issue_monitor_prefs(&b_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(assignment);
+            Ok(())
+        })
+        .unwrap();
+        let intent: AgentSwitchIntent = serde_json::from_value(serde_json::json!({
+            "request":{"operation_id":operation,"member_id":member_id,
+                "expected_roster_revision":roster.revision,"target_issue_number":42},
+            "source":{"assignment":{"reservation_id":"old-reservation",
+                "session_id":"old-session", "project_key":a_key, "issue_number":41,
+                "spec_number":null,"delivery_id":"old-delivery","host_id":host,
+                "host_pid":std::process::id(),"host_started_at":1},
+                "window_id":"old-window","claim_id":"old-claim",
+                "confirmation":{"window_id":"old-window","claim_id":"old-claim",
+                    "delivery_id":"old-delivery","confirmed_at":"2026-10-31T00:00:00Z"}},
+            "stage":"launching_next", "runtime_exit_confirmed":true,
+            "checkpoint":{"verified_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "work_id":"saved-work","board_entry_id":"handoff"}
+        }))
+        .unwrap();
+        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs
+                .agent_switch_intents
+                .insert(operation.into(), intent.clone());
+            prefs.launch_confirmations.insert(
+                42,
+                serde_json::from_value(serde_json::json!({
+                    "window_id":"next-window","claim_id":"next-claim",
+                    "delivery_id":"next-delivery","confirmed_at":"2026-10-31T00:00:00Z"
+                }))
+                .unwrap(),
+            );
+            prefs.launch_bindings.insert("next-window".into(), 42);
+            prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
+                issue_number: 42,
+                window_id: "next-window".into(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let foreign = gwt::load_issue_monitor_prefs(&a_path)
+            .unwrap()
+            .agent_roster
+            .unwrap()
+            .members[0]
+            .assignment
+            .clone();
+        let writers = Arc::new(RwLock::new(HashMap::new()));
+        drive_switch(&a_root, &sessions, &intent, &[], &writers, |_| {
+            panic!("LaunchingNext does not retire a runtime")
+        })
+        .unwrap();
+        let pending = gwt::load_issue_monitor_prefs(&a_path).unwrap();
+        assert_eq!(
+            pending.agent_switch_intents[operation].stage,
+            AgentSwitchStage::LaunchingNext,
+            "a same-number assignment in project B cannot complete project A's switch"
+        );
+        assert_eq!(pending.agent_roster.unwrap().members[0].assignment, foreign);
+        // Change only the assignment's project. Its same Session/number and
+        // project A's already-confirmed launch now legitimately complete it.
+        gwt::try_mutate_issue_monitor_prefs(&a_path, |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0]
+                .assignment
+                .as_mut()
+                .unwrap()
+                .project_key = Some(a_key.clone());
+            Ok(())
+        })
+        .unwrap();
+        drive_switch(&a_root, &sessions, &intent, &[], &writers, |_| {
+            panic!("LaunchingNext does not retire a runtime")
+        })
+        .unwrap();
+        assert_eq!(
+            gwt::load_issue_monitor_prefs(&a_path)
+                .unwrap()
+                .agent_switch_intents[operation]
+                .stage,
+            AgentSwitchStage::Completed
+        );
+    }
 
     #[test]
     fn an_exact_live_host_is_not_an_abandoned_switch_request() {

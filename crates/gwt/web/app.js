@@ -1785,13 +1785,14 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           UI_TRACE_EVENT.renderAppState,
           { tabs: Array.isArray(nextState?.tabs) ? nextState.tabs.length : 0 },
           () => {
-            if (nextState?.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
-            appState = mergeProjectCatalog(nextState || {
+            const nextAppState = mergeProjectCatalog(nextState || {
               app_version: "",
               tabs: [],
               active_tab_id: null,
               recent_projects: [],
             });
+            if (appState.active_tab_id !== null && nextAppState.active_tab_id !== appState.active_tab_id) splitSurfaces?.close();
+            appState = nextAppState;
             // Rebind before rendering can emit requests for the new project.
             connectSocket();
             if (incomingRuntimeStatus) {
@@ -5702,8 +5703,9 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
       windowCatalogModel.subscribe(model => model.catalog, catalog => {
         const tabId = catalog.appState.active_tab_id;
         if (tabId !== initialSurfaceTabId) {
+          // Preserve a rail choice made before the first project is hydrated.
+          if (initialSurfaceTabId !== null) initialSurfaceSelected = false;
           initialSurfaceTabId = tabId;
-          initialSurfaceSelected = false;
         }
         const pending = windowCatalogModel.read().pendingSurface;
         if (pending && pending.tabId === catalog.appState.active_tab_id) {

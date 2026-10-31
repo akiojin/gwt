@@ -7727,6 +7727,7 @@ pub(super) fn seed_owner_fixture_roster(project: &Path, capacity: usize) {
             origin_session_id: None,
             last_issue_number: None,
             last_spec_number: None,
+            last_owner_project_key: None,
             assignment: None,
         })
         .collect(),

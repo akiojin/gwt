@@ -548,7 +548,10 @@ pub(crate) fn prepare_owner_saved_session_restore(
                 crate::issue_monitor_worker::cached_agent_member_spec_owner(root, number)
             }),
             None,
-            restore.source.agent_member_id.as_deref(),
+            config
+                .env_vars
+                .get("GWT_AGENT_MEMBER_ID")
+                .map(String::as_str),
             restore.source.agent_id.command(),
             None,
         )?;
