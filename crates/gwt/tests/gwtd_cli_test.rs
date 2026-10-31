@@ -49,6 +49,294 @@ fn isolated_gwtd_command() -> std::process::Command {
 }
 
 #[test]
+fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
+    use gwt_core::test_support::ScopedGwtHome;
+    use std::time::{Duration, Instant};
+    let home = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    let _home = ScopedGwtHome::set(home.path());
+    init_gwt_origin_repo(repo.path());
+    gwt::issue_monitor::save_issue_monitor_prefs(
+        &gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
+        &gwt::issue_monitor::IssueMonitorPrefs {
+            autonomous_mode: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let marker = home.path().join("forbidden-gh-call");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = bin.join("gh");
+        fs::write(
+            &fake,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(fake, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    fs::write(
+        bin.join("gh.cmd"),
+        format!(
+            "@echo off\r\necho called > \"{}\"\r\nexit /b 1\r\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let path = env::join_paths(
+        std::iter::once(bin).chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+    )
+    .unwrap();
+    let secret = "unknown-autofeedback-confidential-phrase";
+    let mut input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{
+        "title":secret,"kind":"bug","operation":"workspace.update","refusal":secret,
+        "reproduction":secret,"workaround":secret,"body":secret,"labels":[secret],"error_record_id":secret,
+    }});
+    let upstream_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(home.path().join(".gwt/feedback-upstream.lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&upstream_lock).unwrap();
+    let mut command = isolated_gwtd_command();
+    command
+        .current_dir(repo.path())
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .env("PATH", path)
+        .env("GWT_TEST_GH_SANDBOX", "1")
+        .env("GWT_OWNER_GITHUB_TOKEN", "untrusted-override")
+        .env("GH_TOKEN", "dummy-never-sent")
+        .env_remove("GITHUB_TOKEN")
+        .env("HTTPS_PROXY", "http://127.0.0.1:1")
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
+        .env("ALL_PROXY", "http://127.0.0.1:1")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    fn intake(
+        command: &mut std::process::Command,
+        input: &serde_json::Value,
+        secret: &str,
+        expected_state: &str,
+    ) -> (serde_json::Value, u32) {
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.to_string().as_bytes())
+            .unwrap();
+        // test-hygiene: allow-wall-clock-deadline Bound a real child process while upstream admission stays locked.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while child.try_wait().unwrap().is_none() {
+            // test-hygiene: allow-wall-clock-deadline Detect a hung native intake; this is not a latency verdict.
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("intake waited on the sender's held upstream lock");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let result = child.wait_with_output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&result.stdout).contains(secret));
+        assert!(!String::from_utf8_lossy(&result.stderr).contains(secret));
+        let envelope: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_str(envelope["output"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            receipt["state"], expected_state,
+            "source returns its safe intake decision without waiting for a worker"
+        );
+        (receipt, pid)
+    }
+    let (receipt, _source_pid) = intake(&mut command, &input, secret, "queued");
+    let receipt_path = Path::new(receipt["receipt"].as_str().unwrap());
+    assert!(receipt_path.starts_with(home.path()));
+    // test-hygiene: allow-wall-clock-deadline Bound observation of the actual detached worker, not simulated app time.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let pids = native_feedback_worker_pids(repo.path());
+        #[cfg(windows)]
+        assert_no_native_feedback_worker_windows(&pids);
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        if stored["state"] == "sending" && !pids.is_empty() {
+            #[cfg(unix)]
+            for pid in pids {
+                let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+                assert_eq!(group, pid as libc::pid_t, "worker must lead its own group");
+                assert_ne!(group, _source_pid as libc::pid_t);
+            }
+            break;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bound real worker startup while its upstream lock is deliberately held.
+            Instant::now() < deadline,
+            "detached worker did not settle: {stored}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The actual worker is alive while intake has returned. Revoke policy
+    // before releasing admission: no HTTP request or consent fallback follows.
+    gwt::issue_monitor::save_issue_monitor_prefs(
+        &gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
+        &gwt::issue_monitor::IssueMonitorPrefs::default(),
+    )
+    .unwrap();
+    drop(upstream_lock);
+    loop {
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        if stored["state"] == "withheld" {
+            assert_eq!(stored["error"], "policy_revoked");
+            break;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bound actual worker settlement after policy revocation and lock release.
+            Instant::now() < deadline,
+            "worker did not withhold revoked snapshot: {stored}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    gwt::issue_monitor::save_issue_monitor_prefs(
+        &gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
+        &gwt::issue_monitor::IssueMonitorPrefs {
+            autonomous_mode: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    command.env_remove("GH_TOKEN");
+    input["params"]["operation"] = serde_json::json!("verify.run");
+    let (no_auth, _) = intake(&mut command, &input, secret, "queued");
+    // test-hygiene: allow-wall-clock-deadline Bound the real worker's missing-auth result without any credential interaction.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(no_auth["receipt"].as_str().unwrap()).unwrap())
+                .unwrap();
+        if stored["state"] == "failed" {
+            assert_eq!(stored["error"], "auth_unavailable");
+            break;
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bound observation of the actual child's safe terminal receipt.
+            Instant::now() < deadline,
+            "worker did not record missing auth: {stored}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    fs::write(
+        gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
+        "{unreadable native prefs",
+    )
+    .unwrap();
+    input["params"]["operation"] = serde_json::json!("hook.health");
+    let (unavailable, _) = intake(&mut command, &input, secret, "withheld");
+    assert_eq!(unavailable["error"], "policy_unavailable");
+    let mut malformed = command.spawn().unwrap();
+    malformed
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{{\"operation\":\"feedback.create\",\"{secret}\"").as_bytes())
+        .unwrap();
+    let malformed = malformed.wait_with_output().unwrap();
+    assert!(!malformed.status.success());
+    assert!(!String::from_utf8_lossy(&malformed.stderr).contains(secret));
+    assert!(
+        !marker.exists(),
+        "Auto attempted a UI-capable gh/auth process"
+    );
+    fn inspect(dir: &Path, secret: &[u8]) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                inspect(&path, secret);
+            } else {
+                assert!(
+                    !fs::read(path)
+                        .unwrap()
+                        .windows(secret.len())
+                        .any(|bytes| bytes == secret),
+                    "raw input reached a durable sink"
+                );
+            }
+        }
+    }
+    inspect(&home.path().join(".gwt"), secret.as_bytes());
+}
+
+fn native_feedback_worker_pids(repo: &Path) -> BTreeSet<u32> {
+    let executable = fs::canonicalize(env!("CARGO_BIN_EXE_gwtd")).unwrap();
+    let repo = fs::canonicalize(repo).unwrap();
+    sysinfo::System::new_all()
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            (process
+                .exe()
+                .is_some_and(|path| fs::canonicalize(path).is_ok_and(|path| path == executable))
+                && process
+                    .cwd()
+                    .is_some_and(|path| fs::canonicalize(path).is_ok_and(|path| path == repo)))
+            .then_some(pid.as_u32())
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn assert_no_native_feedback_worker_windows(pids: &BTreeSet<u32>) {
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumWindows(callback: unsafe extern "system" fn(Hwnd, isize) -> i32, data: isize)
+            -> i32;
+        fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+    }
+    unsafe extern "system" fn observe(hwnd: Hwnd, data: isize) -> i32 {
+        let (pids, seen) = unsafe { &mut *(data as *mut (&BTreeSet<u32>, bool)) };
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pids.contains(&pid) {
+            *seen = true;
+        }
+        1
+    }
+    let mut observation = (pids, false);
+    assert_ne!(
+        unsafe { EnumWindows(observe, &mut observation as *mut _ as isize) },
+        0,
+        "native window enumeration failed"
+    );
+    assert!(
+        !observation.1,
+        "native window appeared in an actual feedback worker"
+    );
+}
+
+#[test]
 fn pr_help_exposes_ready_without_draft_creation_or_transition() {
     let output = isolated_gwtd_command()
         .args(["--help", "pr"])

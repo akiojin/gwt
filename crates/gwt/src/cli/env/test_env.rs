@@ -42,6 +42,7 @@ pub struct TestEnv {
     pub files: HashMap<String, String>,
     pub target_issue_create_call_log: Vec<TargetIssueCreateCall>,
     pub feedback_worker_ids: Vec<String>,
+    pub feedback_worker_error: Option<String>,
     pub linked_prs: HashMap<u64, Vec<LinkedPrSummary>>,
     pub linked_pr_errors: HashMap<u64, String>,
     pub linked_pr_call_log: Vec<u64>,
@@ -113,6 +114,7 @@ impl TestEnv {
             files: HashMap::new(),
             target_issue_create_call_log: Vec::new(),
             feedback_worker_ids: Vec::new(),
+            feedback_worker_error: None,
             linked_prs: HashMap::new(),
             linked_pr_errors: HashMap::new(),
             linked_pr_call_log: Vec::new(),
@@ -252,7 +254,24 @@ impl CliEnv for TestEnv {
     }
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         self.feedback_worker_ids.push(id.to_string());
+        if let Some(error) = &self.feedback_worker_error {
+            return Err(io::Error::other(error.clone()));
+        }
         Ok(())
+    }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        super::super::feedback::send_auto_to_upstream_with_deadline(
+            &self.client,
+            snapshot,
+            &self.repo_path,
+            &gwt_github::client::ResolutionDeadline::new(
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_secs(120),
+            ),
+        )
     }
     fn stdout(&mut self) -> &mut dyn io::Write {
         &mut self.stdout

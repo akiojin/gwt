@@ -794,6 +794,76 @@ fn nightly_determinism_failures_have_an_explicit_notification_target() {
     );
 }
 
+#[test]
+fn nightly_auto_feedback_auth_probe_is_read_only_and_token_scoped() {
+    let workflow: serde_yaml::Value = serde_yaml::from_str(&read(NIGHTLY_WORKFLOW)).unwrap();
+    let job = &workflow["jobs"]["test-windows-default-parallel"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let build_at = steps
+        .iter()
+        .position(|s| s["id"] == "auto_feedback_auth_probe_build")
+        .expect("token-free probe build must exist");
+    let probe_at = steps
+        .iter()
+        .position(|s| s["id"] == "auto_feedback_auth_probe")
+        .expect("dedicated read-only probe must exist");
+    let loop_at = steps
+        .iter()
+        .position(|s| s["name"] == "Prove default-parallel Rust suites are stable")
+        .unwrap();
+    assert!(build_at < probe_at && probe_at < loop_at);
+    let build = &steps[build_at];
+    let probe = &steps[probe_at];
+    for step in [build, probe] {
+        let condition = step["if"].as_str().unwrap();
+        assert!(condition.contains("github.event_name == 'schedule'"));
+        assert!(condition.contains("github.repository == 'akiojin/gwt'"));
+        assert_eq!(step["continue-on-error"].as_bool(), Some(true));
+    }
+    assert!(probe["if"]
+        .as_str()
+        .unwrap()
+        .contains("steps.auto_feedback_auth_probe_build.outcome == 'success'"));
+    assert_eq!(
+        build["run"].as_str(),
+        Some("cargo build -p gwt-github --example auto_feedback_auth_probe")
+    );
+    assert_eq!(build["timeout-minutes"].as_u64(), Some(15));
+    assert_eq!(probe["timeout-minutes"].as_u64(), Some(2));
+    for scope in [&workflow, job] {
+        assert!(scope["env"]["GH_TOKEN"].is_null());
+        assert!(scope["env"]["GITHUB_TOKEN"].is_null());
+    }
+    for (index, step) in steps
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != probe_at)
+    {
+        assert!(
+            step["env"]["GH_TOKEN"].is_null(),
+            "step {index} inherits the probe token"
+        );
+        assert!(
+            step["env"]["GITHUB_TOKEN"].is_null(),
+            "step {index} inherits the probe token"
+        );
+    }
+    assert_eq!(probe["env"].as_mapping().unwrap().len(), 1);
+    assert_eq!(
+        probe["env"]["GH_TOKEN"].as_str(),
+        Some("${{ github.token }}")
+    );
+    let run = probe["run"].as_str().unwrap();
+    assert!(run.contains(r".\target\debug\examples\auto_feedback_auth_probe.exe"));
+    assert!(
+        run.contains("2>$null") && run.contains("$LASTEXITCODE") && run.contains("-ceq 'true'")
+    );
+    assert!(
+        run.contains("$env:HOME = $probeHome") && run.contains("$env:USERPROFILE = $probeHome")
+    );
+    assert!(!run.contains("cargo ") && !run.contains("GITHUB_ENV"));
+}
+
 /// Issue #4134 AC-2: four matrix shards each paid a 279s cold build to run
 /// 137s of tests. The installed-only job still builds once, runs both
 /// providers, and attributes a failure to its provider.
