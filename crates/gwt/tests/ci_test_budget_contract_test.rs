@@ -539,17 +539,18 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         let exact_run = exact["run"].as_str().unwrap();
         assert!(exact_run.contains("\"$@\" | tee \"$RUNNER_TEMP/t453-exact.log\""));
         assert!(exact_run.contains("grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;'"));
+        let expected_exact_cases = if lib { 7 } else { 8 };
         assert_eq!(
             exact_run
                 .matches("exact node scripts/ci-windows-tests.mjs")
                 .count(),
-            7
+            expected_exact_cases
         );
         assert_eq!(
             exact_run
                 .matches(" -- --exact --test-threads=1 --nocapture")
                 .count(),
-            7
+            expected_exact_cases
         );
         if lib {
             let fleet = steps
@@ -722,8 +723,9 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
         "gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture",
         "gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture",
+        "gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture",
     ];
-    assert_eq!(expected_filters.len(), 66);
+    assert_eq!(expected_filters.len(), 67);
     expected_filters.sort_unstable();
     actual_filters.sort_unstable();
     assert_eq!(actual_filters, expected_filters);

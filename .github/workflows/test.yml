@@ -697,6 +697,7 @@ jobs:
           exact node scripts/ci-windows-tests.mjs run-runtime gwt test hook_contracts hook_health_test::managed_hook_health_understands_all_provider_runtime_indirect_fallbacks -- --exact --test-threads=1 --nocapture
           exact node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts discussion_cli_test::discussion_update_creates_single_canonical_discussions_file -- --exact --test-threads=1 --nocapture
           exact node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts memory_cli_test::memory_add_writes_to_machine_local_work_notes -- --exact --test-threads=1 --nocapture
+          exact node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts gwtd_cli_test::auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks -- --exact --test-threads=1 --nocapture
         timeout-minutes: 15
       - name: Run cross-process FIFO reservation contention regression
         run: node scripts/ci-windows-tests.mjs run-runtime gwt test cli_contracts verification_lease_cli_test::deferred_fifo_survives_status_read_contention_and_new_processes -- --exact --nocapture

@@ -175,16 +175,24 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
     // test-hygiene: allow-wall-clock-deadline Bound observation of the actual detached worker, not simulated app time.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
         let pids = native_feedback_worker_pids(repo.path());
         #[cfg(windows)]
         assert_no_native_feedback_worker_windows(&pids);
-        let stored: serde_json::Value =
-            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
         if stored["state"] == "sending" && !pids.is_empty() {
+            assert_eq!(
+                pids.len(),
+                1,
+                "expected one worker process after source {_source_pid}: {pids:?}"
+            );
             #[cfg(unix)]
             for pid in pids {
                 let group = unsafe { libc::getpgid(pid as libc::pid_t) };
-                assert_eq!(group, pid as libc::pid_t, "worker must lead its own group");
+                assert_eq!(
+                    group, pid as libc::pid_t,
+                    "worker {pid} must lead its own group (source {_source_pid})"
+                );
                 assert_ne!(group, _source_pid as libc::pid_t);
             }
             break;
@@ -290,7 +298,17 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
 fn native_feedback_worker_pids(repo: &Path) -> BTreeSet<u32> {
     let executable = fs::canonicalize(env!("CARGO_BIN_EXE_gwtd")).unwrap();
     let repo = fs::canonicalize(repo).unwrap();
-    sysinfo::System::new_all()
+    // Linux task/thread IDs share executable and cwd with the process but
+    // cannot lead its process group. Observe actual processes only.
+    let system = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing().with_processes(
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_exe(sysinfo::UpdateKind::Always)
+                .with_cwd(sysinfo::UpdateKind::Always)
+                .without_tasks(),
+        ),
+    );
+    system
         .processes()
         .iter()
         .filter_map(|(pid, process)| {
