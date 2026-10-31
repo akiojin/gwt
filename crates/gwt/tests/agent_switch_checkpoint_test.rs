@@ -128,6 +128,53 @@ fn switch_cwd_observation_counts_the_provider_in_a_worktree_subdirectory() {
         !reused.complete,
         "a changed source identity never proves clear"
     );
+    let parent_pid = std::process::id();
+    let parent_started_at = gwt::process::host_process_start_time(parent_pid).unwrap();
+    let with_child = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+        temp.path(),
+        parent_pid,
+        parent_started_at,
+    );
+    assert!(
+        with_child.matching_pids.contains(&child.0.id()),
+        "a live child/helper process is not one of the source's own threads"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn switch_checkpoint_cwd_exempts_only_the_exact_sources_live_threads() {
+    let directory = std::env::current_dir().unwrap();
+    let pid = std::process::id();
+    let started_at = gwt::process::host_process_start_time(pid).unwrap();
+    std::thread::scope(|scope| {
+        let (ready, observed) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || {
+            // SAFETY: gettid only reads the calling thread's kernel identity.
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
+            ready.send(tid).unwrap();
+            let _ = released.recv();
+        });
+        let tid = observed.recv().unwrap();
+        let strict = gwt::issue_monitor::observe_agent_switch_cwd(&directory);
+        assert!(strict.matching_pids.contains(&tid));
+        let checkpoint =
+            gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(&directory, pid, started_at);
+        assert!(
+            !checkpoint.matching_pids.contains(&tid),
+            "the exact source's own thread must not self-block checkpoint delivery"
+        );
+        assert!(!checkpoint.unknown_pids.contains(&tid));
+        let reused = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+            &directory,
+            pid,
+            started_at + 1,
+        );
+        assert!(reused.matching_pids.contains(&tid));
+        assert!(!reused.complete);
+        drop(release);
+    });
 }
 
 #[test]
