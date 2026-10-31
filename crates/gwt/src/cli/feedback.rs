@@ -1055,10 +1055,59 @@ mod tests {
                 .expect("original loopback I/O deadline expired")
         }
 
+        struct FailureContext<'a> {
+            store: &'a FeedbackStore,
+            id: &'a str,
+            comment: bool,
+            outcome: &'a str,
+        }
+
+        impl FailureContext<'_> {
+            fn receipt_labels(&self) -> (&'static str, &'static str, &'static str) {
+                // Read only this fixture's receipt once. Failure must not
+                // replace the original missing-HTTP assertion or expose I/O.
+                let Ok(record) = self.store.read_auto(self.id) else {
+                    return ("unknown", "unknown", "unknown");
+                };
+                let state = match record.state {
+                    FeedbackState::PendingApproval => "pending_approval",
+                    FeedbackState::Queued => "queued",
+                    FeedbackState::Sending => "sending",
+                    FeedbackState::Sent => "sent",
+                    FeedbackState::Declined => "declined",
+                    FeedbackState::Failed => "failed",
+                    FeedbackState::Uncertain => "uncertain",
+                    FeedbackState::Withheld => "withheld",
+                };
+                let reason = match record.error {
+                    None => "none",
+                    Some(AutoReason::InsufficientInformation) => "insufficient_information",
+                    Some(AutoReason::PolicyUnavailable) => "policy_unavailable",
+                    Some(AutoReason::PolicyRevoked) => "policy_revoked",
+                    Some(AutoReason::WorkerUnavailable) => "worker_unavailable",
+                    Some(AutoReason::AuthUnavailable) => "auth_unavailable",
+                    Some(AutoReason::PreSubmitFailed) => "pre_submit_failed",
+                    Some(AutoReason::RemoteOutcomeUnknown) => "remote_outcome_unknown",
+                    Some(AutoReason::SenderInterrupted) => "sender_interrupted",
+                };
+                let phase = match record.owned.and_then(|owned| owned.attempt) {
+                    None => "none",
+                    Some(attempt) => match attempt.phase {
+                        OwnedAutoPhase::PreDispatch => "pre_dispatch",
+                        OwnedAutoPhase::CancelAccepted => "cancel_accepted",
+                        OwnedAutoPhase::DispatchCommitted => "dispatch_committed",
+                    },
+                };
+                (state, reason, phase)
+            }
+        }
+
         fn receive(
             listener: &TcpListener,
             child: &mut Child,
             stage_path: &Path,
+            case: &FailureContext<'_>,
+            expected: &str,
         ) -> (TcpStream, String, serde_json::Value, Instant) {
             // test-hygiene: allow-wall-clock-deadline Bound real loopback accept/header/body I/O with one original guard.
             let end = Instant::now() + Duration::from_secs(30);
@@ -1070,7 +1119,22 @@ mod tests {
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                         if let Some(status) = child.try_wait().unwrap() {
-                            panic!("test child exited before expected HTTP; success={} code={:?} native_u32={:?} stage={:?}", status.success(), status.code(), status.code().map(|value| value as u32), read_stage(stage_path));
+                            let (state, reason, phase) = case.receipt_labels();
+                            let target = if case.comment { "Comment" } else { "Issue" };
+                            let outcome = match case.outcome {
+                                "crash" => "crash",
+                                "cancel" => "cancel",
+                                "success" => "success",
+                                _ => "unknown",
+                            };
+                            let expected = match expected {
+                                "discovery" => "discovery",
+                                "comments" => "comments",
+                                "mutation" => "mutation",
+                                "readback" => "readback",
+                                _ => "unknown",
+                            };
+                            panic!("test child exited before expected HTTP; case={target}/{outcome} expected={expected} receipt_state={state} auto_reason={reason} owned_phase={phase} success={} code={:?} native_u32={:?} stage={:?}", status.success(), status.code(), status.code().map(|value| value as u32), read_stage(stage_path));
                         }
                         // test-hygiene: allow-wall-clock-deadline Detect missing real HTTP without extending the socket guard.
                         assert!(Instant::now() < end, "expected loopback request was absent");
@@ -1176,6 +1240,12 @@ mod tests {
                     let attempt = uuid::Uuid::new_v4();
                     let owner = store.try_owner_lock(&id).unwrap();
                     store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+                    let failure_context = FailureContext {
+                        store: &store,
+                        id: &id,
+                        comment,
+                        outcome,
+                    };
                     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
                     listener.set_nonblocking(true).unwrap();
                     let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
@@ -1212,8 +1282,13 @@ mod tests {
                     .unwrap();
                     assert!(input.len() <= 4096);
                     child.0.stdin.take().unwrap().write_all(&input).unwrap();
-                    let (mut read_socket, line, query, mut read_end) =
-                        receive(&listener, &mut child.0, &stage_path);
+                    let (mut read_socket, line, query, mut read_end) = receive(
+                        &listener,
+                        &mut child.0,
+                        &stage_path,
+                        &failure_context,
+                        "discovery",
+                    );
                     assert!(
                         line == "POST /graphql HTTP/1.1",
                         "unexpected discovery request line"
@@ -1227,8 +1302,13 @@ mod tests {
                     let listing = serde_json::json!({"data":{"repository":{"issues":connection(if comment {serde_json::json!([issue(&record.snapshot,false)])} else {serde_json::json!([])})}}});
                     let last_read = if comment {
                         respond(read_socket, 200, listing.clone(), read_end);
-                        let (socket, line, query, end) =
-                            receive(&listener, &mut child.0, &stage_path);
+                        let (socket, line, query, end) = receive(
+                            &listener,
+                            &mut child.0,
+                            &stage_path,
+                            &failure_context,
+                            "comments",
+                        );
                         assert!(
                             line == "POST /graphql HTTP/1.1",
                             "unexpected discovery request line"
@@ -1268,8 +1348,13 @@ mod tests {
                             OwnedAutoPhase::CancelAccepted
                         );
                     } else {
-                        let (socket, line, body, end) =
-                            receive(&listener, &mut child.0, &stage_path);
+                        let (socket, line, body, end) = receive(
+                            &listener,
+                            &mut child.0,
+                            &stage_path,
+                            &failure_context,
+                            "mutation",
+                        );
                         assert!(
                             line == if comment {
                                 "POST /repos/akiojin/gwt/issues/42/comments HTTP/1.1"
@@ -1333,8 +1418,13 @@ mod tests {
                                 },
                                 end,
                             );
-                            let (socket, line, query, end) =
-                                receive(&listener, &mut child.0, &stage_path);
+                            let (socket, line, query, end) = receive(
+                                &listener,
+                                &mut child.0,
+                                &stage_path,
+                                &failure_context,
+                                "readback",
+                            );
                             assert!(
                                 line == "POST /graphql HTTP/1.1",
                                 "unexpected readback request line"
