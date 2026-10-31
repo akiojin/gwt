@@ -115,8 +115,8 @@ struct Arena {
 
 impl Arena {
     fn new() -> Self {
-        // FIFO fixtures exercise admission order independently of host disk pressure.
         let home = tempfile::tempdir().expect("home tempdir");
+        // FIFO admission must not depend on the host's production disk policy.
         std::fs::create_dir_all(home.path().join(".gwt")).unwrap();
         std::fs::write(
             gwt_config::Settings::global_config_path_for_home(home.path()),
@@ -395,6 +395,74 @@ fn assert_heavy_lock_released(coordinator: &gwt_core::index_coordinator::IndexCo
     }
 }
 
+fn fixture_reservation_arrival(
+    coordinator: &gwt_core::index_coordinator::IndexCoordinator,
+    key: &gwt_core::index_coordinator::TargetKey,
+) -> (u64, u64) {
+    let entry: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(coordinator.heavy_reservation_path(key)).unwrap())
+            .unwrap();
+    (
+        entry["queued_at_ms"].as_u64().unwrap(),
+        entry["queue_seq"].as_u64().unwrap(),
+    )
+}
+
+fn refresh_fixture_reservation(
+    coordinator: &gwt_core::index_coordinator::IndexCoordinator,
+    key: &gwt_core::index_coordinator::TargetKey,
+    ttl: Duration,
+    reservation: &mut gwt_core::index_coordinator::HeavyReservation,
+    arrival: (u64, u64),
+) {
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    assert!(
+        now < reservation.expires_at_ms,
+        "a fixture waiter must still be alive before renewal"
+    );
+    assert_eq!(fixture_reservation_arrival(coordinator, key), arrival);
+    *reservation = coordinator
+        .reserve_heavy(
+            key,
+            gwt_core::index_coordinator::JobPriority::ManualRebuild,
+            ttl,
+            Some("later same-priority fixture"),
+        )
+        .unwrap();
+    assert_eq!(fixture_reservation_arrival(coordinator, key), arrival);
+}
+
+#[test]
+fn expired_fixture_waiter_is_not_recreated() {
+    use gwt_core::index_coordinator::{JobPriority, TargetKey};
+
+    let arena = Arena::new();
+    let coordinator = index_coordinator(arena.home.path());
+    let key = TargetKey::verification("private-fixture", "expired");
+    let mut reservation = coordinator
+        .reserve_heavy(&key, JobPriority::ManualRebuild, Duration::ZERO, None)
+        .unwrap();
+    let arrival = fixture_reservation_arrival(&coordinator, &key);
+    let path = coordinator.heavy_reservation_path(&key);
+    let before = std::fs::read(&path).unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        refresh_fixture_reservation(
+            &coordinator,
+            &key,
+            Duration::from_secs(66),
+            &mut reservation,
+            arrival,
+        );
+    }));
+    assert!(
+        result.is_err(),
+        "an expired waiter must fail before renewal"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(coordinator.heavy_lease_status().unwrap().pending, 0);
+    assert!(!path.exists());
+}
+
 /// Issue #4969: cross-process admission must preserve the same arrival during
 /// polling, after a Windows status-probe lock, and across deferred resubmission.
 fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
@@ -458,14 +526,26 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
     );
     assert_eq!(early.target.as_deref(), Some(key.file_stem().as_str()));
     let later = TargetKey::verification(project.as_str(), "later");
-    coordinator
+    let later_ttl = Duration::from_secs(max_wait_secs + 60);
+    let mut later_reservation = coordinator
         .reserve_heavy(
             &later,
             JobPriority::ManualRebuild,
-            Duration::from_secs(max_wait_secs + 60),
+            later_ttl,
             Some("later same-priority fixture"),
         )
         .unwrap();
+    let later_arrival = fixture_reservation_arrival(&coordinator, &later);
+    // The later caller stays alive between CLI round trips without rejoining.
+    let mut refresh_later = || {
+        refresh_fixture_reservation(
+            &coordinator,
+            &later,
+            later_ttl,
+            &mut later_reservation,
+            later_arrival,
+        );
+    };
 
     #[cfg(windows)]
     {
@@ -490,6 +570,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
         assert_eq!(queue[0].queued_at_ms, early.queued_at_ms, "{queue:?}");
     }
 
+    refresh_later();
     let started = Instant::now();
     let mut waiting = WaitingRun(Some(spawn_gwtd(
         arena.home.path(),
@@ -524,6 +605,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
     assert!(started.elapsed() >= Duration::from_secs(max_wait_secs));
     assert!(deferred.contains("next_turn_reserved: yes"), "{deferred}");
     assert!(deferred.contains("queue_position: 1"), "{deferred}");
+    refresh_later();
     let status = arena.run(STATUS);
     assert_eq!(field(&status, "lease_id"), lease.id());
     assert_eq!(field(&status, "holder_intervention"), "forbidden");
@@ -563,6 +645,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
             "max_wait_secs": 0
         }
     }).to_string();
+    refresh_later();
     let (ok, mixed) = gwtd(arena.home.path(), arena.worktree.path(), &mixed_request);
     assert!(ok && mixed.contains("next_turn_reserved: yes"), "{mixed}");
     let record: serde_json::Value = serde_json::from_slice(
@@ -582,6 +665,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
     assert_eq!(queue[0].queued_at_ms, early.queued_at_ms);
 
     // Another process is materialized after the first one has returned.
+    refresh_later();
     let (ok, resubmitted) = gwtd(arena.home.path(), arena.worktree.path(), &request(0));
     assert!(ok && resubmitted.contains("deferred"), "{resubmitted}");
     assert!(
@@ -596,6 +680,7 @@ fn assert_deferred_fifo_across_processes(max_wait_secs: u64) {
 
     // Only the owning fixture releases the holder. The early target takes the
     // free host while the later reservation remains queued behind it.
+    refresh_later();
     lease.release().unwrap();
     guard.complete(JobOutcome::Completed).unwrap();
     assert_heavy_lock_released(&coordinator);
