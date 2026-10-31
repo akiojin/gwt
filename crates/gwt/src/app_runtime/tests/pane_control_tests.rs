@@ -1,87 +1,635 @@
 use super::*;
+use std::collections::BTreeSet;
 
-#[test]
-fn dropping_window_runtime_reclaims_worker_owned_pty_without_the_pane_lock() {
-    let _lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    super::super::pty_io::initialize_process_window_close_finalizer().unwrap();
-    let temp = tempdir().unwrap();
-    let (command, args) = if cfg!(windows) {
-        ("cmd", vec!["/d", "/s", "/c", "exit /b 0"])
-    } else {
-        ("/bin/cat", vec![])
-    };
-    // No frontend answers ConPTY's startup query: even this exit command
-    // remains alive until its owning runtime explicitly tears it down.
-    let pane = Arc::new(Mutex::new(
-        Pane::new(
-            "drop-runtime".into(),
-            command.into(),
-            args.into_iter().map(str::to_owned).collect(),
-            80,
-            24,
-            HashMap::new(),
-            Some(temp.path().to_owned()),
-        )
-        .unwrap(),
-    ));
-    let pty = pane.lock().unwrap().shared_pty();
-    let _cleanup = TestPaneGuard {
-        pty: pty.clone(),
-        reader: None,
-    };
-    let (exit_tx, exit_rx) = mpsc::channel();
-    let output_tx = exit_tx.clone();
-    let mut runtime = WindowRuntime::new(1, pane.clone());
-    runtime.output_thread = Some(gwt::pane_runtime::spawn_output_thread(
-        "drop-runtime".into(),
-        1,
-        pane.clone(),
-        move |event| {
-            if matches!(event, gwt::pane_runtime::PaneRuntimeEvent::Status { .. }) {
-                let _ = output_tx.send("output");
+pub(super) fn control_custom_agent() -> gwt_agent::CustomCodingAgent {
+    gwt_agent::CustomCodingAgent {
+        id: "pane-contract-fixture".into(),
+        display_name: "Pane contract fixture".into(),
+        agent_type: gwt_agent::custom::CustomAgentType::Command,
+        command: if cfg!(windows) {
+            "powershell"
+        } else {
+            "/bin/sh"
+        }
+        .into(),
+        default_args: if cfg!(windows) {
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "while ($null -ne [Console]::ReadLine()) {}".into(),
+            ]
+        } else {
+            vec![
+                "-c".into(),
+                "stty -echo -icanon -isig; exec cat >/dev/null".into(),
+            ]
+        },
+        mode_args: Some(gwt_agent::custom::ModeArgs {
+            normal: Vec::new(),
+            continue_mode: Vec::new(),
+            resume: Vec::new(),
+        }),
+        skip_permissions_args: Vec::new(),
+        env: HashMap::new(),
+        supports_resume_picker: false,
+    }
+}
+
+pub(super) fn control_launch_config(project: &Path, issue: u64) -> gwt_agent::LaunchConfig {
+    let base = git_stdout(project, &["branch", "--show-current"]);
+    let scope = gwt_core::paths::project_scope_hash(project);
+    let worktree = project
+        .parent()
+        .unwrap()
+        .join("pane-worktrees")
+        .join(scope.to_string())
+        .join(issue.to_string());
+    let branch = format!("work/pane-fixture-{issue}");
+    if !worktree.exists() {
+        fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                &branch,
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+    }
+    let custom = control_custom_agent();
+    let mut config =
+        gwt_agent::AgentLaunchBuilder::new(gwt_agent::AgentId::Custom(custom.id.clone()))
+            .custom_agent(custom)
+            .working_dir(&worktree)
+            .branch(branch)
+            .base_branch(base)
+            .build();
+    // Retain the builder's ordinary permission decision. The production owner
+    // alone creates the producing Session, execution and transport capability.
+    config.linked_issue_number = Some(issue);
+    config.explicit_follow_up = true;
+    config
+}
+
+pub(super) fn control_owner_launch(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    raw_id: &str,
+    config: gwt_agent::LaunchConfig,
+) -> gwt::project_runtime::test_support::OwnerRuntimeProbe {
+    use gwt::project_runtime::events::OwnerCommand;
+    configure_owner_fixture_start_gate(owner);
+    let expects_producing =
+        config.linked_issue_number.is_some() && !config.suppress_execution_control;
+    let id = owner.pane_id(raw_id);
+    let launched = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
+        id: id.clone(),
+        operation_id: format!("pane-fixture-{}", uuid::Uuid::new_v4()),
+        tab_id: id.split_once("::").unwrap().0.into(),
+        config: Box::new(config),
+        metadata: Box::default(),
+        cols: 80,
+        rows: 24,
+    }))
+    .unwrap();
+    let probe = owner_fixture_block_on(owner.probe(&id, launched["incarnation"].as_u64().unwrap()))
+        .unwrap();
+    assert_eq!(probe.session.as_ref().unwrap().id, launched["session_id"]);
+    assert_eq!(
+        probe.session.as_ref().unwrap().execution_binding.is_some(),
+        expects_producing
+    );
+    assert!(
+        probe.grant.is_some(),
+        "the production owner must issue the request capability"
+    );
+    probe
+}
+
+pub(super) fn control_init_repo(project: &Path) {
+    fs::create_dir_all(project).unwrap();
+    if !project.join(".git").exists() {
+        init_repo(project);
+    }
+    if !gwt_core::process::hidden_command("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(project)
+        .output()
+        .unwrap()
+        .status
+        .success()
+    {
+        run_git(
+            project,
+            &[
+                "-c",
+                "user.name=Pane fixture",
+                "-c",
+                "user.email=pane@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "pane fixture",
+            ],
+        );
+    }
+}
+
+pub(super) fn control_seed_foreign_roster(project: &Path) {
+    control_init_repo(project);
+    seed_owner_fixture_roster(project, 8);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(project),
+        |prefs| {
+            for (member, name) in prefs
+                .agent_roster
+                .as_mut()
+                .unwrap()
+                .members
+                .iter_mut()
+                .zip([
+                    "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
+                ])
+            {
+                member.agent_member_id = format!("member-{name}");
+                member.name = name.into();
             }
         },
-    ));
-    runtime.status_thread = Some(gwt::pane_runtime::spawn_status_thread(
-        "drop-runtime".into(),
-        1,
-        pane.clone(),
-        move |_| {
-            let _ = exit_tx.send("status");
-        },
-    ));
-    let pane_lock = pane.lock().unwrap();
-    let (dropped_tx, dropped_rx) = mpsc::channel();
-    let dropper = thread::spawn(move || {
-        drop(runtime);
-        let _ = dropped_tx.send(());
-    });
-    // test-hygiene: allow-wall-clock-deadline Bound a regressed pane mutex wait; the channel establishes Drop completion.
-    let dropped_without_pane_lock = dropped_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-    drop(pane_lock);
-    dropper.join().unwrap();
-    assert!(
-        dropped_without_pane_lock,
-        "runtime Drop must dispatch cleanup without taking the pane lock"
+    )
+    .unwrap();
+}
+
+pub(super) fn control_owner_agent(
+    project: &Path,
+    raw_id: &str,
+    issue: u64,
+) -> (
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    control_init_repo(project);
+    if gwt::load_issue_monitor_prefs(&gwt::issue_monitor_prefs_path_for_repo_path(project))
+        .unwrap()
+        .agent_roster
+        .is_none()
+    {
+        seed_owner_fixture_roster(project, 8);
+    }
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start(project),
+        )
+        .unwrap(),
     );
-    let mut exited = [
-        exit_rx
-            // test-hygiene: allow-wall-clock-deadline Bound actual OS child exit; this event establishes completion.
-            .recv_timeout(Duration::from_secs(5))
-            .expect("runtime Drop must stop its owned child"),
-        exit_rx
-            // test-hygiene: allow-wall-clock-deadline Bound actual PTY reader exit; this event establishes completion.
-            .recv_timeout(Duration::from_secs(5))
-            .expect("runtime Drop must release its PTY reader"),
+    let probe = control_owner_launch(&owner, raw_id, control_launch_config(project, issue));
+    (owner, probe)
+}
+
+struct ControlSessionMutation {
+    original: Option<gwt_agent::Session>,
+    sessions: PathBuf,
+}
+impl ControlSessionMutation {
+    fn new(pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe) -> Self {
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let original = gwt_agent::Session::load(
+            &sessions.join(format!("{}.toml", pane.session.as_ref().unwrap().id)),
+        )
+        .unwrap();
+        Self {
+            original: Some(original),
+            sessions,
+        }
+    }
+    fn restore(mut self) {
+        self.original.take().unwrap().save(&self.sessions).unwrap();
+    }
+}
+impl Drop for ControlSessionMutation {
+    fn drop(&mut self) {
+        if let Some(original) = self.original.take() {
+            // Undo only this fixture's deliberate hostile Session mutation
+            // before its actual owner drains, including an assertion failure.
+            let _ = original.save(&self.sessions);
+        }
+    }
+}
+
+pub(super) fn control_request(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    request: AgentFrontendRequest,
+) -> gwt::project_runtime::test_support::OwnerAgentReply {
+    let client = owner_fixture_block_on(
+        owner.agent_client(&format!("pane-client-{}", uuid::Uuid::new_v4())),
+    )
+    .unwrap();
+    owner_fixture_block_on(client.request(caller.grant.as_ref().unwrap().clone(), request)).unwrap()
+}
+
+fn control_request_settled(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    request: AgentFrontendRequest,
+) -> gwt::project_runtime::test_support::OwnerAgentReply {
+    let client = owner_fixture_block_on(
+        owner.agent_client(&format!("completed-client-{}", uuid::Uuid::new_v4())),
+    )
+    .unwrap();
+    let mut reply =
+        owner_fixture_block_on(client.request(caller.grant.as_ref().unwrap().clone(), request))
+            .unwrap();
+    control_settled_self_closes(owner);
+    let final_reply = client.drain().unwrap();
+    reply.events.extend(final_reply.events);
+    reply.close = final_reply.close.or(reply.close);
+    reply
+}
+
+pub(super) fn control_close(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
+        }),
+    )
+    .unwrap();
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ControlRetainedSession {
+    id: String,
+    session: gwt_agent::Session,
+    child_pid: u32,
+    child_started_at: u64,
+    owner_pid: u32,
+}
+
+pub(super) fn run_retained_owner_fixture() {
+    let Some(root) = std::env::var_os("GWT_TEST_RETAINED_ROOT") else {
+        return;
+    };
+    let home = std::env::var_os("GWT_TEST_RETAINED_HOME").unwrap();
+    let _home = ScopedGwtHome::set(PathBuf::from(home));
+    let project = PathBuf::from(root);
+    let raw = std::env::var("GWT_TEST_RETAINED_RAW").unwrap();
+    let (owner, bootstrap) = control_owner_agent(&project, "bootstrap", 900);
+    let mut config = control_launch_config(&project, 901);
+    config.linked_issue_number = None;
+    config.explicit_follow_up = false;
+    let target = control_owner_launch(&owner, &raw, config);
+    let child_pid = target.pty.process_id().unwrap();
+    let child_started_at = gwt::process::host_process_start_time(child_pid).unwrap();
+    owner_fixture_block_on(
+        Arc::try_unwrap(owner)
+            .ok()
+            .expect("fixture owns the only harness")
+            .shutdown(),
+    );
+    assert!(bootstrap.pty.try_wait().unwrap().is_some());
+    assert!(target.pty.try_wait().unwrap().is_some());
+    let saved = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", target.session.as_ref().unwrap().id)),
+    )
+    .unwrap();
+    assert_eq!(saved.status, gwt_agent::AgentStatus::Stopped);
+    assert!(saved.restore_window_on_startup);
+    let bootstrap_saved = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", bootstrap.session.as_ref().unwrap().id)),
+    )
+    .unwrap();
+    let retained_members = [
+        bootstrap_saved.agent_member_id.as_deref(),
+        saved.agent_member_id.as_deref(),
     ];
-    exited.sort_unstable();
-    assert_eq!(exited, ["output", "status"]);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
+        |prefs| {
+            for member in &mut prefs.agent_roster.as_mut().unwrap().members {
+                if retained_members.contains(&Some(member.agent_member_id.as_str())) {
+                    member.enabled = false;
+                }
+            }
+            prefs.max_active_agents = prefs.agent_roster.as_ref().unwrap().enabled_count();
+        },
+    )
+    .unwrap();
+    fs::write(
+        project.join("retained-owner-receipt.json"),
+        serde_json::to_vec(&ControlRetainedSession {
+            id: target.id,
+            session: saved,
+            child_pid,
+            child_started_at,
+            owner_pid: std::process::id(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn control_retained_husk(project: &Path, raw: &str) -> ControlRetainedSession {
+    control_init_repo(project);
+    let home = gwt_core::test_support::gwt_home_override().expect("isolated fixture HOME");
+    let child = gwt_core::process::hidden_command(std::env::current_exe().unwrap())
+        .args([
+            "app_runtime::tests::owner_retained_husk_helper",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("GWT_TEST_RETAINED_ROOT", project)
+        .env("GWT_TEST_RETAINED_HOME", &home)
+        .env("GWT_TEST_RETAINED_RAW", raw)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .spawn()
+        .unwrap();
+    let old_host = child.id();
+    let status = child.wait_with_output().unwrap().status;
+    assert!(status.success(), "actual previous owner fixture failed");
     assert!(
-        pty.try_wait().unwrap().is_some(),
-        "owned child must be reaped before verification ends"
+        !gwt::process::is_host_process_alive(old_host),
+        "the prior Host process must have actually exited"
     );
+    let receipt: ControlRetainedSession =
+        serde_json::from_slice(&fs::read(project.join("retained-owner-receipt.json")).unwrap())
+            .unwrap();
+    assert!(!gwt::process::exact_pty_process_tree_is_alive(
+        receipt.child_pid,
+        receipt.child_started_at
+    ));
+    let canonical = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", receipt.session.id)),
+    )
+    .unwrap();
+    assert_eq!(canonical.id, receipt.session.id);
+    assert_eq!(canonical.status, gwt_agent::AgentStatus::Stopped);
+    assert!(canonical.restore_window_on_startup);
+    receipt
+}
+
+pub(super) fn control_register_pm(
+    project: &Path,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    let session = pane.session.as_ref().unwrap();
+    let mut registration = pm_registration_fixture(&session.id, &session.worktree_path);
+    registration.agent_id = session.agent_id.command().to_string();
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(project),
+        registration,
+        |_| false,
+    )
+    .unwrap();
+}
+
+fn control_fleet_request(
+    target: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) -> AgentFrontendRequest {
+    AgentFrontendRequest::CloseFleetPane {
+        request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+        id: target.id.clone(),
+        session_id: target.session.as_ref().unwrap().id.clone(),
+        child_pid: target.pty.process_id(),
+        child_started_at: target
+            .pty
+            .process_id()
+            .and_then(gwt::process::host_process_start_time),
+    }
+}
+
+fn assert_fleet_refused(
+    reply: &gwt::project_runtime::test_support::OwnerAgentReply,
+    expected: &str,
+) {
+    assert_eq!(reply.close, None);
+    assert!(
+        reply
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result"
+                && event["ok"] == false
+                && event["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains(expected))),
+        "{:?}",
+        reply.events
+    );
+}
+
+fn control_projection(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    project: &Path,
+) -> gwt::project_runtime::agent_dispatch::PaneProjection {
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    let rows: gwt::PersistedWindowRegistry =
+        serde_json::from_value(inventory["canonical_rows"].clone()).unwrap();
+    let raw = pane.id.split_once("::").unwrap().1;
+    let mut window = rows
+        .windows
+        .into_iter()
+        .find(|window| window.id == raw)
+        .unwrap();
+    window.id = pane.id.clone();
+    gwt::project_runtime::agent_dispatch::PaneProjection {
+        project_root: project.to_path_buf(),
+        tab_id: pane.id.split_once("::").unwrap().0.into(),
+        window,
+        active: None,
+    }
+}
+
+pub(super) fn control_accept_self_close(
+    owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
+    pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) -> (
+    crate::embedded_server::AgentSelfCloseDirectAcceptance,
+    gwt::project_runtime::test_support::OwnerAgentReply,
+) {
+    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
+    let reply = control_request(
+        owner,
+        pane,
+        AgentFrontendRequest::CloseWindow {
+            id: pane.id.clone(),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            responder: Some(responder),
+        },
+    );
+    (
+        acceptance
+            .try_recv()
+            .expect("canonical dispatch completed")
+            .expect("real owner accepts correlated self-close"),
+        reply,
+    )
+}
+
+fn control_settled_self_closes(owner: &gwt::project_runtime::test_support::ProjectOwnerHarness) {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline bound the real actor/finalizer ACK wait after the origin releases its exact acceptance ticket
+        tokio::time::timeout(
+            gwt_core::deadline_budget::HANG_GUARD,
+            owner.settled_self_closes(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    });
+}
+
+fn control_close_series(project: &Path, count: u64) {
+    let (owner, caller) = control_owner_agent(project, "caller", 42);
+    let targets = (0..count)
+        .map(|index| {
+            control_owner_launch(
+                &owner,
+                &format!("target-{index}"),
+                control_launch_config(project, 100 + index),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut releases = Vec::new();
+    let mut holders = Vec::new();
+    for target in &targets {
+        let pane = target.pane.clone();
+        let (held_tx, held_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        holders.push(thread::spawn(move || {
+            let _guard = pane.lock().unwrap();
+            held_tx.send(()).unwrap();
+            gwt_core::test_support::recv_event(
+                &release_rx,
+                "all real close/list requests finished before parser release",
+            );
+        }));
+        held_rx.recv().unwrap();
+        releases.push(release_tx);
+    }
+    owner_fixture_block_on(async {
+        let (mut socket, _) = connect_async(caller.agent_pane_request().unwrap())
+            .await
+            .unwrap();
+        socket
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+            .await
+            .unwrap();
+        let _ = next_test_agent_websocket_event(
+            &mut socket,
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        for target in &targets {
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({"kind":"close_window","id":target.id})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
+        socket
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+            .await
+            .unwrap();
+        let listed = next_test_agent_websocket_event(
+            &mut socket,
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        assert!(listed["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == caller.id));
+        assert!(
+            targets
+                .iter()
+                .all(|target| target.pty.try_wait().unwrap().is_none()),
+            "close/list must answer before any held target finalizer can reap"
+        );
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        let mut completed = BTreeSet::new();
+        for _ in 0..count {
+            let closed = next_test_agent_websocket_event(
+                &mut socket,
+                "pane_close_result",
+                gwt_core::deadline_budget::HANG_GUARD,
+            )
+            .await;
+            assert_eq!(closed["ok"], true);
+            assert!(
+                completed.insert(closed["window_id"].as_str().unwrap().to_owned()),
+                "each actual close must acknowledge once"
+            );
+        }
+        assert_eq!(
+            completed,
+            targets.iter().map(|target| target.id.clone()).collect()
+        );
+        socket
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+            .await
+            .unwrap();
+        let final_list = next_test_agent_websocket_event(
+            &mut socket,
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        assert!(final_list["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| !completed.contains(row["id"].as_str().unwrap())));
+        socket.close(None).await.unwrap();
+    });
+    for holder in holders {
+        holder.join().unwrap();
+    }
+    for target in &targets {
+        assert!(target.pty.try_wait().unwrap().is_some());
+        let source = gwt_agent::Session::load(
+            &gwt_core::paths::gwt_sessions_dir()
+                .join(format!("{}.toml", target.session.as_ref().unwrap().id)),
+        )
+        .unwrap();
+        assert_eq!(source.status, gwt_agent::AgentStatus::Stopped);
+        assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_err());
+    }
+    control_close(&owner, &caller);
+}
+
+fn control_tracing_events(
+    caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    run: impl FnOnce(),
+) -> Vec<CapturedTracingEvent> {
+    capture_tracing_events(|| {
+        let trace = tracing::dispatcher::get_default(Clone::clone);
+        let _trace = gwt::project_runtime::agent_frontend::capture_owner_agent_trace(
+            caller.grant.as_ref().unwrap(),
+            gwt::project_runtime::agent_frontend::OwnerAgentTraceRequest::Ready,
+            trace,
+        );
+        run();
+    })
 }
 
 fn issue_3713_read_board(project: &Path, session: &str) {
@@ -96,103 +644,74 @@ fn issue_3713_read_board(project: &Path, session: &str) {
 
 #[test]
 fn issue_3713_agent_self_close_keeps_capability_until_recent_owner_evidence_is_read() {
-    let _lock = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, _, issuer, grant, window_id) = self_close_runtime(temp.path());
     let project = temp.path().join("project");
-    let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
-    gwt::save_issue_monitor_prefs(
-        &prefs_path,
-        &gwt::IssueMonitorPrefs {
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
-                issue_number: 42,
-                window_id: window_id.clone(),
-            }],
-            ..Default::default()
-        },
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let session = pane.session.as_ref().unwrap();
+    gwt::board_provider::post_entry(
+        &project,
+        gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Reviewer",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Keep Issue 42 evidence until the ruling",
+            None,
+            None,
+            vec![],
+            vec!["42".into()],
+        )
+        .with_origin_session_id("reviewer-session"),
     )
     .unwrap();
-    let evidence = gwt_core::coordination::BoardEntry::new(
-        gwt_core::coordination::AuthorKind::Agent,
-        "Reviewer",
-        gwt_core::coordination::BoardEntryKind::Handoff,
-        "Keep Issue 42 evidence until the ruling",
-        None,
-        None,
-        vec![],
-        vec!["42".into()],
-    )
-    .with_origin_session_id("reviewer-session");
-    gwt::board_provider::post_entry(&project, evidence).unwrap();
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-    runtime.handle_agent_frontend_event_if_current(
-        "self-client".into(),
-        grant.clone(),
+    let refused = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("a728413a-8bde-4b13-81c2-2a216a484cdc".into()),
+            id: pane.id.clone(),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
             responder: Some(responder),
         },
     );
-    assert!(
-        runtime.pending_agent_self_closes.is_empty(),
-        "unread owner evidence must refuse before accepting a self-close ticket"
-    );
-    assert!(
-        issuer.grant_is_current(&grant),
-        "a refused close must preserve the caller capability for recovery"
-    );
-    assert!(runtime.window_lookup.contains_key(&window_id));
-    let refused = match acceptance.try_recv().expect("direct refusal") {
-        Err(refusal) => refusal,
-        Ok(_) => panic!("unread evidence must not be accepted"),
-    };
-    assert!(refused.reason.contains("board.show"));
-    assert_eq!(refused.window_id, window_id);
-    issue_3713_read_board(&project, "session-project");
+    assert_eq!(refused.close, None);
+    let refusal = acceptance.try_recv().unwrap().unwrap_err();
+    assert!(refusal.reason.contains("board.show"));
+    assert_eq!(refusal.window_id, pane.id);
+    assert!(pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    issue_3713_read_board(&project, &session.id);
     gwt::board_provider::post_entry(
         &project,
         gwt_core::coordination::BoardEntry::new(
             gwt_core::coordination::AuthorKind::Agent,
             "Self",
             gwt_core::coordination::BoardEntryKind::Status,
-            "My own completion does not require rereading",
+            "Own completion does not require rereading",
             None,
             None,
             vec![],
             vec!["42".into()],
         )
-        .with_origin_session_id("session-project"),
+        .with_origin_session_id(session.id.clone()),
     )
     .unwrap();
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-    runtime.handle_agent_frontend_event_if_current(
-        "self-client".into(),
-        grant.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("70f95447-1746-4b6a-8e4f-1a7b98674bb8".into()),
-            responder: Some(responder),
-        },
-    );
-    let accepted = acceptance
-        .try_recv()
-        .expect("direct response")
-        .expect("explicit read enables retry");
-    assert!(!issuer.grant_is_current(&grant));
+    let (accepted, _) = control_accept_self_close(&owner, &pane);
+    assert!(!pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
     drop(accepted);
+    control_settled_self_closes(&owner);
 }
 
 #[test]
 fn issue_3713_human_canvas_close_is_not_subject_to_agent_read_receipts() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, _, _, _, window_id) = self_close_runtime(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
     gwt::board_provider::post_entry(
-        &temp.path().join("project"),
+        &project,
         gwt_core::coordination::BoardEntry::new(
             gwt_core::coordination::AuthorKind::Agent,
             "Owner",
@@ -203,209 +722,162 @@ fn issue_3713_human_canvas_close_is_not_subject_to_agent_read_receipts() {
             vec![],
             vec![],
         )
-        .with_origin_session_id("session-project"),
+        .with_origin_session_id(pane.session.as_ref().unwrap().id.clone()),
     )
     .unwrap();
-    assert!(runtime.close_window_outcome(&window_id).closed);
+    control_close(&owner, &pane);
+    assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
 #[test]
 fn issue_3713_agent_peer_close_requires_reading_recent_target_session_evidence() {
-    let _lock = env_test_lock()
+    let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "peer",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    tab.workspace
-        .set_session_id("peer", Some("peer-session".into()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    let entry = gwt_core::coordination::BoardEntry::new(
-        gwt_core::coordination::AuthorKind::Agent,
-        "Peer",
-        gwt_core::coordination::BoardEntryKind::Handoff,
-        "Keep this pane for the ruling",
-        None,
-        None,
-        vec![],
-        vec![],
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let peer = control_owner_launch(&owner, "peer", control_launch_config(&project, 43));
+    gwt::board_provider::post_entry(
+        &project,
+        gwt_core::coordination::BoardEntry::new(
+            gwt_core::coordination::AuthorKind::Agent,
+            "Peer",
+            gwt_core::coordination::BoardEntryKind::Handoff,
+            "Keep this pane for the ruling",
+            None,
+            None,
+            vec![],
+            vec![],
+        )
+        .with_origin_session_id(peer.session.as_ref().unwrap().id.clone()),
     )
-    .with_origin_session_id("peer-session");
-    gwt::board_provider::post_entry(&project, entry).unwrap();
-    let principal = AgentSessionPrincipal::for_test(&project, "caller-session").unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "client".into(),
-        principal.clone(),
+    .unwrap();
+    let close = || AgentFrontendRequest::CloseWindow {
+        id: peer.id.clone(),
+        request_id: None,
+        responder: None,
+    };
+    let refused = control_request(&owner, &pane, close());
+    assert!(refused
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result"
+            && event["ok"] == false
+            && event["reason"].as_str().unwrap().contains("board.show")));
+    assert!(owner_fixture_block_on(owner.probe(&peer.id, peer.incarnation)).is_ok());
+    issue_3713_read_board(&project, "different-session");
+    let refused = control_request(&owner, &pane, close());
+    assert!(refused
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == false));
+    issue_3713_read_board(&project, &pane.session.as_ref().unwrap().id);
+    let accepted = control_request_settled(&owner, &pane, close());
+    assert!(accepted
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == true));
+    assert!(owner_fixture_block_on(owner.probe(&peer.id, peer.incarnation)).is_err());
+    control_close(&owner, &pane);
+}
+
+#[test]
+fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let foreign_project = temp.path().join("foreign");
+    control_seed_foreign_roster(&foreign_project);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "agent", 43);
+    let own_projection = control_projection(&owner, &pane, &project);
+    let mut foreign_projection = control_projection(&foreign_owner, &foreign, &foreign_project);
+    // An adversarial read projection may repeat a Session id from another
+    // project. It never installs that identity into either physical owner.
+    foreign_projection.window.session_id = own_projection.window.session_id.clone();
+    let selected = gwt::project_runtime::agent_dispatch::principal_session_window(
+        &[foreign_projection, own_projection],
+        pane.grant.as_ref().unwrap().principal(),
+    )
+    .unwrap();
+    assert_eq!(selected, pane.id);
+    let reply = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::SendInput {
+            text: "scoped-draft".into(),
+        },
+    );
+    assert_eq!(reply.close, None);
+    assert!(reply
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_send_result"
+            && event["ok"] == true
+            && event["window_id"] == pane.id));
+    assert!(pane.pane.lock().unwrap().has_unsent_user_input());
+    assert!(!foreign.pane.lock().unwrap().has_unsent_user_input());
+    control_close(&owner, &pane);
+    control_close(&foreign_owner, &foreign);
+}
+
+#[test]
+fn agent_pane_close_rejects_window_from_foreign_project() {
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let foreign_project = temp.path().join("foreign");
+    control_seed_foreign_roster(&foreign_project);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "foreign", 44);
+    let peer = control_owner_launch(&owner, "peer", control_launch_config(&project, 43));
+    let denied = control_request_settled(
+        &owner,
+        &pane,
         AgentFrontendRequest::CloseWindow {
-            id: "tab::peer".into(),
+            id: foreign.id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    );
+    assert_eq!(denied.close, None);
+    assert!(
+        denied
+            .events
+            .iter()
+            .any(|event| event["kind"] == "pane_close_result"
+                && event["ok"] == false
+                && event["window_id"] == foreign.id
+                && event["reason"].is_string()),
+        "foreign close must answer explicitly: {:?}",
+        denied.events
+    );
+    assert!(owner_fixture_block_on(foreign_owner.probe(&foreign.id, foreign.incarnation)).is_ok());
+    let accepted = control_request_settled(
+        &owner,
+        &pane,
+        AgentFrontendRequest::CloseWindow {
+            id: peer.id.clone(),
             request_id: None,
             responder: None,
         },
     );
     assert!(
-        matches!(events.first(), Some(OutboundEvent {
-        event: BackendEvent::PaneCloseResult { ok: false, reason: Some(reason), .. }, ..
-    }) if reason.contains("board.show")),
-        "must preserve unread target evidence: {events:?}"
+        accepted
+            .events
+            .iter()
+            .any(|event| event["kind"] == "pane_close_result"
+                && event["ok"] == true
+                && event["window_id"] == peer.id),
+        "completed exact close must reply to its requesting client: {:?}",
+        accepted.events
     );
-    assert!(runtime.window_lookup.contains_key("tab::peer"));
-    issue_3713_read_board(&project, "different-session");
-    assert!(runtime
-        .agent_close_board_check(&principal, "tab::peer")
-        .is_some());
-    issue_3713_read_board(&project, "caller-session");
-    let events = runtime.handle_agent_frontend_event(
-        "client".into(),
-        principal,
-        AgentFrontendRequest::CloseWindow {
-            id: "tab::peer".into(),
-            request_id: None,
-            responder: None,
-        },
-    );
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-    assert!(!runtime.window_lookup.contains_key("tab::peer"));
-}
-
-#[test]
-fn agent_pane_input_with_equal_session_ids_targets_authenticated_project_only() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let foreign_project = temp.path().join("foreign-project");
-    let authenticated_project = temp.path().join("authenticated-project");
-    fs::create_dir_all(&foreign_project).expect("foreign project");
-    fs::create_dir_all(&authenticated_project).expect("authenticated project");
-
-    let mut foreign_tab = sample_project_tab_with_window_at(
-        "tab-foreign",
-        "agent-foreign",
-        foreign_project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(foreign_tab
-        .workspace
-        .set_session_id("agent-foreign", Some("shared-session".to_string())));
-    let mut authenticated_tab = sample_project_tab_with_window_at(
-        "tab-authenticated",
-        "agent-authenticated",
-        authenticated_project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(authenticated_tab
-        .workspace
-        .set_session_id("agent-authenticated", Some("shared-session".to_string())));
-    // Keep the foreign tab first so a process-global session lookup would
-    // deterministically select the wrong pane.
-    let (mut runtime, _) = sample_runtime_with_events(
-        temp.path(),
-        vec![foreign_tab, authenticated_tab],
-        Some("tab-foreign"),
-    );
-    let principal = AgentSessionPrincipal::for_test(&authenticated_project, "shared-session")
-        .expect("authenticated principal");
-
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::SendInput {
-            text: "status\r".to_string(),
-        },
-    );
-
-    assert!(matches!(
-        events.as_slice(),
-        [OutboundEvent {
-            target: DispatchTarget::Client(client_id),
-            event: BackendEvent::PaneSendResult {
-                ok: false,
-                window_id: Some(window_id),
-                error: Some(error),
-            },
-            ..
-        }] if client_id == "pane-client"
-            && window_id == "tab-authenticated::agent-authenticated"
-            && error.contains("no live runtime")
-    ));
-}
-
-#[test]
-fn agent_pane_close_rejects_window_from_foreign_project() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let foreign_project = temp.path().join("foreign-project");
-    let authenticated_project = temp.path().join("authenticated-project");
-    fs::create_dir_all(&foreign_project).expect("foreign project");
-    fs::create_dir_all(&authenticated_project).expect("authenticated project");
-    let foreign_tab = sample_project_tab_with_window_at(
-        "tab-foreign",
-        "agent-foreign",
-        foreign_project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let authenticated_tab = sample_project_tab_with_window_at(
-        "tab-authenticated",
-        "agent-authenticated",
-        authenticated_project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _) = sample_runtime_with_events(
-        temp.path(),
-        vec![foreign_tab, authenticated_tab],
-        Some("tab-authenticated"),
-    );
-    let principal =
-        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
-            .expect("authenticated principal");
-
-    let denied = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-foreign::agent-foreign".to_string(),
-            request_id: None,
-            responder: None,
-        },
-    );
-
-    // Issue #3629 AC-12: the refusal answers explicitly instead of silence;
-    // the foreign window itself must survive untouched.
-    assert!(denied.iter().all(|outbound| matches!(
-        outbound.event,
-        BackendEvent::PaneCloseResult { ok: false, .. }
-    )));
-    assert!(runtime
-        .window_lookup
-        .contains_key("tab-foreign::agent-foreign"));
-
-    let _accepted = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-authenticated::agent-authenticated".to_string(),
-            request_id: None,
-            responder: None,
-        },
-    );
-    assert!(!runtime
-        .window_lookup
-        .contains_key("tab-authenticated::agent-authenticated"));
-    assert!(runtime
-        .window_lookup
-        .contains_key("tab-foreign::agent-foreign"));
+    assert!(owner_fixture_block_on(owner.probe(&peer.id, peer.incarnation)).is_err());
+    assert!(owner_fixture_block_on(foreign_owner.probe(&foreign.id, foreign.incarnation)).is_ok());
+    control_close(&owner, &pane);
+    control_close(&foreign_owner, &foreign);
 }
 
 /// Issue #3629 AC-10/AC-12: every agent-route close outcome must answer the
@@ -413,90 +885,36 @@ fn agent_pane_close_rejects_window_from_foreign_project() {
 /// silent empty event list that made `pane.close` undiagnosable.
 #[test]
 fn agent_pane_close_replies_with_pane_close_result() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let foreign_project = temp.path().join("foreign-project");
-    let authenticated_project = temp.path().join("authenticated-project");
-    fs::create_dir_all(&foreign_project).expect("foreign project");
-    fs::create_dir_all(&authenticated_project).expect("authenticated project");
-    let foreign_tab = sample_project_tab_with_window_at(
-        "tab-foreign",
-        "agent-foreign",
-        foreign_project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let authenticated_tab = sample_project_tab_with_window_at(
-        "tab-authenticated",
-        "agent-authenticated",
-        authenticated_project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _) = sample_runtime_with_events(
-        temp.path(),
-        vec![foreign_tab, authenticated_tab],
-        Some("tab-authenticated"),
-    );
-    let principal =
-        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
-            .expect("authenticated principal");
-
-    let denied = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-foreign::agent-foreign".to_string(),
-            request_id: None,
-            responder: None,
-        },
-    );
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let peer = control_owner_launch(&owner, "peer", control_launch_config(&project, 43));
+    let request = || AgentFrontendRequest::CloseWindow {
+        id: peer.id.clone(),
+        request_id: None,
+        responder: None,
+    };
+    let accepted = control_request_settled(&owner, &pane, request());
+    assert!(accepted
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result"
+            && event["ok"] == true
+            && event["window_id"] == peer.id));
+    let absent = control_request_settled(&owner, &pane, request());
     assert!(
-        matches!(
-            denied.as_slice(),
-            [OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::PaneCloseResult {
-                    ok: false,
-                    window_id,
-                    reason: Some(_),
-                },
-                ..
-            }] if client_id == "pane-client" && window_id == "tab-foreign::agent-foreign"
-        ),
-        "a cross-project close refusal must answer explicitly, got: {denied:?}"
+        absent
+            .events
+            .iter()
+            .any(|event| event["kind"] == "pane_close_result"
+                && event["ok"] == false
+                && event["window_id"] == peer.id
+                && event["reason"].is_string()),
+        "an already-removed target must still produce an explicit receipt: {:?}",
+        absent.events
     );
-    assert!(runtime
-        .window_lookup
-        .contains_key("tab-foreign::agent-foreign"));
-
-    let accepted = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-authenticated::agent-authenticated".to_string(),
-            request_id: None,
-            responder: None,
-        },
-    );
-    assert!(
-        matches!(
-            accepted.first(),
-            Some(OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::PaneCloseResult {
-                    ok: true,
-                    window_id,
-                    reason: None,
-                },
-                ..
-            }) if client_id == "pane-client" && window_id == "tab-authenticated::agent-authenticated"
-        ),
-        "a successful close must answer the requesting client first, got: {accepted:?}"
-    );
-    assert!(!runtime
-        .window_lookup
-        .contains_key("tab-authenticated::agent-authenticated"));
+    control_close(&owner, &pane);
 }
 
 #[test]
@@ -504,179 +922,140 @@ fn fleet_pane_inventory_scopes_actual_runtime_generations() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    let worktree = temp.path().join("worktree");
-    fs::create_dir_all(&project).unwrap();
-    let mut tab = sample_project_tab_with_window_at(
-        "owned",
-        "agent",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    tab.workspace
-        .set_session_id("agent", Some("target-session".into()));
-    let foreign = sample_project_tab_with_window_at(
-        "foreign",
-        "agent",
-        temp.path().join("foreign"),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _) =
-        sample_runtime_with_events(temp.path(), vec![tab, foreign], Some("owned"));
-    let window_id = "owned::agent";
-    let mut session = sample_active_agent_session("owned", window_id);
-    session.session_id = "target-session".into();
-    session.worktree_path = worktree.clone();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.into(), session);
-    insert_test_pane_runtime(&mut runtime, window_id);
-    let pid = runtime.runtimes[window_id].pty.process_id().unwrap();
-    let started_at = gwt::process::host_process_start_time(pid).unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "inventory-client".into(),
-        AgentSessionPrincipal::for_test(&project, "observer").unwrap(),
-        AgentFrontendRequest::ListFleetPanes,
-    );
-    assert_eq!(events.len(), 1);
-    assert!(matches!(&events[0].target, DispatchTarget::Client(id) if id == "inventory-client"));
-    let response = serde_json::to_value(&events[0].event).unwrap();
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let foreign_project = temp.path().join("foreign");
+    control_seed_foreign_roster(&foreign_project);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "agent", 43);
+    let reply = control_request(&owner, &pane, AgentFrontendRequest::ListFleetPanes);
+    assert_eq!(reply.close, None);
+    assert_eq!(reply.events.len(), 1);
+    let response = &reply.events[0];
     assert_eq!(response["kind"], "fleet_pane_list");
-    let panes = response["panes"].as_array().unwrap();
-    assert_eq!(panes.len(), 1, "foreign project panes must not leak");
-    assert_eq!(panes[0]["window_id"], window_id);
-    assert_eq!(panes[0]["project_root"], project.to_string_lossy().as_ref());
-    assert_eq!(panes[0]["session_id"], "target-session");
-    assert_eq!(panes[0]["runtime_present"], true);
-    assert_eq!(panes[0]["child_pid"], pid);
-    assert_eq!(panes[0]["child_started_at"], started_at);
+    let rows = response["panes"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "foreign owner panes must not leak");
+    let session = pane.session.as_ref().unwrap();
+    let child = pane.pty.process_id().unwrap();
+    assert_eq!(rows[0]["window_id"], pane.id);
     assert_eq!(
-        panes[0]["worktree_path"],
-        worktree.to_string_lossy().as_ref()
+        rows[0]["project_root"],
+        dunce::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .as_ref()
     );
-}
-
-fn fleet_target_session(project: &Path, runtime: &mut AppRuntime) -> gwt_agent::Session {
-    let mut session = gwt_agent::Session::new(project, "work/target", gwt_agent::AgentId::Codex);
-    session.id = "other-session".into();
-    session.save(&runtime.sessions_dir).unwrap();
-    runtime
-        .active_agent_sessions
-        .get_mut("tab-1::other-window")
-        .unwrap()
-        .worktree_path = project.into();
-    session
+    assert_eq!(rows[0]["session_id"], session.id);
+    assert_eq!(rows[0]["runtime_present"], true);
+    assert_eq!(rows[0]["child_pid"], child);
+    assert_eq!(
+        rows[0]["child_started_at"],
+        gwt::process::host_process_start_time(child).unwrap()
+    );
+    assert_eq!(
+        rows[0]["worktree_path"],
+        session.worktree_path.to_string_lossy().as_ref()
+    );
+    control_close(&owner, &pane);
+    control_close(&foreign_owner, &foreign);
 }
 
 #[test]
 fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, mut runtime, _) = pm_wake_fixture(&temp);
-    fleet_target_session(&project, &mut runtime);
-    let window_id = "tab-1::other-window";
-    insert_test_pane_runtime(&mut runtime, window_id);
-    let pid = runtime.runtimes[window_id].pty.process_id().unwrap();
-    let started_at = gwt::process::host_process_start_time(pid).unwrap();
-    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
-    let request =
-        |session: &str, child_pid, child_started_at| AgentFrontendRequest::CloseFleetPane {
+    let project = temp.path().join("project");
+    let (owner, pm) = control_owner_agent(&project, "pm", 42);
+    let mut inspection = control_launch_config(&project, 43);
+    inspection.linked_issue_number = None;
+    inspection.explicit_follow_up = false;
+    let target = control_owner_launch(&owner, "target", inspection);
+    control_register_pm(&project, &pm);
+    let observer = control_owner_launch(&owner, "observer", control_launch_config(&project, 44));
+    let human_tab = sample_project_tab("human", "Project", project.clone(), ProjectKind::Git, &[]);
+    let mut human_runtime = sample_runtime(temp.path(), vec![human_tab], Some("human"));
+    let human = human_runtime.handle_frontend_event(
+        "close-client".into(),
+        FrontendEvent::CloseFleetPane {
             request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-            id: window_id.into(),
-            session_id: session.into(),
-            child_pid,
-            child_started_at,
-        };
-    let assert_refused = |events: Vec<OutboundEvent>, reason_part: &str| {
-        assert!(
-            matches!(events.as_slice(), [OutboundEvent {
-            target: DispatchTarget::Client(client),
-            event: BackendEvent::FleetPaneCloseResult {
-                request_id, ok: false, reason: Some(reason), ..
-            }, ..
-        }] if client == "close-client"
-            && request_id == "84ef22cc-44ef-415d-b4c4-06a6d4cc7416"
-            && reason.contains(reason_part)),
-            "{events:?}"
-        );
-    };
-    assert_refused(
-        runtime.handle_frontend_event(
-            "close-client".into(),
-            FrontendEvent::CloseFleetPane {
-                request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-                id: window_id.into(),
-                session_id: "other-session".into(),
-                child_pid: Some(pid),
-                child_started_at: Some(started_at),
-            },
-        ),
-        "authenticated agent",
+            id: target.id.clone(),
+            session_id: target.session.as_ref().unwrap().id.clone(),
+            child_pid: target.pty.process_id(),
+            child_started_at: target
+                .pty
+                .process_id()
+                .and_then(gwt::process::host_process_start_time),
+        },
     );
-    assert_refused(
-        runtime.handle_agent_frontend_event(
-            "close-client".into(),
-            AgentSessionPrincipal::for_test(&project, "observer").unwrap(),
-            request("other-session", Some(pid), Some(started_at)),
-        ),
-        "registered PM",
-    );
-    assert_refused(
-        runtime.handle_agent_frontend_event(
-            "close-client".into(),
-            principal.clone(),
-            request("predecessor-session", Some(pid), Some(started_at)),
-        ),
+    assert!(human.iter().any(|event| matches!(&event.event, BackendEvent::FleetPaneCloseResult { ok: false, reason: Some(reason), .. } if reason.contains("authenticated agent"))));
+    let denied = control_request_settled(&owner, &observer, control_fleet_request(&target));
+    assert_fleet_refused(&denied, "registered PM");
+    let mut request = control_fleet_request(&target);
+    if let AgentFrontendRequest::CloseFleetPane { session_id, .. } = &mut request {
+        *session_id = "predecessor-session".into();
+    }
+    assert_fleet_refused(
+        &control_request_settled(&owner, &pm, request),
         "session changed",
     );
-    assert_refused(
-        runtime.handle_agent_frontend_event(
-            "close-client".into(),
-            principal.clone(),
-            request("other-session", Some(pid), Some(started_at + 1)),
-        ),
+    let mut request = control_fleet_request(&target);
+    if let AgentFrontendRequest::CloseFleetPane {
+        child_started_at, ..
+    } = &mut request
+    {
+        *child_started_at = child_started_at.map(|time| time + 1);
+    }
+    assert_fleet_refused(
+        &control_request_settled(&owner, &pm, request),
         "runtime changed",
     );
-    assert_refused(
-        runtime.handle_agent_frontend_event(
-            "close-client".into(),
-            principal.clone(),
-            request("other-session", None, None),
-        ),
+    let mut request = control_fleet_request(&target);
+    if let AgentFrontendRequest::CloseFleetPane {
+        child_pid,
+        child_started_at,
+        ..
+    } = &mut request
+    {
+        *child_pid = None;
+        *child_started_at = None;
+    }
+    assert_fleet_refused(
+        &control_request_settled(&owner, &pm, request),
         "runtime changed",
     );
-    assert!(runtime.window_lookup.contains_key(window_id));
-    assert_eq!(runtime.runtimes[window_id].pty.process_id(), Some(pid));
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        principal,
-        request("other-session", Some(pid), Some(started_at)),
-    );
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
+    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
     assert!(
-        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
-        request_id, ok: true, reason: None, ..
-    } if request_id == "84ef22cc-44ef-415d-b4c4-06a6d4cc7416"),
-        "{events:?}"
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "{:?}",
+        closed.events
     );
-    assert!(!runtime.window_lookup.contains_key(window_id));
+    assert!(target.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &observer);
+    control_close(&owner, &pm);
 }
 
 #[test]
 fn fleet_pane_close_protects_authority_acquired_after_inventory() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, mut runtime, _) = pm_wake_fixture(&temp);
-    let window_id = "tab-1::other-window";
-    let session = fleet_target_session(&project, &mut runtime);
-    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
-    let selected = runtime
-        .agent_fleet_pane_inventory(&principal)
-        .into_iter()
-        .find(|pane| pane.window_id == window_id)
-        .unwrap();
+    let project = temp.path().join("project");
+    let (owner, pm) = control_owner_agent(&project, "pm", 42);
+    let mut inspection = control_launch_config(&project, 43);
+    inspection.linked_issue_number = None;
+    inspection.explicit_follow_up = false;
+    let target = control_owner_launch(&owner, "target", inspection);
+    control_register_pm(&project, &pm);
+    let selected = control_request(&owner, &pm, AgentFrontendRequest::ListFleetPanes);
+    assert!(selected.events[0]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["window_id"] == target.id));
+    let session = target.session.as_ref().unwrap();
     gwt::cli::execution_state::materialize_at_launch(
-        &project,
+        &session.worktree_path,
         gwt::cli::execution_state::ExecutionOwnerKind::Spec,
         4179,
         &session.id,
@@ -684,351 +1063,321 @@ fn fleet_pane_close_protects_authority_acquired_after_inventory() {
         false,
     )
     .unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        principal,
-        AgentFrontendRequest::CloseFleetPane {
-            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-            id: window_id.into(),
-            session_id: selected.session_id.unwrap(),
-            child_pid: selected.child_pid,
-            child_started_at: selected.child_started_at,
-        },
-    );
-    assert!(
-        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
-        ok: false, reason: Some(reason), ..
-    } if reason.contains("execution holder")),
-        "{events:?}"
-    );
-    assert!(runtime.window_lookup.contains_key(window_id));
+    let refused = control_request_settled(&owner, &pm, control_fleet_request(&target));
+    assert_fleet_refused(&refused, "execution holder");
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
     gwt::cli::execution_state::settle(
-        &project,
+        &session.worktree_path,
         &session.id,
         gwt::cli::execution_state::ExecutionSettlement::Completed,
     )
     .unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
-        AgentFrontendRequest::CloseFleetPane {
-            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-            id: window_id.into(),
-            session_id: session.id,
-            child_pid: selected.child_pid,
-            child_started_at: selected.child_started_at,
-        },
-    );
-    assert!(
-        matches!(
-            &events[0].event,
-            BackendEvent::FleetPaneCloseResult { ok: true, .. }
-        ),
-        "{events:?}"
-    );
-    assert!(!runtime.window_lookup.contains_key(window_id));
+    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
+    assert!(closed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    assert!(target.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &pm);
 }
 
 #[test]
 fn fleet_pane_close_protects_claim_acquired_after_inventory() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, mut runtime, _) = pm_wake_fixture(&temp);
-    fleet_target_session(&project, &mut runtime);
-    let window_id = "tab-1::other-window";
-    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
-    let selected = runtime
-        .agent_fleet_pane_inventory(&principal)
-        .into_iter()
-        .find(|pane| pane.window_id == window_id)
-        .unwrap();
+    let project = temp.path().join("project");
+    let (owner, pm) = control_owner_agent(&project, "pm", 42);
+    let mut inspection = control_launch_config(&project, 43);
+    inspection.linked_issue_number = None;
+    inspection.explicit_follow_up = false;
+    let target = control_owner_launch(&owner, "target", inspection);
+    control_register_pm(&project, &pm);
+    let selected = control_request(&owner, &pm, AgentFrontendRequest::ListFleetPanes);
+    assert!(selected.events[0]["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["window_id"] == target.id));
     gwt::mutate_issue_monitor_prefs(
         &gwt::issue_monitor_prefs_path_for_repo_path(&project),
         |prefs| {
             prefs.launched_issues.push(gwt::IssueMonitorLaunchedIssue {
                 issue_number: 4179,
-                window_id: window_id.into(),
+                window_id: target.id.clone(),
             });
         },
     )
     .unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        principal,
-        AgentFrontendRequest::CloseFleetPane {
-            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-            id: window_id.into(),
-            session_id: selected.session_id.unwrap(),
-            child_pid: selected.child_pid,
-            child_started_at: selected.child_started_at,
-        },
+    assert_fleet_refused(
+        &control_request_settled(&owner, &pm, control_fleet_request(&target)),
+        "claim holder",
     );
-    assert!(
-        matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
-        ok: false, reason: Some(reason), ..
-    } if reason.contains("claim holder")),
-        "{events:?}"
-    );
-    assert!(runtime.window_lookup.contains_key(window_id));
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
+    control_close(&owner, &target);
+    control_close(&owner, &pm);
 }
 
 #[test]
 fn fleet_pane_close_refuses_busy_lifecycle_fence_and_recovers() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, mut runtime, _) = pm_wake_fixture(&temp);
-    fleet_target_session(&project, &mut runtime);
-    let window_id = "tab-1::other-window";
-    let request = || AgentFrontendRequest::CloseFleetPane {
-        request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-        id: window_id.into(),
-        session_id: "other-session".into(),
-        child_pid: None,
-        child_started_at: None,
-    };
-    gwt::cli::trusted_store::with_write_lease(&project, || {
-        let events = runtime.handle_agent_frontend_event(
-            "close-client".into(),
-            AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
-            request(),
-        );
-        assert!(
-            matches!(&events[0].event, BackendEvent::FleetPaneCloseResult {
-            ok: false, reason: Some(reason), ..
-        } if reason.contains("lease") && reason.contains("retry")),
-            "{events:?}"
-        );
-        assert!(runtime.window_lookup.contains_key(window_id));
-        Ok(())
-    })
+    let project = temp.path().join("project");
+    let (owner, pm) = control_owner_agent(&project, "pm", 42);
+    let mut inspection = control_launch_config(&project, 43);
+    inspection.linked_issue_number = None;
+    inspection.explicit_follow_up = false;
+    let target = control_owner_launch(&owner, "target", inspection);
+    control_register_pm(&project, &pm);
+    gwt::cli::trusted_store::with_write_lease(
+        &target.session.as_ref().unwrap().worktree_path,
+        || {
+            let refused = control_request_settled(&owner, &pm, control_fleet_request(&target));
+            assert_fleet_refused(&refused, "lease");
+            assert_fleet_refused(&refused, "retry");
+            assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
+            Ok(())
+        },
+    )
     .unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap(),
-        request(),
-    );
-    assert!(
-        matches!(
-            &events[0].event,
-            BackendEvent::FleetPaneCloseResult { ok: true, .. }
-        ),
-        "{events:?}"
-    );
-    assert!(!runtime.window_lookup.contains_key(window_id));
+    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
+    assert!(closed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true));
+    assert!(target.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &pm);
 }
 
 #[test]
 fn fleet_pane_close_matches_absent_runtime_without_wildcards() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let (project, mut runtime, _) = pm_wake_fixture(&temp);
-    fleet_target_session(&project, &mut runtime);
-    runtime
-        .tab_mut("tab-1")
+    let project = temp.path().join("project");
+    let target = control_retained_husk(&project, "target");
+    let (owner, pm) = control_owner_agent(&project, "pm", 42);
+    control_register_pm(&project, &pm);
+    let inventory = control_request(&owner, &pm, AgentFrontendRequest::ListFleetPanes);
+    let target_row = inventory.events[0]["panes"]
+        .as_array()
         .unwrap()
-        .workspace
-        .set_status("other-window", WindowProcessStatus::Stopped);
-    let window_id = "tab-1::other-window";
-    assert!(!runtime.runtimes.contains_key(window_id));
-    let principal = AgentSessionPrincipal::for_test(&project, "pm-session-live").unwrap();
-    let inventory = runtime.agent_fleet_pane_inventory(&principal);
+        .iter()
+        .find(|row| row["window_id"] == target.id)
+        .unwrap();
+    assert_eq!(target_row["runtime_present"], false);
+    assert!(target_row["child_pid"].is_null());
+    let request = AgentFrontendRequest::CloseFleetPane {
+        request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
+        id: target.id.clone(),
+        session_id: target.session.id.clone(),
+        child_pid: None,
+        child_started_at: None,
+    };
+    let reply = control_request_settled(&owner, &pm, request);
     assert!(
-        !inventory
+        reply
+            .events
             .iter()
-            .find(|pane| pane.window_id == window_id)
-            .unwrap()
-            .runtime_present
+            .any(|event| event["kind"] == "fleet_pane_close_result" && event["ok"] == true),
+        "{:?}",
+        reply.events
     );
-    let events = runtime.handle_agent_frontend_event(
-        "close-client".into(),
-        principal,
-        AgentFrontendRequest::CloseFleetPane {
-            request_id: "84ef22cc-44ef-415d-b4c4-06a6d4cc7416".into(),
-            id: window_id.into(),
-            session_id: "other-session".into(),
-            child_pid: None,
-            child_started_at: None,
-        },
-    );
+    let remaining = control_request(&owner, &pm, AgentFrontendRequest::ListWindows);
     assert!(
-        matches!(
-            &events[0].event,
-            BackendEvent::FleetPaneCloseResult { ok: true, .. }
-        ),
-        "{events:?}"
+        remaining.events[0]["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != target.id)
     );
-    assert!(!runtime.window_lookup.contains_key(window_id));
+    control_close(&owner, &pm);
 }
 
 #[test]
 fn recover_restored_window_protects_replacement_and_normal_launches() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-1",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let mut session = gwt_agent::Session::new(&project, "work/test", gwt_agent::AgentId::Codex);
-    tab.workspace
-        .set_session_id("agent-1", Some(session.id.clone()));
-    let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    session.save(&runtime.sessions_dir).expect("save session");
-    let principal = AgentSessionPrincipal::for_test(&project, "pm-session").expect("principal");
-    let window_id = "tab-1::agent-1";
-    insert_test_pane_runtime(&mut runtime, window_id);
-    let child_pid = runtime.runtimes[window_id]
-        .pane
+    let _env_lock = env_test_lock()
         .lock()
-        .expect("pane")
-        .pty()
-        .process_id()
-        .expect("child pid");
-    let child_started_at = gwt::process::host_process_start_time(child_pid).expect("child start");
-    let request = |session_id: &str| AgentFrontendRequest::RecoverRestoredWindow {
-        id: window_id.to_string(),
-        session_id: session_id.to_string(),
-        child_pid,
-        child_started_at,
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let _custom_agents = ScopedEnvVar::unset(gwt_agent::DISABLE_GLOBAL_CUSTOM_AGENTS_ENV);
+    let project = temp.path().join("project");
+    let source = control_retained_husk(&project, "restored");
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let source_path = sessions.join(format!("{}.toml", source.session.id));
+    let mut saved = gwt_agent::Session::load(&source_path).unwrap();
+    // The benign Custom provider's native conversation is fixture metadata;
+    // its physical Session and retained child proof were created by the owner.
+    saved.agent_session_id = Some("fixture-native-conversation".into());
+    saved.save(&sessions).unwrap();
+    fs::write(
+        saved.worktree_path.join("WORK.md"),
+        "retained in-progress provider fixture\n",
+    )
+    .unwrap();
+    gwt_agent::save_stored_custom_agents_to_path(
+        &gwt_core::paths::gwt_config_path(),
+        &[gwt_agent::StoredCustomAgent::new(control_custom_agent())],
+    )
+    .unwrap();
+    let (owner, caller) = control_owner_agent(&project, "caller", 42);
+    let normal = control_owner_launch(&owner, "normal", control_launch_config(&project, 43));
+    let request = |pane: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
+                   session_id: String,
+                   birth: u64| AgentFrontendRequest::RecoverRestoredWindow {
+        id: pane.id.clone(),
+        session_id,
+        child_pid: pane.pty.process_id().unwrap(),
+        child_started_at: birth,
     };
-    let assert_refused = |events: Vec<OutboundEvent>, expected: &str| {
+    let normal_birth = normal
+        .pty
+        .process_id()
+        .and_then(gwt::process::host_process_start_time)
+        .unwrap();
+    let assert_refused = |reply: gwt::project_runtime::test_support::OwnerAgentReply,
+                          expected: &str| {
+        assert_eq!(reply.close, None);
         assert!(
-            matches!(events.as_slice(), [OutboundEvent {
-            target: DispatchTarget::Client(client_id),
-            event: BackendEvent::PaneCloseResult { ok: false, reason: Some(reason), .. },
-            ..
-        }] if client_id == "pane-client" && reason.contains(expected)),
-            "{events:?}"
+            reply
+                .events
+                .iter()
+                .any(|event| event["kind"] == "pane_close_result"
+                    && event["ok"] == false
+                    && event["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains(expected))),
+            "{:?}",
+            reply.events
         );
     };
-
-    // A window id may now identify a successor of the snapshotted Session.
     assert_refused(
-        runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal.clone(),
-            request("replaced-session"),
+        control_request_settled(
+            &owner,
+            &caller,
+            request(&normal, "replaced-session".into(), normal_birth),
         ),
         "session changed",
     );
+    let mutation = ControlSessionMutation::new(&normal);
+    let mut negative = mutation.original.as_ref().unwrap().clone();
     for origin in [
         gwt_agent::SessionLaunchOrigin::Launch,
         gwt_agent::SessionLaunchOrigin::UserRestart,
         gwt_agent::SessionLaunchOrigin::Unknown,
     ] {
-        session.launch_origin = origin;
-        session
-            .save(&runtime.sessions_dir)
-            .expect("save non-restore origin");
+        negative.launch_origin = origin;
+        negative.save(&sessions).unwrap();
         assert_refused(
-            runtime.handle_agent_frontend_event(
-                "pane-client".to_string(),
-                principal.clone(),
-                request(&session.id),
+            control_request_settled(
+                &owner,
+                &caller,
+                request(&normal, negative.id.clone(), normal_birth),
             ),
             "automatic restore",
         );
     }
-    assert!(runtime.window_lookup.contains_key(window_id));
-
-    session.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
-    session
-        .save(&runtime.sessions_dir)
-        .expect("save incomplete restore provenance");
+    negative.launch_origin = gwt_agent::SessionLaunchOrigin::AutomaticRestore;
+    negative.restore_source_session_id = None;
+    negative.save(&sessions).unwrap();
     assert_refused(
-        runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal.clone(),
-            request(&session.id),
+        control_request_settled(
+            &owner,
+            &caller,
+            request(&normal, negative.id.clone(), normal_birth),
         ),
         "automatic restore",
     );
-    session.restore_source_session_id = Some("source-session".to_string());
-    session
-        .save(&runtime.sessions_dir)
-        .expect("save restore provenance");
+    mutation.restore();
+    let mut restore_events = owner.subscribe();
+    let receipt = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::RestoreSavedSession {
+            id: source.id.clone(),
+            operation_id: "actual-recovery-restore".into(),
+            source_session_id: saved.id.clone(),
+            expected_source: Box::new(saved.clone()),
+            origin: gwt_agent::SessionLaunchOrigin::AutomaticRestore,
+            cols: 80,
+            rows: 24,
+        },
+    ))
+    .unwrap();
+    let mut restore_failures = Vec::new();
+    while let Ok(event) = restore_events.try_recv() {
+        if let gwt::project_runtime::events::OwnerEvent::LaunchFailed { id, detail, .. } = event {
+            if id == source.id {
+                restore_failures.push(detail);
+            }
+        }
+    }
+    assert!(
+        receipt.get("restore_refusal").is_none(),
+        "actual restore must be admitted: {receipt:?}; failures: {restore_failures:?}"
+    );
+    let restored =
+        owner_fixture_block_on(owner.probe(&source.id, receipt["incarnation"].as_u64().unwrap()))
+            .unwrap();
+    let restored_saved = gwt_agent::Session::load(
+        &sessions.join(format!("{}.toml", restored.session.as_ref().unwrap().id)),
+    )
+    .unwrap();
+    assert_eq!(
+        restored_saved.launch_origin,
+        gwt_agent::SessionLaunchOrigin::AutomaticRestore
+    );
+    assert_eq!(
+        restored_saved.restore_source_session_id.as_deref(),
+        Some(saved.id.as_str())
+    );
+    let birth = restored
+        .pty
+        .process_id()
+        .and_then(gwt::process::host_process_start_time)
+        .unwrap();
     assert_refused(
-        runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal.clone(),
-            AgentFrontendRequest::RecoverRestoredWindow {
-                id: window_id.to_string(),
-                session_id: session.id.clone(),
-                child_pid,
-                child_started_at: child_started_at + 1,
-            },
+        control_request_settled(
+            &owner,
+            &caller,
+            request(&restored, restored_saved.id.clone(), birth + 1),
         ),
         "process changed",
     );
-    let foreign = temp.path().join("foreign");
-    fs::create_dir_all(&foreign).expect("foreign project");
+    let foreign_project = temp.path().join("foreign");
+    control_seed_foreign_roster(&foreign_project);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "foreign", 44);
     assert_refused(
-        runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            AgentSessionPrincipal::for_test(&foreign, "foreign-pm").expect("foreign principal"),
-            request(&session.id),
+        control_request_settled(
+            &foreign_owner,
+            &foreign,
+            request(&restored, restored_saved.id.clone(), birth),
         ),
         "project scope",
     );
     assert_refused(
-        runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            AgentSessionPrincipal::for_test(&project, &session.id).expect("self principal"),
-            request(&session.id),
+        control_request_settled(
+            &owner,
+            &restored,
+            request(&restored, restored_saved.id.clone(), birth),
         ),
         "correlated acceptance",
     );
-    assert!(runtime.window_lookup.contains_key(window_id));
-
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        request(&session.id),
+    assert!(owner_fixture_block_on(owner.probe(&restored.id, restored.incarnation)).is_ok());
+    let closed = control_request_settled(
+        &owner,
+        &caller,
+        request(&restored, restored_saved.id, birth),
     );
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })),
-        "recovery must wait for process exit: {events:?}"
-    );
-    assert!(!runtime.window_lookup.contains_key(window_id));
-    let queued = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .drain(..)
-        .collect::<Vec<_>>();
-    assert_eq!(queued.len(), 1, "only the proven restore queues teardown");
-    for finalizer in queued {
-        finalizer();
-    }
-    let recorded = recorded
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let replies = recorded
-        .iter()
-        .filter_map(|event| match recorded_project_payload(event) {
-            UserEvent::Dispatch(events) => Some(events),
-            _ => None,
-        })
-        .flatten()
-        .filter(|event| {
-            matches!(event, OutboundEvent {
-        target: DispatchTarget::Client(client_id),
-        event: BackendEvent::PaneCloseResult { ok: true, window_id: closed, reason: None },
-        ..
-    } if client_id == "pane-client" && closed == window_id)
-        })
-        .count();
     assert_eq!(
-        replies, 1,
-        "the completed restore close replies once to its requesting client"
+        closed
+            .events
+            .iter()
+            .filter(|event| event["kind"] == "pane_close_result" && event["ok"] == true)
+            .count(),
+        1
     );
+    assert!(restored.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &normal);
+    control_close(&owner, &caller);
+    control_close(&foreign_owner, &foreign);
 }
 
 /// Issue #5248 AC-2/AC-3: stop has already removed the Monitor binding, so
@@ -1036,192 +1385,60 @@ fn recover_restored_window_protects_replacement_and_normal_launches() {
 #[cfg(unix)]
 #[test]
 fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
-    use std::{
-        collections::BTreeSet,
-        io::BufRead,
-        os::unix::net::{UnixListener, UnixStream},
-    };
-
-    use gwt_core::daemon::{
-        persist_endpoint, ClientFrame, DaemonEndpoint, DaemonFrame, IpcHandshakeRequest,
-        IpcHandshakeResponse, RuntimeScope, RuntimeTarget, DAEMON_PROTOCOL_VERSION,
-    };
-
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = gwt_core::test_support::socket_tempdir().expect("short socket tempdir");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let project = temp.path().join("project");
+    use std::collections::BTreeSet;
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let (project, owner, delivery_id) =
+        owner_monitor_fixture(temp.path(), 5248, false, &["pane-contract-fixture"]);
+    let target = owner_monitor_launch(&project, &owner, 5248, "agent-closed", delivery_id);
+    let mut config = control_launch_config(&project, 5249);
+    config.launch_route = gwt_agent::LaunchRoute::Autonomous;
+    let survivor = control_owner_launch(&owner, "agent-live", config);
+    let pm = control_owner_launch(&owner, "pm", control_launch_config(&project, 5250));
+    control_register_pm(&project, &pm);
     let foreign_project = temp.path().join("foreign-project");
-    fs::create_dir_all(&project).expect("project");
-    fs::create_dir_all(&foreign_project).expect("foreign project");
-    init_repo(&project);
-    init_repo(&foreign_project);
-    let closed_id = "tab-owner::agent-closed";
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut monitor = test_monitor(gwt::IssueMonitorConfig::default());
-    monitor.complete_active_launch_at(5248, closed_id, &now);
-    let target = gwt::IssueMonitorStopTarget {
-        issue_number: 5248,
-        claim_id: monitor.live_claim_id(5248),
-        delivery_id: monitor.pending_launch_delivery_id(5248),
-        window_id: Some(closed_id.to_string()),
-    };
-    assert!(matches!(
-        monitor.stop_only(&target, "fresh launch", &now),
-        gwt::IssueMonitorStopOutcome::Stopped { .. }
-    ));
-    assert_eq!(monitor.launched_window_issue(closed_id), None);
-    gwt::save_issue_monitor_prefs(
-        &gwt::issue_monitor_prefs_path_for_repo_path(&project),
-        &monitor.prefs(),
-    )
-    .expect("persist stopped Monitor binding");
-
-    let tabs = vec![
-        sample_project_tab_with_window_at(
-            "tab-foreign",
-            "agent-foreign",
-            foreign_project,
-            WindowPreset::Agent,
-            WindowProcessStatus::Running,
-        ),
-        sample_project_tab_with_window_at(
-            "tab-owner",
-            "agent-closed",
-            project.clone(),
-            WindowPreset::Agent,
-            WindowProcessStatus::Running,
-        ),
-        sample_project_tab_with_window_at(
-            "tab-sibling",
-            "agent-live",
-            project.clone(),
-            WindowPreset::Agent,
-            WindowProcessStatus::Running,
-        ),
-    ];
-    let mut runtime = sample_runtime(temp.path(), tabs, Some("tab-foreign"));
-    let mut survivor_session =
-        gwt_agent::Session::new(&project, "work/survivor", gwt_agent::AgentId::Codex);
-    survivor_session.launch_route = gwt_agent::LaunchRoute::Autonomous;
-    assert!(runtime
-        .tab_mut("tab-sibling")
-        .expect("own sibling")
-        .workspace
-        .set_session_id("agent-live", Some(survivor_session.id.clone())));
-    // The queued finalizer resolves this survivor without loading the ledger on Tao.
-    survivor_session
-        .save(&runtime.sessions_dir)
-        .expect("save survivor");
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let scope =
-        RuntimeScope::from_project_root(&project, RuntimeTarget::Host).expect("own project scope");
-    let socket_path = temp.path().join("close.sock");
-    let listener = UnixListener::bind(gwt_core::test_support::checked_socket_path(&socket_path))
-        .expect("bind fake daemon");
-    let endpoint = DaemonEndpoint::new(
-        scope.clone(),
-        std::process::id(),
-        socket_path.to_string_lossy().to_string(),
-        "close-token".to_string(),
-        "test-daemon".to_string(),
+    control_seed_foreign_roster(&foreign_project);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "agent-foreign", 5251);
+    let before = owner_monitor_read(&project, 5248);
+    let source = before.launch_identity(5248);
+    gwt::daemon_publisher::publish_durable_issue_monitor_control(&project,
+        gwt::runtime_daemon_events::issue_monitor_payload("control", serde_json::json!({"window_closed": {
+            "window_id":target.id,"issue_number":5248,"claim_id":source.claim_id,"delivery_id":source.delivery_id,
+        }}), std::process::id())).unwrap();
+    assert_eq!(
+        owner_monitor_read(&project, 5248).launched_window_issue(&target.id),
+        None
     );
-    persist_endpoint(
-        &scope.endpoint_path(&gwt_core::paths::gwt_home()),
-        &endpoint,
-    )
-    .expect("persist own project daemon endpoint");
-    let principal =
-        AgentSessionPrincipal::for_test(&project, "session-pm").expect("own project principal");
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
+    let closed = control_request_settled(
+        &owner,
+        &pm,
         AgentFrontendRequest::CloseWindow {
-            id: closed_id.to_string(),
+            id: target.id.clone(),
             request_id: None,
             responder: None,
         },
     );
-    assert!(matches!(
-        events.first(),
-        Some(OutboundEvent {
-            event: BackendEvent::PaneCloseResult { ok: true, .. },
-            ..
-        })
-    ));
-    assert!(!runtime.window_lookup.contains_key(closed_id));
-
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("accept close snapshot");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("set fixture hang guard");
-        let mut reader = std::io::BufReader::new(stream.try_clone().expect("clone stream"));
-        let mut line = String::new();
-        if reader.read_line(&mut line).expect("read handshake") == 0 {
-            return None;
-        }
-        let handshake: IpcHandshakeRequest =
-            serde_json::from_str(line.trim_end()).expect("parse handshake");
-        assert_eq!(handshake.scope, scope);
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string(&IpcHandshakeResponse {
-                protocol_version: DAEMON_PROTOCOL_VERSION,
-                daemon_version: "test-daemon".to_string(),
-                accepted: true,
-                rejection_reason: None,
-            })
-            .expect("serialize handshake")
-        )
-        .expect("accept handshake");
-        line.clear();
-        reader.read_line(&mut line).expect("read close snapshot");
-        let ClientFrame::Publish { channel, payload } =
-            serde_json::from_str(line.trim_end()).expect("parse close snapshot")
-        else {
-            panic!("expected close snapshot publication");
-        };
-        assert_eq!(
-            channel,
-            gwt::runtime_daemon_events::ISSUE_MONITOR_CONTROL_CHANNEL
-        );
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string(&DaemonFrame::Ack).expect("serialize ack")
-        )
-        .expect("ack close snapshot");
-        Some(payload)
-    });
-    let queued = std::mem::take(
-        &mut *tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    for task in queued {
-        task();
-    }
-    // An empty connection releases accept on RED without leaving a fixture
-    // thread behind when the close did not publish anything.
-    drop(UnixStream::connect(&socket_path));
-    let publication = server
-        .join()
-        .expect("fake daemon joins")
-        .expect("successful close must publish a canvas even after stop removed its binding");
-    let control = &publication["payload"];
-    let snapshot: gwt::IssueMonitorWindowSnapshot =
-        serde_json::from_value(control["window_snapshot"].clone())
-            .expect("complete canvas snapshot");
-    assert_eq!(snapshot.project_tab_id, "tab-owner");
+    assert!(closed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == true));
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_err());
+    assert!(target.pty.try_wait().unwrap().is_some());
+    owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+    let snapshot = owner
+        .monitor_snapshot()
+        .unwrap()
+        .expect("the canonical Monitor driver received its canvas");
+    let own_key = survivor.id.split_once("::").unwrap().0;
+    assert_eq!(snapshot.project_tab_id, own_key);
     assert!(
-        snapshot.windows[0].monitor_owned,
-        "retain survivor Monitor ownership"
+        snapshot
+            .windows
+            .iter()
+            .find(|window| window.window_id == survivor.id)
+            .unwrap()
+            .monitor_owned,
+        "the complete surviving canvas retains autonomous Monitor provenance"
     );
     assert_eq!(
         snapshot
@@ -1229,14 +1446,21 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
             .iter()
             .map(|window| window.window_id.as_str())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["tab-sibling::agent-live"]),
-        "the closed pane and foreign project leave the canvas; the own sibling survives"
+        BTreeSet::from([survivor.id.as_str(), pm.id.as_str()]),
+        "the closed pane and foreign project leave the canvas; every own surviving pane remains"
     );
-    assert_eq!(
-        serde_json::from_value::<BTreeSet<String>>(control["window_snapshot_project_tabs"].clone())
-            .expect("complete project tab scope"),
-        BTreeSet::from(["tab-owner".to_string(), "tab-sibling".to_string()])
+    assert!(
+        snapshot
+            .windows
+            .iter()
+            .all(|window| window.window_id.split_once("::").unwrap().0 == own_key),
+        "the complete canvas is fixed to its own project"
     );
+    assert!(owner_fixture_block_on(foreign_owner.probe(&foreign.id, foreign.incarnation)).is_ok());
+    control_close(&foreign_owner, &foreign);
+    control_close(&owner, &survivor);
+    control_close(&owner, &pm);
+    owner_fixture_block_on(owner.shutdown());
 }
 
 /// Issue #3705 AC-1/AC-2: consecutive close of live-PTY panes must keep the
@@ -1245,115 +1469,10 @@ fn stopped_monitor_pane_close_publishes_complete_own_project_canvas() {
 /// sat behind that queue until the websocket timed out.
 #[test]
 fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let tab = sample_project_tab(
-        "tab-project",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-        ],
-    );
-    let window_ids: Vec<String> = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|window| combined_window_id("tab-project", &window.id))
-        .collect();
-    assert_eq!(window_ids.len(), 4, "AC-1 requires four live panes");
-    let (mut runtime, recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let mut children = Vec::new();
-    let mut worker_releases = Vec::new();
-    let (worker_done, workers_done) = mpsc::channel();
-    for window_id in &window_ids {
-        let pane = long_running_test_pane(window_id);
-        children.push(TestPaneGuard::new(&pane));
-        let pane = Arc::new(Mutex::new(pane));
-        let mut window_runtime =
-            WindowRuntime::new(super::super::next_window_runtime_incarnation(), pane);
-        for worker in [
-            &mut window_runtime.output_thread,
-            &mut window_runtime.status_thread,
-        ] {
-            let (release, released) = mpsc::channel::<()>();
-            worker_releases.push(release);
-            let done = worker_done.clone();
-            *worker = Some(thread::spawn(move || {
-                // Stay blocked during close, but release on both success and panic.
-                let _ = released.recv();
-                let _ = done.send(());
-            }));
-        }
-        runtime.runtimes.insert(window_id.clone(), window_runtime);
-    }
-    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
-
-    let started = Instant::now();
-    for window_id in &window_ids {
-        let closed = runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal.clone(),
-            AgentFrontendRequest::CloseWindow {
-                id: window_id.clone(),
-                request_id: None,
-                responder: None,
-            },
-        );
-        assert!(
-            closed.iter().all(|event| !matches!(
-                event.event,
-                BackendEvent::PaneCloseResult { ok: true, .. }
-            )),
-            "live PTY close must defer success until teardown: {closed:?}"
-        );
-        assert!(
-            !runtime.window_lookup.contains_key(window_id),
-            "closed window {window_id} must leave the lookup"
-        );
-    }
-    let listed = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::ListWindows,
-    );
-    assert!(
-        !listed.is_empty(),
-        "pane.list must still answer after consecutive live PTY closes"
-    );
-    let elapsed = started.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(400),
-        "four live-PTY closes plus pane.list blocked the agent route for {elapsed:?}"
-    );
-    drop(worker_releases);
-    for _ in 0..window_ids.len() * 2 {
-        workers_done
-            .recv_timeout(Duration::from_secs(20))
-            .expect("close fixture worker exited");
-    }
-    // test-hygiene: allow-wall-clock-deadline Observe the asynchronous close-completion events after releasing the real PTY finalizers.
-    wait_for_recorded_event("deferred peer close results", &recorded, |events| {
-        events
-            .iter()
-            .filter_map(|event| match recorded_project_payload(event) {
-                UserEvent::Dispatch(events) => Some(events),
-                _ => None,
-            })
-            .flatten()
-            .filter(|event| matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. }))
-            .count()
-            == window_ids.len()
-    });
-    drop(children);
+    control_close_series(&project, 4);
 }
 
 /// Issue #3783 AC-2/AC-3/AC-4: accepting a pane close is an in-memory
@@ -1362,256 +1481,16 @@ fn consecutive_live_pty_pane_closes_keep_agent_route_responsive() {
 /// nor two consecutive closes can delay the pane bridge acknowledgement.
 #[test]
 fn consecutive_agent_pane_closes_queue_finalizers_before_disk_projection_work() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let tab = sample_project_tab(
-        "tab-project",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent, WindowPreset::Agent],
-    );
-    let window_ids = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|window| combined_window_id("tab-project", &window.id))
-        .collect::<Vec<_>>();
-    let (mut runtime, recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, tasks) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let mut ptys = Vec::new();
-    let child_file = project.join("close-child.pid");
-    let mut child_guard = None;
-    for (index, window_id) in window_ids.iter().enumerate() {
-        if index == 0 {
-            let (command, args) = if cfg!(windows) {
-                ("powershell", vec!["-NoProfile", "-NonInteractive", "-Command", "$child = Start-Process ping -ArgumentList '-n','61','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -LiteralPath $env:GWT_TEST_CHILD_PID -Value $child.Id; Wait-Process -Id $child.Id"])
-            } else {
-                (
-                    "/bin/sh",
-                    vec![
-                        "-c",
-                        "sleep 60 & printf '%s' \"$!\" > \"$GWT_TEST_CHILD_PID\"; wait",
-                    ],
-                )
-            };
-            let pane = Pane::new(
-                window_id.clone(),
-                command.into(),
-                args.into_iter().map(str::to_owned).collect(),
-                80,
-                24,
-                HashMap::from([(
-                    "GWT_TEST_CHILD_PID".into(),
-                    child_file.display().to_string(),
-                )]),
-                Some(project.clone()),
-            )
-            .unwrap();
-            child_guard = Some(TestPaneGuard::new(&pane));
-            insert_test_pane_runtime_with_pane(&mut runtime, window_id, pane);
-        } else {
-            insert_test_pane_runtime(&mut runtime, window_id);
-        }
-        ptys.push(
-            runtime
-                .runtimes
-                .get(window_id)
-                .expect("live runtime")
-                .pty
-                .clone(),
-        );
-        runtime.active_agent_sessions.insert(
-            window_id.clone(),
-            ActiveAgentSession {
-                window_id: window_id.clone(),
-                session_id: format!("session-close-finalizer-{index}"),
-                agent_id: "codex".to_string(),
-                branch_name: format!("work/close-finalizer-{index}"),
-                display_name: "Codex".to_string(),
-                worktree_path: project.clone(),
-                agent_project_root: project.display().to_string(),
-                runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-                tab_id: "tab-project".to_string(),
-            },
-        );
-    }
-    // test-hygiene: allow-wall-clock-deadline Bound the real descendant's startup; the PID file establishes ordering.
-    let child_deadline = Instant::now() + Duration::from_secs(15);
-    let child_pid = loop {
-        if let Some(pid) = fs::read_to_string(&child_file)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        assert!(
-            // test-hygiene: allow-wall-clock-deadline Bound actual OS PID publication, not relative scheduling.
-            Instant::now() < child_deadline,
-            "descendant PID not published"
-        );
-        thread::sleep(Duration::from_millis(100));
-    };
-    #[cfg(windows)]
-    assert_eq!(
-        gwt::process::host_process_liveness(child_pid),
-        Some(true),
-        "the descendant must be running before close"
-    );
-    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
-    // Issue #3777 AC-3: `active_work_projection_for_tab` no longer decodes the
-    // projection inline — it schedules the background prepare and returns
-    // `None`, so the cache this test needs is only populated once that task has
-    // run and its completion has been committed. The spawner here is queued, so
-    // drive both explicitly rather than expecting a synchronous value.
-    assert!(
-        runtime
-            .active_work_projection_for_tab("tab-project", &runtime.tabs[0])
-            .is_none(),
-        "the tab accessor must schedule the rebuild instead of decoding inline"
-    );
-    let queued = std::mem::take(
-        &mut *tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    for task in queued {
-        task();
-    }
-    let initial_projection = wait_for_active_work_projection(&mut runtime);
-    assert_eq!(initial_projection.active_agents, window_ids.len());
-
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let started = Instant::now();
-    let mut final_projection = None;
-    for window_id in &window_ids {
-        let events = runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal.clone(),
-            AgentFrontendRequest::CloseWindow {
-                id: window_id.clone(),
-                request_id: None,
-                responder: None,
-            },
-        );
-        assert!(
-            events.iter().all(|event| !matches!(
-                event.event,
-                BackendEvent::PaneCloseResult { ok: true, .. }
-            )),
-            "queued teardown cannot report a completed close"
-        );
-        final_projection = events.iter().find_map(|event| match &event.event {
-            BackendEvent::ActiveWorkProjectionPatch { projection } => Some(projection.clone()),
-            _ => None,
-        });
-        assert!(!runtime.window_lookup.contains_key(window_id));
-        assert!(!runtime.runtimes.contains_key(window_id));
-    }
-    assert!(!runtime
-        .handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal,
-            AgentFrontendRequest::ListWindows,
-        )
-        .is_empty());
-    assert!(
-        started.elapsed() < Duration::from_millis(400),
-        "two close acknowledgements plus pane.list must stay below the bridge budget"
-    );
+    control_close_series(&project, 2);
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
         0,
-        "the close hot path must never enter the disk-backed projection builder"
+        "the actual owner route must not call the GUI's disk-backed projection builder"
     );
-    assert_eq!(
-        final_projection
-            .as_deref()
-            .expect("cache-only close projection")
-            .active_agents,
-        0,
-        "the cache-only acknowledgement must not replay a closed agent as active"
-    );
-    assert_eq!(
-        tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        window_ids.len(),
-        "each accepted close owns one independent background finalizer"
-    );
-    assert!(
-        ptys.iter()
-            .all(|pty| pty.try_wait().expect("probe child").is_none()),
-        "PTY teardown must not run before the queued finalizer"
-    );
-
-    let queued = {
-        let mut tasks = tasks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        tasks.drain(..).collect::<Vec<_>>()
-    };
-    for task in queued {
-        task();
-    }
-    assert!(
-        ptys.iter()
-            .all(|pty| pty.try_wait().expect("probe reaped child").is_some()),
-        "every finalizer must terminate and reap its detached PTY"
-    );
-    let recorded = recorded
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let replies = recorded
-        .iter()
-        .filter_map(|event| match recorded_project_payload(event) {
-            UserEvent::Dispatch(events) => Some(events),
-            _ => None,
-        })
-        .flatten()
-        .filter(|event| {
-            matches!(&event.target, DispatchTarget::Client(id) if id == "pane-client")
-                && matches!(event.event, BackendEvent::PaneCloseResult { ok: true, .. })
-        })
-        .count();
-    assert_eq!(
-        replies,
-        window_ids.len(),
-        "each reaped peer close receives one final result"
-    );
-    drop(recorded);
-    // Windows snapshots can retain a terminated process object with status Run.
-    // Observe the native process signal immediately, without waiting after success.
-    #[cfg(windows)]
-    assert_eq!(
-        gwt::process::host_process_liveness(child_pid),
-        Some(false),
-        "a successful peer close must leave descendant {child_pid} terminated"
-    );
-    #[cfg(unix)]
-    {
-        let mut system = sysinfo::System::new();
-        let child = sysinfo::Pid::from_u32(child_pid);
-        system.refresh_processes_specifics(
-            sysinfo::ProcessesToUpdate::Some(&[child]),
-            true,
-            sysinfo::ProcessRefreshKind::nothing(),
-        );
-        assert!(
-            system
-                .process(child)
-                .is_none_or(|process| process.status() == sysinfo::ProcessStatus::Zombie),
-            "a successful peer close must leave no running descendant"
-        );
-    }
-    drop(child_guard);
 }
 
 /// Issue #3783: closing a whole project tab is the same accepted lifecycle
@@ -1650,14 +1529,7 @@ fn close_project_tab_queues_all_window_finalizers_before_pty_teardown() {
     for (index, (raw_id, window_id)) in raw_window_ids.iter().zip(&window_ids).enumerate() {
         runtime.register_window("tab-project", raw_id);
         insert_test_pane_runtime(&mut runtime, window_id);
-        ptys.push(
-            runtime
-                .runtimes
-                .get(window_id)
-                .expect("live runtime")
-                .pty
-                .clone(),
-        );
+        ptys.push(owner_runtime_probe(&runtime, window_id).pty.clone());
         runtime.active_agent_sessions.insert(
             window_id.clone(),
             ActiveAgentSession {
@@ -1774,20 +1646,11 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
     let project = temp.path().join("project");
     fs::create_dir_all(&project).expect("project");
     init_repo(&project);
-    let tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-1",
-        project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let window_id = "tab-project::agent-1".to_string();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, _finalizers) = BlockingTaskSpawner::queued();
+    let tab = sample_project_tab("tab-project", "Project", project, ProjectKind::Git, &[]);
+    let (mut runtime, recorded) =
+        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
+    let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
-    // The fixture tab already carries `agent-1`; close it so the loop below
-    // starts from an empty canvas and every round opens its own window.
-    assert!(runtime.close_window_outcome(&window_id).closed);
 
     let baseline = runtime.window_scoped_state_entry_count();
     let mut opened = Vec::new();
@@ -1801,8 +1664,13 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
         let id = combined_window_id("tab-project", &raw_id);
         runtime.register_window("tab-project", &raw_id);
         insert_test_pane_runtime(&mut runtime, &id);
+        let pty = owner_runtime_probe(&runtime, &id).pty;
         seed_window_scoped_state(&mut runtime, &id);
         assert!(runtime.close_window_outcome(&id).closed);
+        // The same physical id becomes reusable only after the real close ACK.
+        drain_queued_blocking_tasks(&finalizers);
+        apply_recorded_window_close_finalized(&mut runtime, &recorded);
+        assert!(pty.try_wait().unwrap().is_some());
         opened.push(id);
     }
 
@@ -1828,90 +1696,37 @@ fn opening_and_closing_windows_returns_window_scoped_state_to_baseline() {
 /// successor writer generation.
 #[test]
 fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-1",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let window_id = "tab-project::agent-1".to_string();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let predecessor = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("predecessor runtime")
-        .pty
-        .clone();
-    runtime.register_pty_writer(&window_id, None);
-
-    assert!(runtime.close_window_outcome(&window_id).closed);
-    assert_eq!(
-        finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        1
-    );
-
-    runtime.register_window("tab-project", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let successor_runtime = runtime.runtimes.get(&window_id).expect("successor runtime");
-    let successor_incarnation = successor_runtime.incarnation;
-    let successor = successor_runtime.pty.clone();
-    runtime.register_pty_writer(&window_id, None);
-
-    let finalizer = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("queued predecessor finalizer");
-    finalizer();
-
-    let registered = runtime
-        .pty_writers
-        .read()
-        .expect("PTY writer registry")
-        .get(&window_id)
-        .cloned()
-        .expect("successor writer remains registered");
-    assert!(Arc::ptr_eq(&registered.handle, &successor));
+    let (owner, predecessor) = control_owner_agent(&project, "agent", 42);
+    let old_writer = predecessor.writer.as_ref().unwrap().clone();
+    control_close(&owner, &predecessor);
+    let successor = control_owner_launch(&owner, "agent", control_launch_config(&project, 43));
+    assert_ne!(successor.incarnation, predecessor.incarnation);
+    assert!(owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Close {
+            id: predecessor.id.clone(),
+            incarnation: predecessor.incarnation,
+        }
+    ))
+    .is_err());
+    let current =
+        owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation)).unwrap();
+    let writer = current.writer.unwrap();
+    assert!(Arc::ptr_eq(&writer.handle, &successor.pty));
+    assert!(Arc::ptr_eq(&writer.current, &successor.current));
+    assert!(successor.current.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!old_writer
+        .current
+        .load(std::sync::atomic::Ordering::Acquire));
     assert!(
-        successor.reserve_input_transaction().is_ok(),
-        "the predecessor finalizer must not revoke successor input"
+        successor.pty.reserve_input_transaction().is_ok(),
+        "the predecessor close replay must not revoke successor input"
     );
-    assert_eq!(
-        runtime
-            .runtimes
-            .get(&window_id)
-            .map(|runtime| runtime.incarnation),
-        Some(successor_incarnation)
-    );
-    assert!(
-        runtime
-            .window_lifecycle_generations
-            .lock()
-            .expect("window lifecycle generations")
-            .contains_key(&window_id),
-        "the predecessor finalizer must not settle the successor generation"
-    );
-    assert!(
-        predecessor
-            .try_wait()
-            .expect("predecessor exit probe")
-            .is_some(),
-        "the predecessor PTY is still reaped"
-    );
-    successor.kill().expect("stop successor test PTY");
+    assert!(predecessor.pty.try_wait().unwrap().is_some());
+    assert!(successor.pty.try_wait().unwrap().is_none());
+    control_close(&owner, &successor);
 }
 
 /// Issue #3783 authority fence: an unreadable predecessor Session is not
@@ -1919,70 +1734,64 @@ fn queued_close_finalizer_preserves_same_window_successor_writer_generation() {
 /// remain Running when the old local PTY finalizer eventually executes.
 #[test]
 fn queued_close_finalizer_with_unavailable_predecessor_session_preserves_same_id_successor() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-1",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let window_id = "tab-project::agent-1".to_string();
-    let session_id = "session-reused-after-unreadable-close";
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    runtime.active_agent_sessions.insert(
-        window_id.clone(),
-        ActiveAgentSession {
-            window_id: window_id.clone(),
-            session_id: session_id.to_string(),
-            agent_id: "codex".to_string(),
-            branch_name: "work/predecessor".to_string(),
-            display_name: "Codex".to_string(),
-            worktree_path: project.clone(),
-            agent_project_root: project.display().to_string(),
-            runtime_target: gwt_agent::LaunchRuntimeTarget::Host,
-            tab_id: "tab-project".to_string(),
-        },
-    );
-    insert_test_pane_runtime(&mut runtime, &window_id);
+    let (owner, predecessor) = control_owner_agent(&project, "agent", 42);
+    let mutation = ControlSessionMutation::new(&predecessor);
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let id = predecessor.session.as_ref().unwrap().id.clone();
     fs::write(
-        runtime.sessions_dir.join(format!("{session_id}.toml")),
-        "not valid session toml",
+        sessions.join(format!("{id}.toml")),
+        b"not valid session toml",
     )
-    .expect("seed unreadable predecessor Session");
-
-    assert!(runtime.close_window_outcome(&window_id).closed);
-
-    let mut successor =
-        gwt_agent::Session::new(&project, "work/successor", gwt_agent::AgentId::Codex);
-    successor.id = session_id.to_string();
-    successor.status = gwt_agent::AgentStatus::Running;
-    successor.restore_window_on_startup = true;
-    successor
-        .save(&runtime.sessions_dir)
-        .expect("persist same-id successor Session");
-
-    let finalizer = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("queued predecessor finalizer");
-    finalizer();
-
-    let durable =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("reload successor Session");
-    assert_eq!(durable.status, gwt_agent::AgentStatus::Running);
+    .unwrap();
+    let refused = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Close {
+            id: predecessor.id.clone(),
+            incarnation: predecessor.incarnation,
+        },
+    ));
+    let predecessor_survived = predecessor.pty.try_wait().unwrap().is_none();
+    mutation.restore();
+    let recovered = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Close {
+            id: predecessor.id.clone(),
+            incarnation: predecessor.incarnation,
+        },
+    ));
     assert!(
-        durable.restore_window_on_startup,
-        "an unavailable predecessor identity must not clear successor restore state"
+        refused.is_err(),
+        "an unreadable producing source must never be treated as an unbound Session"
     );
+    assert!(
+        predecessor_survived,
+        "unproven authority must refuse before mutating its physical child"
+    );
+    recovered.expect("the exact retained retirement must recover after fixture source repair");
+    let mut resume = control_launch_config(&project, 42);
+    resume.session_mode = gwt_agent::SessionMode::Continue;
+    resume.predecessor_session_id = Some(id.clone());
+    let successor = control_owner_launch(&owner, "agent", resume);
+    let before = gwt_agent::Session::load(&sessions.join(format!("{id}.toml"))).unwrap();
+    assert_eq!(before.id, successor.session.as_ref().unwrap().id);
+    assert_eq!(before.status, gwt_agent::AgentStatus::Running);
+    assert!(before.restore_window_on_startup);
+    assert!(owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Close {
+            id: predecessor.id,
+            incarnation: predecessor.incarnation,
+        }
+    ))
+    .is_err());
+    let after = gwt_agent::Session::load(&sessions.join(format!("{id}.toml"))).unwrap();
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap(),
+        "a stale predecessor completion must preserve the exact current Session"
+    );
+    assert!(successor.pty.try_wait().unwrap().is_none());
+    control_close(&owner, &successor);
 }
 
 #[test]
@@ -2003,12 +1812,7 @@ fn close_finalizer_falls_back_when_blocking_spawner_fails() {
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     runtime.blocking_tasks = BlockingTaskSpawner::failing("injected close scheduler failure");
     insert_test_pane_runtime(&mut runtime, &window_id);
-    let pty = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("live runtime")
-        .pty
-        .clone();
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
 
     assert!(!runtime
         .issue_monitor_idle_pane_close_events(&window_id, Some(4117), "review_verdict_published")
@@ -2043,12 +1847,7 @@ fn close_finalizer_queues_on_process_worker_when_both_schedulers_fail() {
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
     runtime.blocking_tasks = BlockingTaskSpawner::failing("injected close scheduler failure");
     insert_test_pane_runtime(&mut runtime, &window_id);
-    let pty = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("live runtime")
-        .pty
-        .clone();
+    let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
     let release_process_worker =
         super::super::pty_io::hold_process_close_finalizer_worker_for_test();
     let _raw_spawn_failure =
@@ -2080,121 +1879,86 @@ fn close_finalizer_queues_on_process_worker_when_both_schedulers_fail() {
 
 #[test]
 fn exact_close_finalizer_holds_handoff_through_generation_gated_cleanup() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-holder",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let session_id = "session-close-cleanup-successor";
-    assert!(tab
-        .workspace
-        .set_session_id("agent-holder", Some(session_id.to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    fs::create_dir_all(&runtime.sessions_dir).expect("create Session store");
-    let window_id = "tab-1::agent-holder".to_string();
-    let holder = install_manual_launch_holder(
-        &mut runtime,
-        &project,
-        session_id,
-        gwt_agent::AgentStatus::Running,
-        Some(&window_id),
-    );
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let issuer = install_manual_holder_capability(&mut runtime, &project, &window_id, &holder);
-    let active = runtime
-        .active_agent_sessions
-        .get(&window_id)
-        .expect("active exact holder")
-        .clone();
-    save_workspace_launch_projection(
-        &project,
-        &active,
-        Some("develop"),
-        Some(42),
-        None,
-        None,
-        WorkspaceLaunchProjectionKind::StartWork,
-        Some(&HashSet::from([session_id.to_string()])),
-    )
-    .expect("seed predecessor Workspace projection");
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let generations = Arc::clone(&runtime.window_lifecycle_generations);
-    let hook_issuer = issuer.clone();
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let session = pane.session.as_ref().unwrap();
+    let hook_issuer = pane.issuer.clone();
     let hook_project = project.clone();
-    let hook_window_id = window_id.clone();
-    let hook_holder = holder.clone();
-    let hook_active = active.clone();
-    let successor_issue = Arc::new(Mutex::new(None));
-    let hook_successor_issue = Arc::clone(&successor_issue);
-    super::super::pty_io::set_close_finalizer_before_durable_cleanup_test_hook(move || {
-        let result = hook_issuer.issue_bound(
-            &hook_project,
-            session_id,
-            hook_holder.execution_binding.clone(),
-        );
-        *hook_successor_issue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-        generations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                hook_window_id.clone(),
-                super::super::next_window_runtime_incarnation(),
-            );
-        save_workspace_launch_projection(
-            &hook_project,
-            &hook_active,
-            Some("develop"),
-            Some(42),
-            None,
-            None,
-            WorkspaceLaunchProjectionKind::StartWork,
-            Some(&HashSet::from([session_id.to_string()])),
-        )
-        .expect("materialize same Session/window successor projection");
-    });
-
-    assert!(runtime.close_window_outcome(&window_id).closed);
-    finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("queued exact close finalizer")();
-
-    assert!(
-        successor_issue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .expect("successor issue attempt")
-            .is_err(),
-        "the exact handoff fence must remain held through durable cleanup"
+    let hook_session = session.id.clone();
+    let hook_binding = session.execution_binding.as_ref().unwrap().clone();
+    let hook_owner = owner.clone();
+    let id = pane.id.clone();
+    let mut config = control_launch_config(&project, 42);
+    config.session_mode = gwt_agent::SessionMode::Continue;
+    config.predecessor_session_id = Some(session.id.clone());
+    let hook_config = config.clone();
+    let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+    let _hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        pane.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::BeforeRegistryCleanup,
+        move || {
+            let issuing_refused = hook_issuer
+                .issue_bound(&hook_project, &hook_session, hook_binding)
+                .is_err();
+            let replacement_refused = owner_fixture_block_on(hook_owner.command(
+                gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+                    id: id.clone(),
+                    operation_id: "too-early-same-session-successor".into(),
+                    tab_id: id.split_once("::").unwrap().0.into(),
+                    config: Box::new(hook_config),
+                    metadata: Box::default(),
+                    cols: 80,
+                    rows: 24,
+                },
+            ))
+            .is_err();
+            observed_tx
+                .send((issuing_refused, replacement_refused))
+                .unwrap();
+        },
     );
-    let projection = gwt_core::workspace_projection::load_workspace_projection(&project)
-        .expect("load successor projection")
-        .expect("successor projection");
-    assert!(
-        projection.agents.iter().any(|agent| {
-            agent.session_id == session_id && agent.window_id.as_deref() == Some(window_id.as_str())
-        }),
-        "a stale predecessor finalizer must not remove the same Session/window successor"
+    control_close(&owner, &pane);
+    let (issuing_refused, replacement_refused) = gwt_core::test_support::recv_event(
+        &observed_rx,
+        "real cleanup reached its exact handoff observation",
     );
     assert!(
-        issuer
-            .issue_bound(&project, session_id, holder.execution_binding.clone(),)
+        issuing_refused,
+        "exact capability handoff must stay held through canonical registry cleanup"
+    );
+    assert!(
+        replacement_refused,
+        "a same-id physical successor must wait until cleanup ACK"
+    );
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    assert!(
+        pane.issuer
+            .issue_bound(
+                &project,
+                &session.id,
+                session.execution_binding.as_ref().unwrap().clone()
+            )
             .is_ok(),
-        "the exact handoff fence must release after generation-gated cleanup"
+        "the committed cleanup ACK must release the exact holder handoff"
     );
+    let successor = control_owner_launch(&owner, "agent", config);
+    assert_eq!(successor.session.as_ref().unwrap().id, session.id);
+    assert_ne!(successor.incarnation, pane.incarnation);
+    assert!(
+        owner_fixture_block_on(
+            owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+                id: pane.id,
+                incarnation: pane.incarnation,
+            })
+        )
+        .is_err(),
+        "old close replay must not remove the actual same-Session successor"
+    );
+    assert!(owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation)).is_ok());
+    assert!(successor.pty.reserve_input_transaction().is_ok());
+    control_close(&owner, &successor);
 }
 
 /// Issue #3755 AC-1/AC-2: one pane whose output/status worker currently owns
@@ -2203,122 +1967,102 @@ fn exact_close_finalizer_holds_handoff_through_generation_gated_cleanup() {
 /// request with an explicit availability receipt.
 #[test]
 fn agent_pane_sync_skips_a_contended_runtime_without_hiding_error_panes() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab(
-        "tab-project",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent, WindowPreset::Agent],
-    );
-    let raw_window_ids = tab
-        .workspace
-        .persisted()
-        .windows
+    let (owner, busy) = control_owner_agent(&project, "busy", 375501);
+    let caller = control_owner_launch(&owner, "reader", control_launch_config(&project, 375502));
+    let error_id = owner.pane_id("failed");
+    let mut failed = control_launch_config(&project, 375503);
+    // Retained manual diagnostics are inspection launches. A failed producing
+    // genesis correctly compensates its Session instead of retaining this row.
+    failed.linked_issue_number = None;
+    failed.explicit_follow_up = false;
+    // A missing target can fail after the real PTY gate has started. Fail the
+    // gate executable itself to exercise the pre-PTY installation diagnostic.
+    owner_fixture_block_on(
+        owner.set_pty_start_gate(project.join("nonexistent-agent-executable"), Vec::new()),
+    )
+    .unwrap();
+    let result = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::LaunchAgent {
+            id: error_id.clone(),
+            operation_id: "failed-snapshot-launch".into(),
+            tab_id: error_id.split_once("::").unwrap().0.into(),
+            config: Box::new(failed),
+            metadata: Box::default(),
+            cols: 80,
+            rows: 24,
+        },
+    ));
+    let receipt = result.expect("actual retained manual launch-failure receipt");
+    let failure: gwt::project_runtime::events::OwnerLaunchFailure =
+        serde_json::from_value(receipt["launch_failure"].clone())
+            .unwrap_or_else(|error| panic!("exact manual diagnostic required: {error}; {receipt}"));
+    assert_eq!(failure.id, error_id);
+    assert_eq!(receipt["incarnation"], failure.incarnation);
+    assert_eq!(receipt["session_id"], failure.session_id);
+    assert!(failure.detail.contains("nonexistent-agent-executable"));
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(inventory["panes"].as_array().unwrap().len(), 2);
+    assert!(inventory["panes"]
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|window| window.id.clone())
-        .collect::<Vec<_>>();
-    assert_eq!(raw_window_ids.len(), 2);
-    let busy_window_id = combined_window_id("tab-project", &raw_window_ids[0]);
-    let error_window_id = combined_window_id("tab-project", &raw_window_ids[1]);
-    assert!(tab
-        .workspace
-        .set_status(&raw_window_ids[1], WindowProcessStatus::Error));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let busy_pane = Arc::new(Mutex::new(long_running_test_pane(&busy_window_id)));
-    runtime.runtimes.insert(
-        busy_window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::clone(&busy_pane),
-        ),
-    );
-    runtime.launch_error_terminal_details.insert(
-        error_window_id.clone(),
-        "agent bootstrap failed before PTY start".to_string(),
-    );
-    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
-        .expect("authenticated principal");
+        .all(|pane| pane["id"] != error_id));
+    assert!(inventory["pending"].as_array().unwrap().is_empty());
     let (locked_tx, locked_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let holder_pane = Arc::clone(&busy_pane);
+    let pane = busy.pane.clone();
     let holder = thread::spawn(move || {
-        let _guard = holder_pane.lock().expect("hold pane mutex");
-        locked_tx.send(()).expect("signal held mutex");
-        gwt_core::test_support::recv_event(&release_rx, "pane sync request finished");
+        let _guard = pane.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        gwt_core::test_support::recv_event(&release_rx, "authenticated Ready returned");
     });
-    locked_rx.recv().expect("pane mutex acquired");
-
-    let mut events = None;
-    let mut elapsed = Duration::MAX;
-    let logs = capture_tracing_events(|| {
-        let started = Instant::now();
-        events = Some(runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal,
+    locked_rx.recv().unwrap();
+    let mut reply = None;
+    let logs = control_tracing_events(&caller, || {
+        reply = Some(control_request(
+            &owner,
+            &caller,
             AgentFrontendRequest::Ready,
         ));
-        elapsed = started.elapsed();
     });
-    let events = events.expect("pane sync events");
-    release_tx.send(()).expect("release pane mutex");
-    holder.join().expect("pane mutex holder");
-
+    let reply = reply.unwrap();
+    // The lock cannot release before the real dispatch returned. This proves
+    // nonblocking behavior without a runner-speed assertion.
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(reply.close, None);
     assert!(
-        elapsed < Duration::from_millis(300),
-        "pane.read sync waited {elapsed:?} for an unrelated pane mutex"
+        reply
+            .events
+            .iter()
+            .any(|event| event["kind"] == "terminal_snapshot" && event["id"] == error_id),
+        "a captured failed-launch diagnostic must survive another busy pane: {:?}",
+        reply.events
     );
-    assert!(
-        events.iter().any(|outbound| matches!(
-            &outbound.event,
-            BackendEvent::TerminalSnapshot { id, .. } if id == &error_window_id
-        )),
-        "the launch-error pane must remain readable while another pane is busy: {events:?}"
-    );
-    assert!(
-        events.iter().any(|outbound| {
-            serde_json::to_value(&outbound.event)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("kind")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some("pane_sync_complete")
-        }),
-        "pane.read needs an explicit completion receipt: {events:?}"
-    );
-    assert!(events.iter().any(|outbound| matches!(
-        &outbound.event,
-        BackendEvent::PaneSyncComplete {
-            busy_window_ids,
-            empty_window_ids,
-            unavailable_window_ids,
-            failed_window_ids,
-        } if busy_window_ids == &vec![busy_window_id.clone()]
-            && empty_window_ids.is_empty()
-            && unavailable_window_ids.is_empty()
-            && failed_window_ids.is_empty()
-    )));
-    let busy_log = logs
+    let complete = reply
+        .events
         .iter()
-        .find(|event| {
-            event.target == "gwt.pane.sync"
-                && event.fields.get("window_id").map(String::as_str)
-                    == Some(busy_window_id.as_str())
-                && event.fields.get("stage").map(String::as_str) == Some("pane_snapshot_try_lock")
-        })
-        .expect("busy snapshot diagnostic");
-    assert_eq!(
-        busy_log.fields.get("outcome").map(String::as_str),
-        Some("busy")
-    );
-    assert!(busy_log.fields.contains_key("elapsed_ms"));
+        .find(|event| event["kind"] == "pane_sync_complete")
+        .unwrap();
+    assert_eq!(complete["busy_window_ids"], serde_json::json!([busy.id]));
+    for key in [
+        "empty_window_ids",
+        "unavailable_window_ids",
+        "failed_window_ids",
+    ] {
+        assert_eq!(complete[key], serde_json::json!([]));
+    }
+    assert!(logs.iter().any(|event| event.target == "gwt.pane.sync"
+        && event.fields.get("outcome").map(String::as_str) == Some("busy")
+        && event.fields.contains_key("elapsed_ms")));
+    control_close(&owner, &busy);
+    control_close(&owner, &caller);
 }
 
 /// Issue #3755 AC-2: completion outcomes are disjoint. A blank live terminal
@@ -2326,98 +2070,66 @@ fn agent_pane_sync_skips_a_contended_runtime_without_hiding_error_panes() {
 /// and a poisoned parser mutex is an internal failure rather than busy.
 #[test]
 fn agent_pane_sync_completion_distinguishes_snapshot_unavailable_and_poisoned() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let tab = sample_project_tab(
-        "tab-project",
-        "Repo",
+    fs::create_dir_all(&project).unwrap();
+    control_init_repo(&project);
+    // A saved window without a Session or runtime is truthful startup input,
+    // rather than a fabricated running process proof.
+    let tab = sample_project_tab_with_window_at(
+        "saved",
+        "unavailable",
         project.clone(),
-        ProjectKind::Git,
-        &[
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-        ],
+        WindowPreset::Agent,
+        WindowProcessStatus::Stopped,
     );
-    let window_ids = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|window| combined_window_id("tab-project", &window.id))
-        .collect::<Vec<_>>();
-    let empty_window_id = window_ids[0].clone();
-    let unavailable_window_id = window_ids[1].clone();
-    let failed_window_id = window_ids[2].clone();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    runtime.window_lookup.remove(&unavailable_window_id);
-    let empty_pane = Arc::new(Mutex::new(long_running_test_pane(&empty_window_id)));
-    runtime.runtimes.insert(
-        empty_window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::clone(&empty_pane),
-        ),
-    );
-    let failed_pane = Arc::new(Mutex::new(long_running_test_pane(&failed_window_id)));
-    runtime.runtimes.insert(
-        failed_window_id.clone(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            Arc::clone(&failed_pane),
-        ),
-    );
-    let poison_pane = Arc::clone(&failed_pane);
+    gwt::persistence::save_workspace_state(
+        &gwt::persistence::workspace_state_path(&project),
+        tab.workspace.persisted(),
+    )
+    .unwrap();
+    let (owner, empty) = control_owner_agent(&project, "empty", 375504);
+    let failed = control_owner_launch(&owner, "poisoned", control_launch_config(&project, 375505));
+    let failed_pane = failed.pane.clone();
     let _ = thread::spawn(move || {
-        let _guard = poison_pane.lock().expect("poison target pane");
+        let _guard = failed_pane.lock().unwrap();
         panic!("intentional pane mutex poison");
     })
     .join();
-    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
-        .expect("authenticated principal");
-
-    let mut events = None;
-    let logs = capture_tracing_events(|| {
-        events = Some(runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal,
-            AgentFrontendRequest::Ready,
-        ));
+    let mut reply = None;
+    let logs = control_tracing_events(&empty, || {
+        reply = Some(control_request(&owner, &empty, AgentFrontendRequest::Ready));
     });
-    let events = events.expect("pane sync events");
-
-    assert!(events.iter().any(|outbound| matches!(
-        &outbound.event,
-        BackendEvent::TerminalSnapshot { id, .. } if id == &empty_window_id
-    )));
-    assert!(events.iter().any(|outbound| matches!(
-        &outbound.event,
-        BackendEvent::PaneSyncComplete {
-            empty_window_ids,
-            busy_window_ids,
-            unavailable_window_ids,
-            failed_window_ids,
-        } if empty_window_ids.is_empty()
-            && busy_window_ids.is_empty()
-            && unavailable_window_ids == &vec![unavailable_window_id.clone()]
-            && failed_window_ids == &vec![failed_window_id.clone()]
-    )));
-    let failed_log = logs
+    let reply = reply.unwrap();
+    assert_eq!(reply.close, None);
+    assert!(reply
+        .events
         .iter()
-        .find(|event| {
-            event.target == "gwt.pane.sync"
-                && event.fields.get("window_id").map(String::as_str)
-                    == Some(failed_window_id.as_str())
-                && event.fields.get("stage").map(String::as_str) == Some("pane_snapshot_try_lock")
-        })
-        .expect("poisoned snapshot diagnostic");
+        .any(|event| event["kind"] == "terminal_snapshot" && event["id"] == empty.id));
+    let complete = reply
+        .events
+        .iter()
+        .find(|event| event["kind"] == "pane_sync_complete")
+        .unwrap();
+    assert_eq!(complete["empty_window_ids"], serde_json::json!([]));
+    assert_eq!(complete["busy_window_ids"], serde_json::json!([]));
     assert_eq!(
-        failed_log.fields.get("outcome").map(String::as_str),
-        Some("poisoned")
+        complete["unavailable_window_ids"],
+        serde_json::json!([owner.pane_id("unavailable")])
     );
-    assert!(failed_log.fields.contains_key("elapsed_ms"));
+    assert_eq!(
+        complete["failed_window_ids"],
+        serde_json::json!([failed.id])
+    );
+    assert!(logs.iter().any(|event| event.target == "gwt.pane.sync"
+        && event.fields.get("outcome").map(String::as_str) == Some("poisoned")
+        && event.fields.contains_key("elapsed_ms")));
+    // Repair only the fixture mutex poison after observing the production
+    // failure receipt, so ordinary exact-owner teardown can reap the child.
+    failed.pane.clear_poison();
+    control_close(&owner, &failed);
+    control_close(&owner, &empty);
 }
 
 /// Issue #3755 AC-3 / Issue #3988: removing mutex waits must not hide a new
@@ -2441,108 +2153,73 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
     // Print well past the cap so the clamp is exercised rather than assumed.
     let printed_lines = SNAPSHOT_SCROLLBACK_REPLAY_LIMIT + PANE_ROWS + 1_000;
 
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let tab = sample_project_tab(
-        "tab-project",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-            WindowPreset::Agent,
-        ],
-    );
-    let window_ids = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|window| combined_window_id("tab-project", &window.id))
-        .collect::<Vec<_>>();
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let replay = (0..printed_lines)
-        .map(|line| format!("snapshot-line-{line:06}\n"))
-        .collect::<String>();
-    let contended_window_id = window_ids[0].clone();
-    let mut contended_pane = None;
-    for window_id in &window_ids {
-        let mut pane = long_running_test_pane(window_id);
-        pane.process_bytes(replay.as_bytes());
-        let pane = Arc::new(Mutex::new(pane));
-        if window_id == &contended_window_id {
-            contended_pane = Some(Arc::clone(&pane));
-        }
-        runtime.runtimes.insert(
-            window_id.clone(),
-            WindowRuntime::new(super::super::next_window_runtime_incarnation(), pane),
-        );
+    let (owner, first) = control_owner_agent(&project, "pane-0", 375510);
+    let mut panes = vec![first];
+    for number in 1..4 {
+        panes.push(control_owner_launch(
+            &owner,
+            &format!("pane-{number}"),
+            control_launch_config(&project, 375510 + number),
+        ));
     }
-    let contended_pane = contended_pane.expect("contended pane runtime");
-
-    // Explicit sync points replace the old sleep: the holder owns the mutex
-    // before the dispatch starts and releases it only after the dispatch has
-    // returned, so contention covers the whole dispatch on any host speed.
+    let replay = (0..printed_lines)
+        .map(|line| format!("snapshot-line-{line:06}\r\n"))
+        .collect::<String>();
+    for pane in &panes {
+        pane.pane.lock().unwrap().process_bytes(replay.as_bytes());
+    }
+    let contended_window_id = panes[0].id.clone();
+    let contended_pane = panes[0].pane.clone();
     let (held_tx, held_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::channel();
     let holder = thread::spawn(move || {
-        let _guard = contended_pane.lock().expect("hold contended pane mutex");
-        held_tx.send(()).expect("signal held mutex");
+        let _guard = contended_pane.lock().unwrap();
+        held_tx.send(()).unwrap();
         let _ = release_rx.recv_timeout(HOLDER_DEADLOCK_GUARD);
     });
-    held_rx.recv().expect("contended pane mutex acquired");
-
-    let principal = AgentSessionPrincipal::for_test(&project, "session-reader")
-        .expect("authenticated principal");
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::Ready,
-    );
+    held_rx.recv().unwrap();
+    let reply = control_request(&owner, &panes[1], AgentFrontendRequest::Ready);
     let _ = release_tx.send(());
-    holder.join().expect("contended pane holder");
-
-    assert!(
-        events.iter().any(|outbound| matches!(
-            &outbound.event,
-            BackendEvent::PaneSyncComplete {
-                empty_window_ids,
-                busy_window_ids,
-                unavailable_window_ids,
-                failed_window_ids,
-            } if busy_window_ids == &vec![contended_window_id.clone()]
-                && empty_window_ids.is_empty()
-                && unavailable_window_ids.is_empty()
-                && failed_window_ids.is_empty()
-        )),
-        "a full-scrollback pane holding its mutex must be reported busy, never awaited: {events:?}"
-    );
-
-    let snapshots = events
+    holder.join().unwrap();
+    assert_eq!(reply.close, None);
+    let complete = reply
+        .events
         .iter()
-        .filter_map(|outbound| match &outbound.event {
-            BackendEvent::TerminalSnapshot { id, data_base64 } => {
-                Some((id.clone(), data_base64.clone()))
-            }
-            _ => None,
+        .find(|event| event["kind"] == "pane_sync_complete")
+        .unwrap();
+    assert_eq!(
+        complete["busy_window_ids"],
+        serde_json::json!([contended_window_id])
+    );
+    for key in [
+        "empty_window_ids",
+        "unavailable_window_ids",
+        "failed_window_ids",
+    ] {
+        assert_eq!(complete[key], serde_json::json!([]));
+    }
+    let snapshots = reply
+        .events
+        .iter()
+        .filter(|event| event["kind"] == "terminal_snapshot")
+        .map(|event| {
+            (
+                event["id"].as_str().unwrap().to_owned(),
+                event["data_base64"].as_str().unwrap().to_owned(),
+            )
         })
         .collect::<BTreeMap<_, _>>();
-    let mut expected_snapshot_ids = window_ids
+    let mut expected_snapshot_ids = panes
         .iter()
-        .filter(|id| *id != &contended_window_id)
-        .cloned()
+        .skip(1)
+        .map(|pane| pane.id.clone())
         .collect::<Vec<_>>();
     expected_snapshot_ids.sort();
-    assert_eq!(
-        snapshots.keys().cloned().collect::<Vec<_>>(),
-        expected_snapshot_ids,
-        "every uncontended full-scrollback pane must still be snapshotted in the same dispatch"
-    );
-
+    assert_eq!(snapshots.keys().cloned().collect::<Vec<_>>(), expected_snapshot_ids,
+        "every uncontended full-scrollback pane must be snapshotted by the same authenticated dispatch");
     let newest_line = format!("snapshot-line-{:06}", printed_lines - 1);
     for (window_id, data_base64) in &snapshots {
         let decoded = base64::engine::general_purpose::STANDARD
@@ -2564,6 +2241,9 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
             "{window_id} replayed a line older than the scrollback replay cap"
         );
     }
+    for pane in &panes {
+        control_close(&owner, pane);
+    }
 }
 
 /// Issue #3755 AC-2/AC-3: close removes the runtime and window synchronously,
@@ -2571,174 +2251,139 @@ fn agent_pane_sync_with_full_scrollback_stays_bounded() {
 /// GUI event loop.
 #[test]
 fn agent_pane_close_bypasses_a_contended_pane_lock() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-holder".to_string())));
-    let window_id = "tab-project::agent-project".to_string();
-    let (mut runtime, recorded) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let holder_identity = install_manual_launch_holder(
-        &mut runtime,
-        &project,
-        "session-holder",
-        gwt_agent::AgentStatus::Running,
-        Some(&window_id),
-    );
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    install_manual_holder_capability(&mut runtime, &project, &window_id, &holder_identity);
-    let exact_runtime = runtime
-        .runtimes
-        .get(&window_id)
-        .expect("exact holder runtime");
-    let busy_pane = exact_runtime.pane.clone();
-    let pty = exact_runtime.pty.clone();
-    let incarnation = exact_runtime.incarnation;
-    let runtime_path =
-        gwt_agent::runtime_state_path(&runtime.sessions_dir, &holder_identity.session_id);
-    let principal = AgentSessionPrincipal::for_test(&project, "session-closer")
-        .expect("authenticated principal");
-    let (locked_tx, locked_rx) = mpsc::sync_channel(1);
+    let (owner, caller) = control_owner_agent(&project, "caller", 42);
+    let target = control_owner_launch(&owner, "target", control_launch_config(&project, 43));
+    let target_pane = target.pane.clone();
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let holder_pane = Arc::clone(&busy_pane);
     let holder = thread::spawn(move || {
-        let _guard = holder_pane.lock().expect("hold pane mutex");
-        locked_tx.send(()).expect("signal held mutex");
-        gwt_core::test_support::recv_event(&release_rx, "pane close request finished");
+        let _guard = target_pane.lock().unwrap();
+        held_tx.send(()).unwrap();
+        gwt_core::test_support::recv_event(
+            &release_rx,
+            "actual owner answered list while close finalizer was blocked",
+        );
     });
-    locked_rx.recv().expect("pane mutex acquired");
-
-    let mut events = None;
+    held_rx.recv().unwrap();
     let logs = capture_tracing_events(|| {
-        events = Some(runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal,
-            AgentFrontendRequest::CloseWindow {
-                id: window_id.clone(),
-                request_id: None,
-                responder: None,
-            },
-        ));
-        // The holder cannot release until close returns: returning while this
-        // channel is unreleased proves that close did not acquire the mutex.
-        release_tx.send(()).expect("release pane mutex");
-        let queued = {
-            let mut finalizers = finalizers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(finalizers.len(), 1, "close must queue one finalizer");
-            finalizers.drain(..).collect::<Vec<_>>()
-        };
-        for finalizer in queued {
-            finalizer();
-        }
+        let trace = tracing::dispatcher::get_default(Clone::clone);
+        owner_fixture_block_on(async {
+            let (mut socket, _) = connect_async(caller.agent_pane_request().unwrap())
+                .await
+                .unwrap();
+            socket
+                .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+                .await
+                .unwrap();
+            let _ = next_test_agent_websocket_event(
+                &mut socket,
+                "workspace_state",
+                gwt_core::deadline_budget::HANG_GUARD,
+            )
+            .await;
+            let _trace = gwt::project_runtime::agent_frontend::capture_owner_agent_trace(
+                caller.grant.as_ref().unwrap(),
+                gwt::project_runtime::agent_frontend::OwnerAgentTraceRequest::CloseWindow,
+                trace,
+            );
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({"kind":"close_window","id":target.id})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+                .await
+                .unwrap();
+            let listed = next_test_agent_websocket_event(
+                &mut socket,
+                "workspace_state",
+                gwt_core::deadline_budget::HANG_GUARD,
+            )
+            .await;
+            assert!(listed["workspace"]["tabs"][0]["workspace"]["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["id"] == caller.id));
+            release_tx.send(()).unwrap();
+            let closed = next_test_agent_websocket_event(
+                &mut socket,
+                "pane_close_result",
+                gwt_core::deadline_budget::HANG_GUARD,
+            )
+            .await;
+            assert_eq!(closed["ok"], true);
+            assert_eq!(closed["window_id"], target.id);
+            socket.close(None).await.unwrap();
+        });
     });
-    let events = events.expect("pane close events");
-    holder.join().expect("pane mutex holder");
-
-    // Running the queued finalizer acknowledges both reap and durable proof.
-    assert!(
-        pty.try_wait().expect("exact holder child exit").is_some(),
-        "completed finalizer must reap its exact child"
+    holder.join().unwrap();
+    assert!(target.pty.try_wait().unwrap().is_some());
+    let session = target.session.as_ref().unwrap();
+    let proof = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &session.id,
+    ))
+    .unwrap();
+    assert_eq!(proof.status, gwt_agent::AgentStatus::Stopped);
+    assert_eq!(
+        proof
+            .execution_identity
+            .as_ref()
+            .map(|identity| &identity.execution_binding),
+        session.execution_binding.as_ref()
     );
-    let terminal_proof = gwt_agent::SessionRuntimeState::load(&runtime_path)
-        .expect("completed finalizer must persist terminal proof");
-    assert_eq!(terminal_proof.status, gwt_agent::AgentStatus::Stopped);
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-    assert!(recorded.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().any(|event| match recorded_project_payload(event) {
-        UserEvent::Dispatch(events) => events.iter().any(|event| matches!(&event.event, BackendEvent::PaneCloseResult { ok: true, window_id: closed, .. } if closed == &window_id)),
-        _ => false,
-    }));
-    assert!(!runtime.runtimes.contains_key(&window_id));
-    assert!(!runtime.window_lookup.contains_key(&window_id));
-    let kill_log = logs
+    assert_eq!(proof.runtime_incarnation, Some(target.incarnation));
+    let kill = logs
         .iter()
         .find(|event| {
             event.target == "gwt.pane.teardown"
                 && event.fields.get("stage").map(String::as_str) == Some("pty_kill")
                 && event.fields.get("outcome").map(String::as_str) == Some("completed")
         })
-        .expect("pty_kill teardown diagnostic");
-    assert_eq!(
-        kill_log.fields.get("window_id").map(String::as_str),
-        Some(window_id.as_str())
-    );
-    assert!(kill_log.fields.contains_key("elapsed_ms"));
-    assert_eq!(kill_log.fields.get("ok").map(String::as_str), Some("true"));
-    assert_eq!(
-        terminal_proof.execution_identity.as_ref(),
-        Some(&holder_identity)
-    );
-    assert_eq!(terminal_proof.runtime_incarnation, Some(incarnation));
+        .expect("actual owner kill diagnostic");
+    assert_eq!(kill.fields.get("window_id"), Some(&target.id));
+    assert_eq!(kill.fields.get("ok").map(String::as_str), Some("true"));
+    assert!(kill.fields.contains_key("elapsed_ms"));
+    control_close(&owner, &caller);
 }
 
 /// Issue #3629 AC-12: an uncorrelated self-close stays refused, but the
 /// refusal must be explicit so the CLI stops guessing at session correlation.
 #[test]
 fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-project".to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let principal =
-        AgentSessionPrincipal::for_test(&project, "session-project").expect("self-owned principal");
-
-    let refused = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let refused = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-project".to_string(),
+            id: pane.id.clone(),
             request_id: None,
             responder: None,
         },
     );
-
-    assert!(
-        matches!(
-            refused.as_slice(),
-            [OutboundEvent {
-                target: DispatchTarget::Client(client_id),
-                event: BackendEvent::PaneCloseResult {
-                    ok: false,
-                    window_id,
-                    reason: Some(reason),
-                },
-                ..
-            }] if client_id == "pane-client"
-                && window_id == "tab-project::agent-project"
-                && reason.contains("correlated")
-        ),
-        "an uncorrelated self-close must name the correlation requirement, got: {refused:?}"
-    );
-    assert!(runtime
-        .window_lookup
-        .contains_key("tab-project::agent-project"));
+    assert!(refused
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result"
+            && event["ok"] == false
+            && event["reason"]
+                .as_str()
+                .unwrap()
+                .contains("correlated acceptance")));
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_ok());
+    assert!(pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    control_close(&owner, &pane);
 }
 
 /// Issue #3503 / #3552 AC-1: the pane the PM could never clean up had failed
@@ -2751,616 +2396,448 @@ fn agent_pane_close_reports_uncorrelated_self_close_refusal() {
 /// same command, so it is covered here too.
 #[test]
 fn agent_pane_close_removes_a_launch_failed_peer_pane_without_session_binding() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-caller",
+    control_init_repo(&project);
+    let tab = sample_project_tab_with_window_at(
+        "saved",
+        "failed",
         project.clone(),
         WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        WindowProcessStatus::Error,
     );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-caller", Some("caller-session".to_string())));
-    let launch_failed = tab.workspace.add_window(WindowPreset::Agent);
-    let launch_failed_window_id = combined_window_id("tab-project", &launch_failed.id);
-    assert!(
-        tab.workspace
-            .window(&launch_failed.id)
-            .expect("launch-failed window")
-            .session_id
-            .is_none(),
-        "a pane that failed before PTY start carries no session binding"
-    );
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    // The PM is a conversational role with no linked owner, so its principal
-    // never carries an active execution binding.
-    let owner_less_principal =
-        AgentSessionPrincipal::for_test(&project, "caller-session").expect("owner-less principal");
-    assert!(!owner_less_principal.authorizes_producing_mutation());
-
-    let closed = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        owner_less_principal.clone(),
+    gwt::persistence::save_workspace_state(
+        &gwt::persistence::workspace_state_path(&project),
+        tab.workspace.persisted(),
+    )
+    .unwrap();
+    let (owner, bootstrap) = control_owner_agent(&project, "bootstrap", 42);
+    let mut config = control_launch_config(&project, 43);
+    config.linked_issue_number = None;
+    config.explicit_follow_up = false;
+    let caller = control_owner_launch(&owner, "pm", config);
+    assert!(!caller
+        .grant
+        .as_ref()
+        .unwrap()
+        .principal()
+        .authorizes_producing_mutation());
+    let failed_id = owner.pane_id("failed");
+    let reply = control_request_settled(
+        &owner,
+        &caller,
         AgentFrontendRequest::CloseWindow {
-            id: launch_failed_window_id.clone(),
+            id: failed_id.clone(),
             request_id: None,
             responder: None,
         },
     );
-
-    assert!(!closed.is_empty());
-    assert!(!runtime.window_lookup.contains_key(&launch_failed_window_id));
-
-    let refused = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        owner_less_principal,
+    assert!(
+        reply
+            .events
+            .iter()
+            .any(|event| event["kind"] == "pane_close_result"
+                && event["ok"] == true
+                && event["window_id"] == failed_id),
+        "{:?}",
+        reply.events
+    );
+    let refused = control_request(
+        &owner,
+        &caller,
         AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-caller".to_string(),
+            id: caller.id.clone(),
             request_id: None,
             responder: None,
         },
     );
-
-    assert!(
-        matches!(
-            refused.as_slice(),
-            [OutboundEvent {
-                event: BackendEvent::PaneCloseResult { ok: false, .. },
-                ..
-            }]
-        ),
-        "self-session protection still refuses an uncorrelated close of the caller's own pane, got: {refused:?}"
-    );
-    assert!(runtime
-        .window_lookup
-        .contains_key("tab-project::agent-caller"));
+    assert!(refused
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == false));
+    assert!(owner_fixture_block_on(owner.probe(&caller.id, caller.incarnation)).is_ok());
+    control_close(&owner, &caller);
+    control_close(&owner, &bootstrap);
 }
 
 /// Issue #3629 AC-9: a husk window (workspace record without a lookup entry,
 /// left behind by an app restart) must still close through the agent route.
 #[test]
 fn agent_pane_close_removes_husk_window_missing_from_lookup() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
+    control_init_repo(&project);
     let tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-husk",
+        "saved",
+        "husk",
         project.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Stopped,
     );
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    runtime.window_lookup.remove("tab-project::agent-husk");
-    let principal = AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
-
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
+    gwt::persistence::save_workspace_state(
+        &gwt::persistence::workspace_state_path(&project),
+        tab.workspace.persisted(),
+    )
+    .unwrap();
+    let (owner, caller) = control_owner_agent(&project, "caller", 42);
+    let id = owner.pane_id("husk");
+    let closed = control_request_settled(
+        &owner,
+        &caller,
         AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-husk".to_string(),
+            id: id.clone(),
             request_id: None,
             responder: None,
         },
     );
-
     assert!(
-        matches!(
-            events.first(),
-            Some(OutboundEvent {
-                event: BackendEvent::PaneCloseResult { ok: true, .. },
-                ..
-            })
-        ),
-        "husk close must succeed via the workspace fallback, got: {events:?}"
+        closed
+            .events
+            .iter()
+            .any(|event| event["kind"] == "pane_close_result"
+                && event["ok"] == true
+                && event["window_id"] == id),
+        "{:?}",
+        closed.events
     );
-    assert!(runtime
-        .tab("tab-project")
-        .expect("project tab")
-        .workspace
-        .window("agent-husk")
-        .is_none());
+    let listed = control_request(&owner, &caller, AgentFrontendRequest::ListWindows);
+    assert!(
+        listed.events[0]["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != id)
+    );
+    control_close(&owner, &caller);
 }
 
 #[test]
 fn agent_pane_close_removes_restored_session_husk_without_claiming_tree_exit() {
-    for boundary in [
-        "restored",
-        "view_only",
-        "running",
-        "current_host",
-        "live",
-        "unknown",
-    ] {
-        let temp = tempdir().expect("tempdir");
-        let _gwt_home = ScopedGwtHome::set(temp.path());
+    for boundary in ["restored", "view_only"] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
         let project = temp.path().join("project");
-        fs::create_dir_all(&project).expect("project");
-        let mut tab = sample_project_tab_with_window_at(
-            "tab-project",
-            "agent-husk",
-            project.clone(),
-            WindowPreset::Agent,
-            if boundary == "running" {
-                WindowProcessStatus::Running
-            } else {
-                WindowProcessStatus::Stopped
-            },
-        );
-        assert!(tab
-            .workspace
-            .set_session_id("agent-husk", Some("restored-session".to_string())));
-        let (mut runtime, recorded) =
-            sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-        let mut session =
-            gwt_agent::Session::new(&project, "work/restored", gwt_agent::AgentId::Codex);
-        session.id = "restored-session".to_string();
-        session.status = gwt_agent::AgentStatus::Running;
-        session.restore_window_on_startup = true;
-        session
-            .save(&runtime.sessions_dir)
-            .expect("persist restored Session");
-        if boundary == "current_host" {
-            gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running)
-                .save(&gwt_agent::runtime_state_path_for_pid(
-                    &runtime.sessions_dir,
-                    std::process::id(),
-                    &session.id,
-                ))
-                .expect("publish current Host runtime");
-        } else if boundary == "live" {
-            let mut state = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
-            state.child_pid = Some(std::process::id());
-            state.child_started_at = gwt::process::host_process_start_time(std::process::id());
-            state
-                .save(&gwt_agent::runtime_state_path_for_pid(
-                    &runtime.sessions_dir,
-                    i32::MAX as u32,
-                    &session.id,
-                ))
-                .unwrap();
-        } else if boundary == "unknown" {
-            let path = gwt_agent::runtime_state_path_for_pid(
-                &runtime.sessions_dir,
-                i32::MAX as u32,
-                &session.id,
-            );
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, b"unreadable runtime evidence").unwrap();
-        }
-        runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
-        let mut active = sample_active_agent_session("tab-project", "tab-project::agent-husk");
-        active.session_id = session.id.clone();
-        active.branch_name = session.branch.clone();
-        active.worktree_path = project.clone();
-        active.agent_project_root = project.display().to_string();
-        if boundary != "view_only" {
-            runtime
-                .active_agent_sessions
-                .insert(active.window_id.clone(), active);
-        }
-        runtime.window_lookup.remove("tab-project::agent-husk");
-        let (spawner, finalizers) = BlockingTaskSpawner::queued();
-        runtime.blocking_tasks = spawner;
-        let principal =
-            AgentSessionPrincipal::for_test(&project, "session-pm").expect("pm principal");
-
-        let events = runtime.handle_agent_frontend_event(
-            "pane-client".to_string(),
-            principal,
+        let target = control_retained_husk(&project, "historical");
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let path = sessions.join(format!("{}.toml", target.session.id));
+        let mut historical = gwt_agent::Session::load(&path).unwrap();
+        // Model the historical TOML left stale by a crashed old Host. This
+        // scalar is not live proof: the real prior Host and child both exited.
+        historical.status = gwt_agent::AgentStatus::Running;
+        historical.save(&sessions).unwrap();
+        let (owner, caller) = control_owner_agent(&project, "caller", 42);
+        let reply = control_request_settled(
+            &owner,
+            &caller,
             AgentFrontendRequest::CloseWindow {
-                id: "tab-project::agent-husk".to_string(),
+                id: target.id.clone(),
                 request_id: None,
                 responder: None,
             },
         );
-
-        assert!(!events
+        let durable = gwt_agent::Session::load(&path).unwrap();
+        let listed = control_request(&owner, &caller, AgentFrontendRequest::ListWindows);
+        control_close(&owner, &caller);
+        assert_eq!(reply.close, None);
+        let receipt = reply
+            .events
             .iter()
-            .any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. })));
-        assert!(runtime
-            .tab("tab-project")
-            .expect("project tab")
-            .workspace
-            .window("agent-husk")
-            .is_none());
-        let queued = finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect::<Vec<_>>();
-        assert_eq!(queued.len(), 1);
-        for finalizer in queued {
-            finalizer();
+            .find(|event| event["window_id"] == target.id)
+            .expect("exact client-scoped historical-view result");
+        assert_eq!(
+            receipt["kind"], "pane_husk_removed",
+            "{boundary}: {receipt:?}"
+        );
+        assert!(
+            receipt.get("ok").is_none(),
+            "view removal must not claim process-tree exit"
+        );
+        historical.restore_window_on_startup = false;
+        assert_eq!(
+            serde_json::to_value(durable).unwrap(),
+            serde_json::to_value(historical).unwrap(),
+            "historical Session metadata/status must stay unchanged except the restore flag"
+        );
+        assert!(
+            listed.events[0]["workspace"]["tabs"][0]["workspace"]["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["id"] != target.id)
+        );
+        let reference = BackendEvent::PaneCloseResult {
+            ok: false,
+            window_id: String::new(),
+            reason: None,
         }
-        let durable =
-            gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
-                .expect("reload restored Session");
-        if matches!(boundary, "restored" | "view_only") {
-            assert_eq!(durable.status, gwt_agent::AgentStatus::Running);
-            assert!(!durable.restore_window_on_startup);
-        } else {
-            assert_eq!(
-                durable.status,
-                gwt_agent::AgentStatus::Running,
-                "{boundary}"
+        .delivery_policy();
+        let husk = BackendEvent::PaneHuskRemoved {
+            window_id: target.id,
+        }
+        .delivery_policy();
+        assert_eq!(husk.delivery, reference.delivery);
+        assert_eq!(husk.backpressure, reference.backpressure);
+    }
+    // The canonical historical-view guard must reject real live/current-Host
+    // evidence. Raw GUI rows cannot bypass that guard after owner normalization.
+    for boundary in ["running", "live", "current_host", "unknown"] {
+        let temp = tempdir().unwrap();
+        let _home = ScopedGwtHome::set(temp.path());
+        let project = temp.path().join("project");
+        if boundary == "unknown" {
+            let target = control_retained_husk(&project, "uncertain");
+            let sessions = gwt_core::paths::gwt_sessions_dir();
+            let path = gwt_agent::runtime_state_path_for_pid(
+                &sessions,
+                target.owner_pid,
+                &target.session.id,
             );
-            assert!(durable.restore_window_on_startup, "{boundary}");
+            let original = fs::read(&path).unwrap();
+            let snapshot =
+                gwt_agent::Session::load(&sessions.join(format!("{}.toml", target.session.id)))
+                    .unwrap();
+            let before = fs::read(sessions.join(format!("{}.toml", target.session.id))).unwrap();
+            fs::write(&path, b"unreadable actual prior runtime proof").unwrap();
+            let result = gwt::session_finalizer::remove_restored_stopped_view(&sessions, &snapshot);
+            fs::write(&path, original).unwrap();
+            assert!(!matches!(result, Ok(true)));
+            assert_eq!(
+                fs::read(sessions.join(format!("{}.toml", target.session.id))).unwrap(),
+                before
+            );
+            continue;
         }
-        let recorded = recorded
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let reply = recorded
-            .iter()
-            .find_map(|event| {
-                match recorded_project_payload(event) {
-            UserEvent::Dispatch(events) => events.iter().find(|event| {
-                matches!(&event.target, DispatchTarget::Client(id) if id == "pane-client")
-            }),
-            _ => None,
-        }
-            })
-            .expect("client-scoped close result");
-        let payload = serde_json::to_value(&reply.event).unwrap();
-        assert_eq!(payload["window_id"], "tab-project::agent-husk");
-        if matches!(boundary, "restored" | "view_only") {
-            assert_eq!(payload["kind"], "pane_husk_removed");
+        let (owner, pane) = control_owner_agent(&project, "current", 42);
+        let sessions = gwt_core::paths::gwt_sessions_dir();
+        let session_id = pane.session.as_ref().unwrap().id.clone();
+        if boundary == "current_host" {
+            owner_fixture_block_on(Arc::try_unwrap(owner).ok().unwrap().shutdown());
+            assert!(pane.pty.try_wait().unwrap().is_some());
+            let current =
+                gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+            let before = fs::read(sessions.join(format!("{session_id}.toml"))).unwrap();
             assert!(
-                payload.get("ok").is_none(),
-                "view removal is not exit proof"
-            );
-            let reference_policy = BackendEvent::PaneCloseResult {
-                ok: false,
-                window_id: String::new(),
-                reason: None,
-            }
-            .delivery_policy();
-            assert_eq!(
-                reply.event.delivery_policy().delivery,
-                reference_policy.delivery
+                !gwt::session_finalizer::remove_restored_stopped_view(&sessions, &current).unwrap()
             );
             assert_eq!(
-                reply.event.delivery_policy().backpressure,
-                reference_policy.backpressure
+                fs::read(sessions.join(format!("{session_id}.toml"))).unwrap(),
+                before
             );
         } else {
-            assert_eq!(payload["kind"], "pane_close_result", "{boundary}");
-            assert_eq!(payload["ok"], false, "{boundary}");
+            assert!(pane.pty.try_wait().unwrap().is_none());
+            let current =
+                gwt_agent::Session::load(&sessions.join(format!("{session_id}.toml"))).unwrap();
+            let before = fs::read(sessions.join(format!("{session_id}.toml"))).unwrap();
+            assert!(
+                !gwt::session_finalizer::remove_restored_stopped_view(&sessions, &current).unwrap()
+            );
+            assert_eq!(
+                fs::read(sessions.join(format!("{session_id}.toml"))).unwrap(),
+                before
+            );
+            assert!(pane.pty.try_wait().unwrap().is_none());
+            control_close(&owner, &pane);
         }
     }
 }
 
 #[test]
 fn queued_agent_pane_request_rechecks_generation_before_runtime_dispatch() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let queued = pane.grant.as_ref().unwrap().clone();
+    let session = pane.session.as_ref().unwrap();
+    let rotated = pane.issuer.issue(&project, &session.id).unwrap();
+    let stale_client = owner_fixture_block_on(owner.agent_client("stale-inspector")).unwrap();
+    let stale =
+        owner_fixture_block_on(stale_client.request(queued.clone(), AgentFrontendRequest::Ready))
+            .unwrap();
+    assert_eq!(
+        stale.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE),
+        "a queued request whose owner capability generation was rotated must be rejected as stale"
     );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-project".to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    let original = issuer
-        .issue(&project, "session-project")
-        .expect("original capability");
-    let queued_grant = issuer
-        .grant_for_test(&original.token)
-        .expect("queued authenticated grant");
-
-    let current = issuer
-        .issue(&project, "session-project")
-        .expect("rotate capability before tao dispatch");
-    let stale_outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        queued_grant,
+    let shared_stale = gwt::project_runtime::agent_frontend::dispatch_if_current(
+        Some(&pane.issuer),
+        &gwt_core::paths::gwt_sessions_dir(),
+        "stale-inspector".into(),
+        queued,
         AgentFrontendRequest::Ready,
+        |_, _| panic!("shared gate dispatched a revoked queued grant"),
     );
+    assert!(matches!(
+        shared_stale,
+        gwt::project_runtime::agent_frontend::AgentFrontendDispatchOutcome::StaleCapability
+    ));
+    let current = pane.issuer.grant_for_test(&rotated.token).unwrap();
+    let client = owner_fixture_block_on(owner.agent_client("current-inspector")).unwrap();
+    let reply =
+        owner_fixture_block_on(client.request(current, AgentFrontendRequest::Ready)).unwrap();
+    assert_eq!(reply.close, None);
     assert!(
-        matches!(
-            stale_outcome,
-            super::super::AgentFrontendDispatchOutcome::StaleCapability
-        ),
-        "a queued request whose generation was revoked must be rejected as stale"
-    );
-
-    let current_grant = issuer
-        .grant_for_test(&current.token)
-        .expect("current authenticated grant");
-    let current_events = match runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        current_grant,
-        AgentFrontendRequest::Ready,
-    ) {
-        super::super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
-        super::super::AgentFrontendDispatchOutcome::StaleCapability => {
-            panic!("current grant must dispatch")
-        }
-        super::super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => {
-            panic!("current inspection grant does not require durable authority")
-        }
-    };
-    assert!(
-        current_events
+        reply
+            .events
             .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
+            .any(|event| event["kind"] == "workspace_state"),
         "the current observation grant must still receive its scoped snapshot"
     );
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: pane.id,
+            incarnation: pane.incarnation,
+        }),
+    )
+    .unwrap();
 }
 
-/// Issue #3816: the Tao dispatch path must release the caller capability
-/// registry read lock before close teardown fences the target capability.
-/// Otherwise `pane.close` self-deadlocks before its acknowledgement and every
-/// later request on the same event loop stalls behind it.
 #[test]
 fn current_peer_pane_close_releases_caller_grant_lock_before_target_handoff() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-target",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let target_session_id = "session-close-target";
-    assert!(tab
-        .workspace
-        .set_session_id("agent-target", Some(target_session_id.to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-target");
-    let holder = install_manual_launch_holder(
-        &mut runtime,
-        &project,
-        target_session_id,
-        gwt_agent::AgentStatus::Running,
-        Some(&window_id),
-    );
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let issuer = install_manual_holder_capability(&mut runtime, &project, &window_id, &holder);
-    let stale_caller = issuer
-        .issue(&project, "session-close-caller")
-        .expect("issue stale peer caller capability");
-    let stale_caller_grant = issuer
-        .grant_for_test(&stale_caller.token)
-        .expect("authenticate stale peer caller capability");
-    let caller = issuer
-        .issue(&project, "session-close-caller")
-        .expect("issue peer caller capability");
-    let caller_grant = issuer
-        .grant_for_test(&caller.token)
-        .expect("authenticate peer caller capability");
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-
-    let stale_close = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        stale_caller_grant,
+    let (owner, pane) = control_owner_agent(&project, "caller", 42);
+    let target = control_owner_launch(&owner, "target", control_launch_config(&project, 43));
+    let old_grant = pane.grant.as_ref().unwrap().clone();
+    let session = pane.session.as_ref().unwrap();
+    let issued = pane
+        .issuer
+        .issue_bound(
+            &project,
+            &session.id,
+            session.execution_binding.as_ref().unwrap().clone(),
+        )
+        .unwrap();
+    let current = pane.issuer.grant_for_test(&issued.token).unwrap();
+    let stale_client = owner_fixture_block_on(owner.agent_client("stale-close")).unwrap();
+    let stale = owner_fixture_block_on(stale_client.request(
+        old_grant,
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
+            id: target.id.clone(),
             request_id: None,
             responder: None,
         },
-    );
-    assert!(matches!(
-        stale_close,
-        super::super::AgentFrontendDispatchOutcome::StaleCapability
-    ));
-    assert!(
-        runtime.tracked_window_exists(&window_id),
-        "rotation before acceptance must reject the close without touching its target"
-    );
-    assert!(
-        finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty(),
-        "a close rejected before acceptance must not queue teardown"
-    );
-
-    let (result_tx, result_rx) = mpsc::sync_channel(1);
-    let thread_home = temp.path().to_path_buf();
-    let worker_window_id = window_id.clone();
-    let worker = thread::spawn(move || {
-        let _gwt_home = ScopedGwtHome::set(&thread_home);
-        let close = runtime.handle_agent_frontend_event_if_current(
-            "pane-client".to_string(),
-            caller_grant.clone(),
-            AgentFrontendRequest::CloseWindow {
-                id: worker_window_id.clone(),
-                request_id: None,
-                responder: None,
-            },
-        );
-        let reclose = runtime.handle_agent_frontend_event_if_current(
-            "pane-client".to_string(),
-            caller_grant.clone(),
-            AgentFrontendRequest::CloseWindow {
-                id: worker_window_id,
-                request_id: None,
-                responder: None,
-            },
-        );
-        let listed = runtime.handle_agent_frontend_event_if_current(
-            "pane-client".to_string(),
-            caller_grant,
-            AgentFrontendRequest::ListWindows,
-        );
-        result_tx
-            .send((close, reclose, listed))
-            .expect("report peer close outcomes");
-    });
-
-    // This regression checks grant lock ordering. The real-WebSocket test
-    // separately covers close/list/read latency without this fixture's startup.
-    let (close, reclose, listed) = gwt_core::test_support::recv_event(
-        &result_rx,
-        "peer close and the following bridge requests finished",
-    );
-    worker.join().expect("join peer close dispatch");
-    assert!(matches!(
-        close,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref events)
-            if !events.is_empty() && !events.iter().any(|event| matches!(event.event, BackendEvent::PaneCloseResult { .. }))
-    ));
-    assert!(matches!(
-        reclose,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref events)
-            if matches!(
-                events.first(),
-                Some(OutboundEvent {
-                    event: BackendEvent::PaneCloseResult { ok: false, .. },
-                    ..
-                })
-            )
-    ));
-    assert!(matches!(
-        listed,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref events) if !events.is_empty()
-    ));
+    ))
+    .unwrap();
     assert_eq!(
-        finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        1,
-        "only the accepted close may queue background teardown"
+        stale.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE)
     );
-    let queued = {
-        let mut finalizers = finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        finalizers.drain(..).collect::<Vec<_>>()
-    };
-    for finalizer in queued {
-        finalizer();
-    }
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
+    let client = owner_fixture_block_on(owner.agent_client("accepted-close")).unwrap();
+    let close = owner_fixture_block_on(client.request(
+        current.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: target.id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    ))
+    .unwrap();
+    assert_eq!(close.close, None);
+    control_settled_self_closes(&owner);
+    let mut events = close.events;
+    events.extend(client.drain().unwrap().events);
+    assert!(events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == true));
+    let reclose = owner_fixture_block_on(client.request(
+        current.clone(),
+        AgentFrontendRequest::CloseWindow {
+            id: target.id.clone(),
+            request_id: None,
+            responder: None,
+        },
+    ))
+    .unwrap();
+    assert!(reclose
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == false));
+    let listed =
+        owner_fixture_block_on(client.request(current, AgentFrontendRequest::ListWindows)).unwrap();
+    assert_eq!(listed.close, None);
+    assert!(listed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "workspace_state"));
+    assert!(!target.current.load(std::sync::atomic::Ordering::Acquire));
+    assert!(target.pty.try_wait().unwrap().is_some());
+    // The fixture rotated this bearer outside the owner's runtime. Release
+    // that exact fixture capability before the caller's normal teardown.
+    assert!(pane.issuer.revoke_token(&issued.token));
+    control_close(&owner, &pane);
 }
 
 /// Issue #3816: once the caller grant has crossed the acceptance snapshot,
 /// rotating that caller must not cancel the already accepted peer operation.
 #[test]
 fn accepted_peer_close_snapshot_survives_caller_rotation() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-target",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Stopped,
-    );
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    let window_id = combined_window_id("tab-1", "agent-target");
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let caller = issuer
-        .issue(&project, "session-close-caller")
-        .expect("issue peer caller capability");
-    let caller_grant = issuer
-        .grant_for_test(&caller.token)
-        .expect("authenticate peer caller capability");
-    let asserted_grant = caller_grant.clone();
+    let (owner, pane) = control_owner_agent(&project, "caller", 42);
+    let target = control_owner_launch(&owner, "target", control_launch_config(&project, 43));
     let (accepted_tx, accepted_rx) = mpsc::sync_channel(1);
     let (resume_tx, resume_rx) = mpsc::sync_channel(1);
-    let thread_home = temp.path().to_path_buf();
-    let worker_window_id = window_id.clone();
+    let _hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        pane.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::PeerCloseAccepted,
+        move || {
+            accepted_tx.send(()).unwrap();
+            gwt_core::test_support::recv_event(&resume_rx, "caller rotated after real acceptance");
+        },
+    );
+    let client = owner_fixture_block_on(owner.agent_client("peer-close")).unwrap();
+    let grant = pane.grant.as_ref().unwrap().clone();
+    let worker_owner = owner.clone();
+    let target_id = target.id.clone();
+    let worker_home = temp.path().to_path_buf();
     let worker = thread::spawn(move || {
-        let _gwt_home = ScopedGwtHome::set(&thread_home);
-        super::super::set_agent_peer_close_after_acceptance_test_hook(move || {
-            accepted_tx
-                .send(())
-                .expect("signal peer close acceptance snapshot");
-            resume_rx
-                .recv_timeout(Duration::from_secs(1))
-                .expect("resume accepted peer close");
-        });
-        let outcome = runtime.handle_agent_frontend_event_if_current(
-            "pane-client".to_string(),
-            caller_grant,
+        let _home = ScopedGwtHome::set(&worker_home);
+        let mut reply = owner_fixture_block_on(client.request(
+            grant,
             AgentFrontendRequest::CloseWindow {
-                id: worker_window_id,
+                id: target_id,
                 request_id: None,
                 responder: None,
             },
-        );
-        (runtime, outcome)
+        ))
+        .unwrap();
+        control_settled_self_closes(&worker_owner);
+        reply.events.extend(client.drain().unwrap().events);
+        reply
     });
-
-    accepted_rx
-        .recv_timeout(Duration::from_millis(400))
-        .expect("production dispatch reached the post-acceptance barrier");
-    let rotation_issuer = issuer.clone();
+    gwt_core::test_support::recv_event(&accepted_rx, "real dispatch crossed acceptance fence");
+    let rotation_issuer = pane.issuer.clone();
     let rotation_project = project.clone();
+    let session_id = pane.session.as_ref().unwrap().id.clone();
     let (rotation_tx, rotation_rx) = mpsc::sync_channel(1);
     let rotation = thread::spawn(move || {
         rotation_tx
-            .send(rotation_issuer.issue(&rotation_project, "session-close-caller"))
-            .expect("report caller rotation");
+            .send(rotation_issuer.issue(&rotation_project, &session_id))
+            .unwrap();
     });
-    rotation_rx
-        .recv_timeout(Duration::from_millis(400))
-        .expect("caller rotation must not wait on the accepted dispatch")
-        .expect("rotate caller after acceptance");
-    rotation.join().expect("join caller rotation");
-    assert!(
-        !issuer.grant_is_current(&asserted_grant),
-        "the accepted grant must now be stale in the registry"
-    );
-    resume_tx.send(()).expect("resume accepted peer close");
-    let (runtime, outcome) = worker.join().expect("join accepted peer close dispatch");
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref events)
-            if matches!(
-                events.first(),
-                Some(OutboundEvent {
-                    event: BackendEvent::PaneCloseResult { ok: true, .. },
-                    ..
-                })
-            )
-    ));
-    assert!(
-        !runtime.tracked_window_exists(&window_id),
-        "rotation after acceptance must not cancel the accepted close"
-    );
-    let queued = {
-        let mut finalizers = finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        finalizers.drain(..).collect::<Vec<_>>()
-    };
-    for finalizer in queued {
-        finalizer();
-    }
+    gwt_core::test_support::recv_event(
+        &rotation_rx,
+        "caller rotation must not wait for accepted target handoff",
+    )
+    .unwrap();
+    rotation.join().unwrap();
+    assert!(!pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    resume_tx.send(()).unwrap();
+    let reply = worker.join().unwrap();
+    assert_eq!(reply.close, None);
+    assert!(reply
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_close_result" && event["ok"] == true));
+    assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_err());
+    assert!(target.pty.try_wait().unwrap().is_some());
+    control_close(&owner, &pane);
 }
 
 /// Issue #3816 AC-3/AC-5/AC-6: exercise the real TCP WebSocket bridge, its
@@ -3370,361 +2847,133 @@ fn accepted_peer_close_snapshot_survives_caller_rotation() {
 /// authenticated connection.
 #[test]
 fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("isolated HOME");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    let caller_session_id = "session-ws-caller";
-    let target_session_id = "session-ws-target";
-    let caller_binding = materialize_active_agent_pane_binding(&project, caller_session_id);
-
-    // Keep first-use Board migration and Git discovery outside the bridge's
-    // request latency measurement. Close still performs its ordinary Board check.
-    {
-        let _gwt_home = ScopedGwtHome::set(temp.path());
-        gwt_core::coordination::ensure_repo_local_files(&project)
-            .expect("prepare Board before measuring pane bridge");
-    }
-
-    let mut tab = sample_project_tab(
-        "tab-project",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent, WindowPreset::Agent],
-    );
-    let raw_window_ids = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|window| window.id.clone())
-        .collect::<Vec<_>>();
-    let caller_window_id = combined_window_id("tab-project", &raw_window_ids[0]);
-    let target_window_id = combined_window_id("tab-project", &raw_window_ids[1]);
-    assert!(tab
-        .workspace
-        .set_session_id(&raw_window_ids[0], Some(caller_session_id.to_string())));
-    assert!(tab
-        .workspace
-        .set_session_id(&raw_window_ids[1], Some(target_session_id.to_string())));
-
-    let (mut app, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    for window_id in [&caller_window_id, &target_window_id] {
-        insert_test_pane_runtime(&mut app, window_id);
-    }
-    let target_pty = Arc::clone(
-        &app.runtimes
-            .get(&target_window_id)
-            .expect("target runtime")
-            .pty,
-    );
-    let caller_pane = app
-        .runtimes
-        .get(&caller_window_id)
-        .expect("caller runtime")
-        .pane
-        .clone();
-    let mut caller_reader = caller_pane
+    let (owner, pane) = control_owner_agent(&project, "caller", 42);
+    let target = control_owner_launch(&owner, "target", control_launch_config(&project, 43));
+    pane.pane
         .lock()
-        .expect("caller pane")
-        .reader()
-        .expect("caller PTY reader");
-    let caller_output_thread = thread::spawn(move || {
-        let mut buffer = [0u8; 4096];
-        while std::io::Read::read(&mut caller_reader, &mut buffer).is_ok_and(|read| read > 0) {}
-    });
-    caller_pane
-        .lock()
-        .expect("caller pane")
-        .process_bytes(b"caller snapshot remains readable after peer close\n");
-    let caller_child_pid = caller_pane
-        .lock()
-        .expect("caller pane")
-        .pty()
-        .process_id()
-        .expect("caller child pid");
-    let caller_child_started_at = gwt::process::host_process_start_time(caller_child_pid)
-        .expect("caller child process start time");
-    app.register_pty_writer(&caller_window_id, None);
-
-    let mut caller_session = sample_active_agent_session("tab-project", &caller_window_id);
-    caller_session.session_id = caller_session_id.to_string();
-    caller_session.worktree_path = project.clone();
-    caller_session.agent_project_root = project.display().to_string();
-    let mut target_session = sample_active_agent_session("tab-project", &target_window_id);
-    target_session.session_id = target_session_id.to_string();
-    target_session.worktree_path = project.clone();
-    target_session.agent_project_root = project.display().to_string();
-    app.active_agent_sessions
-        .insert(caller_window_id.clone(), caller_session);
-    app.active_agent_sessions
-        .insert(target_window_id.clone(), target_session);
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    app.blocking_tasks = spawner;
-
-    let tokio = TokioRuntime::new().expect("Tokio runtime");
-    let (proxy, recorded_events) = AppEventProxy::stub();
-    app.proxy = proxy.clone();
-    let clients = crate::embedded_server::ClientHub::default();
-    let mut server = crate::embedded_server::EmbeddedServer::start(
-        &tokio,
-        proxy,
-        clients.clone(),
-        Arc::clone(&app.pty_writers),
-        AttachmentUploadStore::in_system_temp(),
-    )
-    .expect("embedded server");
-    let issuer = server.agent_capability_issuer();
-    let caller = issuer
-        .issue_bound(&project, caller_session_id, caller_binding)
-        .expect("active caller capability");
-    let target = issuer
-        .issue(&project, target_session_id)
-        .expect("peer target capability");
-    app.agent_capability_issuer = Some(issuer.clone());
-    app.agent_capability_tokens
-        .insert(caller_window_id.clone(), caller.token.clone());
-    app.agent_capability_tokens
-        .insert(target_window_id.clone(), target.token);
-
-    let (stop_tx, stop_rx) = mpsc::sync_channel(1);
-    let driver_home = temp.path().to_path_buf();
-    let driver_events = Arc::clone(&recorded_events);
-    let driver_clients = clients.clone();
-    let driver = thread::spawn(move || {
-        let _gwt_home = ScopedGwtHome::set(&driver_home);
-        loop {
-            match stop_rx.try_recv() {
-                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => break,
-                Err(mpsc::TryRecvError::Empty) => {}
-            }
-            let event = {
-                let mut events = driver_events
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                events
-                    .iter()
-                    .position(|event| {
-                        matches!(
-                            recorded_project_payload(event),
-                            UserEvent::AgentFrontend { .. } | UserEvent::Dispatch(_)
-                        )
-                    })
-                    .map(|position| events.remove(position))
-            };
-            let Some(event) = event.and_then(|event| app.accept_project_completion(event)) else {
-                // test-hygiene: allow-short-duration bounded event-driver and OS process-exit polling; observed event/state establishes ordering, not this interval
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            };
-            match event {
-                UserEvent::AgentFrontend {
-                    client_id,
-                    grant,
-                    request,
-                } => {
-                    let outcome = app.handle_agent_frontend_event_if_current(
-                        client_id.clone(),
-                        grant,
-                        request,
-                    );
-                    crate::apply_agent_frontend_dispatch_outcome(
-                        &driver_clients,
-                        &client_id,
-                        outcome,
-                    );
-                }
-                UserEvent::Dispatch(events) => driver_clients.dispatch(events),
-                _ => unreachable!("selected agent or completion dispatch"),
-            }
-        }
-        app
-    });
-
-    let pane_url = issuer.agent_pane_websocket_url().to_string();
-    tokio.block_on(async {
-        let mut request = pane_url
-            .as_str()
-            .into_client_request()
-            .expect("agent pane WebSocket request");
-        request.headers_mut().insert(
-            axum::http::header::AUTHORIZATION,
-            format!("Bearer {}", caller.token)
-                .parse()
-                .expect("bearer header"),
+        .unwrap()
+        .process_bytes(b"caller snapshot remains readable after peer close\r\n");
+    let target_pane = target.pane.clone();
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
+        let _guard = target_pane.lock().unwrap();
+        held_tx.send(()).unwrap();
+        gwt_core::test_support::recv_event(
+            &release_rx,
+            "wire close/list/read returned while target finalizer was contended",
         );
-        let (mut socket, _) = connect_async(request)
-            .await
-            .expect("real agent pane WebSocket");
-
+    });
+    held_rx.recv().unwrap();
+    let socket_request = pane.agent_pane_request().unwrap();
+    owner_fixture_block_on(async {
+        let (mut socket, _) = connect_async(socket_request).await.unwrap();
         socket
-            .send(WebSocketMessage::Text(
-                r#"{"kind":"list_windows"}"#.to_string().into(),
-            ))
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
             .await
-            .expect("seed authenticated pane scope");
-        let _ =
-            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
-                .await;
-
-        let close_started = Instant::now();
-        socket
-            .send(WebSocketMessage::Text(
-                serde_json::json!({"kind": "close_window", "id": target_window_id})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .expect("send peer close");
-        // Agent sockets receive client replies, not project broadcasts. Keep
-        // the seeded scope until re-close has exercised the removed target.
-        let reclose_started = Instant::now();
-        socket
-            .send(WebSocketMessage::Text(
-                serde_json::json!({"kind": "close_window", "id": target_window_id})
-                    .to_string()
-                    .into(),
-            ))
-            .await
-            .expect("send failed peer re-close");
+            .unwrap();
+        let _ = next_test_agent_websocket_event(
+            &mut socket,
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        for _ in 0..2 {
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::json!({"kind":"close_window","id":target.id})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        }
         let reclose = next_test_agent_websocket_event(
             &mut socket,
             "pane_close_result",
-            Duration::from_millis(400),
+            gwt_core::deadline_budget::HANG_GUARD,
         )
         .await;
-        assert_eq!(reclose["ok"], false);
-        assert_eq!(reclose["window_id"], target_window_id);
-        assert!(
-            close_started.elapsed() < Duration::from_millis(400),
-            "real WebSocket close and re-close exceeded the bridge budget"
-        );
-        assert!(
-            reclose_started.elapsed() < Duration::from_millis(400),
-            "real WebSocket failed peer re-close exceeded the bridge budget"
-        );
-
-        socket
-            .send(WebSocketMessage::Text(
-                r#"{"kind":"list_windows"}"#.to_string().into(),
-            ))
-            .await
-            .expect("send list after failed close");
-        let listed =
-            next_test_agent_websocket_event(&mut socket, "workspace_state", Duration::from_secs(1))
-                .await;
-        let listed_windows = listed["workspace"]["tabs"][0]["workspace"]["windows"]
-            .as_array()
-            .expect("listed windows");
-        assert!(listed_windows
-            .iter()
-            .any(|window| window["id"] == caller_window_id));
-        assert!(listed_windows
-            .iter()
-            .all(|window| window["id"] != target_window_id));
-
-        let queued = finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-            .collect::<Vec<_>>();
         assert_eq!(
-            queued.len(),
-            1,
-            "the accepted peer close owns one background finalizer"
+            reclose["ok"], false,
+            "the accepted close waits for its exact finalizer; re-close still answers"
         );
-        tokio::task::spawn_blocking(move || {
-            for finalizer in queued {
-                finalizer();
-            }
-        })
-        .await
-        .expect("join peer close finalizer");
-        let close = next_test_agent_websocket_event(
+        socket
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+            .await
+            .unwrap();
+        let listed = next_test_agent_websocket_event(
             &mut socket,
-            "pane_close_result",
-            Duration::from_secs(15),
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
         )
         .await;
-        assert_eq!(close["ok"], true);
-        assert_eq!(close["window_id"], target_window_id);
-        assert!(target_pty
-            .try_wait()
-            .expect("peer PTY exit confirmed")
-            .is_some());
-
+        assert!(listed["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|window| window["id"] == pane.id));
         socket
             .send(WebSocketMessage::Text(
-                r#"{"kind":"frontend_ready"}"#.to_string().into(),
+                r#"{"kind":"frontend_ready"}"#.into(),
             ))
             .await
-            .expect("send read sync after peer close");
+            .unwrap();
         let snapshot = next_test_agent_websocket_event(
             &mut socket,
             "terminal_snapshot",
-            Duration::from_secs(1),
+            gwt_core::deadline_budget::HANG_GUARD,
         )
         .await;
-        assert_eq!(snapshot["id"], caller_window_id);
-        let snapshot_bytes = base64::engine::general_purpose::STANDARD
-            .decode(snapshot["data_base64"].as_str().expect("snapshot base64"))
-            .expect("decode caller snapshot");
-        assert!(String::from_utf8_lossy(&snapshot_bytes)
+        assert_eq!(snapshot["id"], pane.id);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(snapshot["data_base64"].as_str().unwrap())
+            .unwrap();
+        assert!(String::from_utf8_lossy(&bytes)
             .contains("caller snapshot remains readable after peer close"));
-
-        socket
-            .send(WebSocketMessage::Text(
-                serde_json::json!({
-                    "kind": "pane_send_input",
-                    "session_id": caller_session_id,
-                    "text": "status after peer close"
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .expect("send caller pane input after peer close");
+        socket.send(WebSocketMessage::Text(serde_json::json!({"kind":"pane_send_input","session_id":pane.session.as_ref().unwrap().id,"text":"status after peer close"}).to_string().into())).await.unwrap();
         let sent = next_test_agent_websocket_event(
             &mut socket,
             "pane_send_result",
-            Duration::from_secs(1),
+            gwt_core::deadline_budget::HANG_GUARD,
         )
         .await;
         assert_eq!(sent["ok"], true);
-        assert_eq!(sent["window_id"], caller_window_id);
-        socket.close(None).await.expect("close test WebSocket");
+        assert_eq!(sent["window_id"], pane.id);
+        // All wire requests returned before the held parser was released.
+        release_tx.send(()).unwrap();
+        let closed = next_test_agent_websocket_event(
+            &mut socket,
+            "pane_close_result",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        assert_eq!(closed["ok"], true);
+        assert_eq!(closed["window_id"], target.id);
+        assert!(target.pty.try_wait().unwrap().is_some());
+        socket
+            .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+            .await
+            .unwrap();
+        let final_list = next_test_agent_websocket_event(
+            &mut socket,
+            "workspace_state",
+            gwt_core::deadline_budget::HANG_GUARD,
+        )
+        .await;
+        assert!(final_list["workspace"]["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|window| window["id"] != target.id));
+        socket.close(None).await.unwrap();
     });
-
-    stop_tx.send(()).expect("stop Tao-shaped event driver");
-    let mut app = driver.join().expect("join Tao-shaped event driver");
-    server.shutdown();
-    assert_eq!(
-        finalizers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len(),
-        0,
-        "the peer close finalizer already completed before success"
-    );
-    app.stop_window_runtime_without_session_projection(&caller_window_id);
-    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
-    while gwt::process::exact_pty_process_tree_is_alive(caller_child_pid, caller_child_started_at) {
-        assert!(
-            Instant::now() < cleanup_deadline,
-            "caller PTY process tree survived explicit test cleanup"
-        );
-        // test-hygiene: allow-short-duration bounded event-driver and OS process-exit polling; observed event/state establishes ordering, not this interval
-        thread::sleep(Duration::from_millis(10));
-    }
-    // Close the retained ConPTY master before waiting for the reader's EOF.
-    drop(caller_pane);
-    caller_output_thread
-        .join()
-        .expect("join caller PTY output drain");
+    holder.join().unwrap();
+    assert!(pane.pane.lock().unwrap().has_unsent_user_input());
+    control_close(&owner, &pane);
 }
 
 /// Issue #3667 AC-1/AC-3 at the runtime dispatch layer: a settled grant (an
@@ -3732,539 +2981,427 @@ fn real_agent_pane_websocket_stays_responsive_after_peer_close() {
 /// scoped state while producing mutation stays refused.
 #[test]
 fn settled_grant_observes_scoped_state_but_mutation_is_refused() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (owner, pane) = control_owner_agent(&project, "agent", 2359);
+    let mutation = ControlSessionMutation::new(&pane);
+    let session = pane.session.as_ref().unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    gwt_agent::rotate_session_execution_capability(&sessions, &session.id).unwrap();
+    let observed = control_request(&owner, &pane, AgentFrontendRequest::Ready);
+    assert_eq!(
+        observed.close, None,
+        "settled observation must not require durable producing authority"
     );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-settled".to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    // No durable session file exists under the scoped home, so the durable
-    // authority for this binding resolves Stale — the settled shape.
-    let binding = gwt_agent::SessionExecutionBinding {
-        schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-        session_id: "session-settled".to_string(),
-        repo_hash: "repo-3667".to_string(),
-        owner_kind: "issue".to_string(),
-        owner_number: 3667,
-        identity: gwt_agent::ExecutionBindingIdentity {
-            generation_id: "generation-3667".to_string(),
-            binding_id: "binding-3667".to_string(),
-            ledger_head_hash: "head-3667".to_string(),
-        },
-        capability_generation: 1,
-    };
-    let target = issuer
-        .issue_bound(&project, "session-settled", binding)
-        .expect("settled capability");
-    let grant = issuer
-        .grant_for_test(&target.token)
-        .expect("authenticated settled grant");
-
-    let observed = match runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant.clone(),
-        AgentFrontendRequest::Ready,
-    ) {
-        super::super::AgentFrontendDispatchOutcome::Dispatched(events) => events,
-        super::super::AgentFrontendDispatchOutcome::StaleCapability => {
-            panic!("settled observation must dispatch instead of reading as stale")
-        }
-        super::super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable => {
-            panic!("settled observation must not require durable authority")
-        }
-    };
-    assert!(
-        observed
-            .iter()
-            .any(|event| matches!(&event.event, BackendEvent::WorkspaceState { .. })),
-        "the settled grant must still receive its scoped snapshot"
-    );
-
-    let refused = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
+    assert!(observed
+        .events
+        .iter()
+        .any(|event| event["kind"] == "workspace_state"));
+    let refused = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::SendInput {
-            text: "must-not-dispatch".to_string(),
+            text: "must-not-dispatch".into(),
         },
     );
-    assert!(
-        matches!(
-            refused,
-            super::super::AgentFrontendDispatchOutcome::StaleCapability
-        ),
-        "settled producing mutation must stay refused at runtime dispatch"
+    assert_eq!(
+        refused.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE)
     );
+    assert!(!pane.pane.lock().unwrap().has_unsent_user_input());
+    mutation.restore();
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn agent_pane_list_windows_returns_scoped_state_without_terminal_snapshots() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let foreign_project = temp.path().join("foreign-project");
     let authenticated_project = temp.path().join("authenticated-project");
-    fs::create_dir_all(&foreign_project).expect("foreign project");
-    fs::create_dir_all(&authenticated_project).expect("authenticated project");
-    let foreign_tab = sample_project_tab_with_window_at(
-        "tab-foreign",
-        "agent-foreign",
-        foreign_project,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let authenticated_tab = sample_project_tab_with_window_at(
-        "tab-authenticated",
-        "agent-authenticated",
-        authenticated_project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let (mut runtime, _) = sample_runtime_with_events(
-        temp.path(),
-        vec![foreign_tab, authenticated_tab],
-        Some("tab-authenticated"),
-    );
-    let window_id = "tab-authenticated::agent-authenticated";
-    let mut pane = long_running_test_pane(window_id);
-    pane.process_bytes(b"pane list must not serialize this snapshot\n");
-    let pane = Arc::new(Mutex::new(pane));
-    runtime.runtimes.insert(
-        window_id.to_string(),
-        WindowRuntime::new(
-            super::super::next_window_runtime_incarnation(),
-            pane.clone(),
-        ),
-    );
-    let principal =
-        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
-            .expect("authenticated principal");
-    let intake_worktree = temp.path().join(".intake-pane-list");
-    fs::create_dir(&intake_worktree).expect("intake-shaped worktree");
-    let mut active_session = sample_active_agent_session("tab-authenticated", window_id);
-    active_session.worktree_path = intake_worktree;
-    runtime
-        .active_agent_sessions
-        .insert(window_id.to_string(), active_session);
+    let (foreign_owner, foreign) = control_owner_agent(&foreign_project, "foreign", 43);
+    control_seed_foreign_roster(&authenticated_project);
+    let (owner, caller) = control_owner_agent(&authenticated_project, "authenticated", 42);
+    caller
+        .pane
+        .lock()
+        .unwrap()
+        .process_bytes(b"pane list must not serialize this snapshot\r\n");
+    let pane = caller.pane.clone();
     let (held_tx, held_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
     let holder = thread::spawn(move || {
-        let _pane = pane.lock().expect("hold terminal snapshot mutex");
-        held_tx.send(()).expect("announce held snapshot mutex");
+        let _pane = pane.lock().unwrap();
+        held_tx.send(()).unwrap();
         release_rx.recv_timeout(Duration::from_secs(2)).is_ok()
     });
-    held_rx.recv().expect("snapshot mutex must be held");
-
-    let events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        principal,
-        AgentFrontendRequest::ListWindows,
-    );
+    held_rx.recv().unwrap();
+    let reply = control_request(&owner, &caller, AgentFrontendRequest::ListWindows);
     release_tx
         .send(())
         .expect("list response must not wait for the snapshot mutex");
     assert!(
-        holder.join().expect("snapshot mutex holder"),
+        holder.join().unwrap(),
         "list response waited for the terminal snapshot mutex"
     );
-
-    let [OutboundEvent {
-        target: DispatchTarget::Client(client_id),
-        event: BackendEvent::WorkspaceState { workspace },
-        ..
-    }] = events.as_slice()
-    else {
-        panic!("pane list must return exactly one workspace_state reply");
-    };
-    assert_eq!(client_id, "pane-client");
-    assert_eq!(workspace.tabs.len(), 1);
+    assert_eq!(reply.close, None);
     assert_eq!(
-        workspace.tabs[0].project_root,
-        authenticated_project.to_string_lossy()
+        reply.events.len(),
+        1,
+        "pane list must return exactly one scoped workspace_state reply"
     );
-    assert_eq!(workspace.tabs[0].workspace.windows.len(), 1);
-    assert_eq!(workspace.tabs[0].workspace.windows[0].id, window_id);
+    assert_eq!(reply.events[0]["kind"], "workspace_state");
+    let workspace = &reply.events[0]["workspace"];
+    assert_eq!(workspace["tabs"].as_array().unwrap().len(), 1);
     assert_eq!(
-        workspace.tabs[0].workspace.windows[0].worktree_form,
-        gwt::WindowWorktreeForm::Unknown,
+        Path::new(workspace["tabs"][0]["project_root"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        authenticated_project.canonicalize().unwrap()
+    );
+    assert_eq!(
+        workspace["tabs"][0]["workspace"]["windows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        workspace["tabs"][0]["workspace"]["windows"][0]["id"],
+        caller.id
+    );
+    assert_eq!(
+        workspace["tabs"][0]["workspace"]["windows"][0]["lane_kind"], "unknown",
         "pane list must use the persisted no-I/O projection instead of resolving Git worktree form"
     );
-
-    let ready_events = runtime.handle_agent_frontend_event(
-        "pane-client".to_string(),
-        AgentSessionPrincipal::for_test(&authenticated_project, "session-authenticated")
-            .expect("authenticated principal"),
-        AgentFrontendRequest::Ready,
+    let foreign_reply =
+        control_request(&foreign_owner, &foreign, AgentFrontendRequest::ListWindows);
+    let foreign_workspace = &foreign_reply.events[0]["workspace"];
+    let tab_view = |value: &serde_json::Value| gwt::ProjectTabView {
+        id: value["id"].as_str().unwrap().into(),
+        project_key: value["project_key"].as_str().unwrap().into(),
+        title: value["title"].as_str().unwrap().into(),
+        project_root: value["project_root"].as_str().unwrap().into(),
+        project_scope: value["project_scope"].as_str().unwrap().into(),
+        kind: serde_json::from_value(value["kind"].clone()).unwrap(),
+        workspace: gwt::WorkspaceView {
+            windows: value["workspace"]["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|wire| {
+                    let mut window: gwt::persistence::PersistedWindowState =
+                        serde_json::from_value(wire.clone()).unwrap();
+                    // These fields intentionally never deserialize from persisted layouts.
+                    // Reconstruct the actual wire view to compare the shared scope filter.
+                    window.agent_color = wire
+                        .get("agent_color")
+                        .map(|value| serde_json::from_value(value.clone()).unwrap());
+                    window.runtime_started_at_ms = wire["runtime_started_at_ms"].as_u64();
+                    window.is_pm = wire["is_pm"].as_bool().unwrap();
+                    window
+                })
+                .collect(),
+            work_items: Vec::new(),
+        },
+        running_agent_count: value["running_agent_count"].as_u64().unwrap() as u32,
+        running_agents: serde_json::from_value(value["running_agents"].clone()).unwrap(),
+    };
+    let shared = gwt::project_runtime::agent_dispatch::workspace_state_reply(
+        "pane-client",
+        caller.grant.as_ref().unwrap().principal(),
+        workspace["app_version"].as_str().unwrap().into(),
+        vec![
+            (
+                foreign_project.clone(),
+                tab_view(&foreign_workspace["tabs"][0]),
+            ),
+            (
+                authenticated_project.clone(),
+                tab_view(&workspace["tabs"][0]),
+            ),
+        ],
     );
-    let ready_workspace = ready_events
-        .iter()
-        .find_map(|event| match &event.event {
-            BackendEvent::WorkspaceState { workspace } => Some(workspace),
-            _ => None,
-        })
-        .expect("frontend_ready workspace state");
+    let BackendEvent::WorkspaceState {
+        workspace: shared_workspace,
+    } = &shared.event
+    else {
+        panic!("shared pane projection must return workspace_state");
+    };
     assert_eq!(
-        ready_workspace.tabs[0].workspace.windows[0].worktree_form,
-        gwt::WindowWorktreeForm::BranchBacked,
+        serde_json::to_value(shared_workspace).unwrap(),
+        workspace.clone()
+    );
+    let ready = control_request(&owner, &caller, AgentFrontendRequest::Ready);
+    let ready_workspace = ready
+        .events
+        .iter()
+        .find(|event| event["kind"] == "workspace_state")
+        .unwrap();
+    assert_eq!(
+        ready_workspace["workspace"]["tabs"][0]["workspace"]["windows"][0]["lane_kind"],
+        "execution",
         "existing frontend_ready payload must retain resolved worktree-form semantics"
     );
+    assert!(owner_fixture_block_on(foreign_owner.probe(&foreign.id, foreign.incarnation)).is_ok());
+    control_close(&owner, &caller);
+    control_close(&foreign_owner, &foreign);
 }
 
 #[test]
 fn queued_bound_agent_pane_request_rechecks_durable_authority_before_runtime_dispatch() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-project".to_string())));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    let target = issuer
-        .issue_bound(
-            &project,
-            "session-project",
-            gwt_agent::SessionExecutionBinding {
-                schema_version: gwt_agent::SessionExecutionBinding::CURRENT_SCHEMA_VERSION,
-                session_id: "session-project".to_string(),
-                repo_hash: "repo-stale".to_string(),
-                owner_kind: "issue".to_string(),
-                owner_number: 2359,
-                identity: gwt_agent::ExecutionBindingIdentity {
-                    generation_id: "generation-stale".to_string(),
-                    binding_id: "binding-stale".to_string(),
-                    ledger_head_hash: "head-stale".to_string(),
-                },
-                capability_generation: 1,
-            },
-        )
-        .expect("bound capability");
-    let queued_grant = issuer
-        .grant_for_test(&target.token)
-        .expect("queued bound grant");
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        queued_grant,
+    let (owner, pane) = control_owner_agent(&project, "agent", 2359);
+    let mutation = ControlSessionMutation::new(&pane);
+    let session = pane.session.as_ref().unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    gwt_agent::rotate_session_execution_capability(&sessions, &session.id).unwrap();
+    let reply = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::SendInput {
-            text: "must-not-reach-pty\r".to_string(),
+            text: "must-not-reach-pty\r".into(),
         },
     );
-
-    assert!(
-        matches!(
-            outcome,
-            super::super::AgentFrontendDispatchOutcome::StaleCapability
-        ),
+    assert_eq!(
+        reply.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE),
         "a process-local current token with stale durable authority must fail closed"
     );
+    assert!(!pane.pane.lock().unwrap().has_unsent_user_input());
+    // Undo this test's deliberate epoch mutation before reaping its exact
+    // still-live owner child. No new process or grant is fabricated.
+    mutation.restore();
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn bound_agent_pane_rotation_after_precheck_rejects_before_pty_write() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("isolated HOME");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    let binding = materialize_active_agent_pane_binding(&project, "session-pane-race");
-    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
-        &temp.path().join("runtime"),
-        &project,
-        "session-pane-race",
-        &binding,
-    );
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let (rotation_tx, rotation_rx) = std::sync::mpsc::sync_channel(1);
-    super::super::set_agent_after_durable_check_test_hook(move || {
-        let rotated =
-            gwt_agent::rotate_session_execution_capability(&sessions_dir, "session-pane-race");
-        rotation_tx.send(rotated).expect("report Host rotation");
-    });
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::SendInput {
-            text: "must-not-reach-pty\r".to_string(),
+    let (owner, pane) = control_owner_agent(&project, "agent", 2359);
+    let mutation = ControlSessionMutation::new(&pane);
+    let session = pane.session.as_ref().unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let hook_sessions = sessions.clone();
+    let hook_session = session.id.clone();
+    let (rotation_tx, rotation_rx) = mpsc::sync_channel(1);
+    let _hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        pane.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::AfterDurableCheck,
+        move || {
+            rotation_tx
+                .send(gwt_agent::rotate_session_execution_capability(
+                    &hook_sessions,
+                    &hook_session,
+                ))
+                .unwrap();
         },
     );
-
-    rotation_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("durable-check race hook runs")
-        .expect("rotate Host epoch");
-    assert!(
-        matches!(
-            outcome,
-            super::super::AgentFrontendDispatchOutcome::StaleCapability
-        ),
-        "a Host rotation between the preliminary check and leased dispatch must reject before PTY mutation"
+    let reply = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-reach-pty\r".into(),
+        },
     );
+    rotation_rx.recv().unwrap().unwrap();
+    assert_eq!(reply.close, Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE), "epoch rotation between preliminary check and leased dispatch must reject before PTY mutation");
+    assert!(!pane.pane.lock().unwrap().has_unsent_user_input());
+    mutation.restore();
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn bound_agent_pane_write_holds_epoch_lease_until_actual_pty_mutation_finishes() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("isolated HOME");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    let binding = materialize_active_agent_pane_binding(&project, "session-pane-write");
-    let initial_epoch = binding.capability_generation;
-    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
-        &temp.path().join("runtime"),
-        &project,
-        "session-pane-write",
-        &binding,
-    );
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let (rotation_started_tx, rotation_started_rx) = std::sync::mpsc::sync_channel(1);
-    let (rotation_done_tx, rotation_done_rx) = std::sync::mpsc::sync_channel(1);
+    let (owner, pane) = control_owner_agent(&project, "agent", 2359);
+    let mutation = ControlSessionMutation::new(&pane);
+    let session = pane.session.as_ref().unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let initial_epoch = session
+        .execution_binding
+        .as_ref()
+        .unwrap()
+        .capability_generation;
+    let hook_session = session.id.clone();
+    let hook_sessions = sessions.clone();
+    let (lease_checked_tx, lease_checked_rx) = mpsc::sync_channel(1);
+    let (rotation_done_tx, rotation_done_rx) = mpsc::sync_channel(1);
     let rotation_done_rx = Arc::new(Mutex::new(rotation_done_rx));
-    let hook_rotation_done_rx = Arc::clone(&rotation_done_rx);
-    super::super::set_agent_leased_mutation_test_hook(move || {
-        std::thread::spawn(move || {
-            rotation_started_tx
-                .send(())
-                .expect("signal Host rotation attempt");
-            let rotated =
-                gwt_agent::rotate_session_execution_capability(&sessions_dir, "session-pane-write");
-            rotation_done_tx
-                .send(rotated)
-                .expect("report Host rotation result");
-        });
-        rotation_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("Host rotation attempted");
-        assert!(
-            hook_rotation_done_rx
-                .lock()
-                .expect("rotation result receiver")
-                .recv_timeout(Duration::from_millis(100))
-                .is_err(),
-            "Host rotation must wait until the leased PTY mutation returns"
-        );
-    });
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::SendInput {
-            text: "linearized-input\r".to_string(),
+    let _hook = gwt::project_runtime::agent_frontend::set_owner_agent_dispatch_test_hook(
+        pane.grant.as_ref().unwrap(),
+        gwt::project_runtime::agent_frontend::OwnerAgentDispatchTestStage::LeasedMutation,
+        move || {
+            thread::spawn(move || {
+                let lease = gwt_agent::with_session_path_lease_wait(
+                    &hook_sessions,
+                    &hook_session,
+                    Duration::ZERO,
+                    |_| Ok(()),
+                );
+                lease_checked_tx
+                    .send(lease.map_err(|error| error.kind()))
+                    .unwrap();
+                rotation_done_tx
+                    .send(gwt_agent::rotate_session_execution_capability(
+                        &hook_sessions,
+                        &hook_session,
+                    ))
+                    .unwrap();
+            });
+            let lease = gwt_core::test_support::recv_event(
+                &lease_checked_rx,
+                "a separate thread probed the actual held Session lease",
+            );
+            assert_eq!(lease, Err(std::io::ErrorKind::WouldBlock),
+                "the exact Session lease must remain exclusive while the physical PTY mutation is accepted");
         },
     );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref events)
-            if matches!(
-                events.as_slice(),
-                [OutboundEvent {
-                    event: BackendEvent::PaneSendResult {
-                        ok: true,
-                        window_id: Some(window_id),
-                        error: None,
-                    },
-                    ..
-                }] if window_id == "tab-project::agent-project"
-            )
-    ));
+    let reply = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::SendInput {
+            text: "linearized-input\r".into(),
+        },
+    );
+    assert_eq!(reply.close, None);
+    assert!(reply
+        .events
+        .iter()
+        .any(|event| event["kind"] == "pane_send_result"
+            && event["ok"] == true
+            && event["window_id"] == pane.id));
     let rotated = rotation_done_rx
         .lock()
-        .expect("rotation result receiver")
-        .recv_timeout(Duration::from_secs(1))
-        .expect("Host rotation resumes after PTY mutation")
-        .expect("rotate Host epoch");
+        .unwrap()
+        .recv_timeout(gwt_core::deadline_budget::HANG_GUARD) // test-hygiene: allow-wall-clock-deadline wait only for the actual cross-thread epoch rotation after the leased PTY command has completed
+        .unwrap()
+        .unwrap();
     assert_eq!(rotated.capability_generation, initial_epoch + 1);
+    mutation.restore();
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn bound_agent_pane_dispatch_does_not_wait_for_a_contended_session_lease_on_tao_thread() {
-    let _env_lock = env_test_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempdir().expect("isolated HOME");
-    let _home = ScopedEnvVar::set("HOME", temp.path());
-    let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    let binding = materialize_active_agent_pane_binding(&project, "session-pane-contended");
-    let (mut runtime, _issuer, grant) = active_bound_agent_pane_runtime(
-        &temp.path().join("runtime"),
-        &project,
-        "session-pane-contended",
-        &binding,
-    );
-    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    let holder_sessions_dir = sessions_dir.clone();
-    let (lease_acquired_tx, lease_acquired_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_lease_tx, release_lease_rx) = std::sync::mpsc::sync_channel(1);
-    let holder = std::thread::spawn(move || {
+    let (owner, pane) = control_owner_agent(&project, "agent", 2359);
+    let session = pane.session.as_ref().unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let holder_sessions = sessions.clone();
+    let holder_session = session.id.clone();
+    let (held_tx, held_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let holder = thread::spawn(move || {
         gwt_agent::with_session_path_lease_wait(
-            &holder_sessions_dir,
-            "session-pane-contended",
-            Duration::from_secs(1),
-            |_state| {
-                lease_acquired_tx
-                    .send(())
-                    .expect("report contended Session lease");
-                release_lease_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .expect("release contended Session lease");
+            &holder_sessions,
+            &holder_session,
+            gwt_core::deadline_budget::HANG_GUARD,
+            |_| {
+                held_tx.send(()).unwrap();
+                gwt_core::test_support::recv_event(
+                    &release_rx,
+                    "real AgentFrontend dispatch refused contended authority",
+                );
                 Ok(())
             },
         )
-        .expect("hold contended Session lease");
+        .unwrap();
     });
-    lease_acquired_rx
-        .recv_timeout(Duration::from_secs(1))
-        .expect("Session lease holder starts");
-
-    let (dispatch_done_tx, dispatch_done_rx) = std::sync::mpsc::sync_channel(1);
-    let dispatch = std::thread::spawn(move || {
-        let outcome = runtime.handle_agent_frontend_event_if_current(
-            "pane-client".to_string(),
-            grant,
-            AgentFrontendRequest::SendInput {
-                text: "must-not-block-tao\r".to_string(),
-            },
-        );
-        dispatch_done_tx
-            .send(outcome)
-            .expect("report tao dispatch outcome");
-    });
-
-    // The holder cannot release its Session lease until this receive finishes
-    // and `release_lease_tx` fires below. A successful receive therefore proves
-    // dispatch completed while the lease was still contended. The generous
-    // timeout is only a deadlock guard; it is not the behavior contract.
-    let outcome = dispatch_done_rx.recv_timeout(Duration::from_secs(2));
-    release_lease_tx
-        .send(())
-        .expect("release contended Session lease");
-    holder.join().expect("join Session lease holder");
-    dispatch.join().expect("join tao dispatch");
-    let outcome = outcome.expect("tao dispatch must finish before the contended lease is released");
-    assert!(
-        matches!(
-            outcome,
-            super::super::AgentFrontendDispatchOutcome::ExecutionAuthorityUnavailable
-        ),
-        "tao dispatch must fail closed when its pre-dispatch lease is no longer immediately available"
+    held_rx.recv().unwrap();
+    let reply = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::SendInput {
+            text: "must-not-block-owner\r".into(),
+        },
     );
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    assert_eq!(
+        reply.close,
+        Some(gwt::project_transport::AGENT_AUTHORITY_UNAVAILABLE_CLOSE),
+        "the actual request must finish before the contended lease is released"
+    );
+    assert!(!pane.pane.lock().unwrap().has_unsent_user_input());
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn queued_correlated_self_close_rechecks_generation_before_acceptance() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, issuer, queued_grant, window_id) = self_close_runtime(temp.path());
-    issuer
-        .issue(temp.path().join("project").as_path(), "session-project")
-        .expect("rotate capability before queued self-close dispatch");
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let stale_grant = pane.grant.as_ref().unwrap().clone();
+    pane.issuer
+        .issue(&project, &pane.session.as_ref().unwrap().id)
+        .unwrap();
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "stale-origin-pane".to_string(),
-        queued_grant,
+    let client = owner_fixture_block_on(owner.agent_client("stale-self-close")).unwrap();
+    let reply = owner_fixture_block_on(client.request(
+        stale_grant,
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("acb37331-72e8-493a-a411-12d060d5a33b".to_string()),
+            id: pane.id.clone(),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
             responder: Some(responder),
         },
+    ))
+    .unwrap();
+    assert_eq!(
+        reply.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE)
     );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::StaleCapability
-    ));
     assert!(acceptance.try_recv().is_err());
-    assert!(runtime.pending_agent_self_closes.is_empty());
-    assert!(runtime.window_lookup.contains_key(&window_id));
-    assert!(events.lock().expect("event log").is_empty());
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_ok());
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("d466de22-4a6b-4b5c-9c88-bdc2ab334f67".to_string()),
-            responder: Some(responder),
-        },
-    );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
-            if dispatched.is_empty()
-    ));
-    let accepted = acceptance
-        .try_recv()
-        .expect("direct response")
-        .expect("direct acceptance");
-    assert!(!issuer.grant_is_current(&grant));
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let (accepted, reply) = control_accept_self_close(&owner, &pane);
+    assert_eq!(reply.close, None);
     assert!(
-        issuer
-            .issue(temp.path().join("project").as_path(), "session-project")
-            .is_err(),
-        "the same principal must not be reissued while its close is pending"
+        reply.events.is_empty(),
+        "self-close uses its direct response channel"
+    );
+    let session = pane.session.as_ref().unwrap();
+    let grant = pane.grant.as_ref().unwrap();
+    assert!(!pane.issuer.grant_is_current(grant));
+    assert!(
+        pane.issuer.issue(&project, &session.id).is_err(),
+        "Closing must reserve the principal until exact finalization"
     );
     assert!(
-        runtime.window_lookup.contains_key(&window_id),
-        "acceptance must not remove the window before the direct ACK attempt"
+        owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_ok(),
+        "the child must remain owned before the direct ACK attempt"
     );
-    assert!(runtime.has_pending_agent_self_closes());
-
-    drop(accepted);
-    let ticket = take_self_close_commit(&events);
+    let ticket = accepted.disarm();
     let replay = ticket.clone();
-    let committed = runtime.commit_agent_self_close(ticket);
-    assert!(!committed.is_empty());
-    assert!(!runtime.window_lookup.contains_key(&window_id));
-    assert!(!runtime.has_pending_agent_self_closes());
-    assert!(runtime.commit_agent_self_close(replay).is_empty());
+    owner.commit_self_close(ticket).unwrap();
+    control_settled_self_closes(&owner);
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_err());
     assert!(
-        issuer
-            .issue(temp.path().join("project").as_path(), "session-project")
-            .is_ok(),
+        pane.pty.try_wait().unwrap().is_some(),
+        "exact self-close must reap its child"
+    );
+    owner.commit_self_close(replay).unwrap();
+    control_settled_self_closes(&owner);
+    assert!(
+        pane.issuer.issue(&project, &session.id).is_ok(),
         "finalization must release the Closing principal"
     );
 }
@@ -4275,417 +3412,217 @@ fn accepted_agent_self_close_waits_for_direct_ack_then_commits_exactly_once() {
 /// retrying the now-absent bearer token and skipping durable Session cleanup.
 #[test]
 fn accepted_bound_agent_self_close_persists_terminal_session_in_finalizer() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    init_repo(&project);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-1",
-        "agent-holder",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    let session_id = "session-self-close-exact";
-    assert!(tab
-        .workspace
-        .set_session_id("agent-holder", Some(session_id.to_string())));
-    let (mut runtime, recorded_events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
-    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
-    fs::create_dir_all(&runtime.sessions_dir).expect("create capability Session store");
-    let window_id = "tab-1::agent-holder".to_string();
-    let holder = install_manual_launch_holder(
-        &mut runtime,
-        &project,
-        session_id,
-        gwt_agent::AgentStatus::Running,
-        Some(&window_id),
-    );
-    let mut durable =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("load holder Session");
-    durable.restore_window_on_startup = true;
-    durable.save(&runtime.sessions_dir).expect("enable restore");
-    runtime.launch_wizard_cache = LaunchWizardMemoryCache::load(&runtime.sessions_dir);
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let issuer = install_manual_holder_capability(&mut runtime, &project, &window_id, &holder);
-    let token = runtime
-        .agent_capability_tokens
-        .get(&window_id)
-        .expect("bound pane token")
-        .clone();
-    let grant = issuer
-        .grant_for_test(&token)
-        .expect("authenticated bound pane grant");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let session = pane.session.as_ref().unwrap();
     assert_eq!(
-        gwt_core::paths::gwt_sessions_dir(),
-        runtime.sessions_dir,
-        "the capability gate and runtime fixture must share the Session store"
+        pane.issuer.durable_authority(pane.grant.as_ref().unwrap()),
+        crate::embedded_server::AgentDurableAuthority::Current
     );
-    let holder_session =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("reload exact holder before dispatch");
-    assert_eq!(
-        holder_session.execution_binding.as_ref(),
-        Some(&holder.execution_binding),
-        "runtime proof persistence must preserve the holder execution binding"
-    );
-    assert!(
-        gwt::cli::execution_state::current_active_execution_binding_matches(
-            &holder_session.worktree_path,
-            gwt::cli::execution_state::ExecutionOwnerKey {
-                kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
-                number: 42,
-            },
-            session_id,
-            &holder.execution_binding.identity,
-        )
-        .expect("probe holder execution authority"),
-        "the generation ledger must still authorize the exact holder"
-    );
-    assert_eq!(
-        issuer.durable_authority(&grant),
-        crate::embedded_server::AgentDurableAuthority::Current,
-        "the exact holder fixture must carry current durable authority"
-    );
-    let (spawner, finalizers) = BlockingTaskSpawner::queued();
-    runtime.blocking_tasks = spawner;
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("4e7b2cc2-69f7-40a6-897a-32754482c970".to_string()),
-            responder: Some(responder),
-        },
-    );
-    assert!(
-        matches!(
-            outcome,
-            super::super::AgentFrontendDispatchOutcome::Dispatched(ref events) if events.is_empty()
-        ),
-        "unexpected self-close dispatch outcome: {outcome:?}"
-    );
-    drop(
-        acceptance
-            .try_recv()
-            .expect("direct response")
-            .expect("direct self-close acceptance"),
-    );
-    let ticket = take_self_close_commit(&recorded_events);
-    assert!(!runtime.commit_agent_self_close(ticket).is_empty());
-    let finalizer = finalizers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .pop()
-        .expect("queued exact self-close finalizer");
-    finalizer();
-
-    let durable =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{session_id}.toml")))
-            .expect("reload terminal holder Session");
+    let before = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+    )
+    .unwrap();
+    assert_eq!(before.execution_binding, session.execution_binding);
+    let (accepted, reply) = control_accept_self_close(&owner, &pane);
+    assert_eq!(reply.close, None);
+    drop(accepted);
+    control_settled_self_closes(&owner);
+    let durable = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+    )
+    .unwrap();
     assert_eq!(durable.status, gwt_agent::AgentStatus::Stopped);
     assert!(!durable.restore_window_on_startup);
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    let proof = gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+        &gwt_core::paths::gwt_sessions_dir(),
+        &session.id,
+    ))
+    .unwrap();
+    assert_eq!(
+        proof
+            .execution_identity
+            .as_ref()
+            .map(|identity| &identity.execution_binding),
+        session.execution_binding.as_ref()
+    );
+    assert_eq!(proof.runtime_incarnation, Some(pane.incarnation));
 }
 
 #[test]
 fn agent_self_close_disconnect_before_acceptance_rolls_back_the_grant() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
     let (responder, acceptance) = AgentSelfCloseResponder::channel();
     drop(acceptance);
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "disconnected-pane-client".to_string(),
-        grant.clone(),
+    let reply = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("89d7c5fc-3894-48dc-a6f4-180af89fb6a3".to_string()),
+            id: pane.id.clone(),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
             responder: Some(responder),
         },
     );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
-            if dispatched.is_empty()
-    ));
-    assert!(issuer.grant_is_current(&grant));
-    assert!(runtime.window_lookup.contains_key(&window_id));
-    assert!(runtime.pending_agent_self_closes.is_empty());
-    assert!(events.lock().expect("event log").is_empty());
+    assert_eq!(reply.close, None);
+    assert!(reply.events.is_empty());
+    assert!(pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_ok());
+    control_settled_self_closes(&owner);
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn correlated_agent_self_close_rejects_same_project_peer_window() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-project".to_string())));
-    let peer = tab.workspace.add_window(WindowPreset::Agent);
-    assert!(tab
-        .workspace
-        .set_session_id(&peer.id, Some("session-peer".to_string())));
-    let peer_window_id = combined_window_id("tab-project", &peer.id);
-    let (mut runtime, _events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
-    );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    let target = issuer
-        .issue(&project, "session-project")
-        .expect("self capability");
-    let grant = issuer
-        .grant_for_test(&target.token)
-        .expect("authenticated grant");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let peer = control_owner_launch(&owner, "peer", control_launch_config(&project, 43));
     let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant.clone(),
+    let reply = control_request(
+        &owner,
+        &pane,
         AgentFrontendRequest::CloseWindow {
-            id: peer_window_id.clone(),
-            request_id: Some("fb5c985e-d51a-419a-9fcf-a0ba1229273a".to_string()),
+            id: peer.id.clone(),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
             responder: Some(responder),
         },
     );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
-            if dispatched.is_empty()
-    ));
-    assert!(acceptance.try_recv().is_err());
-    assert!(issuer.grant_is_current(&grant));
-    assert!(runtime.window_lookup.contains_key(&peer_window_id));
+    assert_eq!(reply.close, None);
+    assert!(
+        acceptance.try_recv().unwrap().is_err(),
+        "a correlated peer target must be explicitly refused"
+    );
+    assert!(pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    assert!(owner_fixture_block_on(owner.probe(&peer.id, peer.incarnation)).is_ok());
+    control_close(&owner, &peer);
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn correlated_agent_self_close_fails_closed_for_ambiguous_session_windows() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
-    fs::create_dir_all(&project).expect("project");
-    let mut tab = sample_project_tab_with_window_at(
-        "tab-project",
-        "agent-project",
-        project.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let own = control_projection(&owner, &pane, &project);
+    let mut duplicate = own.clone();
+    duplicate.window.id = owner.pane_id("duplicate-view");
+    // Simulate the corrupt read model at the canonical acceptance boundary;
+    // the duplicate is never admitted as another physical Session or runtime.
+    let result = gwt::project_runtime::agent_dispatch::begin_self_close(
+        &[own, duplicate],
+        &gwt_core::paths::gwt_sessions_dir(),
+        &pane.issuer,
+        pane.grant.as_ref().unwrap(),
+        &pane.id,
+        &uuid::Uuid::new_v4().to_string(),
+        Some(pane.incarnation),
     );
-    assert!(tab
-        .workspace
-        .set_session_id("agent-project", Some("session-project".to_string())));
-    let duplicate = tab.workspace.add_window(WindowPreset::Agent);
-    assert!(tab
-        .workspace
-        .set_session_id(&duplicate.id, Some("session-project".to_string())));
-    let (mut runtime, _events) =
-        sample_runtime_with_events(temp.path(), vec![tab], Some("tab-project"));
-    let issuer = crate::embedded_server::AgentCapabilityIssuer::for_test(
-        "http://127.0.0.1:43123/internal/hook-live",
-        "ws://127.0.0.1:43124/ws",
-        "ws://127.0.0.1:43123/internal/pane-ws",
+    assert!(
+        result.is_err(),
+        "ambiguous Session windows must refuse before capability consumption"
     );
-    runtime.agent_capability_issuer = Some(issuer.clone());
-    let target = issuer
-        .issue(&project, "session-project")
-        .expect("self capability");
-    let grant = issuer
-        .grant_for_test(&target.token)
-        .expect("authenticated grant");
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant.clone(),
-        AgentFrontendRequest::CloseWindow {
-            id: "tab-project::agent-project".to_string(),
-            request_id: Some("6c00f003-8b70-42b4-be2f-af6f03c62698".to_string()),
-            responder: Some(responder),
-        },
-    );
-
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(ref dispatched)
-            if dispatched.is_empty()
-    ));
-    assert!(acceptance.try_recv().is_err());
-    assert!(issuer.grant_is_current(&grant));
-    assert_eq!(runtime.window_lookup.len(), 2);
+    assert!(pane.issuer.grant_is_current(pane.grant.as_ref().unwrap()));
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_ok());
+    control_close(&owner, &pane);
 }
 
 #[test]
 fn accepted_agent_self_close_survives_external_stop_before_commit() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("e3c14844-f500-477d-b794-ab0fccb003af".to_string()),
-            responder: Some(responder),
-        },
-    );
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(_)
-    ));
-    let accepted = acceptance
-        .try_recv()
-        .expect("direct response")
-        .expect("direct acceptance");
-
-    let stopped = runtime.stop_window_events(&window_id);
-    assert!(!stopped.is_empty());
-    assert!(runtime.window_lookup.contains_key(&window_id));
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let (accepted, _) = control_accept_self_close(&owner, &pane);
+    // A second owner close may complete after acceptance but before origin ACK.
+    control_close(&owner, &pane);
     drop(accepted);
-
-    let ticket = take_self_close_commit(&events);
-    let committed = runtime.commit_agent_self_close(ticket);
-    assert!(!committed.is_empty());
-    assert!(!runtime.window_lookup.contains_key(&window_id));
+    control_settled_self_closes(&owner);
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_err());
+    assert!(pane.pty.try_wait().unwrap().is_some());
 }
 
 #[test]
 fn accepted_agent_self_close_does_not_remove_same_id_successor_session() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, _issuer, grant, window_id) = self_close_runtime(temp.path());
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("0745685c-28cc-4b3f-888e-e11a11bd773c".to_string()),
-            responder: Some(responder),
-        },
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let (accepted, _) = control_accept_self_close(&owner, &pane);
+    control_close(&owner, &pane);
+    let successor = control_owner_launch(&owner, "agent", control_launch_config(&project, 43));
+    assert_eq!(successor.id, pane.id);
+    assert_ne!(
+        successor.session.as_ref().unwrap().id,
+        pane.session.as_ref().unwrap().id
     );
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(_)
-    ));
-    let accepted = acceptance
-        .try_recv()
-        .expect("direct response")
-        .expect("direct acceptance");
-    let address = runtime
-        .window_lookup
-        .get(&window_id)
-        .expect("window address")
-        .clone();
-    assert!(runtime
-        .tab_mut(&address.tab_id)
-        .expect("tab")
-        .workspace
-        .set_session_id(&address.raw_id, Some("successor-session".to_string())));
+    assert_ne!(successor.incarnation, pane.incarnation);
     drop(accepted);
-
-    let ticket = take_self_close_commit(&events);
-    assert!(runtime.commit_agent_self_close(ticket).is_empty());
-    assert!(
-        runtime.window_lookup.contains_key(&window_id),
-        "a same-id replacement with a new Session must survive stale close finalization"
+    control_settled_self_closes(&owner);
+    let current =
+        owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation)).unwrap();
+    assert_eq!(
+        current.session.as_ref().unwrap().id,
+        successor.session.as_ref().unwrap().id
     );
+    assert!(
+        successor.pty.try_wait().unwrap().is_none(),
+        "the exact same-id successor must survive stale acceptance"
+    );
+    control_close(&owner, &successor);
 }
 
 #[test]
 fn accepted_agent_self_close_does_not_remove_same_address_same_session_successor() {
-    let temp = tempdir().expect("tempdir");
-    let _gwt_home = ScopedGwtHome::set(temp.path());
-    let (mut runtime, events, issuer, grant, window_id) = self_close_runtime(temp.path());
-    let (responder, mut acceptance) = AgentSelfCloseResponder::channel();
-
-    let outcome = runtime.handle_agent_frontend_event_if_current(
-        "origin-pane-client".to_string(),
-        grant,
-        AgentFrontendRequest::CloseWindow {
-            id: window_id.clone(),
-            request_id: Some("8b99ac42-d645-48a3-a2ed-dcd1cf211d70".to_string()),
-            responder: Some(responder),
-        },
-    );
-    assert!(matches!(
-        outcome,
-        super::super::AgentFrontendDispatchOutcome::Dispatched(_)
-    ));
-    let accepted = acceptance
-        .try_recv()
-        .expect("direct response")
-        .expect("direct acceptance");
-    let address = runtime
-        .window_lookup
-        .get(&window_id)
-        .expect("accepted window address")
-        .clone();
-    let accepted_generation = runtime
-        .window_lifecycle_generations
-        .lock()
-        .expect("window lifecycle generations")
-        .get(&window_id)
-        .copied()
-        .expect("accepted window generation");
-
-    runtime.register_window(&address.tab_id, &address.raw_id);
-    let successor_generation = runtime
-        .window_lifecycle_generations
-        .lock()
-        .expect("window lifecycle generations")
-        .get(&window_id)
-        .copied()
-        .expect("successor window generation");
-    assert_ne!(accepted_generation, successor_generation);
-    assert_eq!(
-        runtime
-            .tab(&address.tab_id)
-            .and_then(|tab| tab.workspace.window(&address.raw_id))
-            .and_then(|window| window.session_id.as_deref()),
-        Some("session-project"),
-        "the successor intentionally reuses the same Session identity"
-    );
-    drop(accepted);
-
-    let ticket = take_self_close_commit(&events);
+    let temp = tempdir().unwrap();
+    let _home = ScopedGwtHome::set(temp.path());
+    let project = temp.path().join("project");
+    let (owner, pane) = control_owner_agent(&project, "agent", 42);
+    let (accepted, _) = control_accept_self_close(&owner, &pane);
+    let ticket = accepted.disarm();
     let replay = ticket.clone();
-    assert!(runtime.commit_agent_self_close(ticket).is_empty());
-    assert!(runtime.commit_agent_self_close(replay).is_empty());
-    assert!(runtime.window_lookup.contains_key(&window_id));
-    assert!(!runtime.has_pending_agent_self_closes());
-    assert!(
-        issuer
-            .issue(temp.path().join("project").as_path(), "session-project")
-            .is_ok(),
-        "the stale ticket must be irreversibly settled after its no-op commit"
+    control_close(&owner, &pane);
+    // The Closing principal is reserved until its actual ticket is settled.
+    // Reusing a GUI address can no longer fabricate a physical generation.
+    assert!(pane
+        .issuer
+        .issue(&project, &pane.session.as_ref().unwrap().id)
+        .is_err());
+    owner.commit_self_close(ticket).unwrap();
+    control_settled_self_closes(&owner);
+    let mut resume = control_launch_config(&project, 42);
+    resume.session_mode = gwt_agent::SessionMode::Continue;
+    resume.predecessor_session_id = Some(pane.session.as_ref().unwrap().id.clone());
+    let successor = control_owner_launch(&owner, "agent", resume);
+    assert_eq!(successor.id, pane.id);
+    assert_eq!(
+        successor.session.as_ref().unwrap().id,
+        pane.session.as_ref().unwrap().id,
+        "the actual continuation must reuse the Session rather than forge a read model successor"
     );
+    assert_ne!(successor.incarnation, pane.incarnation);
+    owner.commit_self_close(replay).unwrap();
+    control_settled_self_closes(&owner);
+    assert!(owner_fixture_block_on(owner.probe(&successor.id, successor.incarnation)).is_ok());
+    assert!(successor.pty.try_wait().unwrap().is_none());
+    control_close(&owner, &successor);
 }
 
 #[test]
 fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment() {
+    use gwt::project_runtime::agent_frontend::{
+        set_owner_agent_dispatch_test_hook, OwnerAgentDispatchTestStage,
+    };
+    use gwt::project_runtime::events::OwnerCommand;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4695,236 +3632,268 @@ fn agent_name_real_transport_preserves_inspection_metadata_and_active_assignment
     let _home = ScopedGwtHome::set(temp.path());
     let project = temp.path().join("project");
     let foreign = temp.path().join("foreign");
-    fs::create_dir_all(&foreign).unwrap();
-    let active_binding = materialize_active_agent_pane_binding(&project, "active-name");
-    let mut tab = sample_project_tab(
-        "own",
-        "Repo",
-        project.clone(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent; 6],
-    );
-    let sessions = [
+    control_init_repo(&project);
+    control_init_repo(&foreign);
+    seed_owner_fixture_roster(&project, 8);
+    // Retained rows are metadata owned by the same native registry. Leave the
+    // Sessions absent during startup so its ordinary backfill cannot name them.
+    let rows = [
         "review",
         "unnamed",
         "ambiguous",
         "ambiguous",
         "pm",
-        "active-name",
-    ];
-    let ids = tab
-        .workspace
-        .persisted()
-        .windows
-        .iter()
-        .map(|w| w.id.clone())
-        .collect::<Vec<_>>();
-    for (id, session) in ids.iter().zip(sessions) {
-        tab.workspace.set_session_id(id, Some(session.into()));
-        if session != "unnamed" && session != "active-name" {
-            tab.workspace
-                .set_agent_name(id, Some(format!("Assigned-{session}-2")));
+        "canonical-pm",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, session)| {
+        let mut row = sample_window(
+            &format!("metadata-{index}"),
+            WindowPreset::Agent,
+            WindowProcessStatus::Stopped,
+        );
+        row.session_id = Some(session.into());
+        if session != "unnamed" {
+            row.agent_name = Some(format!("Assigned-{session}-2"));
         }
-    }
-    let mut foreign_tab = sample_project_tab_with_window_at(
-        "foreign",
-        "agent",
-        foreign,
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    foreign_tab
-        .workspace
-        .set_session_id("agent", Some("foreign-only".into()));
-    foreign_tab
-        .workspace
-        .set_agent_name("agent", Some("Foreign private name".into()));
-    let (mut app, _) = sample_runtime_with_events(temp.path(), vec![tab, foreign_tab], Some("own"));
-    let context = app.project_context("own").unwrap();
-    app.project_state_mut(&context)
+        row
+    })
+    .collect();
+    save_legacy_name_rows(&project, rows);
+    let mut foreign_row = sample_window("agent", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    foreign_row.session_id = Some("foreign-only".into());
+    foreign_row.agent_name = Some("Foreign private name".into());
+    save_legacy_name_rows(&foreign, vec![foreign_row]);
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+        pm_registration_fixture("pm", &project),
+        |_| false,
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&project),
+    )
+    .unwrap();
+    let foreign_owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&foreign),
+    )
+    .unwrap();
+    let active = control_owner_launch(&owner, "active-name", control_launch_config(&project, 42));
+    let issuer = active.issuer.clone();
+    let active_session = active.session.as_ref().unwrap();
+    let active_request = active.agent_pane_request().unwrap();
+    let active_token = active_request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
         .unwrap()
-        .pm_sessions
-        .insert(project.clone(), "pm".into());
-    // Normal fresh reviews have a Session and a preassigned window name, but
-    // no producing owner/binding. Leave Session.agent_name absent deliberately:
-    // invoking the assignment helper would silently persist it during a read.
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .unwrap()
+        .to_owned();
+    let sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    // A fresh reviewer has an assigned row and Session but no producing
+    // binding. An assignment helper would silently persist this absent name.
     let mut session = gwt_agent::Session::new(&project, "work/review", gwt_agent::AgentId::Codex);
     session.id = "review".into();
     session.review_dispatch = true;
-    session.save(&app.sessions_dir).unwrap();
-    let original_tabs = app
-        .tabs
-        .iter()
-        .map(|t| serde_json::to_value(t.workspace.persisted()).unwrap())
-        .collect::<Vec<_>>();
+    session.save(&sessions_dir).unwrap();
+    let mut canonical_pm = gwt_agent::Session::new(&project, "work/pm", gwt_agent::AgentId::Codex);
+    canonical_pm.id = "canonical-pm".into();
+    canonical_pm.worktree_path = gwt::pm_registry::pm_worktree_path_for_repo_path(&project);
+    fs::create_dir_all(&canonical_pm.worktree_path).unwrap();
+    assert!(gwt::pm_registry::is_canonical_pm_worktree(
+        &canonical_pm.worktree_path
+    ));
+    assert!(!gwt::pm_registry::session_is_registered_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&project),
+        &canonical_pm.id,
+    ));
+    canonical_pm.save(&sessions_dir).unwrap();
+    let original_rows = owner_fixture_block_on(owner.command(OwnerCommand::ListPanes)).unwrap()
+        ["canonical_rows"]
+        .clone();
+    let original_foreign_rows =
+        owner_fixture_block_on(foreign_owner.command(OwnerCommand::ListPanes)).unwrap()
+            ["canonical_rows"]
+            .clone();
     let original_files = snapshot_optional_files(&[
-        app.sessions_dir.join("review.toml"),
-        app.session_state_path.clone(),
+        sessions_dir.join("review.toml"),
+        sessions_dir.join("canonical-pm.toml"),
+        temp.path().join(".gwt/session.json"),
         workspace_state_path(&project),
+        workspace_state_path(&foreign),
         gwt_core::paths::gwt_project_dir_for_repo_path(&project).join("agent-names.jsonl"),
         gwt::issue_monitor_prefs_path_for_repo_path(&project),
     ]);
-    let original_authority =
-        snapshot_optional_files(&current_generation_authority_artifacts(&project));
+    let mut authority_paths = current_generation_authority_artifacts(&project);
+    authority_paths.extend(current_generation_authority_artifacts(
+        &active_session.worktree_path,
+    ));
+    let original_authority = snapshot_optional_files(&authority_paths);
     let original_work = tracked_workspace_work_store_snapshot(&project);
-    let tokio = TokioRuntime::new().unwrap();
-    let (proxy, recorded) = AppEventProxy::stub();
-    app.proxy = proxy.clone();
-    let clients = crate::embedded_server::ClientHub::default();
-    let mut server = crate::embedded_server::EmbeddedServer::start(
-        &tokio,
-        proxy,
-        clients.clone(),
-        Arc::clone(&app.pty_writers),
-        AttachmentUploadStore::in_system_temp(),
-    )
-    .unwrap();
-    let issuer = server.agent_capability_issuer();
-    app.agent_capability_issuer = Some(issuer.clone());
-    let active_token = issuer
-        .issue_bound(&project, "active-name", active_binding)
-        .unwrap()
-        .token;
     let queued_token = issuer.issue(&project, "revoked-queued").unwrap().token;
     let outbound_token = issuer.issue(&project, "revoked-outbound").unwrap().token;
-    let driver_tokens = (queued_token.clone(), outbound_token.clone());
-    let driver_issuer = issuer.clone();
-    let (stop_tx, stop_rx) = mpsc::channel::<()>();
-    let driver_home = temp.path().to_path_buf();
-    let driver_project = project.clone();
-    let driver = thread::spawn(move || {
-        let _home = ScopedGwtHome::set(&driver_home);
-        let mut read_only_checked = false;
-        loop {
-            if !matches!(stop_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-                break;
-            }
-            let event = {
-                let mut events = recorded.lock().unwrap();
-                events
-                    .iter()
-                    .position(|e| {
-                        matches!(recorded_project_payload(e), UserEvent::AgentFrontend { .. })
-                    })
-                    .map(|index| events.remove(index))
-            };
-            if let Some(UserEvent::AgentFrontend {
-                client_id,
-                grant,
-                request,
-            }) = event.and_then(|e| app.accept_project_completion(e))
-            {
-                if grant.principal().session_id() == "active-name" {
-                    // All observation requests finished. Check their originals
-                    // before the legacy Active allocation is allowed to mutate.
+    let mut read_only_checked = false;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        owner_fixture_block_on(async {
+            for (session_id, expected_error) in [
+                ("review", None),
+                ("unnamed", Some("assigned")),
+                ("missing", Some("not bound")),
+                ("foreign-only", Some("not bound")),
+                ("ambiguous", Some("multiple")),
+                ("pm", Some("PM")),
+                ("canonical-pm", Some("PM")),
+                ("revoked", Some("capability")),
+                ("revoked-queued", Some("capability")),
+                ("revoked-outbound", Some("capability")),
+                ("forged", Some("forbidden")),
+                ("active-name", None),
+            ] {
+                if session_id == "active-name" {
+                    // All observations completed before the Active request is
+                    // allowed to publish its own assigned identity.
+                    owner.agent_dispatch_barrier().await.unwrap();
                     assert_eq!(
-                        original_tabs,
-                        app.tabs
-                            .iter()
-                            .map(|t| serde_json::to_value(t.workspace.persisted()).unwrap())
-                            .collect::<Vec<_>>()
+                        original_rows,
+                        owner.command(OwnerCommand::ListPanes).await.unwrap()["canonical_rows"]
+                    );
+                    assert_eq!(
+                        original_foreign_rows,
+                        foreign_owner
+                            .command(OwnerCommand::ListPanes)
+                            .await
+                            .unwrap()["canonical_rows"]
                     );
                     assert_optional_files_unchanged(&original_files);
                     assert_optional_files_unchanged(&original_authority);
                     assert_eq!(
                         original_work,
-                        tracked_workspace_work_store_snapshot(&driver_project)
+                        tracked_workspace_work_store_snapshot(&project)
                     );
-                    assert!(
-                        gwt_agent::Session::load(&app.sessions_dir.join("review.toml"))
-                            .unwrap()
-                            .execution_binding
-                            .is_none()
-                    );
+                    assert!(gwt_agent::Session::load(&sessions_dir.join("review.toml"))
+                        .unwrap()
+                        .execution_binding
+                        .is_none());
                     read_only_checked = true;
                 }
-                let queued_revoke = grant.principal().session_id() == "revoked-queued";
-                let outbound_revoke = grant.principal().session_id() == "revoked-outbound";
-                if queued_revoke {
-                    assert!(driver_issuer.revoke_token(&driver_tokens.0));
+                let token = match session_id {
+                    "revoked-queued" => queued_token.clone(),
+                    "revoked-outbound" => outbound_token.clone(),
+                    "active-name" => active_token.clone(),
+                    _ => issuer.issue(&project, session_id).unwrap().token,
+                };
+                let grant = issuer.grant_for_test(&token).unwrap();
+                assert_eq!(
+                    grant.principal().authorizes_producing_mutation(),
+                    session_id == "active-name"
+                );
+                let _queued_hook = (session_id == "revoked-queued").then(|| {
+                    let issuer = issuer.clone();
+                    let token = token.clone();
+                    set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatch,
+                        move || {
+                            assert!(issuer.revoke_token(&token));
+                        },
+                    )
+                });
+                let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+                let (release_tx, release_rx) = mpsc::channel::<()>();
+                let _result_hook = (session_id == "revoked-outbound").then(|| {
+                    set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatchResult,
+                        move || {
+                            ready_tx.send(()).unwrap();
+                            // Dropping the sender also releases this exact
+                            // worker on assertion failure and fixture cleanup.
+                            let _ = release_rx.recv();
+                        },
+                    )
+                });
+                let mut request = issuer
+                    .agent_pane_websocket_url()
+                    .into_client_request()
+                    .unwrap();
+                request.headers_mut().insert(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {token}").parse().unwrap(),
+                );
+                let (mut socket, _) = connect_async(request).await.unwrap();
+                if session_id == "revoked" {
+                    assert!(issuer.revoke_token(&token));
                 }
-                let outcome =
-                    app.handle_agent_frontend_event_if_current(client_id.clone(), grant, request);
-                if outbound_revoke {
-                    assert!(driver_issuer.revoke_token(&driver_tokens.1));
-                    // A result must survive a stale fence even when another
-                    // queued message precedes the name reply.
-                    crate::apply_agent_frontend_dispatch_outcome(
-                        &clients,
-                        &client_id,
-                        super::super::AgentFrontendDispatchOutcome::Dispatched(vec![
-                            OutboundEvent::reply(
-                                client_id.clone(),
-                                BackendEvent::PaneCloseResult {
-                                    ok: false,
-                                    window_id: "unrelated".into(),
-                                    reason: None,
-                                },
-                            ),
-                        ]),
+                let mut payload = serde_json::json!({"kind":"pane_name", "candidate":"Must not assign", "request_id":session_id});
+                if session_id == "forged" {
+                    payload["window_id"] = serde_json::json!("foreign::agent");
+                }
+                socket
+                    .send(WebSocketMessage::Text(payload.to_string().into()))
+                    .await
+                    .unwrap();
+                let _outbound_fence_hook = if session_id == "revoked-outbound" {
+                    gwt_core::test_support::recv_event(
+                        &ready_rx,
+                        "native name reply prepared before outbound revocation",
+                    );
+                    let issuer = issuer.clone();
+                    let token = token.clone();
+                    let hook = set_owner_agent_dispatch_test_hook(
+                        &grant,
+                        OwnerAgentDispatchTestStage::BeforeDispatchResult,
+                        move || {
+                            assert!(issuer.revoke_token(&token));
+                        },
+                    );
+                    // A real unrelated response precedes the held name reply.
+                    // Its stale fence must still answer the pending correlation.
+                    socket
+                        .send(WebSocketMessage::Text(r#"{"kind":"list_windows"}"#.into()))
+                        .await
+                        .unwrap();
+                    Some(hook)
+                } else {
+                    None
+                };
+                let reply = next_test_agent_websocket_event(
+                    &mut socket,
+                    "pane_name_result",
+                    Duration::from_secs(5),
+                )
+                .await;
+                drop(release_tx);
+                assert_eq!(reply["request_id"], session_id);
+                if let Some(error) = expected_error {
+                    assert_eq!(reply["ok"], false, "{reply}");
+                    assert!(reply["agent_name"].is_null(), "{reply}");
+                    assert!(reply["error"].as_str().unwrap().contains(error), "{reply}");
+                } else {
+                    assert_eq!(reply["ok"], true, "{reply}");
+                    if session_id == "review" {
+                        assert_eq!(reply["agent_name"], "Assigned-review-2");
+                    } else {
+                        assert!(!reply["agent_name"].as_str().unwrap().is_empty());
+                        assert_ne!(reply["agent_name"], "Must not assign");
+                    }
+                    assert!(issuer.grant_is_current(&grant));
+                    assert_eq!(
+                        issuer
+                            .grant_for_test(&token)
+                            .unwrap()
+                            .principal()
+                            .authorizes_producing_mutation(),
+                        session_id == "active-name"
                     );
                 }
-                crate::apply_agent_frontend_dispatch_outcome(&clients, &client_id, outcome);
-            } else {
-                thread::sleep(Duration::from_millis(100));
+                let _ = socket.close(None).await;
             }
-        }
-        (app, read_only_checked)
-    });
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokio.block_on(async {
-        for (session_id, expected_error) in [
-            ("review", None),
-            ("unnamed", Some("assigned")),
-            ("missing", Some("not bound")),
-            ("foreign-only", Some("not bound")),
-            ("ambiguous", Some("multiple")),
-            ("pm", Some("PM")),
-            ("revoked", Some("capability")),
-            ("revoked-queued", Some("capability")),
-            ("revoked-outbound", Some("capability")),
-            ("forged", Some("forbidden")),
-            ("active-name", None),
-        ] {
-            let token = match session_id {
-                "revoked-queued" => queued_token.clone(),
-                "revoked-outbound" => outbound_token.clone(),
-                "active-name" => active_token.clone(),
-                _ => issuer.issue(&project, session_id).unwrap().token,
-            };
-            let grant = issuer.grant_for_test(&token).unwrap();
-            assert_eq!(grant.principal().authorizes_producing_mutation(), session_id == "active-name");
-            let mut request = issuer.agent_pane_websocket_url().into_client_request().unwrap();
-            request.headers_mut().insert(axum::http::header::AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
-            let (mut socket, _) = connect_async(request).await.unwrap();
-            if session_id == "revoked" { assert!(issuer.revoke_token(&token)); }
-            let mut payload = serde_json::json!({"kind":"pane_name", "candidate":"Must not assign", "request_id":session_id});
-            if session_id == "forged" { payload["window_id"] = serde_json::json!("foreign::agent"); }
-            socket.send(WebSocketMessage::Text(payload.to_string().into())).await.unwrap();
-            let reply = next_test_agent_websocket_event(&mut socket, "pane_name_result", Duration::from_secs(5)).await;
-            assert_eq!(reply["request_id"], session_id);
-            if let Some(error) = expected_error {
-                assert_eq!(reply["ok"], false, "{reply}");
-                assert!(reply["agent_name"].is_null(), "{reply}");
-                assert!(reply["error"].as_str().unwrap().contains(error), "{reply}");
-            } else {
-                assert_eq!(reply["ok"], true, "{reply}");
-                if session_id == "review" {
-                    assert_eq!(reply["agent_name"], "Assigned-review-2");
-                } else {
-                    assert!(!reply["agent_name"].as_str().unwrap().is_empty());
-                    assert_ne!(reply["agent_name"], "Must not assign");
-                }
-                assert!(issuer.grant_is_current(&grant));
-                assert_eq!(issuer.grant_for_test(&token).unwrap().principal().authorizes_producing_mutation(), session_id == "active-name");
-            }
-            let _ = socket.close(None).await;
-        }
-    })
+        })
     }));
-    drop(stop_tx);
-    let (_app, read_only_checked) = driver.join().unwrap();
-    server.shutdown();
+    control_close(&owner, &active);
     result.unwrap();
     assert!(
         read_only_checked,
@@ -4938,177 +3907,148 @@ fn agent_name_assigns_only_self_and_reserves_names_across_all_tabs() {
     let _home = ScopedGwtHome::set(temp.path());
     let own = temp.path().join("own");
     let foreign = temp.path().join("foreign");
-    fs::create_dir_all(&own).unwrap();
-    fs::create_dir_all(&foreign).unwrap();
-    let mut own_tab = sample_project_tab_with_window_at(
-        "own",
-        "agent",
-        own.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (foreign_owner, foreign_pane) = control_owner_agent(&foreign, "agent", 43);
+    control_seed_foreign_roster(&own);
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&own),
+    )
+    .unwrap();
+    let mut naming_events = owner.subscribe();
+    let caller = control_owner_launch(&owner, "agent", control_launch_config(&own, 42));
+    assert!(
+        std::iter::from_fn(|| naming_events.try_recv().ok())
+            .any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated)),
+        "initial owner naming must invalidate its public projection"
     );
-    own_tab
-        .workspace
-        .set_session_id("agent", Some("same-session".into()));
-    let mut foreign_tab = sample_project_tab_with_window_at(
-        "foreign",
-        "agent",
-        foreign.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
-    foreign_tab
-        .workspace
-        .set_session_id("agent", Some("same-session".into()));
-    let (mut runtime, _) =
-        sample_runtime_with_events(temp.path(), vec![foreign_tab, own_tab], Some("own"));
-    // Simultaneous launches are serialized through this handler. Both Agents
-    // proposed "Orven" on 2026-10-16; the old runtime assigned Orven / Orven-2.
-    runtime.handle_agent_frontend_event(
-        "foreign-caller".into(),
-        AgentSessionPrincipal::for_test(&foreign, "same-session").unwrap(),
+    let foreign_reply = control_request(
+        &foreign_owner,
+        &foreign_pane,
         AgentFrontendRequest::Name {
             candidate: "Orven".into(),
             request_id: "foreign-name".into(),
         },
     );
-    let first_assigned = runtime
-        .tab("foreign")
+    let first_assigned = foreign_reply.events[0]["agent_name"]
+        .as_str()
         .unwrap()
-        .workspace
-        .window("agent")
-        .unwrap()
-        .agent_name
-        .clone()
-        .unwrap();
-    let principal = AgentSessionPrincipal::for_test(&own, "same-session").unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "caller".into(),
-        principal.clone(),
+        .to_owned();
+    let foreign_before = fs::read(gwt::persistence::workspace_state_path(&foreign)).unwrap();
+    let named = control_request(
+        &owner,
+        &caller,
         AgentFrontendRequest::Name {
             candidate: "Orven".into(),
             request_id: "name-request".into(),
         },
     );
-    let assigned = runtime
-        .tab("own")
-        .unwrap()
-        .workspace
-        .window("agent")
-        .unwrap()
-        .agent_name
-        .clone()
+    assert_eq!(named.close, None);
+    let result = named
+        .events
+        .iter()
+        .find(|event| event["kind"] == "pane_name_result")
         .unwrap();
+    assert_eq!(result["request_id"], "name-request");
+    assert_eq!(result["ok"], true);
+    assert!(result["error"].is_null());
+    let assigned = result["agent_name"].as_str().unwrap().to_owned();
     assert_ne!(
         assigned.chars().next().unwrap().to_ascii_lowercase(),
         first_assigned.chars().next().unwrap().to_ascii_lowercase()
     );
     assert!(!first_assigned.starts_with("Orven"));
     assert!(!assigned.starts_with("Orven"));
-    assert!(events.iter().any(|event| matches!(&event.event, BackendEvent::PaneNameResult { request_id, ok: true, agent_name: Some(name), error: None } if request_id == "name-request" && name == &assigned) && matches!(&event.target, DispatchTarget::Client(id) if id == "caller")));
     assert_eq!(
-        runtime
-            .tab("foreign")
-            .unwrap()
-            .workspace
-            .window("agent")
-            .unwrap()
-            .agent_name
-            .as_deref(),
-        Some(first_assigned.as_str())
+        fs::read(gwt::persistence::workspace_state_path(&foreign)).unwrap(),
+        foreign_before,
+        "a scoped name request must not mutate another owner's row"
     );
+    let saved = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir()
+            .join(format!("{}.toml", caller.session.as_ref().unwrap().id)),
+    )
+    .unwrap();
+    assert_eq!(saved.agent_name.as_deref(), Some(assigned.as_str()));
     assert_eq!(
-        events
+        named
+            .events
             .iter()
-            .filter(|event| matches!(event.event, BackendEvent::WorkspaceState { .. }))
+            .filter(|event| event["kind"] == "workspace_state")
             .count(),
-        1
+        0,
+        "a name already assigned at owner launch needs no second projection mutation"
     );
-    let retry = runtime.handle_agent_frontend_event(
-        "caller".into(),
-        principal,
+    let retry = control_request(
+        &owner,
+        &caller,
         AgentFrontendRequest::Name {
             candidate: "Mint".into(),
             request_id: "retry".into(),
         },
     );
-    assert!(
-        matches!(&retry[0].event, BackendEvent::PaneNameResult { ok: true, agent_name: Some(name), .. } if name == &assigned)
-    );
-    assert_eq!(retry.len(), 1);
+    assert_eq!(retry.events.len(), 1);
+    assert_eq!(retry.events[0]["ok"], true);
+    assert_eq!(retry.events[0]["agent_name"], assigned);
+    control_close(&owner, &caller);
+    control_close(&foreign_owner, &foreign_pane);
 }
 
 #[test]
 fn agent_name_refuses_pm_and_missing_without_mutation() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
-    let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "agent",
-        root.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    let (root, owner, pm, ordinary) =
+        super::managed_launch_tests::managed_owner_fixture(temp.path(), false);
+    let before = fs::read(gwt::persistence::workspace_state_path(&root)).unwrap();
+    let target = pm.issuer.issue(&root, "missing").unwrap();
+    let missing = pm.issuer.grant_for_test(&target.token).unwrap();
+    let missing_error = gwt::project_runtime::agent_dispatch::prepare_pane_name(
+        &[
+            control_projection(&owner, &pm, &root),
+            control_projection(&owner, &ordinary, &root),
+        ],
+        missing.principal(),
+        &gwt_core::paths::gwt_sessions_dir(),
+    )
+    .err()
+    .expect("a missing Session has no pane naming target");
+    assert!(missing_error.contains("not bound"));
+    let client = owner_fixture_block_on(owner.agent_client("missing-name")).unwrap();
+    let refused = owner_fixture_block_on(client.request(
+        missing,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "refused".into(),
+        },
+    ))
+    .unwrap();
+    assert_eq!(
+        refused.close,
+        Some(gwt::project_transport::AGENT_STALE_BINDING_CLOSE),
+        "a grant without an actual durable Session must fail before naming dispatch"
     );
-    tab.workspace
-        .set_session_id("agent", Some("session".into()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    {
-        let (session, candidate) = ("missing", "Falcon");
-        let principal = AgentSessionPrincipal::for_test(&root, session).unwrap();
-        let events = runtime.handle_agent_frontend_event(
-            "caller".into(),
-            principal,
-            AgentFrontendRequest::Name {
-                candidate: candidate.into(),
-                request_id: "refused".into(),
-            },
-        );
-        assert!(matches!(
-            &events[0].event,
-            BackendEvent::PaneNameResult {
-                ok: false,
-                agent_name: None,
-                error: Some(_),
-                ..
-            }
-        ));
-        assert!(runtime
-            .tab("tab")
-            .unwrap()
-            .workspace
-            .window("agent")
-            .unwrap()
-            .agent_name
-            .is_none());
-    }
-    let context = runtime.project_context("tab").unwrap();
-    runtime
-        .project_state_mut(&context)
-        .unwrap()
-        .pm_sessions
-        .insert(root.clone(), "session".into());
-    let principal = AgentSessionPrincipal::for_test(&root, "session").unwrap();
-    let events = runtime.handle_agent_frontend_event(
-        "caller".into(),
-        principal,
+    assert!(refused.events.is_empty());
+    assert_eq!(
+        fs::read(gwt::persistence::workspace_state_path(&root)).unwrap(),
+        before
+    );
+    let refused = control_request(
+        &owner,
+        &pm,
         AgentFrontendRequest::Name {
             candidate: "Falcon".into(),
             request_id: "pm".into(),
         },
     );
-    assert!(
-        matches!(&events[0].event, BackendEvent::PaneNameResult { ok: false, error: Some(error), .. } if error.contains("PM"))
+    assert_eq!(refused.close, None);
+    assert_eq!(refused.events[0]["ok"], false);
+    assert!(refused.events[0]["error"].as_str().unwrap().contains("PM"));
+    assert_eq!(
+        fs::read(gwt::persistence::workspace_state_path(&root)).unwrap(),
+        before,
+        "refused PM or missing-Session naming must leave canonical identities untouched"
     );
-    assert!(runtime
-        .tab("tab")
-        .unwrap()
-        .workspace
-        .window("agent")
-        .unwrap()
-        .agent_name
-        .is_none());
+    control_close(&owner, &ordinary);
+    control_close(&owner, &pm);
 }
 
 #[test]
@@ -5139,75 +4079,99 @@ fn agent_name_projects_into_active_work_without_replacing_provider_identity() {
     assert!(view.unassigned_agents[0].agent_name.is_none());
 }
 
+fn legacy_name_session_row(
+    root: &Path,
+    raw: &str,
+    preset: WindowPreset,
+    name: Option<&str>,
+) -> (gwt::PersistedWindowState, gwt_agent::Session) {
+    let mut session = gwt_agent::Session::new(root, "work/legacy", gwt_agent::AgentId::Codex);
+    session.project_state_root = Some(root.to_path_buf());
+    session.update_status(gwt_agent::AgentStatus::Stopped);
+    session.restore_window_on_startup = true;
+    session.agent_name = name.map(str::to_owned);
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    let mut row = sample_window(raw, preset, WindowProcessStatus::Stopped);
+    row.session_id = Some(session.id.clone());
+    row.agent_name = name.map(str::to_owned);
+    (row, session)
+}
+
+fn save_legacy_name_rows(root: &Path, windows: Vec<gwt::PersistedWindowState>) {
+    gwt::persistence::save_workspace_state_durable(
+        &gwt::persistence::workspace_state_path(root),
+        &gwt::PersistedWindowRegistry {
+            windows,
+            next_z_index: 3,
+        },
+    )
+    .unwrap();
+}
+
 #[test]
 fn agent_name_backfills_registered_pm_without_joining_the_member_pool() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
-    let worktree = gwt::pm_registry::pm_worktree_path_for_repo_path(&root);
-    fs::create_dir_all(&worktree).unwrap();
-    let mut session = gwt_agent::Session::new(&worktree, "work", gwt_agent::AgentId::ClaudeCode);
-    session.project_state_root = Some(root.clone());
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 8);
+    let worktree = create_detached_pm_worktree_fixture(&root);
+    let (mut row, mut session) = legacy_name_session_row(&root, "pm", WindowPreset::Agent, None);
+    session.worktree_path = worktree.clone();
     session.agent_name = Some("Falcon".into());
-    session.update_status(gwt_agent::AgentStatus::Running);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "pm",
-        root.clone(),
+    session.save(&gwt_core::paths::gwt_sessions_dir()).unwrap();
+    row.agent_name = None;
+    let mut implementation = sample_window(
+        "implementation",
         WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        WindowProcessStatus::Stopped,
     );
-    tab.workspace.set_session_id("pm", Some(session.id.clone()));
-    let implementation = tab.workspace.add_window(WindowPreset::Agent);
-    tab.workspace
-        .set_agent_name(&implementation.id, Some("Flora".into()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    session.save(&runtime.sessions_dir).unwrap();
-    let host_pid = std::process::id();
-    let started = gwt::process::host_process_start_time(host_pid).unwrap();
-    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
-    sidecar.host_started_at = Some(started);
-    sidecar.child_pid = Some(host_pid);
-    sidecar.child_started_at = Some(started);
-    sidecar
-        .save(&gwt_agent::runtime_state_path_for_pid(
-            &runtime.sessions_dir,
-            host_pid,
-            &session.id,
-        ))
-        .unwrap();
-    runtime.register_pm_after_launch(&root, &session.id, "claude", &worktree);
-    let roster = gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap();
-
-    runtime.assign_missing_agent_names();
+    implementation.agent_name = Some("Flora".into());
+    save_legacy_name_rows(&root, vec![row, implementation]);
+    gwt::pm_registry::try_register_pm(
+        &gwt::pm_registry::pm_prefs_path_for_repo_path(&root),
+        pm_registration_fixture(&session.id, &worktree),
+        |_| false,
+    )
+    .unwrap();
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let roster = gwt::agent_names::read_project_roster(&root, &sessions).unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let saved =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap();
     assert_eq!(
-        runtime
-            .tab("tab")
-            .unwrap()
-            .workspace
-            .window("pm")
+        saved
+            .windows
+            .iter()
+            .find(|row| row.id == "pm")
             .unwrap()
             .agent_name
             .as_deref(),
         Some("Falcon")
     );
-    assert!(runtime.agent_name_reservations(None).1.contains("Falcon"));
-    runtime.sync_pm_session_cache(&root, None);
+    let mut events = owner.subscribe();
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::UpdateLayout { layout: saved }),
+    )
+    .unwrap();
     assert!(
-        runtime.assign_missing_agent_names().is_empty(),
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated)),
         "the assigned PM name stays stable"
     );
-    let saved =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
-            .unwrap();
+    let saved = gwt_agent::Session::load(&sessions.join(format!("{}.toml", session.id))).unwrap();
     assert_eq!(saved.agent_name, session.agent_name);
     assert!(saved.agent_member_id.is_none());
     assert_eq!(
-        gwt::agent_names::read_project_roster(&root, &runtime.sessions_dir).unwrap(),
+        gwt::agent_names::read_project_roster(&root, &sessions).unwrap(),
         roster,
         "PM display naming must not change members, assignments or capacity"
     );
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]
@@ -5215,16 +4179,28 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 8);
+    let (row, session) = legacy_name_session_row(&root, "agent", WindowPreset::Agent, None);
+    save_legacy_name_rows(&root, vec![row]);
+    let session_path = gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id));
+    let unavailable = session_path.with_extension("unavailable");
+    fs::rename(&session_path, &unavailable).unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let identity = owner.client().identity().cloned().unwrap();
+    let mut owner_events = owner.subscribe();
+    fs::rename(&unavailable, &session_path).unwrap();
     let mut tab = sample_project_tab_with_window_at(
         "tab",
         "agent",
         root.clone(),
         WindowPreset::Agent,
-        WindowProcessStatus::Running,
+        WindowProcessStatus::Stopped,
     );
-    tab.workspace
-        .set_session_id("agent", Some("session".into()));
+    tab.workspace.set_session_id("agent", Some(session.id));
     let (mut runtime, recorded) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
     let (spawner, tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
@@ -5248,15 +4224,21 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
         .active_work_projection_payload_cache
         .borrow_mut()
         .insert("tab".into(), Arc::from("stale unnamed payload"));
-    let principal = AgentSessionPrincipal::for_test(&root, "session").unwrap();
-    runtime.handle_agent_frontend_event(
-        "caller".into(),
-        principal,
-        AgentFrontendRequest::Name {
-            candidate: "Falcon".into(),
-            request_id: "name".into(),
-        },
-    );
+    let layout =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap();
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::UpdateLayout { layout }),
+    )
+    .unwrap();
+    let changed = std::iter::from_fn(|| owner_events.try_recv().ok())
+        .find(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated))
+        .expect("actual owner published the naming change");
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = Some(identity.clone());
+    runtime.handle_project_owner_event(&context, 1, &identity, changed);
     let state = runtime.project_state_for_tab("tab").unwrap();
     assert!(!state
         .active_work_projection_payload_cache
@@ -5270,6 +4252,7 @@ fn agent_name_invalidates_projection_payload_and_watcher_revision() {
             .is_none(),
         "naming supersedes an in-flight unnamed snapshot"
     );
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]
@@ -5277,247 +4260,584 @@ fn runtime_names_legacy_agent_windows_without_a_pane_name_request() {
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "claude",
-        root.clone(),
-        WindowPreset::Claude,
-        WindowProcessStatus::Running,
-    );
-    let second = tab.workspace.add_window(WindowPreset::Agent);
-    tab.workspace
-        .set_agent_name(&second.id, Some("Falcon".into()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    let events = runtime.assign_missing_agent_names();
-    let workspace = &runtime.tab("tab").unwrap().workspace;
-    let assigned = workspace
-        .window("claude")
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 8);
+    let (unnamed, session) = legacy_name_session_row(&root, "claude", WindowPreset::Claude, None);
+    let mut second = sample_window("named", WindowPreset::Agent, WindowProcessStatus::Stopped);
+    second.agent_name = Some("Falcon".into());
+    save_legacy_name_rows(&root, vec![unnamed, second]);
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let saved =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap();
+    let assigned = saved
+        .windows
+        .iter()
+        .find(|row| row.id == "claude")
         .unwrap()
         .agent_name
-        .as_deref()
-        .expect("runtime assignment");
-    assert_ne!(assigned.chars().next().unwrap(), 'F');
+        .as_ref()
+        .expect("actual owner startup assignment");
+    assert_ne!(assigned.chars().next().unwrap().to_ascii_lowercase(), 'f');
     assert_eq!(
-        workspace.window(&second.id).unwrap().agent_name.as_deref(),
+        saved
+            .windows
+            .iter()
+            .find(|row| row.id == "named")
+            .unwrap()
+            .agent_name
+            .as_deref(),
         Some("Falcon")
     );
-    assert!(events
-        .iter()
-        .any(|event| matches!(event.event, BackendEvent::WorkspaceState { .. })));
-    assert!(runtime.assign_missing_agent_names().is_empty());
+    let session = gwt_agent::Session::load(
+        &gwt_core::paths::gwt_sessions_dir().join(format!("{}.toml", session.id)),
+    )
+    .unwrap();
+    assert_eq!(session.agent_name.as_ref(), Some(assigned));
+    let mut events = owner.subscribe();
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::UpdateLayout { layout: saved }),
+    )
+    .unwrap();
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated)),
+        "the same owner layout must not publish another naming change"
+    );
+    owner_fixture_block_on(owner.shutdown());
 }
 
 #[test]
 fn agent_name_keeps_bound_session_independent_of_roster_readback() {
+    use gwt::project_runtime::events::OwnerCommand;
+
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
-    let mut session = gwt_agent::Session::new(&root, "work/test", gwt_agent::AgentId::Codex);
-    session.agent_name = Some("Falcon".into());
-    session.agent_member_id = Some("bound-member".into());
-    session.update_status(gwt_agent::AgentStatus::Running);
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "agent",
-        root.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 1);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
+        |prefs| prefs.agent_roster.as_mut().unwrap().members[0].name = "Falcon".into(),
+    )
+    .unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let pane = control_owner_launch(&owner, "agent", control_launch_config(&root, 42));
+    let pane = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
+    let session = pane.session.as_ref().unwrap();
+    let binding = session.execution_binding.as_ref().unwrap();
+    let execution_owner = gwt::cli::execution_state::ExecutionOwnerKey {
+        kind: gwt::cli::execution_state::ExecutionOwnerKind::Issue,
+        number: 42,
+    };
+    assert!(pane.pending_fresh_execution.is_none());
+    assert_eq!(binding.owner_kind, "issue");
+    assert_eq!(binding.owner_number, 42);
+    assert_eq!(
+        gwt::cli::execution_state::current_execution_binding(
+            &session.worktree_path,
+            execution_owner
+        )
+        .unwrap(),
+        Some(binding.identity.clone())
     );
-    tab.workspace
-        .set_session_id("agent", Some(session.id.clone()));
-    tab.workspace
-        .set_agent_name("agent", session.agent_name.clone());
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    session.save(&runtime.sessions_dir).unwrap();
-    let pid = std::process::id();
-    let started = gwt::process::host_process_start_time(pid).unwrap();
-    let mut sidecar = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
-    sidecar.host_started_at = Some(started);
-    sidecar.child_pid = Some(pid);
-    sidecar.child_started_at = Some(started);
-    sidecar
-        .save(&gwt_agent::runtime_state_path_for_pid(
-            &runtime.sessions_dir,
-            pid,
-            &session.id,
-        ))
-        .unwrap();
+    assert_eq!(
+        gwt::cli::execution_state::diagnose_owner(&session.worktree_path, execution_owner)
+            .ecr_status,
+        Some(gwt::cli::execution_state::ExecutionControlStatus::Active)
+    );
+    assert!(pane.has_capability_bearer(pane.grant.as_ref().unwrap()));
+    let positive = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "bound-name-control".into(),
+        },
+    );
+    assert_eq!(positive.close, None);
+    assert!(positive
+        .events
+        .iter()
+        .any(|event| event["request_id"] == "bound-name-control"
+            && event["ok"] == true
+            && event["agent_name"] == "Falcon"));
+    assert_eq!(session.agent_name.as_deref(), Some("Falcon"));
+    assert!(session.agent_member_id.is_some());
+    assert_ne!(pane.pty.process_id().unwrap(), std::process::id());
+    assert!(pane.pty.try_wait().unwrap().is_none());
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let session_path = sessions.join(format!("{}.toml", session.id));
+    let before = fs::read(&session_path).unwrap();
     let prefs = gwt::issue_monitor_prefs_path_for_repo_path(&root);
-    fs::create_dir_all(prefs.parent().unwrap()).unwrap();
+    let original_prefs = fs::read(&prefs).unwrap();
     fs::write(&prefs, "unreadable roster").unwrap();
-
-    let result = runtime.ensure_window_agent_name("tab", "agent");
-    assert_eq!(result, Ok(Some("Falcon".into())));
-    assert_eq!(fs::read_to_string(prefs).unwrap(), "unreadable roster");
-    let saved =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
+    let result = control_request(
+        &owner,
+        &pane,
+        AgentFrontendRequest::Name {
+            candidate: "Falcon".into(),
+            request_id: "bound-name".into(),
+        },
+    );
+    let layout =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
             .unwrap();
+    owner_fixture_block_on(owner.command(OwnerCommand::UpdateLayout { layout })).unwrap();
+    let after = fs::read(&session_path).unwrap();
+    let saved = gwt_agent::Session::load(&session_path).unwrap();
+    let unreadable_prefs = fs::read_to_string(&prefs).unwrap();
+    // Restore only the injected fault before normal physical cleanup, including
+    // the RED run where naming currently rejects the already-bound Session.
+    fs::write(&prefs, original_prefs).unwrap();
+    control_close(&owner, &pane);
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    assert_eq!(result.close, None);
+    let named = result
+        .events
+        .iter()
+        .find(|event| event["request_id"] == "bound-name")
+        .unwrap();
+    assert_eq!(
+        named["ok"], true,
+        "bound Session naming must not read the roster: {named}"
+    );
+    assert_eq!(named["agent_name"], "Falcon");
+    assert_eq!(unreadable_prefs, "unreadable roster");
+    assert_eq!(after, before, "naming must not rewrite the bound Session");
+    assert_eq!(saved.agent_name, session.agent_name);
     assert_eq!(saved.agent_member_id, session.agent_member_id);
 }
 
 #[test]
 fn agent_name_reserves_live_initials_and_backfills_named_legacy_sessions() {
+    use gwt::project_runtime::{events::OwnerCommand, launch_payload::OwnerLaunchMetadata};
+
     let temp = tempdir().unwrap();
     let _home = ScopedGwtHome::set(temp.path());
     let root = temp.path().join("project");
-    fs::create_dir_all(&root).unwrap();
-    let mut tab = sample_project_tab_with_window_at(
-        "tab",
-        "agent",
-        root.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Waiting,
-    );
-    let mut session = gwt_agent::Session::new(&root, "work/test", gwt_agent::AgentId::Codex);
-    session.id = "legacy-named-session".into();
-    tab.workspace
-        .set_session_id("agent", Some(session.id.clone()));
-    tab.workspace.set_agent_name("agent", Some("Falcon".into()));
-    let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab"));
-    session.save(&runtime.sessions_dir).unwrap();
-    let reserved = runtime.agent_name_reservations(None).1.contains("Falcon");
-    assert!(
-        runtime
-            .allocate_agent_name(&root, Some("Flora".into()))
-            .is_err(),
-        "restoring another project must not duplicate a retained Agent initial"
-    );
-    runtime
-        .tab_mut("tab")
-        .unwrap()
-        .workspace
-        .set_status("agent", WindowProcessStatus::Stopped);
-    let retained = runtime.agent_name_reservations(None).1.contains("Falcon");
-    assert!(
-        runtime.assign_missing_agent_names().is_empty(),
-        "session backfill needs no UI repaint"
-    );
-    let saved =
-        gwt_agent::Session::load(&runtime.sessions_dir.join(format!("{}.toml", session.id)))
-            .unwrap();
+    control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 1);
+    configure_owner_fixture_tools(&root, &["pane-contract-fixture"]);
+    gwt::mutate_issue_monitor_prefs(
+        &gwt::issue_monitor_prefs_path_for_repo_path(&root),
+        |prefs| {
+            prefs.agent_roster.as_mut().unwrap().members[0].name = "Falcon".into();
+        },
+    )
+    .unwrap();
+    let history = gwt_core::paths::gwt_project_dir_for_repo_path(&root).join("agent-names.jsonl");
+    // The explicitly seeded fixture member has already received this name.
+    gwt::agent_names::remember(&history, &HashSet::from(["Falcon".into()])).unwrap();
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let mut config = control_launch_config(&root, 42);
+    config.linked_issue_number = None;
+    config.explicit_follow_up = false;
+    let source = control_owner_launch(&owner, "agent", config);
+    let source_id = source.session.as_ref().unwrap().id.clone();
+    owner_runtime_status_event(&owner, &source, "Waiting", "PermissionRequest");
+    let live = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+        id: source.id.clone(),
+        incarnation: source.incarnation,
+    }))
+    .unwrap();
+    assert_eq!(live["agent_name"], "Falcon");
+    assert_eq!(live["session_id"], source_id);
+    assert_eq!(live["child_pid"], source.pty.process_id().unwrap());
     assert_eq!(
-        (reserved, retained, saved.agent_name.as_deref()),
-        (true, true, Some("Falcon"))
+        live["status"],
+        serde_json::json!(WindowProcessStatus::Waiting)
     );
+    assert!(source.pty.try_wait().unwrap().is_none());
+    let mut row =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap()
+            .windows
+            .into_iter()
+            .find(|row| row.session_id.as_deref() == Some(source_id.as_str()))
+            .unwrap();
+    let history_before = fs::read(&history).unwrap();
+
+    // Review inherited names still use the original global allocator layer;
+    // registered member UUID/tool reservation is not this negative's oracle.
+    let mut config = control_launch_config(&root, 43);
+    config.linked_issue_number = None;
+    config.explicit_follow_up = false;
+    config.suppress_execution_control = true;
+    config
+        .env_vars
+        .insert("GWT_REVIEW_DISPATCH".into(), "1".into());
+    let target_id = owner.pane_id("conflicting-initial");
+    let rejected = owner_fixture_block_on(owner.command(OwnerCommand::LaunchAgent {
+        id: target_id.clone(),
+        operation_id: "retained-initial-conflict".into(),
+        tab_id: target_id.split_once("::").unwrap().0.into(),
+        config: Box::new(config),
+        metadata: Box::new(OwnerLaunchMetadata {
+            inherited_agent_name: Some("Flora".into()),
+            ..Default::default()
+        }),
+        cols: 80,
+        rows: 24,
+    }));
+    // A RED run may expose a real conflicting child. Drain that exact owned
+    // candidate and source normally before the required negative assertion.
+    let unexpected = rejected
+        .as_ref()
+        .ok()
+        .and_then(|receipt| receipt["incarnation"].as_u64())
+        .and_then(|incarnation| owner_fixture_block_on(owner.probe(&target_id, incarnation)).ok());
+    let unexpected_identity = unexpected.as_ref().map(|candidate| {
+        (
+            candidate.id.clone(),
+            candidate.incarnation,
+            candidate.pty.process_id(),
+            candidate
+                .session
+                .as_ref()
+                .and_then(|session| session.agent_name.clone()),
+        )
+    });
+    if let Some(candidate) = unexpected {
+        control_close(&owner, &candidate);
+        assert!(candidate.pty.try_wait().unwrap().is_some());
+    }
+    let retained = owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).unwrap();
+    assert!(Arc::ptr_eq(&retained.pty, &source.pty));
+    assert!(retained.pty.try_wait().unwrap().is_none());
+    assert_eq!(retained.status, WindowProcessStatus::Waiting);
+    control_close(&owner, &source);
+    assert!(source.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
+    owner_fixture_block_on(owner.shutdown());
+    assert!(rejected.is_err(),
+        "another inherited Agent name must not duplicate the retained live initial; actual candidate: {unexpected_identity:?}; response: {rejected:?}");
+    assert!(
+        rejected
+            .unwrap_err()
+            .to_ascii_lowercase()
+            .contains("initial"),
+        "refusal must be the global name reservation"
+    );
+    assert_eq!(
+        fs::read(&history).unwrap(),
+        history_before,
+        "a rejected inherited name must preserve the existing name history"
+    );
+    let sessions = gwt_core::paths::gwt_sessions_dir();
+    let mut stopped =
+        gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
+    assert_eq!(stopped.status, gwt_agent::AgentStatus::Stopped);
+    assert_eq!(stopped.agent_name.as_deref(), Some("Falcon"));
+    assert!(fs::read_to_string(&history)
+        .unwrap()
+        .lines()
+        .any(|line| line == "\"Falcon\""));
+
+    // Replay the same drained Session and actual owner row in the old optional
+    // metadata format, retaining their physical source identity.
+    stopped.agent_name = None;
+    stopped.agent_member_id = None;
+    stopped.restore_window_on_startup = true;
+    stopped.save(&sessions).unwrap();
+    row.status = gwt::persistence::WindowState::Stopped;
+    save_legacy_name_rows(&root, vec![row]);
+    let owner = owner_fixture_block_on(
+        gwt::project_runtime::test_support::ProjectOwnerHarness::start(&root),
+    )
+    .unwrap();
+    let saved = gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml"))).unwrap();
+    assert_eq!(saved.agent_name.as_deref(), Some("Falcon"));
+    let layout =
+        gwt::persistence::load_workspace_state(&gwt::persistence::workspace_state_path(&root))
+            .unwrap();
+    let mut events = owner.subscribe();
+    owner_fixture_block_on(owner.command(OwnerCommand::UpdateLayout { layout })).unwrap();
+    assert!(
+        !std::iter::from_fn(|| events.try_recv().ok())
+            .any(|event| matches!(event, gwt::project_runtime::events::OwnerEvent::Invalidated)),
+        "Session backfill needs no UI repaint"
+    );
+    assert_eq!(
+        gwt_agent::Session::load(&sessions.join(format!("{source_id}.toml")))
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("Falcon")
+    );
+    assert_eq!(fs::read(&history).unwrap(), history_before);
+    owner_fixture_block_on(owner.shutdown());
 }
 
 fn switch_source_retirement_fixture(
     root: &Path,
 ) -> (
     AppRuntime,
-    Arc<Mutex<Vec<UserEvent>>>,
-    super::super::AgentSwitchSourceExited,
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+    gwt::issue_monitor::IssueMonitorRuntimeStopRequest,
 ) {
     let project = root.join("project");
-    fs::create_dir_all(&project).unwrap();
-    init_repo(&project);
-    let mut tab = sample_project_tab_with_window_at(
+    control_init_repo(&project);
+    seed_owner_fixture_roster(&project, 8);
+    let tab = sample_project_tab_with_window_at(
         "source",
         "agent",
         project.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Error,
     );
-    tab.workspace
-        .set_session_id("agent", Some("source-session".into()));
-    let (mut runtime, events) = sample_runtime_with_events(root, vec![tab], Some("source"));
-    let window_id = combined_window_id("source", "agent");
-    let mut active = sample_active_agent_session("source", &window_id);
-    active.session_id = "source-session".into();
-    active.worktree_path = project.clone();
-    runtime
-        .active_agent_sessions
-        .insert(window_id.clone(), active);
-    insert_test_pane_runtime(&mut runtime, &window_id);
-    let current = &runtime.runtimes[&window_id];
-    let pty = Arc::clone(&current.pty);
-    let child_pid = pty.process_id().unwrap();
-    let proof = serde_json::from_value(serde_json::json!({
-        "issue_number":43,"window_id":window_id,"session_id":"source-session","host_pid":std::process::id(),"host_started_at":gwt::process::host_process_start_time(std::process::id()).unwrap(),"runtime_incarnation":current.incarnation,"child_pid":child_pid,"child_started_at":gwt::process::host_process_start_time(child_pid).unwrap(),"requested_at":"2026-10-26T00:00:00Z",
-        "execution_identity":{"session_id":"source-session","worktree_path":project,"branch":"work/source","agent_id":{"type":"Codex"},"linked_issue_number":43,"execution_binding":{"schema_version":1,"session_id":"source-session","repo_hash":"project","owner_kind":"issue","owner_number":43,"identity":{"generation_id":"generation","binding_id":"binding","ledger_head_hash":"ledger"},"capability_generation":1}}
-    })).unwrap();
-    let lifecycle_generation = runtime.window_lifecycle_generations.lock().unwrap()[&window_id];
-    (
-        runtime,
-        events,
-        super::super::AgentSwitchSourceExited {
-            operation_id: "operation".into(),
-            proof,
-            lifecycle_generation,
-            pty,
-        },
-    )
+    let (mut runtime, _) = sample_runtime_with_events(root, vec![tab], Some("source"));
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    let id = combined_window_id("source", "agent");
+    drive_owner_agent_fixture(
+        &mut runtime,
+        &id,
+        control_launch_config(&project, 43),
+        Default::default(),
+    );
+    let owner = runtime.test_project_owners[&project].clone();
+    let remote = &runtime.runtimes[&id];
+    let mut probe =
+        owner_fixture_block_on(owner.probe(&remote.owner_pane_id, remote.incarnation)).unwrap();
+    let source = probe.session.as_ref().unwrap();
+    let mut ready = runtime_hook_state_for_event("Waiting", "SessionStart", &source.id);
+    ready.project_root = Some(project.display().to_string());
+    ready.branch = Some(source.branch.clone());
+    ready.continuation_readiness_nonce = probe
+        .pending_fresh_execution
+        .as_ref()
+        .map(|pending| pending.readiness_nonce.clone());
+    assert!(owner_fixture_block_on(probe.runtime_hook(&ready))
+        .unwrap()
+        .is_success());
+    // test-hygiene: allow-wall-clock-deadline Bound canonical readiness activation; the owner's pending receipt establishes completion.
+    probe = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound the actual child/owner completion; output or the exact owner receipt establishes progress.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let current = owner.probe(&probe.id, probe.incarnation).await.unwrap();
+                if current.pending_fresh_execution.is_none() {
+                    return current;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Switch fixture must activate through authenticated SessionStart")
+    });
+    let source = probe.session.as_ref().unwrap();
+    let proof = gwt::issue_monitor::IssueMonitorRuntimeStopRequest {
+        issue_number: 43,
+        window_id: probe.id.clone(),
+        session_id: source.id.clone(),
+        host_pid: std::process::id(),
+        host_started_at: gwt::process::host_process_start_time(std::process::id()).unwrap(),
+        runtime_incarnation: probe.incarnation,
+        child_pid: probe.pty.process_id().unwrap(),
+        child_started_at: gwt::process::host_process_start_time(probe.pty.process_id().unwrap())
+            .unwrap(),
+        requested_at: Utc::now().to_rfc3339(),
+        execution_identity: gwt_agent::SessionExecutionIdentity::from_session(source)
+            .unwrap()
+            .unwrap(),
+    };
+    let context = runtime.test_context();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = owner.client().identity().cloned();
+    (runtime, owner, probe, proof)
+}
+
+fn switch_removed_event(
+    events: &mut tokio::sync::broadcast::Receiver<gwt::project_runtime::events::OwnerEvent>,
+    id: &str,
+) -> gwt::project_runtime::events::OwnerEvent {
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bound exact owner finalization; an authenticated removal event establishes completion.
+        let mut observed = Vec::new();
+        // test-hygiene: allow-wall-clock-deadline Bound actual exact owner finalization; the matching removal event establishes completion.
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                observed.push(format!("{event:?}"));
+                if matches!(&event, gwt::project_runtime::events::OwnerEvent::WindowRemoved { id: removed, .. } if removed == id) {
+                    return event;
+                }
+            }
+        }).await;
+        result.unwrap_or_else(|error| panic!("the owner must publish exact Switch source removal: {error}; observed={observed:?}"))
+    })
 }
 
 #[test]
 fn switch_source_exit_retires_exact_diagnostic_pane_and_husk_once() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for keep_runtime in [true, false] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (mut runtime, events, exited) = switch_source_retirement_fixture(temp.path());
-        let id = exited.proof.window_id.clone();
-        let (spawner, finalizers) = BlockingTaskSpawner::queued();
-        runtime.blocking_tasks = spawner;
+        let (mut runtime, owner, source, proof) = switch_source_retirement_fixture(temp.path());
+        let id = combined_window_id("source", "agent");
+        let mut events = owner.subscribe();
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof.clone(), source.pty.clone()))
+            .unwrap();
         assert!(
-            runtime
-                .agent_switch_source_exited_events(exited.clone())
-                .is_empty(),
+            owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_ok(),
             "a live tree is never retirement authority"
         );
         assert!(runtime.window_lookup.contains_key(&id));
-        assert!(exited
+        if !keep_runtime {
+            let session = source.session.as_ref().unwrap();
+            let mut failed = runtime_hook_state_for_event("Error", "PostToolUse", &session.id);
+            failed.project_root = Some(
+                runtime
+                    .tab("source")
+                    .unwrap()
+                    .project_root
+                    .display()
+                    .to_string(),
+            );
+            failed.branch = Some(session.branch.clone());
+            assert!(owner_fixture_block_on(source.runtime_hook(&failed))
+                .unwrap()
+                .is_success());
+            owner_fixture_block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::Health),
+            )
+            .unwrap();
+        }
+        assert!(source
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
             .unwrap());
         if !keep_runtime {
+            owner_fixture_block_on(async {
+                // test-hygiene: allow-wall-clock-deadline Bound the pre-existing diagnostic finalizer; its exact close receipt proves the runtime is retired.
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        if let gwt::project_runtime::events::OwnerEvent::Closed {
+                            id: closed,
+                            incarnation,
+                            error,
+                            ..
+                        } = events.recv().await.unwrap()
+                        {
+                            if closed == source.id && incarnation == source.incarnation {
+                                assert!(error.is_none(), "diagnostic close failed: {error:?}");
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("actual diagnostic source retirement");
+            });
+            assert!(owner_fixture_block_on(owner.probe(&source.id, source.incarnation)).is_err());
             runtime.runtimes.remove(&id);
             runtime.active_agent_sessions.remove(&id);
         }
-        assert!(!runtime.agent_switch_source_exited_events(exited.clone()).is_empty(), "the exact physically exited source must leave the canvas even without a writer registration");
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof.clone(), source.pty.clone()))
+            .unwrap();
+        let removed = switch_removed_event(&mut events, &source.id);
+        let context = runtime.test_context();
+        let identity = owner.client().identity().unwrap().clone();
+        assert!(!runtime.handle_project_owner_event(&context, 1, &identity, removed.clone()).is_empty(), "the exact physically exited source must leave the canvas even without a writer registration");
         assert!(!runtime.window_lookup.contains_key(&id));
-        assert_eq!(finalizers.lock().unwrap().len(), 1);
-        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
-        assert_eq!(finalizers.lock().unwrap().len(), 1);
+        assert!(runtime
+            .handle_project_owner_event(&context, 1, &identity, removed)
+            .is_empty());
+        owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+            .unwrap();
         assert!(
-            events
-                .lock()
+            !std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+                event,
+                gwt::project_runtime::events::OwnerEvent::WindowRemoved { .. }
+            )),
+            "the exact source is finalized once"
+        );
+        assert!(
+            owner_fixture_block_on(
+                owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes)
+            )
+            .unwrap()["panes"]
+                .as_array()
                 .unwrap()
-                .iter()
-                .any(|event| matches!(event, UserEvent::IssueMonitorScheduledTick)),
-            "normal admission must see the released canvas slot"
+                .is_empty(),
+            "normal admission must see the released physical slot"
         );
     }
 }
 
 #[test]
 fn switch_source_exit_preserves_reused_session_and_runtime() {
+    let _lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for replace_session in [true, false] {
         let temp = tempdir().unwrap();
         let _home = ScopedGwtHome::set(temp.path());
-        let (mut runtime, _, exited) = switch_source_retirement_fixture(temp.path());
-        let id = exited.proof.window_id.clone();
-        assert!(exited
+        let (mut runtime, owner, source, proof) = switch_source_retirement_fixture(temp.path());
+        let id = combined_window_id("source", "agent");
+        let mut events = owner.subscribe();
+        assert!(source
             .pty
             .terminate_and_wait_for_tree(Duration::from_secs(5))
             .unwrap());
-        if replace_session {
+        let removed = if replace_session {
             runtime
                 .tab_mut("source")
                 .unwrap()
                 .workspace
                 .set_session_id("agent", Some("successor-session".into()));
+            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+                .unwrap();
+            switch_removed_event(&mut events, &source.id)
         } else {
-            insert_test_pane_runtime(&mut runtime, &id);
-        }
-        assert!(runtime.agent_switch_source_exited_events(exited).is_empty());
+            control_close(&owner, &source);
+            let removed = switch_removed_event(&mut events, &source.id);
+            let project = runtime.tab("source").unwrap().project_root.clone();
+            drive_owner_agent_fixture(
+                &mut runtime,
+                &id,
+                control_launch_config(&project, 44),
+                Default::default(),
+            );
+            owner_fixture_block_on(owner.agent_switch_source_exited(proof, source.pty.clone()))
+                .unwrap();
+            let current = &runtime.runtimes[&id];
+            let current =
+                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
+                    .unwrap();
+            assert!(!Arc::ptr_eq(&current.pty, &source.pty));
+            assert!(
+                !current.pty.tree_exit_confirmed(),
+                "a stale Switch must not stop the replacement tree"
+            );
+            removed
+        };
+        let context = runtime.test_context();
+        let identity = owner.client().identity().unwrap().clone();
+        assert!(runtime
+            .handle_project_owner_event(&context, 1, &identity, removed)
+            .is_empty());
         assert!(runtime.window_lookup.contains_key(&id));
         if !replace_session {
-            runtime.runtimes[&id]
-                .pty
-                .terminate_and_wait_for_tree(Duration::from_secs(5))
-                .unwrap();
+            let current = &runtime.runtimes[&id];
+            let current =
+                owner_fixture_block_on(owner.probe(&current.owner_pane_id, current.incarnation))
+                    .unwrap();
+            control_close(&owner, &current);
         }
     }
 }

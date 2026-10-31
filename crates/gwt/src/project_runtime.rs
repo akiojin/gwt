@@ -2,11 +2,30 @@
 //!
 //! These functions return the owned pane. Callers install it and retain the
 //! handshake guard through publication or uncertain-launch reconciliation.
+pub mod agent_dispatch;
+pub mod agent_frontend;
+pub(crate) mod agent_switch;
+pub mod client;
+pub mod continuation;
+pub mod events;
+pub mod installation;
+pub mod launch;
 pub mod launch_authority;
 pub mod launch_finalization;
 pub mod launch_output_mirror;
 pub mod launch_payload;
 pub mod launch_readiness;
+pub mod monitor;
+pub(crate) mod owner;
+pub mod pm_delivery;
+pub(crate) mod presence;
+pub mod runtime_events;
+pub mod startup;
+#[cfg(any(test, feature = "test-gh-guard"))]
+#[doc(hidden)]
+pub mod test_support;
+pub(crate) mod transport;
+pub mod workspace;
 
 use gwt_terminal::{
     pty::{ProcessPolicy, SpawnConfig},
@@ -128,6 +147,27 @@ pub fn spawn_unbound_pane(
     observation: Option<(&Path, &str)>,
     require_observation: bool,
 ) -> Result<Pane, String> {
+    spawn_unbound_pane_with_attempt_observer(
+        id,
+        spawn_config,
+        policy_gate,
+        incarnation,
+        observation,
+        require_observation,
+        || {},
+    )
+}
+
+/// Observe the OS child-spawn boundary of an unbound or gated pane.
+pub fn spawn_unbound_pane_with_attempt_observer(
+    id: &str,
+    spawn_config: SpawnConfig,
+    policy_gate: Option<(ProcessPolicy, PathBuf, Vec<String>)>,
+    incarnation: u64,
+    observation: Option<(&Path, &str)>,
+    require_observation: bool,
+    on_attempt: impl FnOnce(),
+) -> Result<Pane, String> {
     let record_observation = |child_pid: Option<u32>| -> Result<(), String> {
         let Some((sessions_dir, session_id)) = observation else {
             return if require_observation {
@@ -185,12 +225,13 @@ pub fn spawn_unbound_pane(
     // goes through the start gate so priority / Job limits exist before
     // the target can create its first descendant. Shell panes stay direct.
     let pane = if let Some((policy, gate_program, gate_args)) = policy_gate {
-        let pending = Pane::new_pending_with_spawn_config(
+        let pending = Pane::new_pending_with_spawn_config_and_attempt_observer(
             id.to_string(),
             spawn_config,
             gate_program,
             gate_args,
             uuid::Uuid::new_v4().to_string(),
+            on_attempt,
         )
         .map_err(|error| error.to_string())?;
         best_effort_apply_policy(id, &pending, policy);
@@ -198,8 +239,12 @@ pub fn spawn_unbound_pane(
         record_observation(pending.process_id())?;
         pending.release().map_err(|error| error.to_string())?
     } else {
-        let pane = Pane::new_with_spawn_config(id.to_string(), spawn_config)
-            .map_err(|error| error.to_string())?;
+        let pane = Pane::new_with_spawn_config_and_attempt_observer(
+            id.to_string(),
+            spawn_config,
+            on_attempt,
+        )
+        .map_err(|error| error.to_string())?;
         if let Err(error) = record_observation(pane.pty().process_id()) {
             let cleanup = pane
                 .kill()
@@ -223,13 +268,38 @@ pub fn spawn_bound_pane(
     expected: &gwt_agent::SessionExecutionIdentity,
     handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
 ) -> Result<Pane, String> {
+    spawn_bound_pane_with_attempt_observer(
+        id,
+        spawn_config,
+        resource_policy,
+        gate,
+        incarnation,
+        expected,
+        handshake_cleanup,
+        || {},
+    )
+}
+
+/// Observe the gated producing child's OS spawn attempt before proof publication.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_bound_pane_with_attempt_observer(
+    id: &str,
+    spawn_config: SpawnConfig,
+    resource_policy: Option<ProcessPolicy>,
+    gate: (PathBuf, Vec<String>),
+    incarnation: u64,
+    expected: &gwt_agent::SessionExecutionIdentity,
+    handshake_cleanup: &mut ActiveLaunchHandshakeCleanup,
+    on_attempt: impl FnOnce(),
+) -> Result<Pane, String> {
     let (gate_program, gate_args) = gate;
-    let pending = Pane::new_pending_with_spawn_config(
+    let pending = Pane::new_pending_with_spawn_config_and_attempt_observer(
         id.to_string(),
         spawn_config,
         gate_program,
         gate_args,
         uuid::Uuid::new_v4().to_string(),
+        on_attempt,
     )
     .map_err(|error| error.to_string())?;
     let child_pid = pending.process_id().ok_or_else(|| {

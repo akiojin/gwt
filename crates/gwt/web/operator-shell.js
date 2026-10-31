@@ -1394,3 +1394,21 @@ function matchReduced(doc) {
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
+
+// The project execution owner is independent of the browser's GUI connection.
+export function subscribeProjectOwnerHealth(doc, model) {
+  return model.subscribeFrame(state => state, health => {
+    if (health) applyProjectOwnerHealth(doc, health);
+  });
+}
+
+function applyProjectOwnerHealth(doc, health = {}) {
+  const cell = doc.querySelector("[data-project-owner-health]");
+  if (!cell) return;
+  const state = ["healthy", "degraded"].includes(health.state) ? health.state : "connecting";
+  cell.dataset.state = state;
+  cell.hidden = false;
+  cell.title = health.detail || "";
+  const value = cell.querySelector("[data-project-owner-health-value]");
+  if (value) value.textContent = state === "healthy" ? "Ready" : state === "degraded" ? "Unavailable" : "Connecting";
+}

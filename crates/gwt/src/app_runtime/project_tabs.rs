@@ -1242,7 +1242,7 @@ impl AppRuntime {
                 None,
                 None,
             );
-            self.window_lookup.remove(window_id);
+            self.forget_window_scoped_state(window_id);
         }
 
         self.tabs.remove(index);

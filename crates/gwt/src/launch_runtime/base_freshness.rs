@@ -26,7 +26,7 @@ pub(super) fn refresh_and_record(repo: &Path, branch: &str, worktree: &Path) {
     if let Ok(entry) = draft.finalize() {
         // The validated working tree is already known. Passing its common
         // directory makes Board repeatedly ask Git for a nonexistent toplevel.
-        if let Err(error) = gwt::board_provider::post_entry_outcome(board_root, entry) {
+        if let Err(error) = crate::board_provider::post_entry_outcome(board_root, entry) {
             tracing::warn!(%error, branch, "launch base freshness Board delivery failed; see launch log");
         }
     }
@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn report(worktree: &Path) -> String {
-        let snapshot = gwt::board_provider::load_snapshot(worktree).unwrap();
+        let snapshot = crate::board_provider::load_snapshot(worktree).unwrap();
         let entry = snapshot
             .board
             .entries

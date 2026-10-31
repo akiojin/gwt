@@ -1,5 +1,63 @@
 use super::*;
 
+/// Attach the GUI's read-only row to an actual producing Agent and Monitor.
+/// The owner alone holds the PTY, Session writer and durable launch binding.
+fn registry_monitor_pane(
+    runtime: &mut AppRuntime,
+    tab_id: &str,
+    raw_id: &str,
+    issue: u64,
+) -> (
+    Arc<gwt::project_runtime::test_support::ProjectOwnerHarness>,
+    gwt::project_runtime::test_support::OwnerRuntimeProbe,
+) {
+    use gwt::project_runtime::events::OwnerCommand;
+    let root = runtime.tab(tab_id).unwrap().project_root.clone();
+    pane_control_tests::control_init_repo(&root);
+    seed_owner_fixture_roster(&root, 8);
+    let owner = Arc::new(
+        owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start_with_monitor(&root),
+        )
+        .unwrap(),
+    );
+    owner_fixture_block_on(owner.set_issue_client_factory(runtime.issue_client_factory.clone()))
+        .unwrap();
+    configure_owner_fixture_start_gate(&owner);
+    owner_fixture_block_on(owner.wait_monitor_idle()).unwrap();
+    let pane = pane_control_tests::control_owner_launch(
+        &owner,
+        raw_id,
+        pane_control_tests::control_launch_config(&root, issue),
+    );
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.test_project_owners.insert(root, owner.clone());
+    runtime
+        .tab_mut(tab_id)
+        .unwrap()
+        .workspace
+        .set_session_id(raw_id, Some(pane.session.as_ref().unwrap().id.clone()));
+    let context = runtime.project_context(tab_id).unwrap();
+    let client = owner.client();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = client.identity().cloned();
+    let snapshot = owner_fixture_block_on(owner.command(OwnerCommand::Snapshot {
+        id: pane.id.clone(),
+        incarnation: pane.incarnation,
+    }))
+    .unwrap();
+    let id = combined_window_id(tab_id, raw_id);
+    runtime.install_remote_owner_projection(
+        &context,
+        &id,
+        client,
+        serde_json::from_value(snapshot).unwrap(),
+        pane.session.clone(),
+    );
+    (owner, pane)
+}
+
 /// SPEC-2359 W-16 (FR-387): the ingest worker completes reconcile before the
 /// tao continuation, which only commits prepared branch state and schedules a
 /// projection refresh when persisted Work state changed.
@@ -1113,6 +1171,8 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
     let (mut runtime, _recorded) =
         sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
 
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "tab-1", "agent-1", 42);
+
     let events = runtime.issue_monitor_launch_succeeded_and_drain(&repo, 42, "tab-1::agent-1");
 
     // The ACK may scan for a fresh snapshot, but must NOT claim/launch: no
@@ -1134,7 +1194,7 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
         persisted
             .launched_issues
             .iter()
-            .any(|entry| entry.issue_number == 42 && entry.window_id == "tab-1::agent-1"),
+            .any(|entry| entry.issue_number == 42 && entry.window_id == pane.id),
         "the ACK binds and persists the window: {:?}",
         persisted.launched_issues
     );
@@ -1142,6 +1202,16 @@ fn issue_monitor_launch_succeeded_ack_is_non_scanning_and_persists() {
         persisted.launching_issues.is_empty(),
         "the in-flight marker is consumed by the bind"
     );
+    let inventory = owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::ListPanes),
+    )
+    .unwrap();
+    assert_eq!(
+        inventory["panes"].as_array().unwrap().len(),
+        1,
+        "ACK must not materialize another Agent"
+    );
+    pane_control_tests::control_close(&owner, &pane);
 }
 
 #[test]
@@ -1208,9 +1278,9 @@ fn issue_monitor_close_ack_defers_control_transport_to_finalizer() {
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     let prefs = gwt::IssueMonitorPrefs {
         enabled: true,
-        launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+        launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
             issue_number: 42,
-            window_id: "tab-1::agent-1".to_string(),
+            claimed_at: None,
         }],
         ..gwt::IssueMonitorPrefs::default()
     };
@@ -1223,6 +1293,16 @@ fn issue_monitor_close_ack_defers_control_transport_to_finalizer() {
         WindowProcessStatus::Running,
     );
     let (mut runtime, _) = sample_runtime_with_events(temp.path(), vec![tab], Some("tab-1"));
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "tab-1", "agent-1", 42);
+    let root = runtime.tab("tab-1").unwrap().project_root.clone();
+    runtime.issue_monitor_launch_succeeded_and_drain(&root, 42, "tab-1::agent-1");
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_path)
+            .unwrap()
+            .launched_issues[0]
+            .window_id,
+        pane.id
+    );
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -1252,6 +1332,11 @@ fn issue_monitor_close_ack_defers_control_transport_to_finalizer() {
             .is_empty(),
         "the background finalizer must release the monitor slot"
     );
+    assert!(
+        pane.pty.try_wait().unwrap().is_some(),
+        "owner close reaped its exact child"
+    );
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_err());
 }
 
 /// Issue #3627: a launch whose agent window is gone from the tab canvas held
@@ -1381,7 +1466,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
     let repo = temp.path().join("repo");
     std::fs::create_dir_all(&repo).expect("create repo");
-    init_repo_without_origin(&repo);
+    init_repo_with_initial_commit(&repo);
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo);
     gwt::save_issue_monitor_prefs(
         &prefs_path,
@@ -1415,6 +1500,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
     runtime.register_window("tab-1", &fresh.id);
     runtime.set_window_status("tab-1", &fresh.id, WindowProcessStatus::Running);
     let window_id = combined_window_id("tab-1", &fresh.id);
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "tab-1", &fresh.id, 4258);
     runtime.issue_monitor_launch_succeeded_and_drain(&repo, 4258, &window_id);
     let before = gwt::load_issue_monitor_prefs(&prefs_path).expect("ACKed prefs");
     assert_eq!(
@@ -1435,6 +1521,8 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
         "a stale canvas cannot release the fresh #4258 launch"
     );
     assert!(runtime.tracked_window_exists(&window_id));
+    assert_eq!(persisted.launched_issues[0].window_id, pane.id);
+    assert!(pane.pty.try_wait().unwrap().is_none());
     let mut monitor = test_monitor_with_prefs(gwt::IssueMonitorConfig::default(), persisted);
     monitor.set_gui_connected(true);
     monitor.record_candidate(gwt::IssueMonitorIssue {
@@ -1454,6 +1542,7 @@ fn issue_4328_scheduled_scan_preserves_a_launch_registered_after_canvas_capture(
             .is_none(),
         "the live launch leaves no capacity for #4328"
     );
+    pane_control_tests::control_close(&owner, &pane);
 }
 
 /// Issue #3627 (companion to the release above): the reclaim must not fire on
@@ -1528,8 +1617,8 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
     let repo_b = temp.path().join("repo-b");
     std::fs::create_dir_all(&repo_a).expect("create repo A");
     std::fs::create_dir_all(&repo_b).expect("create repo B");
-    init_repo_without_origin(&repo_a);
-    init_repo_without_origin(&repo_b);
+    init_repo_with_initial_commit(&repo_a);
+    init_repo_with_initial_commit(&repo_b);
 
     let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
     let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
@@ -1572,6 +1661,8 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
     );
     let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
 
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "project-b", "agent-1", 42);
+
     assert_eq!(
         runtime
             .issue_monitor_tab_id_for_project_root(&repo_b)
@@ -1588,7 +1679,7 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
     );
 
     assert_eq!(
-        runtime.issue_monitor_issue_number_for_window(&repo_b, "project-b::agent-1"),
+        runtime.issue_monitor_issue_number_for_window(&repo_b, &pane.id),
         Some(42),
         "heartbeat routing resolves a launched mapping after pending feedback is consumed"
     );
@@ -1606,11 +1697,12 @@ fn issue_monitor_launch_success_is_persisted_to_the_window_owner_project() {
         prefs_b.launched_issues,
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
-            window_id: "project-b::agent-1".to_string(),
+            window_id: pane.id.clone(),
         }],
         "the launch ACK belongs to the window owner project"
     );
     assert!(prefs_b.launching_issues.is_empty());
+    pane_control_tests::control_close(&owner, &pane);
 }
 
 #[test]
@@ -1621,8 +1713,8 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
     let repo_b = temp.path().join("repo-b");
     std::fs::create_dir_all(&repo_a).expect("create repo A");
     std::fs::create_dir_all(&repo_b).expect("create repo B");
-    init_repo_without_origin(&repo_a);
-    init_repo_without_origin(&repo_b);
+    init_repo_with_initial_commit(&repo_a);
+    init_repo_with_initial_commit(&repo_b);
 
     let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
     let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
@@ -1640,9 +1732,9 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
     gwt::save_issue_monitor_prefs(
         &prefs_b_path,
         &gwt::IssueMonitorPrefs {
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
                 issue_number: 42,
-                window_id: "project-b::agent-1".to_string(),
+                claimed_at: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -1665,6 +1757,15 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
     );
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "project-b", "agent-1", 42);
+    runtime.issue_monitor_launch_succeeded_and_drain(&repo_b, 42, "project-b::agent-1");
+    assert_eq!(
+        gwt::load_issue_monitor_prefs(&prefs_b_path)
+            .unwrap()
+            .launched_issues[0]
+            .window_id,
+        pane.id
+    );
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -1697,6 +1798,8 @@ fn closing_an_inactive_project_window_requeues_only_its_owner_project() {
         prefs_b.launched_issues.is_empty(),
         "the owner project's launched slot is released"
     );
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_err());
 }
 
 #[test]
@@ -1707,16 +1810,16 @@ fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
     let repo_b = temp.path().join("repo-b");
     std::fs::create_dir_all(&repo_a).expect("create repo A");
     std::fs::create_dir_all(&repo_b).expect("create repo B");
-    init_repo_without_origin(&repo_a);
-    init_repo_without_origin(&repo_b);
+    init_repo_with_initial_commit(&repo_a);
+    init_repo_with_initial_commit(&repo_b);
 
     let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
     gwt::save_issue_monitor_prefs(
         &prefs_b_path,
         &gwt::IssueMonitorPrefs {
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
+            launching_issues: vec![gwt::IssueMonitorLaunchingIssue {
                 issue_number: 42,
-                window_id: "project-b::agent-1".to_string(),
+                claimed_at: None,
             }],
             ..gwt::IssueMonitorPrefs::default()
         },
@@ -1727,12 +1830,14 @@ fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
     let tab_b = sample_project_tab_with_window_at(
         "project-b",
         "agent-1",
-        repo_b,
+        repo_b.clone(),
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
     let (mut runtime, recorded_events) =
         sample_runtime_with_events(temp.path(), vec![tab_a, tab_b], Some("project-a"));
+    let (owner, pane) = registry_monitor_pane(&mut runtime, "project-b", "agent-1", 42);
+    runtime.issue_monitor_launch_succeeded_and_drain(&repo_b, 42, "project-b::agent-1");
     let (spawner, finalizers) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = spawner;
 
@@ -1748,7 +1853,7 @@ fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
         before_finalizer.launched_issues,
         vec![gwt::IssueMonitorLaunchedIssue {
             issue_number: 42,
-            window_id: "project-b::agent-1".to_string(),
+            window_id: pane.id.clone(),
         }],
         "the accepted tab close does not perform durable monitor I/O on the Tao thread"
     );
@@ -1770,18 +1875,27 @@ fn closing_an_inactive_project_tab_requeues_its_owned_monitor_windows() {
         prefs_b.launched_issues.is_empty(),
         "closing an inactive tab releases its own launched slot"
     );
+    assert!(pane.pty.try_wait().unwrap().is_some());
+    assert!(owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).is_err());
 }
 
 #[test]
 fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
+    let _env_lock = env_test_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temp = tempfile::TempDir::new().expect("tempdir");
     let _home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
     let repo_a = temp.path().join("repo-a");
-    let repo_b = temp.path().join("repo-b");
     std::fs::create_dir_all(&repo_a).expect("create repo A");
-    std::fs::create_dir_all(&repo_b).expect("create repo B");
     init_repo_without_origin(&repo_a);
-    init_repo_without_origin(&repo_b);
+    let (repo_b, owner, pane, mut projection, mut observed) =
+        super::managed_launch_tests::managed_monitor_exit_fixture(
+            &temp.path().join("repo-b"),
+            42,
+            7,
+            "agent failed",
+        );
 
     let prefs_a_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_a);
     let prefs_b_path = gwt::issue_monitor_prefs_path_for_repo_path(&repo_b);
@@ -1796,18 +1910,6 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
         },
     )
     .expect("seed repo A prefs");
-    gwt::save_issue_monitor_prefs(
-        &prefs_b_path,
-        &gwt::IssueMonitorPrefs {
-            launched_issues: vec![gwt::IssueMonitorLaunchedIssue {
-                issue_number: 42,
-                window_id: "project-b::agent-1".to_string(),
-            }],
-            ..gwt::IssueMonitorPrefs::default()
-        },
-    )
-    .expect("seed repo B prefs");
-
     let tab_a = sample_project_tab_with_window_at(
         "project-a",
         "agent-1",
@@ -1815,35 +1917,40 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
         WindowPreset::Agent,
         WindowProcessStatus::Running,
     );
-    let tab_b = sample_project_tab_with_window_at(
-        "project-b",
-        "agent-1",
-        repo_b.clone(),
-        WindowPreset::Agent,
-        WindowProcessStatus::Running,
-    );
+    let mut tab_b = projection.tabs.remove(0);
+    tab_b.id = "project-b".into();
+    drop(projection);
     let mut runtime = sample_runtime(temp.path(), vec![tab_a, tab_b], Some("project-a"));
-    runtime.pending_launch_feedback_contexts.insert(
-        "project-b::agent-1".to_string(),
-        LaunchFeedbackContext {
-            client_id: "__issue_monitor__".to_string(),
-            title: "Issue Monitor".to_string(),
-            issue_monitor_issue_number: Some(42),
-            issue_monitor_delivery_id: None,
-            issue_monitor_project_root: Some(repo_b.clone()),
-            issue_monitor_session_mode: None,
-            issue_monitor_autonomous_handoff: None,
-            issue_monitor_autonomous_submit_started: false,
-            issue_monitor_review_dispatch: false,
+    runtime.sessions_dir = gwt_core::paths::gwt_sessions_dir();
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
+    let context = runtime.project_context("project-b").unwrap();
+    let client = owner.client();
+    let state = runtime.project_state_mut(&context).unwrap();
+    state.project_owner_connection_id = 1;
+    state.project_owner_identity = client.identity().cloned();
+    let snapshot = owner_fixture_block_on(owner.command(
+        gwt::project_runtime::events::OwnerCommand::Snapshot {
+            id: pane.id.clone(),
+            incarnation: pane.incarnation,
         },
+    ))
+    .unwrap();
+    runtime.install_remote_owner_projection(
+        &context,
+        "project-b::monitor-agent",
+        client,
+        serde_json::from_value(snapshot).unwrap(),
+        pane.session.clone(),
     );
-
-    let events = runtime.handle_runtime_status_with_exit_confirmation(
-        "project-b::agent-1".to_string(),
-        WindowProcessStatus::Error,
-        Some("agent failed".to_string()),
-        true,
+    let events = super::managed_launch_tests::finish_managed_exit(
+        &owner,
+        &pane,
+        &mut runtime,
+        &mut observed,
     );
+    assert_eq!(runtime.active_tab_id.as_deref(), Some("project-a"));
+    assert!(pane.pty.tree_exit_confirmed());
+    assert_eq!(pane.pane.lock().unwrap().last_exit().unwrap().exit_code, 7);
 
     assert!(
         events.iter().all(|event| matches!(&event.target, DispatchTarget::Project(key) if key == &runtime.project_context("project-b").expect("owner context").project_key)),
@@ -1865,7 +1972,11 @@ fn issue_monitor_agent_failure_is_persisted_to_the_window_owner_project() {
     let prefs_b = gwt::load_issue_monitor_prefs(&prefs_b_path).expect("reload repo B");
     assert_eq!(prefs_b.failed_issues.len(), 1);
     assert_eq!(prefs_b.failed_issues[0].issue_number, 42);
-    assert_eq!(prefs_b.failed_issues[0].message, "agent failed");
+    assert!(
+        prefs_b.failed_issues[0].message.contains("agent failed"),
+        "the real provider's failure must survive the physical exit detail: {:?}",
+        prefs_b.failed_issues[0]
+    );
 }
 
 #[test]

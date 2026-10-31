@@ -1408,7 +1408,17 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
                 .unwrap_or(IndexScope::All),
         }),
         "diagnostics.cpu" => CliCommand::Diagnostics(DiagnosticsCommand::Cpu { json: true }),
-        "daemon.start" => CliCommand::Daemon(DaemonCommand::Start),
+        "daemon.start" => CliCommand::Daemon(DaemonCommand::Start {
+            startup_intent: match optional_string(params, "startup_intent")?.as_deref() {
+                None | Some("standalone") => gwt_core::daemon::DaemonStartIntent::Standalone,
+                Some("gui_managed") => gwt_core::daemon::DaemonStartIntent::GuiManaged,
+                Some(_) => {
+                    return Err(CliParseError::InvalidJson(
+                        "daemon.start startup_intent must be standalone or gui_managed".into(),
+                    ))
+                }
+            },
+        }),
         "daemon.status" => CliCommand::Daemon(DaemonCommand::Status),
         "daemon.subscribe" => daemon_subscribe(params)?,
         "hook.register_codex_managed_hook_trust" | "hook.register-codex-managed-hook-trust" => {
@@ -8965,7 +8975,15 @@ mod tests {
         ));
         assert!(matches!(
             ok("daemon.start", json!({})),
-            CliCommand::Daemon(DaemonCommand::Start)
+            CliCommand::Daemon(DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::Standalone
+            })
+        ));
+        assert!(matches!(
+            ok("daemon.start", json!({"startup_intent":"gui_managed"})),
+            CliCommand::Daemon(DaemonCommand::Start {
+                startup_intent: gwt_core::daemon::DaemonStartIntent::GuiManaged
+            })
         ));
         assert!(matches!(
             ok("daemon.status", json!({})),

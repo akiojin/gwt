@@ -4,6 +4,71 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Immutable launch inputs from the Rust GUI. No Prepared binding or claim
+/// can be carried here; the fixed-project owner creates those locally.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerLaunchMetadata {
+    #[serde(default)]
+    pub selected_agent_member_id: Option<String>,
+    pub inherited_agent_name: Option<String>,
+    pub workspace_resume_context: Option<WorkspaceResumeContext>,
+    pub launch_feedback_context: Option<LaunchFeedbackContext>,
+    pub manual_successor: Option<ManualSuccessorChoice>,
+    #[serde(default)]
+    pub monitor_requested_tier: Option<u8>,
+    #[serde(default)]
+    pub deliver_pending_autonomous_answer: bool,
+}
+
+/// Expected identity narrows the user's manual choice. It grants no authority
+/// over a predecessor; the owner revalidates its durable and physical proof.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualSuccessorChoice {
+    pub operation_id: String,
+    pub expected_binding: gwt_agent::ExecutionBindingIdentity,
+    pub expected_predecessor: Option<Box<gwt_agent::SessionExecutionIdentity>>,
+    pub expected_runtime: Option<gwt_agent::ManualLaunchRuntimeEvidence>,
+    pub predecessor_kind: gwt_agent::ManualLaunchSuccessorPredecessor,
+}
+
+impl ManualSuccessorChoice {
+    pub fn from_intent(intent: &gwt_agent::ExecutionLaunchIntent) -> Result<Option<Self>, String> {
+        use gwt_agent::ExecutionLaunchIntent;
+        match intent {
+            ExecutionLaunchIntent::Automatic => Ok(None),
+            ExecutionLaunchIntent::ManualSuccessor {
+                operation_id,
+                expected_binding,
+                expected_predecessor,
+                expected_runtime,
+                predecessor_kind,
+            } => Ok(Some(Self {
+                operation_id: operation_id.clone(),
+                expected_binding: expected_binding.clone(),
+                expected_predecessor: expected_predecessor.clone(),
+                expected_runtime: *expected_runtime,
+                predecessor_kind: *predecessor_kind,
+            })),
+            ExecutionLaunchIntent::PreparedContinuation(_)
+            | ExecutionLaunchIntent::PreparedManualSuccessor(_) => {
+                Err("Prepared launch authority must remain in the project owner".into())
+            }
+        }
+    }
+
+    pub(crate) fn into_intent(self) -> gwt_agent::ExecutionLaunchIntent {
+        gwt_agent::ExecutionLaunchIntent::ManualSuccessor {
+            operation_id: self.operation_id,
+            expected_binding: self.expected_binding,
+            expected_predecessor: self.expected_predecessor,
+            expected_runtime: self.expected_runtime,
+            predecessor_kind: self.predecessor_kind,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ProcessLaunch {
     pub initial_prompt_file: Option<Arc<tempfile::TempPath>>,
@@ -169,7 +234,7 @@ pub struct ActiveAgentSession {
     pub tab_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceResumeContext {
     pub title: Option<String>,
     pub owner: Option<String>,
@@ -235,7 +300,7 @@ impl WorkspaceResumeContext {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LaunchFeedbackContext {
     pub client_id: String,
     pub title: String,
@@ -245,10 +310,12 @@ pub struct LaunchFeedbackContext {
     pub issue_monitor_session_mode: Option<gwt_agent::SessionMode>,
     /// Write-ahead answered handoff carried by a native Resume. Only the
     /// provider's UserPromptSubmit receipt may mark it delivered.
+    #[serde(skip)]
     pub issue_monitor_autonomous_handoff: Option<crate::AutonomousHandoffDeliveryAttempt>,
     /// Set immediately before the provider process spawn call. Failures while
     /// false are definitely pre-submit and keep the bounded retry ladder;
     /// failures while true have an ambiguous provider outcome.
+    #[serde(skip)]
     pub issue_monitor_autonomous_submit_started: bool,
     /// SPEC #3200 Option A / Issue #4041: the independent review agent is
     /// subordinate to the implementing launch. Its window must never be
