@@ -20,7 +20,8 @@ test('structure measurement separates lexical sites, surface construction and re
       function receive(event) { switch (event.kind) {
         case "pm_reports": applyPmWindowReceiveEvent(event); break;
         case "terminal_output": applyPmWindowReceiveEvent(event); break;
-        case "terminal_snapshot": applyPmWindowReceiveEvent(event); break; } }
+        case "terminal_snapshot": applyPmWindowReceiveEvent(event); break;
+        case 9007199254740993n: applyPmWindowReceiveEvent(event); break; } }
       function syncPmChat() { document.createElement('div'); }
       function mountWindowBody() { body.innerHTML = ''; if (surface === "terminal") {
         body.innerHTML = '<div>'; const node = document.createElement('div');
@@ -46,6 +47,10 @@ test('structure measurement separates lexical sites, surface construction and re
   assert.ok(result.receiver_audit.bypass_probes.every(probe => probe.detected));
   assert.equal(result.all_receiver_audit.scanned_modules, modules.size);
   assert.deepEqual(result.all_receiver_audit.findings, []);
+  const receive = result.all_receiver_audit.roots.find(root => root.root === 'receive');
+  assert.ok(receive, 'the root inventory must include function declarations');
+  assert.doesNotThrow(() => JSON.stringify(result));
+  assert.equal(receive.switch_labels.at(-1).value, '9007199254740993');
   const other = result.all_receiver_audit.roots.find(root => root.file.endsWith('/other.js'));
   assert.equal(other.root, 'applyOtherReceiveEvent');
   assert.equal(other.if_statements, 1);
