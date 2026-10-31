@@ -104,7 +104,13 @@ pub(super) fn dispatch_input<E: CliEnv>(
     let parsed = match parse(input) {
         Ok(parsed) => parsed,
         Err(err) => {
-            let _ = writeln!(env.stderr(), "{prog}: {err}");
+            if super::feedback::safe_intake_required(env.repo_path()) {
+                // A malformed envelope cannot reliably identify its operation.
+                // Never echo serde's caller-controlled keys/values in Auto.
+                let _ = writeln!(env.stderr(), "{prog}: invalid JSON envelope");
+            } else {
+                let _ = writeln!(env.stderr(), "{prog}: {err}");
+            }
             return 2;
         }
     };
@@ -2978,6 +2984,62 @@ fn verification_quarantine_requests(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_feedback_parse_diagnostics_do_not_echo_unknown_secrets() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let repo = tempfile::tempdir().unwrap();
+        crate::save_issue_monitor_prefs(
+            &crate::issue_monitor_prefs_path_for_repo_path(repo.path()),
+            &crate::IssueMonitorPrefs {
+                autonomous_mode: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let base = serde_json::json!({"operation":"feedback.create","params":{
+            "title":"ignored", "kind":"bug", "operation":"workspace.update",
+            "refusal":"ignored", "reproduction":"ignored"
+        }});
+        for scenario in ["unknown_key", "unknown_kind", "wrong_type", "broken_json"] {
+            let mut observations = Vec::new();
+            for secret in ["unmarked confidential phrase", "未知の情報えひも"] {
+                let mut input = base.clone();
+                match scenario {
+                    "unknown_key" => input["params"][secret] = serde_json::json!(secret),
+                    "unknown_kind" => input["params"]["kind"] = serde_json::json!(secret),
+                    "wrong_type" => input["params"]["labels"] = serde_json::json!(secret),
+                    _ => {}
+                }
+                let input = if scenario == "broken_json" {
+                    format!("{{\"operation\":\"feedback.create\",\"params\":{{\"{secret}\"")
+                } else {
+                    input.to_string()
+                };
+                let mut env = crate::cli::TestEnv::new(repo.path().join("cache"));
+                env.repo_path = repo.path().to_path_buf();
+                assert_ne!(crate::cli::dispatch_json_input(&mut env, "gwtd", &input), 0);
+                let output = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&env.stdout),
+                    String::from_utf8_lossy(&env.stderr)
+                );
+                assert!(
+                    !output.contains(secret),
+                    "{scenario}: diagnostic exposed raw input"
+                );
+                observations.push(output);
+            }
+            assert_eq!(
+                observations[0], observations[1],
+                "{scenario}: secret changed diagnostics"
+            );
+        }
+    }
+
     #[test]
     fn feedback_create_accepts_structured_evidence() {
         let input = serde_json::json!({"schema_version":1,"operation":"feedback.create","params":{

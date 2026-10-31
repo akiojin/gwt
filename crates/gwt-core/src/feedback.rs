@@ -12,6 +12,9 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod auto_report;
+use auto_report::{AutoFeedbackRecord, AutoReason, SafeAutoReport};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FeedbackKind {
@@ -56,6 +59,7 @@ pub enum FeedbackState {
     Declined,
     Failed,
     Uncertain,
+    Withheld,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -452,6 +456,11 @@ pub struct FeedbackStore {
     root: PathBuf,
 }
 
+pub enum StoredFeedback {
+    Manual(Box<FeedbackRecord>),
+    Auto(AutoFeedbackRecord),
+}
+
 #[derive(Serialize, Deserialize)]
 struct Receipt {
     id: String,
@@ -479,6 +488,106 @@ impl FeedbackStore {
             ));
         }
         Ok(record)
+    }
+
+    /// A tag is never interpreted as a legacy raw receipt, even if invalid.
+    pub fn read_entry(&self, id: &str) -> io::Result<StoredFeedback> {
+        let bytes = fs::read(self.path(id)?)?;
+        let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid feedback receipt");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+        if value.get("mode").is_some() {
+            let record: AutoFeedbackRecord =
+                serde_json::from_value(value).map_err(|_| invalid())?;
+            if record.snapshot.id() != id {
+                return Err(invalid());
+            }
+            Ok(StoredFeedback::Auto(record))
+        } else {
+            let record: FeedbackRecord = serde_json::from_value(value).map_err(|_| invalid())?;
+            if record.id != id {
+                return Err(invalid());
+            }
+            Ok(StoredFeedback::Manual(Box::new(record)))
+        }
+    }
+
+    pub fn read_auto(&self, id: &str) -> io::Result<AutoFeedbackRecord> {
+        match self.read_entry(id)? {
+            StoredFeedback::Auto(record) => Ok(record),
+            StoredFeedback::Manual(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "not an automatic feedback receipt",
+            )),
+        }
+    }
+
+    pub fn save_auto(&self, record: &AutoFeedbackRecord) -> io::Result<()> {
+        fs::create_dir_all(&self.root)?;
+        durable_write(
+            &self.path(&record.snapshot.id())?,
+            &serde_json::to_vec_pretty(record)?,
+        )
+    }
+
+    pub fn submit_auto(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, None)
+    }
+
+    /// Unavailable authority permits safe local storage, never a sender. Set
+    /// the initial state inside the intake lock, before any reader sees it.
+    pub fn submit_auto_withheld(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        reason: AutoReason,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        self.submit_auto_intake(report, now, Some(reason))
+    }
+
+    fn submit_auto_intake(
+        &self,
+        report: SafeAutoReport,
+        now: DateTime<Utc>,
+        withheld: Option<AutoReason>,
+    ) -> io::Result<(AutoFeedbackRecord, bool)> {
+        fs::create_dir_all(self.root.join("fingerprints"))?;
+        let lock = self.open_lock("intake")?;
+        lock.lock_exclusive()?;
+        // No raw fields, source identity, clock or request id enters this key.
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&report)?));
+        let index = self
+            .root
+            .join("fingerprints")
+            .join(format!("auto-{fingerprint}.json"));
+        if index.exists() {
+            let receipt: Receipt = serde_json::from_slice(&fs::read(&index)?).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid automatic feedback index",
+                )
+            })?;
+            // Auto snapshots remain deduplicated in every terminal/uncertain
+            // state. Only explicit retry can restart a known failed attempt.
+            return Ok((self.read_auto(&receipt.id)?, false));
+        }
+        let mut record = AutoFeedbackRecord::new(report, now);
+        if let Some(reason) = withheld {
+            record.state = FeedbackState::Withheld;
+            record.error = Some(reason);
+        }
+        self.save_auto(&record)?;
+        durable_write(
+            &index,
+            &serde_json::to_vec(&Receipt {
+                id: record.snapshot.id(),
+                created_at: now,
+            })?,
+        )?;
+        Ok((record, true))
     }
 
     pub fn save(&self, record: &FeedbackRecord) -> io::Result<()> {
