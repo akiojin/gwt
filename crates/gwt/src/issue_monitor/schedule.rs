@@ -141,10 +141,12 @@ impl IssueMonitorPrefs {
                 .iter()
                 .flat_map(|roster| &roster.members)
                 .any(|member| {
-                    member
-                        .assignment
-                        .as_ref()
-                        .is_some_and(|assignment| assignment.issue_number == Some(number))
+                    member.assignment.as_ref().is_some_and(|assignment| {
+                        assignment.issue_number == Some(number)
+                            && assignment.project_key.as_deref().is_none_or(|key| {
+                                self.agent_registry_project_key.as_deref() == Some(key)
+                            })
+                    })
                 })
     }
 
@@ -303,6 +305,9 @@ fn reconcile(
                     member.assignment.is_none()
                         && spec.is_some()
                         && member.last_spec_number.as_ref() == spec
+                        && member.last_owner_project_key.as_deref().is_none_or(|key| {
+                            prefs.agent_registry_project_key.as_deref() == Some(key)
+                        })
                 })
             });
         let load = |member: &AgentMember| {
@@ -514,6 +519,14 @@ impl IssueMonitorState {
         self.agent_roster = Some(
             crate::agent_names::read_project_roster(root, &sessions).map_err(io::Error::other)?,
         );
+        if self
+            .agent_roster
+            .as_ref()
+            .is_some_and(|roster| roster.schema_version == 2)
+        {
+            self.agent_registry_project_key =
+                Some(gwt_core::paths::project_scope_hash(root).to_string());
+        }
         let mut prefs = self.prefs();
         self.agent_schedule_source = Some((
             prefs.agent_issue_schedule.clone(),
@@ -629,6 +642,7 @@ impl IssueMonitorState {
         let available = tool_matches && member.is_some_and(|member| match &member.assignment {
             None => member.enabled,
             Some(assignment) => assignment.issue_number == Some(number)
+                && assignment.project_key.as_deref().is_none_or(|key| self.agent_registry_project_key.as_deref() == Some(key))
                 && (assignment.host_id.is_empty() || assignment.host_id == host)
                 && assignment.delivery_id.as_ref().is_some_and(|id| self.pending_launch_deliveries.iter().any(|delivery| delivery.issue_number == number && delivery.delivery_id == *id && delivery.agent_member_id.as_deref() == Some(member.agent_member_id.as_str()))),
         })
@@ -727,6 +741,115 @@ mod tests {
             prefs.agent_switch_intents.insert(operation.into(), intent);
             Ok(())
         }).unwrap();
+    }
+
+    #[test]
+    fn foreign_project_owner_numbers_do_not_consume_local_queue_entries() {
+        let (_temp, _home, root, _sessions, roster) = fixture();
+        let path = crate::issue_monitor_prefs_path_for_repo_path(&root);
+        let host = crate::process::current_hostname();
+        let mut prefs = load_issue_monitor_prefs(&path).unwrap();
+        prefs.agent_registry_project_key = Some("bbbbbbbbbbbbbbbb".into());
+        prefs
+            .terminal_queues
+            .get_mut(&host)
+            .unwrap()
+            .entries
+            .retain(|entry| entry.number == 42);
+        let foreign = serde_json::from_value(serde_json::json!({
+            "reservation_id":"foreign-reservation", "session_id":"foreign-session",
+            "project_key":"aaaaaaaaaaaaaaaa", "issue_number":42, "spec_number":null,
+            "delivery_id":"foreign-delivery", "host_id":host,
+            "host_pid":1, "host_started_at":2
+        }))
+        .unwrap();
+        prefs.agent_roster.as_mut().unwrap().members[0].assignment = Some(foreign);
+        let foreign_member = prefs.agent_roster.as_ref().unwrap().members[0].clone();
+        assert!(
+            !prefs.scheduled_issue_in_flight(42),
+            "another project running its Issue 42 does not run this project's Issue 42"
+        );
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        let planned = prefs
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .find(|entry| entry.issue_number == 42)
+            .expect("the local queued issue keeps an idle target");
+        assert_eq!(planned.agent_member_id, roster.members[1].agent_member_id);
+        assert_eq!(
+            prefs.agent_roster.as_ref().unwrap().members[0],
+            foreign_member
+        );
+
+        let mut busy_choice = prefs.clone();
+        busy_choice.agent_issue_schedule.reservations[0].agent_member_id =
+            foreign_member.agent_member_id;
+        busy_choice.agent_issue_schedule.reservations[0].reason =
+            AgentScheduleReason::AssignedByYou;
+        let monitor = IssueMonitorState::with_prefs(IssueMonitorConfig::default(), busy_choice);
+        assert!(
+            monitor.agent_schedule_launch_exclusion(42).is_some(),
+            "foreign ownership does not make a globally occupied member idle"
+        );
+
+        prefs.agent_roster.as_mut().unwrap().members[0]
+            .assignment
+            .as_mut()
+            .unwrap()
+            .project_key = Some("bbbbbbbbbbbbbbbb".into());
+        assert!(
+            prefs.scheduled_issue_in_flight(42),
+            "a genuine local assignment still consumes the local owner"
+        );
+        reconcile(&mut prefs, &BTreeMap::new(), &BTreeMap::new(), &host).unwrap();
+        assert!(prefs
+            .agent_issue_schedule
+            .reservations
+            .iter()
+            .all(|entry| entry.issue_number != 42));
+
+        for member in &mut prefs.agent_roster.as_mut().unwrap().members {
+            member.assignment = None;
+            member.last_spec_number = None;
+            member.last_owner_project_key = None;
+        }
+        prefs.agent_issue_schedule.reservations.clear();
+        prefs.agent_roster.as_mut().unwrap().members[1].last_spec_number = Some(900);
+        prefs.agent_roster.as_mut().unwrap().members[1].last_owner_project_key =
+            Some("aaaaaaaaaaaaaaaa".into());
+        reconcile(
+            &mut prefs,
+            &BTreeMap::from([(42, 900)]),
+            &BTreeMap::new(),
+            &host,
+        )
+        .unwrap();
+        let planned = &prefs.agent_issue_schedule.reservations[0];
+        assert_eq!(
+            planned.agent_member_id, roster.members[0].agent_member_id,
+            "another project's SPEC 900 does not prefer its former member for local SPEC 900"
+        );
+        assert_eq!(planned.reason, AgentScheduleReason::QueueOrder);
+        prefs.agent_issue_schedule.reservations.clear();
+        prefs.agent_roster.as_mut().unwrap().members[1].last_owner_project_key =
+            Some("bbbbbbbbbbbbbbbb".into());
+        reconcile(
+            &mut prefs,
+            &BTreeMap::from([(42, 900)]),
+            &BTreeMap::new(),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(
+            prefs.agent_issue_schedule.reservations[0].agent_member_id,
+            roster.members[1].agent_member_id,
+            "a genuine local same-SPEC continuation remains preferred"
+        );
+        assert_eq!(
+            prefs.agent_issue_schedule.reservations[0].reason,
+            AgentScheduleReason::SameSpecContinuation
+        );
     }
 
     #[test]

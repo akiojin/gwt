@@ -4147,6 +4147,22 @@ fn try_apply_accepted_issue_monitor_control_with_disk_migration_observed(
                 return Ok(());
             }
             if applied.is_some_and(|result| result.is_some()) {
+                // Membership changes require an explicit roster control;
+                // cached state and machine-budget updates cannot resize it.
+                let requested_roster_size = match &accepted.control {
+                    IssueMonitorControl::MaxActiveAgents(Some(size)) => Some(*size),
+                    IssueMonitorControl::ConfigSet {
+                        max_active_agents: Some(size),
+                        ..
+                    } => Some(*size),
+                    _ => None,
+                };
+                if let Some(size) = requested_roster_size {
+                    let mut resized = candidate.prefs();
+                    crate::agent_names::resize_shared_roster(&mut resized, size)
+                        .map_err(io::Error::other)?;
+                    candidate.rebase_gui_observer_prefs(&resized);
+                }
                 let explicit_max_active =
                     matches!(&accepted.control, IssueMonitorControl::MaxActiveAgents(_))
                         || matches!(&accepted.control,

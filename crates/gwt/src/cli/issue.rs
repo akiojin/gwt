@@ -4555,7 +4555,11 @@ fn apply_monitor_config_set(
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
     }
     apply_update_drain(&mut candidate, update_drain);
-    *prefs = candidate.prefs();
+    let mut updated = candidate.prefs();
+    if let Some(size) = max_active {
+        crate::agent_names::resize_shared_roster(&mut updated, size).map_err(io::Error::other)?;
+    }
+    *prefs = updated;
     Ok(())
 }
 
@@ -4672,6 +4676,10 @@ fn run_monitor_config_set<E: CliEnv>(
         update_drain.as_ref(),
         caller_is_resident_pm,
     )
+    .map_err(io_as_api_error)?;
+    crate::agent_registry::preflight_write(&crate::issue_monitor_prefs_path_for_repo_path(
+        &project_root,
+    ))
     .map_err(io_as_api_error)?;
     // Issue #3923 AC-5: a switch needs a saved profile to switch. Refuse
     // before publishing so the daemon never has to reject a control it
@@ -4919,7 +4927,8 @@ fn monitor_profiles_projection(prefs: &crate::IssueMonitorPrefs) -> serde_json::
     })
 }
 
-/// Exactly the read set compared by IssueMonitorProfilesSetRequest::resolve.
+/// Project pool/head observation. Captured requests also fence the shared
+/// settings generation when resolving a registered person's omitted core.
 fn monitor_profiles_token(prefs: &crate::IssueMonitorPrefs) -> String {
     use sha2::Digest;
     let observed = serde_json::to_vec(&(prefs.launch_profile_pool(), &prefs.launch_profile))
@@ -5057,6 +5066,7 @@ fn set_monitor_profiles(
         -> Result<(), crate::runtime_daemon_events::IssueMonitorControlPublishError>,
 ) -> Result<i32, SpecOpsError> {
     let prefs_path = crate::issue_monitor_prefs_path_for_repo_path(project_root);
+    crate::agent_registry::preflight_write(&prefs_path).map_err(io_as_api_error)?;
     let saved = crate::load_issue_monitor_prefs(&prefs_path).map_err(io_as_api_error)?;
     if expected_profiles_token.is_some_and(|expected| expected != monitor_profiles_token(&saved)) {
         return Err(io_as_api_error(io::Error::new(
@@ -19074,5 +19084,118 @@ command = "my-agent-cli"
         let persisted = crate::load_issue_monitor_prefs(&prefs_path).expect("prefs");
         assert_eq!(persisted.provider_quota_holds, seed.provider_quota_holds);
         assert!(persisted.provider_quota_hold_releases.is_empty());
+    }
+    // Insert into cli/issue.rs::tests. Calls the actual private CLI writer using
+    // its existing unavailable-publisher injection. No new helper/API is needed.
+    #[test]
+    fn profiles_set_enrolls_a_late_legacy_source_before_loading_its_sparse_patch() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = TempDir::new().unwrap();
+        let _home = ScopedGwtHome::set(tmp.path().join("home"));
+        let a_root = tmp.path().join("project-a");
+        let b_root = tmp.path().join("late-project-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+        let a_path = crate::issue_monitor_prefs_path_for_repo_path(&a_root);
+        let b_path = crate::issue_monitor_prefs_path_for_repo_path(&b_root);
+        let old_id = "a4263a32-14e9-4bb0-ab78-ec3d4816e811";
+        let mut a = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        a["agent_roster"] = serde_json::json!({
+            "schema_version":1, "revision":1, "members":[{
+                "agent_member_id":old_id, "agent_id":"codex", "name":"Cedar",
+                "enabled":true, "created_at":"2026-10-01T00:00:00Z"
+            }]
+        });
+        a["launch_profiles"] = serde_json::json!([{
+            "agent_id":"codex", "agent_member_id":old_id, "model":"model-a",
+            "skip_permissions":true, "prefer_for":["label:project-a"]
+        }]);
+        fs::create_dir_all(a_path.parent().unwrap()).unwrap();
+        fs::write(&a_path, serde_json::to_vec_pretty(&a).unwrap()).unwrap();
+        crate::agent_registry::ensure_active_for_project(&a_root).unwrap();
+        let a_before = crate::load_issue_monitor_prefs(&a_path).unwrap();
+        let a_id = a_before.launch_profile_pool()[0]
+            .agent_member_id
+            .clone()
+            .unwrap();
+
+        // This source did not exist during activation. Its manual pool still has
+        // no member id, so the operation itself must migrate before its first load.
+        let mut b = serde_json::to_value(crate::IssueMonitorPrefs::default()).unwrap();
+        b["agent_roster"] = serde_json::json!({
+            "schema_version":1, "revision":1, "members":[{
+                "agent_member_id":old_id, "agent_id":"codex", "name":"Birch",
+                "enabled":true, "created_at":"2026-10-02T00:00:00Z"
+            }]
+        });
+        b["launch_profiles"] = serde_json::json!([{
+            "agent_id":"codex", "model":"model-b-before", "reasoning":"high",
+            "version":"legacy-b-version", "fast_mode":true, "skip_permissions":false,
+            "prefer_for":["label:project-b"]
+        }]);
+        fs::create_dir_all(b_path.parent().unwrap()).unwrap();
+        fs::write(&b_path, serde_json::to_vec_pretty(&b).unwrap()).unwrap();
+        let patches = serde_json::from_value(serde_json::json!([{
+            "agent_id":"codex", "model":"model-b-after"
+        }]))
+        .unwrap();
+        let published = std::cell::Cell::new(false);
+        let mut out = String::new();
+        assert_eq!(
+            set_monitor_profiles(&b_root, None, patches, None, &mut out, |_, _| {
+                published.set(true);
+                Err(
+                crate::runtime_daemon_events::IssueMonitorControlPublishError::TransportUnavailable(
+                    "offline fixture".into(),
+                ),
+            )
+            })
+            .unwrap(),
+            0,
+            "the CLI writer must enroll the old source before capturing its read set",
+        );
+        assert!(
+            published.get(),
+            "the request reached its normal publish/fallback boundary"
+        );
+        let a_after = crate::load_issue_monitor_prefs(&a_path).unwrap();
+        let b_after = crate::load_issue_monitor_prefs(&b_path).unwrap();
+        assert_eq!(a_after.agent_roster, b_after.agent_roster);
+        assert_eq!(b_after.agent_roster.as_ref().unwrap().members.len(), 2);
+        let b_profile = &b_after.launch_profile_pool()[0];
+        let b_id = b_profile.agent_member_id.as_ref().unwrap();
+        assert_ne!(
+            b_id, &a_id,
+            "the same old UUID from a late source has its own global identity"
+        );
+        assert_eq!(
+            crate::agent_registry::resolve_member_id(&a_root, old_id).unwrap(),
+            a_id
+        );
+        assert_eq!(
+            crate::agent_registry::resolve_member_id(&b_root, old_id).unwrap(),
+            *b_id
+        );
+        assert_eq!(b_profile.model.as_deref(), Some("model-b-after"));
+        assert_eq!(b_profile.reasoning.as_deref(), Some("high"));
+        assert_eq!(b_profile.version.as_deref(), Some("legacy-b-version"));
+        assert!(b_profile.fast_mode);
+        assert!(!b_profile.skip_permissions);
+        assert_eq!(b_profile.prefer_for, ["label:project-b"]);
+        assert_eq!(
+            a_after.launch_profile_pool(),
+            a_before.launch_profile_pool()
+        );
+        assert!(a_after.launch_profile_pool()[0].skip_permissions);
+        for mirror in [&b_path, &b_path.with_extension("committed.json")] {
+            let raw: serde_json::Value =
+                serde_json::from_slice(&fs::read(mirror).unwrap()).unwrap();
+            assert_eq!(raw["schema_version"], 2);
+        }
+        let response: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+        assert_eq!(response["launch_profiles"][0]["agent_member_id"], *b_id);
+        assert_eq!(response["launch_profiles"][0]["model"], "model-b-after");
     }
 }

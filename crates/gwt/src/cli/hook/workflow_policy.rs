@@ -864,7 +864,8 @@ pub(crate) fn is_read_only_json_envelope_operation(operation: &str) -> bool {
     }
     matches!(
         operation,
-        "workspace.candidates"
+        "agent.registry.status"
+            | "workspace.candidates"
             | "feedback.status"
             | "workspace.receipt"
             | "workspace.projection_list"
@@ -1996,6 +1997,38 @@ mod tests {
             evaluate_with_context(&bash_event(&command), repo.path(), &context).expect("policy"),
             HookOutput::Silent,
             "receipt recovery must stay available before Work identity is set"
+        );
+    }
+
+    #[test]
+    fn agent_registry_status_is_read_only_but_reconcile_requires_workspace_identity() {
+        assert!(is_read_only_json_envelope_operation(
+            "agent.registry.status"
+        ));
+        assert!(!is_read_only_json_envelope_operation(
+            "agent.registry.reconcile"
+        ));
+        let repo = tempfile::tempdir().unwrap();
+        let context = WorkflowContext::unknown().with_title_summary_missing(true);
+        let status = envelope_command("agent.registry.status", "{}");
+        assert_eq!(
+            evaluate_with_context(&bash_event(&status), repo.path(), &context).unwrap(),
+            HookOutput::Silent,
+            "registry diagnosis must remain reachable before workspace identity",
+        );
+        let reconcile = envelope_command("agent.registry.reconcile", "{}");
+        let refusal =
+            evaluate_with_context(&bash_event(&reconcile), repo.path(), &context).unwrap();
+        assert!(refusal.summary().contains("workspace.ensure"));
+        assert_eq!(
+            evaluate_with_context(
+                &bash_event(&reconcile),
+                repo.path(),
+                &WorkflowContext::unknown(),
+            )
+            .unwrap(),
+            HookOutput::Silent,
+            "legitimate reconciliation remains available after workspace identity",
         );
     }
 

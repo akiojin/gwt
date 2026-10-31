@@ -480,6 +480,39 @@ fn parse(input: &str) -> Result<ParsedEnvelope, CliParseError> {
     let params = params_object(&envelope.params)?;
     let recording = param_audit::Recording::start();
     let command = match envelope.operation.as_str() {
+        "agent.registry.status" => {
+            reject_unknown_params(params, &["source_key"], &envelope.operation)?;
+            let source_key: Option<String> = serde_json::from_value(
+                lookup(params, "source_key").cloned().unwrap_or(Value::Null),
+            )
+            .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            if let Some(key) = &source_key {
+                gwt_core::repo_hash::ProjectKey::parse(key)
+                    .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            }
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::Status { source_key })
+        }
+        "agent.registry.reconcile" => {
+            reject_unknown_params(
+                params,
+                &[
+                    "expected_phase",
+                    "expected_registry_revision",
+                    "source_key",
+                    "expected_transaction_id",
+                    "expected_source_sha256",
+                    "expected_floor_sha256",
+                    "action",
+                ],
+                &envelope.operation,
+            )?;
+            let request: crate::agent_registry::RegistryReconcileRequest =
+                serde_json::from_value(Value::Object(params.clone()))
+                    .map_err(|error| CliParseError::InvalidJson(error.to_string()))?;
+            gwt_core::repo_hash::ProjectKey::parse(&request.source_key)
+                .map_err(|error| CliParseError::InvalidJson(format!("source_key: {error}")))?;
+            CliCommand::AgentRegistry(super::AgentRegistryCommand::Reconcile(Box::new(request)))
+        }
         "feedback.create" => {
             params.keys().for_each(|key| param_audit::note(key));
             let input = serde_json::from_value(Value::Object(params.clone()))
@@ -2996,10 +3029,10 @@ mod tests {
     }
 
     use super::{
-        parse, report_undelivered_response, write_response, ActionsCommand, CliCommand,
-        CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand, IndexScope,
-        IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction, WorkflowBypassMode,
-        WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
+        parse, parse_operation, report_undelivered_response, write_response, ActionsCommand,
+        CliCommand, CliParseError, DaemonCommand, DiagnosticsCommand, HookCommand, IndexCommand,
+        IndexScope, IssueCommand, PaneCommand, PerfCommand, PrCommand, SkillStateAction,
+        WorkflowBypassMode, WorkflowCommand, WorkspaceCommand, RESPONSE_NOT_DELIVERED_EXIT,
     };
     use crate::cli::verification_lease::VerificationLeaseCommand;
     use crate::cli::{dispatch_json_input, TestEnv};
@@ -3853,6 +3886,53 @@ mod tests {
                 unresolved.join("\n")
             );
         }
+    }
+
+    #[test]
+    fn agent_registry_operations_parse_strict_recovery_identity() {
+        assert!(parse_operation("agent.registry.status", &json!({})).is_ok());
+        assert!(parse_operation(
+            "agent.registry.status",
+            &json!({"source_key":"aaaaaaaaaaaaaaaa"}),
+        )
+        .is_ok());
+        let request = json!({
+            "expected_phase":"active",
+            "expected_registry_revision":7,
+            "source_key":"aaaaaaaaaaaaaaaa",
+            "expected_transaction_id":"transaction-7",
+            "expected_source_sha256":"a".repeat(64),
+            "action":"quarantine_replay_mirror",
+        });
+        assert!(parse_operation("agent.registry.reconcile", &request).is_ok());
+        let mut prepared = request.clone();
+        prepared["expected_phase"] = json!("prepared");
+        prepared["action"] = json!("refresh_prepared_source");
+        assert!(parse_operation("agent.registry.reconcile", &prepared).is_ok());
+        let mut observed_floor = request.clone();
+        observed_floor["expected_floor_sha256"] = json!("b".repeat(64));
+        assert!(
+            parse_operation("agent.registry.reconcile", &observed_floor).is_ok(),
+            "explicit recovery floor observations must reach the typed recovery API",
+        );
+
+        assert!(parse_operation("agent.registry.status", &json!({"source_key":""})).is_err());
+        assert!(
+            parse_operation("agent.registry.status", &json!({"source_key":"../foreign"}),).is_err()
+        );
+        assert!(parse_operation("agent.registry.status", &json!({"apply":true})).is_err());
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("expected_transaction_id");
+        assert!(parse_operation("agent.registry.reconcile", &missing).is_err());
+        let mut unknown = request.clone();
+        unknown["force"] = json!(true);
+        assert!(parse_operation("agent.registry.reconcile", &unknown).is_err());
+        let mut invalid = request;
+        invalid["source_key"] = json!("../foreign");
+        assert!(parse_operation("agent.registry.reconcile", &invalid).is_err());
     }
 
     /// Issue #3913: `verify.run` accepts a bound on its host admission wait.
