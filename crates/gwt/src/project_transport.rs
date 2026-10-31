@@ -2056,6 +2056,9 @@ impl AgentPaneSessionScope {
                     request_id,
                 })
             }
+            FrontendEvent::PaneName { request_id, .. } => {
+                Some(AgentFrontendRequest::ReadName { request_id })
+            }
             // Issue #3629 AC-9: closing a scoped peer pane is a window
             // lifecycle operation, not a producing Work mutation — the PM
             // holds only an observation grant and pane.close is its everyday
@@ -2403,7 +2406,7 @@ async fn send_agent_self_close_response<S>(
     match response {
         Ok(acceptance) => send_agent_self_close_acceptance(sender, acceptance, deadline).await,
         Err(refusal) => {
-            send_agent_pm_terminal_result(
+            send_agent_terminal_result(
                 sender,
                 BackendEvent::PaneCloseResult {
                     ok: false,
@@ -2417,7 +2420,7 @@ async fn send_agent_self_close_response<S>(
     }
 }
 
-async fn send_agent_pm_terminal_result<S>(
+async fn send_agent_terminal_result<S>(
     sender: &mut S,
     event: BackendEvent,
     deadline_after: Duration,
@@ -2431,7 +2434,7 @@ async fn send_agent_pm_terminal_result<S>(
                     .await;
         }
         Err(error) => {
-            tracing::error!(%error, "failed to serialize direct PM message result");
+            tracing::error!(%error, "failed to serialize direct agent result");
         }
     }
 }
@@ -2477,10 +2480,47 @@ fn opaque_agent_pm_target_refusal(operation_id: String, window_id: String) -> Ba
     }
 }
 
-async fn send_agent_fence_close<S>(sender: &mut S, close_frame: ClientCloseFrame)
-where
+fn pane_name_correlation(payload: &str, kind: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    (value.get("kind")?.as_str()? == kind)
+        .then(|| value.get("request_id")?.as_str().map(str::to_owned))?
+}
+
+async fn refuse_pending_agent_names<S>(
+    sender: &mut S,
+    pending_names: &mut HashSet<String>,
+    error: &str,
+) where
     S: futures_util::Sink<Message> + Unpin,
 {
+    for request_id in pending_names.drain() {
+        send_agent_terminal_result(
+            sender,
+            BackendEvent::PaneNameResult {
+                request_id,
+                ok: false,
+                agent_name: None,
+                error: Some(error.to_string()),
+            },
+            Duration::from_secs(1),
+        )
+        .await;
+    }
+}
+
+async fn send_agent_fence_close<S>(
+    sender: &mut S,
+    close_frame: ClientCloseFrame,
+    pending_names: &mut HashSet<String>,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    refuse_pending_agent_names(
+        sender,
+        pending_names,
+        "Agent capability is missing, stale, or unavailable",
+    )
+    .await;
     let _ = tokio::time::timeout(
         Duration::from_secs(1),
         sender.send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -2504,6 +2544,10 @@ async fn client_session_with_scope(
         ClientSessionScope::Agent(_) => state.clients.register_pane(client_id.clone()),
     };
     let (mut sender, mut receiver) = socket.split();
+    // A fence can fire on an unrelated outbound message before the name
+    // result reaches the front of the queue. Retain each accepted correlation
+    // until its reply is sent so revocation never becomes a silent timeout.
+    let mut pending_names = HashSet::new();
 
     let input_seq = Arc::new(AtomicU64::new(0));
 
@@ -2516,6 +2560,7 @@ async fn client_session_with_scope(
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2523,8 +2568,14 @@ async fn client_session_with_scope(
                         let Some(payload) = scope.filter_outbound(payload) else {
                             continue;
                         };
+                        let name_result = if pending_names.is_empty() { None } else {
+                            pane_name_correlation(&payload, "pane_name_result")
+                        };
                         if sender.send(Message::Text(payload.into())).await.is_err() {
                             break;
+                        }
+                        if let Some(request_id) = name_result {
+                            pending_names.remove(&request_id);
                         }
                         let repair_panes = scope.filter_repair_panes(repair_panes);
                         if !repair_panes.is_empty() {
@@ -2540,12 +2591,10 @@ async fn client_session_with_scope(
                     }
                     DrainStep::Closed(close_frame) => {
                         if let Some(close_frame) = close_frame {
-                            let _ = sender
-                                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                                    code: close_frame.code,
-                                    reason: close_frame.reason.into(),
-                                })))
-                                .await;
+                            send_agent_fence_close(&mut sender, close_frame, &mut pending_names).await;
+                        } else {
+                            refuse_pending_agent_names(&mut sender, &mut pending_names,
+                                "Agent connection closed before name lookup completed").await;
                         }
                         break;
                     }
@@ -2555,10 +2604,18 @@ async fn client_session_with_scope(
                 match maybe_message {
                     Some(Ok(Message::Text(text))) => {
                         let received_at = Instant::now();
+                        let name_request_id = match &scope {
+                            ClientSessionScope::Agent(_) => pane_name_correlation(text.as_ref(), "pane_name"),
+                            ClientSessionScope::Browser(_) => None,
+                        };
+                        if let Some(request_id) = &name_request_id {
+                            pending_names.insert(request_id.clone());
+                        }
                         if !scope.refresh_agent_grant(&state.agent_capabilities) {
                             send_agent_fence_close(
                                 &mut sender,
                                 AGENT_STALE_BINDING_CLOSE,
+                                &mut pending_names,
                             )
                             .await;
                             break;
@@ -2575,7 +2632,7 @@ async fn client_session_with_scope(
                                         operation_id,
                                         window_id,
                                     }) => {
-                                        send_agent_pm_terminal_result(
+                                        send_agent_terminal_result(
                                             &mut sender,
                                             opaque_agent_pm_target_refusal(operation_id, window_id),
                                             AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2612,6 +2669,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2624,6 +2682,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_AUTHORITY_UNAVAILABLE_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2632,6 +2691,7 @@ async fn client_session_with_scope(
                                                     send_agent_fence_close(
                                                         &mut sender,
                                                         AGENT_STALE_BINDING_CLOSE,
+                                                        &mut pending_names,
                                                     )
                                                     .await;
                                                     break;
@@ -2693,7 +2753,7 @@ async fn client_session_with_scope(
                                             )) = direct_pm_result.take()
                                             {
                                                 let _ = cancellation.cancel();
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     BackendEvent::PmMessageSendResult {
                                                         operation_id,
@@ -2711,6 +2771,7 @@ async fn client_session_with_scope(
                                                 send_agent_fence_close(
                                                     &mut sender,
                                                     AGENT_STALE_BINDING_CLOSE,
+                                                    &mut pending_names,
                                                 )
                                                 .await;
                                             }
@@ -2781,7 +2842,7 @@ async fn client_session_with_scope(
                                                 }
                                             };
                                             if connected {
-                                                send_agent_pm_terminal_result(
+                                                send_agent_terminal_result(
                                                     &mut sender,
                                                     event,
                                                     AGENT_PM_TERMINAL_SEND_DEADLINE,
@@ -2832,6 +2893,13 @@ async fn client_session_with_scope(
                                 }
                             }
                             Err(error) => {
+                                if let Some(request_id) = name_request_id {
+                                    pending_names.remove(&request_id);
+                                    send_agent_terminal_result(&mut sender, BackendEvent::PaneNameResult {
+                                        request_id, ok: false, agent_name: None,
+                                        error: Some(format!("Invalid pane.name request: {error}")),
+                                    }, Duration::from_secs(1)).await;
+                                }
                                 eprintln!("invalid frontend message: {error}");
                             }
                         }
@@ -3243,7 +3311,7 @@ mod tests {
     }
 
     #[test]
-    fn pane_name_requires_producing_agent_authority_and_refuses_browser_dispatch() {
+    fn pane_name_separates_metadata_read_from_producing_assignment_and_refuses_browser() {
         let project = tempfile::tempdir().expect("project");
         let request = || {
             serde_json::from_value::<FrontendEvent>(serde_json::json!({
@@ -3277,7 +3345,11 @@ mod tests {
                 "observation-capability".to_string(),
                 principal,
             ));
-            assert!(scope.filter_inbound(request()).is_none());
+            let read = scope
+                .filter_inbound(request())
+                .expect("own-name metadata read");
+            assert!(!read.mutates_host_state());
+            assert!(!read.requires_producing_authority());
         }
         let scope = AgentPaneSessionScope::new(AgentCapabilityGrant::new(
             "producing-capability".to_string(),

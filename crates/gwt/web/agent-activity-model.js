@@ -147,9 +147,10 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
     if (error) {
       updateNameEdit(memberId, current => ({ ...current, error, status: "invalid" })); sendNextName(); return;
     }
+    // Normalize the saved name without changing the draft or its typing position.
     const name = edit.value.trim();
     if (name === member.name) {
-      updateNameEdit(memberId, current => ({ ...current, value: name, error: "", status: "saved" })); sendNextName(); return;
+      updateNameEdit(memberId, current => ({ ...current, error: "", status: "saved" })); sendNextName(); return;
     }
     const request = { kind: "agent_roster", action: { kind: "rename", member_id: memberId, name },
       expected_revision: state.revision, request_id: createLaunchOperationId("member-name") };
@@ -183,7 +184,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       name_edits: { ...current.name_edits, [memberId]: error
         ? { ...edit, blocked: true, error, status: "error" }
         : !edit.composing && edit.value.trim() === pending.action.name
-          ? { ...edit, value: pending.action.name, error: "", status: "saved" }
+          ? { ...edit, error: "", status: "saved" }
           : { ...edit, error: validationError, status: edit.composing ? "editing" : validationError ? "invalid" : "queued" } } }));
   }
   function applyAgentRosterSnapshot(snapshot, requestId) {
@@ -195,7 +196,7 @@ export function createAgentRosterModel(projectKey, { onRename = () => {}, schedu
       const nameEdits = { ...state.name_edits };
       for (const member of snapshot.members) {
         const edit = nameEdits[member.agent_member_id];
-        if (edit?.status === "saved" && edit.value !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
+        if (edit?.status === "saved" && edit.value.trim() !== member.name) nameEdits[member.agent_member_id] = { ...edit, value: member.name };
       }
       return { ...snapshot, name_edits: nameEdits, pending_name: state.pending_name, members: snapshot.members.map(member => ({ ...member,
         member_id: member.agent_member_id, tokens: member.tokens ?? memberUsage[member.agent_member_id] ?? null })) };

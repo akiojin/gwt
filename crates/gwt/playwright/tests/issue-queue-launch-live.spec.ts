@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { startIssueQueueLaunchFixture } from "./_helpers/issue-queue-launch";
 import { gotoLiveGwt, sendLiveGwtEvent } from "./_helpers/live-gwt";
@@ -8,6 +8,94 @@ test.describe("Issue queue real backend launch", () => {
   test.skip(process.env.GWT_PLAYWRIGHT_QUEUE_LAUNCH !== "1", "requires checkout binaries and isolated provider fixture");
   test.setTimeout(240_000);
   test.use({ viewport: { width: 1600, height: 1100 } });
+
+  test("roster Manual same-value save updates machine policy before autonomous queue launch", async ({ page }, info) => {
+    const fixture = await startIssueQueueLaunchFixture(info, { autonomousMode: true });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    const theme = info.project.name.includes("light") ? "light" : "dark";
+    const prefs = async () => JSON.parse((await fixture.monitorPreferencesBytes()).toString());
+    const machine = async () => JSON.parse(await readFile(join(fixture.home, ".gwt/machine-state/agent-settings.json"), "utf8"));
+    const operation = (name: "issue.monitor.config.set" | "issue.monitor.status" | "issue.monitor.schedule.read",
+      params: Record<string, unknown> = {}, root = fixture.project) => {
+      const envelope = fixture.fixtureOperation(name, params, root);
+      expect(envelope.ok, JSON.stringify(envelope)).toBe(true);
+      return { envelope, output: JSON.parse(envelope.output) };
+    };
+    try {
+      await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
+      await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      operation("issue.monitor.config.set", { max_active: 10 });
+      operation("issue.monitor.schedule.read");
+      await expect.poll(async () => (await prefs()).agent_roster?.members.filter((member: any) => member.enabled).length).toBe(10);
+      const roster = (await prefs()).agent_roster;
+      // A separate, unregistered fixture scope uses the normal local ConfigSet
+      // path to establish an older machine limit without editing trusted state.
+      const seed = join(fixture.home, "machine-policy-seed");
+      await mkdir(seed);
+      operation("issue.monitor.config.set", { max_active: 4 }, seed);
+      const olderMachine = await machine();
+      expect(olderMachine).toMatchObject({ mode: "manual", manual_limit: 4 });
+      expect(await prefs()).toMatchObject({ max_active_agents: 10, max_active_agents_mode: "manual", agent_roster: roster });
+      const before = operation("issue.monitor.status");
+      expect(before.envelope.project_store.identity_resolved).toBe(true);
+      expect(before.output.autonomous_mode).toBe(true);
+      operation("issue.monitor.config.set", { auto_close_merged_issues: false });
+      expect(await machine(), "reads and unrelated settings preserve the newer machine policy").toEqual(olderMachine);
+      operation("issue.monitor.config.set", { max_active: 10, expected_config_token: before.output.config_token });
+      // This is the regression assertion: a roster and unchanged project value
+      // must not suppress the explicit write to the shared machine authority.
+      expect(await machine()).toMatchObject({ mode: "manual", manual_limit: 10,
+        last_change: { source: "json_operation", max_active_agents_override: 10 } });
+      expect((await prefs()).agent_roster).toEqual(roster);
+      const saved = operation("issue.monitor.status").output;
+      const capacity = saved.agent_capacity;
+      const available = Math.max(0, 10 - Math.max(0, capacity.other_live_agents - capacity.other_pm_agents)
+        - capacity.own_untracked_workers);
+      expect(saved.max_active).toBe(Math.min(10, available));
+      expect(saved.max_active).toBeGreaterThan(0);
+      await sendLiveGwtEvent(page, { kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] });
+      await expect.poll(async () => (await fixture.launches()).length,
+        { timeout: 90_000, message: "normal autonomous claim, materialization and provider launch" }).toBe(1);
+      const launch = (await fixture.launches())[0];
+      expect(launch.pid).toBeGreaterThan(0);
+      expect(() => process.kill(launch.pid, 0)).not.toThrow();
+      expect(launch.gwt_session_id).toBeTruthy();
+      const window = () => page.evaluate(sessionId => {
+        const state = (window as any).__gwtPlaywrightMessages?.findLast((entry: any) => entry.payload.kind === "workspace_state");
+        return (state?.payload.workspace.tabs ?? []).flatMap((tab: any) => tab.workspace.windows)
+          .find((window: any) => window.session_id === sessionId);
+      }, launch.gwt_session_id);
+      await expect.poll(async () => ["running", "idle"].includes((await window())?.status), { timeout: 60_000 }).toBe(true);
+      const actualWindow = await window();
+      await expect.poll(async () => (await prefs()).launch_confirmations?.[fixture.issueNumber]?.window_id,
+        { timeout: 60_000 }).toBe(actualWindow.id);
+      const confirmed = (await prefs()).launch_confirmations[fixture.issueNumber];
+      expect(confirmed.claim_id).toBeTruthy();
+      expect(confirmed.delivery_id).toBeTruthy();
+      expect((await prefs()).launch_bindings[actualWindow.id]).toBe(fixture.issueNumber);
+      expect(fixture.comments.some(comment => comment.body.includes("gwt-auto-improve-claim")
+        && comment.body.includes(confirmed.claim_id))).toBe(true);
+      const record = () => readFile(join(fixture.home, ".gwt/sessions", `${launch.gwt_session_id}.toml`), "utf8");
+      await expect.poll(async () => (await record()).match(/^agent_session_id\s*=\s*"([^"]*)"/m)?.[1],
+        { timeout: 60_000 }).toBe(launch.provider_session_id);
+      expect(await record()).toContain(`linked_issue_number = ${fixture.issueNumber}`);
+      const running = operation("issue.monitor.status").output;
+      expect(running.active_launch_details).toContainEqual(expect.objectContaining({ issue_number: fixture.issueNumber,
+        session_id: launch.gwt_session_id, window_id: actualWindow.id }));
+      expect(running.occupied_slot_count).toBeLessThanOrEqual(running.max_active);
+      await info.attach("machine-manual-native-launch", { body: JSON.stringify({ before: before.output, saved, running,
+        machine: await machine(), launch, confirmation: confirmed,
+        scope: "Real native ConfigSet, machine authority and autonomous claim/Session/window/provider handoff; actual inventory is recorded. Exact other-workers=4 arithmetic is covered by Rust acceptance." }, null, 2), contentType: "application/json" });
+      await info.attach(`machine-manual-${theme}`, { body: await page.screenshot(), contentType: "image/png" });
+      expect(errors).toEqual([]);
+    } finally {
+      try { await page.close(); } finally { await fixture.stop(); }
+    }
+    expect(errors, "zero console/page errors including owned process cleanup").toEqual([]);
+  });
 
   test("T20b pending switch preserves current and cancels without replay after restart", async ({ page }, info) => {
     test.skip(process.platform === "win32", "switch actor fixture requires POSIX executables");
@@ -127,7 +215,9 @@ test.describe("Issue queue real backend launch", () => {
   test("T20b saved checkpoint switches through the real Host and Monitor", async ({ page }, info) => {
     test.skip(process.platform !== "linux" || process.env.GWT_PLAYWRIGHT_SWITCH_POSITIVE !== "1",
       "positive proof requires the isolated Linux root process namespace");
-    const fixture = await startIssueQueueLaunchFixture(info, { targetIssueNumber: 44, switching: true, positive: true });
+    const fixture = await startIssueQueueLaunchFixture(info, {
+      targetIssueNumber: 44, switching: true, positive: true, autonomousMode: true,
+    });
     const errors: string[] = [];
     const theme = info.project.name.includes("light") ? "light" : "dark";
     page.on("pageerror", error => errors.push(error.message));
@@ -149,6 +239,7 @@ test.describe("Issue queue real backend launch", () => {
       await page.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);
       await gotoLiveGwt(page, fixture.url, { enableTestBridge: true });
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+      expect((await preferences()).autonomous_mode).toBe(true);
       await sendLiveGwtEvent(page, { kind: "set_issue_monitor_max_active_agents", max_active_agents: 1 });
       await expect.poll(async () => (await preferences()).max_active_agents_mode, { timeout: 30_000 }).toBe("manual");
       await request({ kind: "issue_monitor_queue_push", issue_numbers: [fixture.issueNumber] }, "issue_monitor_queue_result");
@@ -157,7 +248,7 @@ test.describe("Issue queue real backend launch", () => {
       await expect.poll(async () => !!await actor("idle"), { timeout: 60_000 }).toBe(true);
       const idle = await actor("idle");
       expect(idle.owner_number).toBe(fixture.issueNumber);
-      expect(idle.cwd).not.toBe(source.cwd);
+      expect(idle.cwd, "the source waits in its ordinary worktree before checkpoint delivery").toBe(source.cwd);
       expect(idle.tree_child_pid).toBeGreaterThan(0);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(true);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
@@ -189,6 +280,8 @@ test.describe("Issue queue real backend launch", () => {
       const ack = await actor("checkpoint_acked");
       expect(ack).toMatchObject({ operation: saved.request.operation_id, head: saved.checkpoint.verified_head,
         work_id: saved.checkpoint.work_id, board_entry_id: saved.checkpoint.board_entry_id });
+      expect(await actor("checkpoint_idle")).toMatchObject({ operation: saved.request.operation_id, cwd: source.cwd });
+      expect((await preferences()).autonomous_mode).toBe(true);
       expect(fixture.processAlive(source.pid)).toBe(false);
       expect(fixture.processAlive(idle.tree_child_pid)).toBe(false);
       expect(fixture.processAlive(target.pid)).toBe(true);

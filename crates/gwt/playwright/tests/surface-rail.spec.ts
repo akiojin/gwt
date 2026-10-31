@@ -549,10 +549,11 @@ test.describe("Surface rail", () => {
     await expect(page.locator('.issue-control-explanation[role="tooltip"]:visible')).toHaveCount(1);
     await issueView.getByRole("button", {name:"Issues settings",exact:true}).click();
     const issues = settings.locator('[data-settings-panel="issues"]');
-    await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toBeEnabled();
+    await expect(issues.getByRole("spinbutton", { name: "Max active", exact: true })).toHaveCount(0);
     await clearMessages(page);
     const explain = async (control: ReturnType<Page["locator"]>, pattern: RegExp) => {
       await control.hover();
+      await expect(control).toHaveAttribute("aria-describedby", /\S/);
       let ids = (await control.getAttribute("aria-describedby"))!.split(/\s+/);
       const popup = page.locator(`#${ids.at(-1)}`);
       await expect(popup).toBeVisible();
@@ -565,7 +566,7 @@ test.describe("Surface rail", () => {
       await expect(popup).toBeHidden();
     };
     for (const [name, pattern] of [
-      ["Max active mode", /Auto.*Manual/], ["Max active", /agent/i],
+      ["Autonomous", /human approval/i], ["Monitoring", /queued issues/i],
       ["Auto-refill", /queue/i], ["Refill limit", /0.*disable/i], ["Allowed labels", /matching issues/i],
     ] as const) await explain(issues.locator("[data-settings-issues-controls]").getByLabel(name, { exact: true }), pattern);
     await settings.getByRole("tab", { name: "Project Manager", exact: true }).click();

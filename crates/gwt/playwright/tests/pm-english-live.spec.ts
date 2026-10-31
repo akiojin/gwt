@@ -65,7 +65,8 @@ test.describe('English application UI', () => {
       const issuesSettings = settings.locator('[data-settings-panel="issues"]');
       await expect(settings.locator('[data-settings-tab="issues"]')).toHaveAttribute('aria-selected', 'true');
       await expect(issuesSettings).toBeVisible();
-      await expect(issuesSettings.getByLabel('Max active', { exact: true })).toBeVisible();
+      await expect(issuesSettings.getByLabel('Max active', { exact: true })).toHaveCount(0);
+      await expect(issuesSettings.getByLabel('Autonomous', { exact: true })).toBeVisible();
       await expect(issuesSettings.getByLabel('Allowed labels', { exact: true })).toBeVisible();
       expect(await issuesSettings.innerText()).not.toMatch(CJK);
       await settings.locator('[data-settings-tab="system"]').click();
