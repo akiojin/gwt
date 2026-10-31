@@ -23,6 +23,9 @@ pub(crate) mod discussion;
 mod env;
 pub mod execution_state;
 mod feedback;
+mod feedback_owner_bootstrap;
+#[cfg(any(windows, test))]
+mod feedback_supervisor;
 mod fleet;
 mod fleet_disposition;
 mod github_budget;
@@ -70,6 +73,25 @@ mod workspace;
 pub(crate) mod worktree_gc;
 
 use std::{io, path::PathBuf};
+
+/// Private fixed-binary feedback roles run before normal CLI initialization.
+/// Invalid frames and unsupported platforms fail without diagnostics or hooks.
+pub fn run_feedback_private_role(argv: &[String]) -> Option<i32> {
+    match argv.get(1).map(String::as_str)? {
+        "--gwt-feedback-supervisor" | "--gwt-feedback-sender" => {
+            #[cfg(windows)]
+            {
+                feedback_owner_bootstrap::clear_git_selectors_for_private_role();
+                Some(feedback_supervisor::run(argv))
+            }
+            #[cfg(not(windows))]
+            {
+                Some(1)
+            }
+        }
+        _ => None,
+    }
+}
 
 pub use actions::{ActionsCommand, ActionsDispatchCall, ActionsRerunTarget};
 pub use board::{BoardCommand, BoardPostCommand};

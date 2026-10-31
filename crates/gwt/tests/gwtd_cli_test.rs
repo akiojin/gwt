@@ -52,6 +52,22 @@ fn isolated_gwtd_command() -> std::process::Command {
 fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
     use gwt_core::test_support::ScopedGwtHome;
     use std::time::{Duration, Instant};
+    // Invalid private-role frames must return before ordinary CLI startup,
+    // including on platforms where the Windows-only roles are unavailable.
+    for role in ["--gwt-feedback-supervisor", "--gwt-feedback-sender"] {
+        let empty_home = tempfile::tempdir().unwrap();
+        let output = isolated_gwtd_command()
+            .args([role])
+            .current_dir(empty_home.path())
+            .env("HOME", empty_home.path())
+            .env("USERPROFILE", empty_home.path())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert_eq!(fs::read_dir(empty_home.path()).unwrap().count(), 0);
+    }
     let home = tempfile::tempdir().unwrap();
     let repo = tempfile::tempdir().unwrap();
     let _home = ScopedGwtHome::set(home.path());
@@ -181,6 +197,30 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
         #[cfg(windows)]
         assert_no_native_feedback_worker_windows(&pids);
         if stored["state"] == "sending" && !pids.is_empty() {
+            #[cfg(windows)]
+            {
+                let (supervisors, senders) = native_feedback_role_counts(&pids);
+                assert!(
+                    supervisors <= 1 && senders <= 1,
+                    "duplicate private worker role"
+                );
+                if (supervisors, senders) != (1, 1) {
+                    assert!(
+                        // test-hygiene: allow-wall-clock-deadline Keep the existing native startup bound while observing both private roles.
+                        Instant::now() < deadline,
+                        "owned worker roles did not settle: {stored}"
+                    );
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                assert_eq!(
+                    pids.len(),
+                    2,
+                    "unexpected process beside supervisor and sender"
+                );
+                assert_eq!(native_owned_attempt(&stored)["phase"], "pre_dispatch");
+            }
+            #[cfg(unix)]
             assert_eq!(
                 pids.len(),
                 1,
@@ -217,6 +257,11 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
             serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
         if stored["state"] == "withheld" {
             assert_eq!(stored["error"], "policy_revoked");
+            #[cfg(windows)]
+            if native_owned_cleanup_confirmed(&stored) {
+                break;
+            }
+            #[cfg(not(windows))]
             break;
         }
         assert!(
@@ -245,6 +290,11 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
                 .unwrap();
         if stored["state"] == "failed" {
             assert_eq!(stored["error"], "auth_unavailable");
+            #[cfg(windows)]
+            if native_owned_cleanup_confirmed(&stored) {
+                break;
+            }
+            #[cfg(not(windows))]
             break;
         }
         assert!(
@@ -254,13 +304,183 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    #[cfg(windows)]
+    {
+        fn reconcile_unknown(
+            command: &mut std::process::Command,
+            receipt: &serde_json::Value,
+            prior: &serde_json::Value,
+            repo: &Path,
+            secret: &str,
+        ) {
+            let status = serde_json::json!({"schema_version":1,"operation":"feedback.status","params":{
+                "id": receipt["request_id"],
+            }});
+            intake(command, &status, secret, "uncertain");
+            let path = Path::new(receipt["receipt"].as_str().unwrap());
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let attempt = native_owned_attempt(&stored);
+            assert_eq!(attempt["id"], prior["owned"]["attempt"]["id"]);
+            assert_eq!(attempt["phase"], prior["owned"]["attempt"]["phase"]);
+            assert_eq!(attempt["exit"], "unknown");
+            assert_eq!(attempt["cleanup"], "unknown");
+            assert_eq!(attempt["reason"], "owner_unavailable");
+            assert!(stored["issue_number"].is_null());
+            native_reject_feedback_retry(command, receipt["request_id"].as_str().unwrap(), secret);
+            let after_retry: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(after_retry["owned"], stored["owned"]);
+            assert_eq!(after_retry["state"], "uncertain");
+            assert!(after_retry["issue_number"].is_null());
+            // Exact retained handles already proved exit. This enumeration
+            // checks only that status/retry did not create another worker.
+            assert!(native_feedback_worker_pids(repo).is_empty());
+        }
+        command.env("GH_TOKEN", "dummy-never-sent");
+
+        for (operation, commit) in [("build.start", false), ("build.complete", true)] {
+            let upstream_lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(home.path().join(".gwt/feedback-upstream.lock"))
+                .unwrap();
+            fs2::FileExt::lock_exclusive(&upstream_lock).unwrap();
+            input["params"]["operation"] = serde_json::json!(operation);
+            let (crashed, _) = intake(&mut command, &input, secret, "queued");
+            let path = Path::new(crashed["receipt"].as_str().unwrap());
+            let (mut prior, supervisor, sender) = native_owned_worker_handles(path, repo.path());
+            if commit {
+                // DISPATCH-COMMITTED kill: exercise the durable local phase,
+                // never claim an actual HTTP POST, authentication or Sent.
+                let store =
+                    gwt_core::feedback::FeedbackStore::new(path.parent().unwrap().to_path_buf());
+                store
+                    .commit_owned_attempt(
+                        crashed["request_id"].as_str().unwrap(),
+                        uuid::Uuid::parse_str(native_owned_attempt(&prior)["id"].as_str().unwrap())
+                            .unwrap(),
+                        || Ok(()),
+                    )
+                    .unwrap();
+                prior = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                assert_eq!(native_owned_attempt(&prior)["phase"], "dispatch_committed");
+            }
+            supervisor.terminate();
+            // test-hygiene: allow-wall-clock-deadline Bound exact native process exit after the fixture kills its proven supervisor.
+            let stopped_by = Instant::now() + Duration::from_secs(30);
+            loop {
+                assert_no_native_feedback_worker_windows(&native_feedback_worker_pids(repo.path()));
+                if supervisor.exited() && sender.exited() {
+                    break;
+                }
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline Wait on retained process objects, never infer exit from process-list disappearance.
+                    Instant::now() < stopped_by,
+                    "supervisor crash left its exact sender alive"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            reconcile_unknown(&mut command, &crashed, &prior, repo.path(), secret);
+            drop(upstream_lock);
+        }
+
+        // Block the real cancellation/final-save gate through Dexit. The
+        // driver must still stop its exact Job/Child and bound its own life.
+        let upstream_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(home.path().join(".gwt/feedback-upstream.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&upstream_lock).unwrap();
+        input["params"]["operation"] = serde_json::json!("execution.status");
+        let started = Instant::now();
+        let (expired, _) = intake(&mut command, &input, secret, "queued");
+        let expired_path = Path::new(expired["receipt"].as_str().unwrap());
+        let (prior, supervisor, sender) = native_owned_worker_handles(expired_path, repo.path());
+        let dispatch_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(expired_path.parent().unwrap().join(format!(
+                "{}.dispatch.lock",
+                expired["request_id"].as_str().unwrap()
+            )))
+            .unwrap();
+        while fs2::FileExt::try_lock_exclusive(&dispatch_lock).is_err() {
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Acquiring the forced bookkeeping barrier keeps the original 30s startup bound.
+                started.elapsed() < Duration::from_secs(30),
+                "sender held the dispatch gate while upstream admission was blocked"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // test-hygiene: allow-wall-clock-deadline Observe the real fixed 115s work/120s exit budgets; 130s only bounds a hung native test.
+        let hangguard = started + Duration::from_secs(130);
+        let original_pids = BTreeSet::from([supervisor.pid, sender.pid]);
+        loop {
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(expired_path).unwrap()).unwrap();
+            let pids = native_feedback_worker_pids(repo.path());
+            assert_no_native_feedback_worker_windows(&pids);
+            assert!(
+                pids.is_subset(&original_pids),
+                "deadline owner spawned another worker"
+            );
+            assert_eq!(
+                stored["owned"], prior["owned"],
+                "blocked bookkeeping changed the attempt"
+            );
+            assert_eq!(native_owned_attempt(&stored)["phase"], "pre_dispatch");
+            assert!(
+                stored["issue_number"].is_null(),
+                "locked sender reached upstream"
+            );
+            assert_ne!(stored["state"], "sent");
+            if supervisor.exited() && sender.exited() {
+                assert!(
+                    // test-hygiene: allow-wall-clock-deadline A blocked final save must keep the real supervisor responsible through its fixed exit deadline.
+                    started.elapsed() >= Duration::from_secs(120)
+                );
+                break;
+            }
+            assert!(
+                // test-hygiene: allow-wall-clock-deadline Failure to settle within the extra 10s is a hung real owner, never cleanup success.
+                Instant::now() < hangguard,
+                "native deadline/cleanup did not settle: {stored}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        drop(dispatch_lock);
+        reconcile_unknown(&mut command, &expired, &prior, repo.path(), secret);
+        drop(upstream_lock);
+        command.env_remove("GH_TOKEN");
+    }
+    // Only a known Auto job with unavailable policy must remain noninteractive.
+    // Fresh unknown-mode intake retains the existing Manual origin policy.
+    let known_auto_store = gwt_core::feedback::FeedbackStore::new(
+        gwt_core::paths::gwt_project_dir_for_repo_path(repo.path()).join("feedback"),
+    );
+    let (known_auto, fresh) = known_auto_store
+        .submit_auto(
+            gwt_core::feedback::auto_report::SafeAutoReport::current(
+                gwt_core::feedback::auto_report::KnownOperation::HookHealth,
+            ),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(fresh);
+    assert!(known_auto.owned.is_none());
     fs::write(
         gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
         "{unreadable native prefs",
     )
     .unwrap();
-    input["params"]["operation"] = serde_json::json!("hook.health");
-    let (unavailable, _) = intake(&mut command, &input, secret, "withheld");
+    let unavailable_input = serde_json::json!({"schema_version":1,"operation":"feedback.process","params":{
+        "id":known_auto.snapshot.id(),
+    }});
+    let (unavailable, _) = intake(&mut command, &unavailable_input, secret, "withheld");
     assert_eq!(unavailable["error"], "policy_unavailable");
     let mut malformed = command.spawn().unwrap();
     malformed
@@ -321,6 +541,238 @@ fn native_feedback_worker_pids(repo: &Path) -> BTreeSet<u32> {
             .then_some(pid.as_u32())
         })
         .collect()
+}
+
+#[cfg(windows)]
+fn native_feedback_role_counts(pids: &BTreeSet<u32>) -> (usize, usize) {
+    let (supervisors, senders) = native_feedback_role_pids(pids);
+    (supervisors.len(), senders.len())
+}
+
+#[cfg(windows)]
+fn native_feedback_role_pids(pids: &BTreeSet<u32>) -> (BTreeSet<u32>, BTreeSet<u32>) {
+    let selected: Vec<_> = pids
+        .iter()
+        .map(|pid| sysinfo::Pid::from_u32(*pid))
+        .collect();
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&selected),
+        true,
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_cmd(sysinfo::UpdateKind::Always)
+            .without_tasks(),
+    );
+    let mut roles = (BTreeSet::new(), BTreeSet::new());
+    for pid in pids {
+        let Some(process) = system.process(sysinfo::Pid::from_u32(*pid)) else {
+            continue;
+        };
+        if process
+            .cmd()
+            .iter()
+            .any(|arg| arg == "--gwt-feedback-supervisor")
+        {
+            roles.0.insert(*pid);
+        }
+        if process
+            .cmd()
+            .iter()
+            .any(|arg| arg == "--gwt-feedback-sender")
+        {
+            roles.1.insert(*pid);
+        }
+    }
+    roles
+}
+
+#[cfg(windows)]
+struct NativeFeedbackProcess {
+    handle: windows::Win32::Foundation::HANDLE,
+    pid: u32,
+    authorized: bool,
+}
+
+#[cfg(windows)]
+impl NativeFeedbackProcess {
+    fn capture(pid: u32, repo: &Path, role: &str) -> Self {
+        use windows::Win32::System::Threading::{
+            GetProcessId, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            PROCESS_TERMINATE,
+        };
+        assert_ne!(pid, std::process::id());
+        // Open first, then verify the candidate while this exact object stays
+        // live. A process list or bare PID never authorizes termination.
+        let mut owned = Self {
+            handle: unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE | PROCESS_TERMINATE,
+                    false,
+                    pid,
+                )
+            }
+            .expect("open actual feedback role"),
+            pid,
+            authorized: false,
+        };
+        assert_eq!(unsafe { GetProcessId(owned.handle) }, pid);
+        assert!(!owned.exited());
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cmd(sysinfo::UpdateKind::Always)
+                .with_exe(sysinfo::UpdateKind::Always)
+                .with_cwd(sysinfo::UpdateKind::Always)
+                .without_tasks(),
+        );
+        let process = system
+            .process(sysinfo::Pid::from_u32(pid))
+            .expect("live role");
+        assert_eq!(
+            fs::canonicalize(process.exe().expect("role executable")).unwrap(),
+            fs::canonicalize(env!("CARGO_BIN_EXE_gwtd")).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(process.cwd().expect("isolated role checkout")).unwrap(),
+            fs::canonicalize(repo).unwrap()
+        );
+        assert!(process.cmd().iter().any(|arg| arg == role));
+        assert!(!owned.exited(), "candidate exited before role verification");
+        owned.authorized = true;
+        owned
+    }
+
+    fn exited(&self) -> bool {
+        use windows::Win32::{
+            Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::WaitForSingleObject,
+        };
+        let result = unsafe { WaitForSingleObject(self.handle, 0) };
+        assert!(result == WAIT_OBJECT_0 || result == WAIT_TIMEOUT);
+        result == WAIT_OBJECT_0
+    }
+
+    fn terminate(&self) {
+        assert!(self.authorized);
+        if !self.exited() {
+            unsafe { windows::Win32::System::Threading::TerminateProcess(self.handle, 91) }
+                .expect("terminate only the fixture's proven private role");
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for NativeFeedbackProcess {
+    fn drop(&mut self) {
+        use windows::Win32::{
+            Foundation::{CloseHandle, WAIT_TIMEOUT},
+            System::Threading::{TerminateProcess, WaitForSingleObject},
+        };
+        // On assertion failure, reclaim only a role whose executable, fixed
+        // argument and isolated checkout were verified while its handle lived.
+        if self.authorized && unsafe { WaitForSingleObject(self.handle, 0) } == WAIT_TIMEOUT {
+            let _ = unsafe { TerminateProcess(self.handle, 91) };
+            let _ = unsafe { WaitForSingleObject(self.handle, 5000) };
+        }
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+fn native_owned_worker_handles(
+    receipt: &Path,
+    repo: &Path,
+) -> (
+    serde_json::Value,
+    NativeFeedbackProcess,
+    NativeFeedbackProcess,
+) {
+    use std::time::{Duration, Instant};
+    // test-hygiene: allow-wall-clock-deadline Keep the original 30s real-worker startup guard for each forced native branch.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        let pids = native_feedback_worker_pids(repo);
+        assert_no_native_feedback_worker_windows(&pids);
+        let (supervisors, senders) = native_feedback_role_pids(&pids);
+        assert!(supervisors.len() <= 1 && senders.len() <= 1);
+        if stored["state"] == "sending" && supervisors.len() == 1 && senders.len() == 1 {
+            assert_eq!(pids.len(), 2);
+            assert_eq!(native_owned_attempt(&stored)["phase"], "pre_dispatch");
+            let supervisor = NativeFeedbackProcess::capture(
+                *supervisors.first().unwrap(),
+                repo,
+                "--gwt-feedback-supervisor",
+            );
+            let sender = NativeFeedbackProcess::capture(
+                *senders.first().unwrap(),
+                repo,
+                "--gwt-feedback-sender",
+            );
+            return (stored, supervisor, sender);
+        }
+        assert!(
+            // test-hygiene: allow-wall-clock-deadline Bound startup while upstream admission keeps both real private roles alive.
+            Instant::now() < deadline,
+            "owned worker roles did not start: {stored}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(windows)]
+fn native_reject_feedback_retry(command: &mut std::process::Command, id: &str, secret: &str) {
+    use std::time::{Duration, Instant};
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            serde_json::json!({"schema_version":1,"operation":"feedback.retry","params":{"id":id}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    // test-hygiene: allow-wall-clock-deadline Bound the actual retry-rejection CLI without permitting a worker or external call.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while child.try_wait().unwrap().is_none() {
+        // test-hygiene: allow-wall-clock-deadline A stuck rejection is a native test failure, never proof of a safe retry refusal.
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("feedback.retry did not reject an uncertain owned attempt");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(secret));
+}
+
+#[cfg(windows)]
+fn native_owned_attempt(stored: &serde_json::Value) -> &serde_json::Value {
+    assert_eq!(stored["owned"]["version"], "v1");
+    let attempt = &stored["owned"]["attempt"];
+    assert!(
+        attempt.is_object(),
+        "native owner did not register its attempt"
+    );
+    assert_eq!(attempt["origin"], "inherited_cli_environment");
+    attempt
+}
+
+#[cfg(windows)]
+fn native_owned_cleanup_confirmed(stored: &serde_json::Value) -> bool {
+    let attempt = native_owned_attempt(stored);
+    assert_eq!(attempt["phase"], "cancel_accepted");
+    // These facts are supplied by the exact Child/Job owner. Process or lock
+    // disappearance is deliberately not used as an exit/cleanup assertion.
+    attempt["exit"] == "confirmed" && attempt["cleanup"] == "confirmed"
 }
 
 #[cfg(windows)]
