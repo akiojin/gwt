@@ -5473,6 +5473,36 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
     drain_queued_blocking_tasks(&launch_tasks);
     let (ack_spawner, ack_tasks) = BlockingTaskSpawner::queued();
     runtime.blocking_tasks = ack_spawner;
+    let census_host_pid = std::process::id();
+    let census_host_started_at = gwt::process::host_process_start_time(census_host_pid)
+        .expect("the actual census host process start time");
+    let census_host_key = format!("{census_host_pid}:{census_host_started_at}");
+    let census_window_id = pane.id.clone();
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Join the actual pane1 census before complete prefs baselines; no scheduler delay or field exclusion authorizes the comparison.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&census_host_key)
+                    .is_some_and(|census| {
+                        census.host_pid == census_host_pid
+                            && census.host_started_at == census_host_started_at
+                            && census.counts.len() == 1
+                            && census.counts.get(&3165) == Some(&1)
+                            && census.windows.len() == 1
+                            && census.windows.get(&census_window_id) == Some(&3165)
+                    })
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual exact-host pane1 census precedes prefs baselines");
+    });
     let disk_before_ack = gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
     let pending_before_ack = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
     let delivery = &pending_before_ack.pending_launch_deliveries[0];
@@ -5758,6 +5788,29 @@ fn durable_issue_monitor_delivery_materializes_one_window_and_replay_only_acks()
         .unwrap()
         .agent_roster;
     gwt::save_issue_monitor_prefs(&prefs_path, &pending_after_replacement).unwrap();
+    pending_after_replacement = owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Join the normal pane0 census after original clone/save and capture whole prefs before either stale ACK; no field is copied or excluded.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let prefs = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+                if prefs
+                    .monitor_runtime_counts
+                    .get(&census_host_key)
+                    .is_some_and(|census| {
+                        census.host_pid == census_host_pid
+                            && census.host_started_at == census_host_started_at
+                            && census.counts.is_empty()
+                            && census.windows.is_empty()
+                    })
+                {
+                    break prefs;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the actual pane0 census precedes the stale ACK prefs baseline")
+    });
     let disk_before_stale_ack =
         gwt::load_workspace_state(&gwt::workspace_state_path(&repo)).unwrap();
     let stale_owner_ack = owner_fixture_block_on(owner.command(

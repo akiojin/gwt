@@ -60,6 +60,27 @@ pub trait CliEnv {
     fn spawn_feedback_worker(&mut self, id: &str) -> io::Result<()> {
         super::feedback::spawn_worker(self.repo_path(), id)
     }
+    fn deliver_auto_feedback(
+        &mut self,
+        snapshot: &gwt_core::feedback::auto_report::SafeAutoSnapshot,
+    ) -> Result<u64, gwt_core::feedback::auto_report::AutoReason> {
+        use gwt_core::feedback::auto_report::AutoReason;
+        use gwt_github::client::{http::HttpIssueClient, ResolutionDeadline};
+        let deadline = ResolutionDeadline::new(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(120),
+        );
+        // Never invoke gh/keyring: even a hidden auth token command can open
+        // an OS credential-store unlock dialog. Missing credentials fail closed.
+        let client = HttpIssueClient::from_noninteractive_env("akiojin", "gwt")
+            .map_err(|_| AutoReason::AuthUnavailable)?;
+        super::feedback::send_auto_to_upstream_with_deadline(
+            &client,
+            snapshot,
+            self.repo_path(),
+            &deadline,
+        )
+    }
     fn stdout(&mut self) -> &mut dyn io::Write;
     fn stderr(&mut self) -> &mut dyn io::Write;
     fn read_stdin(&mut self) -> io::Result<String>;

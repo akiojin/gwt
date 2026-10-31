@@ -179,7 +179,6 @@ const actorReady = (async () => {
     fs.mkdirSync(idleDirectory,{recursive:true});
     treeChild = cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)','GWT_SWITCH_TREE_CHILD',process.env.HOME],
       {cwd:idleDirectory,env:{PATH:process.env.PATH,HOME:process.env.HOME},stdio:'ignore'}).pid;
-    process.chdir(idleDirectory);
   }
   actorEvent('idle',{owner_number:owner,tree_child_pid:treeChild});
 })().catch(error=>{actorEvent('actor_failed',{message:error.message});throw error;});
@@ -197,7 +196,6 @@ const checkpoint = async line => {
   if (!intent || intent.stage !== 'checkpointing') {
     sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,clear:true});
     nativeHook('Stop');
-    if (switching.positive) process.chdir(idleDirectory);
     actorEvent('checkpoint_cancelled',{operation});
     return;
   }
@@ -222,9 +220,9 @@ const checkpoint = async line => {
   sourceOperation('issue.monitor.switch.ack',{operation_id:operation,head,work_id:work.id,board_entry_id:entry.id});
   actorEvent('checkpoint_acked',{operation,head,work_id:work.id,board_entry_id:entry.id});
   sourceOperation('issue.monitor.wait',{number:switching.sourceIssueNumber,reason:'Saved checkpoint awaits switch',resume_condition:'Switch cancelled or saved work resumed'});
-  nativeHook('Stop');
-  process.chdir(idleDirectory);
+  // Record cwd before Stop publishes Idle: the Host may then exit this actor.
   actorEvent('checkpoint_idle',{operation});
+  nativeHook('Stop');
 };
 ` : "";
 
