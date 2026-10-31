@@ -22,8 +22,18 @@ pub struct ImportedProject {
     pub preferences_json: String,
     pub preferences_sha256: String,
     pub roster_revision: u64,
-    /// Legacy member UUID -> future global UUID, qualified by the source key.
+    /// Legacy member UUID -> future global UUID, including retired members.
+    /// The immutable ledger is shared by current and historical snapshots.
     pub member_aliases: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_snapshots: Vec<ImportSourceSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportSourceSnapshot {
+    pub preferences_json: String,
+    pub preferences_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,22 +112,41 @@ pub fn load() -> io::Result<Option<InactiveImports>> {
             .ok_or_else(|| invalid("Imported Agent source has no roster"))?;
         if fingerprint(&source.preferences_json) != source.preferences_sha256
             || roster.revision != source.roster_revision
-            || roster.members.len() != source.member_aliases.len()
         {
             return Err(invalid(format!(
                 "Agent import snapshot/alias mismatch: {key}"
             )));
         }
-        for member in &roster.members {
+        let mut member_ids: HashSet<_> = roster
+            .members
+            .into_iter()
+            .map(|member| member.agent_member_id)
+            .collect();
+        for snapshot in &source.previous_snapshots {
+            if fingerprint(&snapshot.preferences_json) != snapshot.preferences_sha256 {
+                return Err(invalid(format!(
+                    "Agent import historical fingerprint mismatch: {key}"
+                )));
+            }
+            let previous = source_roster(&snapshot.preferences_json)?
+                .ok_or_else(|| invalid(format!("Imported Agent history has no roster: {key}")))?;
+            member_ids.extend(
+                previous
+                    .members
+                    .into_iter()
+                    .map(|member| member.agent_member_id),
+            );
+        }
+        if member_ids.len() != source.member_aliases.len() {
+            return Err(invalid(format!(
+                "Agent import snapshot/alias mismatch: {key}"
+            )));
+        }
+        for member_id in member_ids {
             let alias = source
                 .member_aliases
-                .get(&member.agent_member_id)
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "Agent import alias missing: {key}/{}",
-                        member.agent_member_id
-                    ))
-                })?;
+                .get(&member_id)
+                .ok_or_else(|| invalid(format!("Agent import alias missing: {key}/{member_id}")))?;
             let id = uuid::Uuid::parse_str(alias).map_err(|error| invalid(error.to_string()))?;
             if !global_ids.insert(id) {
                 return Err(invalid("Agent import has duplicate global identities"));
@@ -203,6 +232,7 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
             .into_iter()
             .map(|member| (member.agent_member_id, uuid::Uuid::new_v4().to_string()))
             .collect(),
+        previous_snapshots: Vec::new(),
     };
     stored
         .sources
@@ -210,6 +240,93 @@ pub fn import_project(source: &ProjectKey) -> io::Result<Option<ImportedProject>
     // Aliases and the complete source snapshot become visible together.
     save(&stored)?;
     Ok(Some(imported))
+}
+
+/// Explicitly refresh an inactive observation, retaining all prior bytes and
+/// aliases. Both fingerprints must describe the caller's inspected transition.
+/// Only an exact immediate replay may use its already-committed predecessor.
+/// This does not activate a registry or rebind any live Session/assignment.
+pub fn reconcile_project(
+    source: &ProjectKey,
+    expected_import_fingerprint: &str,
+    expected_source_fingerprint: &str,
+) -> io::Result<ImportedProject> {
+    let prefs_path =
+        gwt_core::paths::gwt_project_dir(source).join("project-state/issue-monitor.json");
+    let source_lock_path = prefs_path.with_extension("lock");
+    gwt_config::home::assert_test_path(&source_lock_path);
+    let _source_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &source_lock_path,
+        "Agent reconciliation source preferences",
+    )?;
+    let raw = fs::read_to_string(&prefs_path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Agent reconciliation source {source} unreadable: {error}"),
+        )
+    })?;
+    let observed = fingerprint(&raw);
+    if observed != expected_source_fingerprint {
+        return Err(invalid(format!(
+            "Agent source {source} fingerprint changed: expected {expected_source_fingerprint}, observed {observed}; inspect source before reconciling"
+        )));
+    }
+    let import_path = path();
+    gwt_config::home::assert_test_path(&import_path);
+    fs::create_dir_all(import_path.parent().expect("machine state parent"))?;
+    // Same source -> import order as import_project; never acquire Session,
+    // machine-policy or another project's locks under the import lock.
+    let _import_lock = gwt_core::operation_deadline::NamedFileLock::acquire(
+        &import_path.with_extension("lock"),
+        "inactive Agent imports",
+    )?;
+    let mut stored = load()?.unwrap_or_default();
+    let previous = stored.sources.get(source.as_str()).ok_or_else(|| {
+        invalid(format!(
+            "Agent source {source} is not imported; import it first"
+        ))
+    })?;
+    let replay = previous.preferences_sha256 == observed
+        && previous
+            .previous_snapshots
+            .last()
+            .is_some_and(|snapshot| snapshot.preferences_sha256 == expected_import_fingerprint);
+    if previous.preferences_sha256 != expected_import_fingerprint && !replay {
+        return Err(invalid(format!(
+            "Agent import {source} fingerprint changed: expected {expected_import_fingerprint}, current {}; reload import before reconciling",
+            previous.preferences_sha256
+        )));
+    }
+    if previous.preferences_sha256 == observed {
+        let result = previous.clone();
+        // Retry may follow a committed rename whose parent fsync failed.
+        save(&stored)?;
+        return Ok(result);
+    }
+    let roster = source_roster(&raw)?.ok_or_else(|| {
+        invalid(format!(
+            "Agent reconciliation source {source} has no roster"
+        ))
+    })?;
+    let mut reconciled = previous.clone();
+    reconciled.previous_snapshots.push(ImportSourceSnapshot {
+        preferences_json: previous.preferences_json.clone(),
+        preferences_sha256: previous.preferences_sha256.clone(),
+    });
+    reconciled.preferences_json = raw;
+    reconciled.preferences_sha256 = observed;
+    reconciled.roster_revision = roster.revision;
+    for member in roster.members {
+        reconciled
+            .member_aliases
+            .entry(member.agent_member_id)
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string());
+    }
+    stored
+        .sources
+        .insert(source.as_str().to_string(), reconciled.clone());
+    save(&stored)?;
+    Ok(reconciled)
 }
 
 #[cfg(test)]
@@ -486,5 +603,193 @@ mod tests {
         assert!(load().is_err());
         assert!(import_project(&ProjectKey::parse(A).unwrap()).is_err());
         assert_eq!(fs::read(path()).unwrap(), broken);
+    }
+
+    #[test]
+    fn reconciliation_preserves_snapshots_and_retired_aliases_without_source_writes() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let prefs = source(A, "original");
+        source(B, "other-project");
+        let original = import(A);
+        let other = import(B);
+        let mut changed: serde_json::Value =
+            serde_json::from_str(&original.preferences_json).unwrap();
+        let mut added = changed["agent_roster"]["members"][0].clone();
+        let new_id = uuid::Uuid::new_v4().to_string();
+        added["agent_member_id"] = json!(new_id);
+        added["name"] = json!("Other");
+        added["assignment"] = serde_json::Value::Null;
+        changed["agent_roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(added);
+        changed["launch_profiles"][0]["model"] = json!("changed-profile");
+        let raw = serde_json::to_string_pretty(&changed).unwrap();
+        fs::write(&prefs, &raw).unwrap();
+        let observed = fingerprint(&raw);
+        let key = ProjectKey::parse(A).unwrap();
+        let reconciled = reconcile_project(&key, &original.preferences_sha256, &observed).unwrap();
+        assert_eq!(
+            reconciled.member_aliases[MEMBER],
+            original.member_aliases[MEMBER]
+        );
+        assert_ne!(
+            reconciled.member_aliases[&new_id],
+            other.member_aliases[MEMBER]
+        );
+        assert_eq!(reconciled.preferences_json, raw);
+        let bytes = fs::read(path()).unwrap();
+        assert_eq!(
+            reconcile_project(&key, &original.preferences_sha256, &observed).unwrap(),
+            reconciled
+        );
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        assert!(reconcile_project(&key, "stale", &observed).is_err());
+        assert_eq!(
+            reconcile_project(&key, &observed, &observed).unwrap(),
+            reconciled
+        );
+        let state: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            state["sources"][A]["previous_snapshots"][0]["preferences_json"],
+            original.preferences_json
+        );
+        assert_eq!(fs::read_to_string(&prefs).unwrap(), raw);
+        // A removed then restored source UUID keeps its original global alias.
+        let original_member = changed["agent_roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let removed = serde_json::to_string(&changed).unwrap();
+        fs::write(&prefs, &removed).unwrap();
+        let retired = reconcile_project(&key, &observed, &fingerprint(&removed)).unwrap();
+        assert_eq!(
+            retired.member_aliases[MEMBER],
+            original.member_aliases[MEMBER]
+        );
+        assert_eq!(load().unwrap().unwrap().sources[A], retired);
+        changed["agent_roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(original_member);
+        let restored = serde_json::to_string(&changed).unwrap();
+        fs::write(&prefs, &restored).unwrap();
+        let restored =
+            reconcile_project(&key, &retired.preferences_sha256, &fingerprint(&restored)).unwrap();
+        assert_eq!(restored.member_aliases, reconciled.member_aliases);
+        assert_eq!(load().unwrap().unwrap().sources[B], other);
+        assert_eq!(
+            fs::read_to_string(gwt_core::paths::gwt_sessions_dir().join("original-session.toml"))
+                .unwrap(),
+            "immutable history"
+        );
+        let mut state = serde_json::to_value(load().unwrap().unwrap()).unwrap();
+        state["sources"][A]["previous_snapshots"][0]["preferences_sha256"] = json!("tampered");
+        fs::write(path(), serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(load().is_err());
+    }
+
+    #[test]
+    fn reconciliation_requires_both_fingerprints_and_an_existing_valid_source() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        let prefs = source(A, "original");
+        let key = ProjectKey::parse(A).unwrap();
+        let first = import(A);
+        let bytes = fs::read(path()).unwrap();
+        source(A, "changed");
+        let observed = fingerprint(&fs::read_to_string(&prefs).unwrap());
+        for (old, current) in [
+            ("stale", observed.as_str()),
+            (first.preferences_sha256.as_str(), "stale"),
+        ] {
+            let error = reconcile_project(&key, old, current)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(A) && error.contains("fingerprint"),
+                "{error}"
+            );
+            assert_eq!(fs::read(path()).unwrap(), bytes);
+        }
+        for raw in ["{", "{}", r#"{"schema_version":2}"#] {
+            fs::write(&prefs, raw).unwrap();
+            assert!(reconcile_project(&key, &first.preferences_sha256, &fingerprint(raw)).is_err());
+            assert_eq!(fs::read(path()).unwrap(), bytes);
+            assert_eq!(fs::read_to_string(&prefs).unwrap(), raw);
+        }
+        fs::remove_file(&prefs).unwrap();
+        assert!(reconcile_project(&key, &first.preferences_sha256, &observed).is_err());
+        let b_prefs = source(B, "unimported");
+        let b_observed = fingerprint(&fs::read_to_string(b_prefs).unwrap());
+        let b = ProjectKey::parse(B).unwrap();
+        let error = reconcile_project(&b, &first.preferences_sha256, &b_observed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(B) && error.contains("not imported"),
+            "{error}"
+        );
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn reconciliation_retries_before_and_after_commit_without_duplicate_history_or_aliases() {
+        let _lock = crate::env_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        source(A, "original");
+        let first = import(A);
+        let bytes = fs::read(path()).unwrap();
+        let prefs = source(A, "changed");
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&prefs).unwrap()).unwrap();
+        let mut added = changed["agent_roster"]["members"][0].clone();
+        added["agent_member_id"] = json!(uuid::Uuid::new_v4().to_string());
+        added["name"] = json!("Added");
+        changed["agent_roster"]["members"]
+            .as_array_mut()
+            .unwrap()
+            .push(added);
+        let raw = serde_json::to_string(&changed).unwrap();
+        fs::write(prefs, &raw).unwrap();
+        let observed = fingerprint(&raw);
+        let key = ProjectKey::parse(A).unwrap();
+        {
+            let now = std::time::Instant::now();
+            let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(now);
+            let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(now);
+            let error = reconcile_project(&key, &first.preferences_sha256, &observed).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        }
+        assert_eq!(fs::read(path()).unwrap(), bytes);
+        let _fail = gwt_core::test_support::ScopedEnvVar::set(
+            "GWT_TEST_FAIL_ISSUE_MONITOR_PREFS_PARENT_SYNC_ONCE",
+            path(),
+        );
+        fs::write(path().with_extension("parent-sync-fail-once"), "fail").unwrap();
+        assert!(reconcile_project(&key, &first.preferences_sha256, &observed).is_err());
+        let committed = load().unwrap().unwrap().sources[A].clone();
+        assert_eq!(committed.preferences_sha256, observed);
+        assert_eq!(
+            committed.member_aliases[MEMBER],
+            first.member_aliases[MEMBER]
+        );
+        assert_eq!(committed.member_aliases.len(), 2);
+        let bytes = fs::read(path()).unwrap();
+        assert_eq!(
+            reconcile_project(&key, &first.preferences_sha256, &observed).unwrap(),
+            committed
+        );
+        assert_eq!(fs::read(path()).unwrap(), bytes);
     }
 }
