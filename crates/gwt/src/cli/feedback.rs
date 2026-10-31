@@ -116,7 +116,7 @@ pub fn run<E: super::CliEnv>(
     Ok(0)
 }
 
-fn auto_policy(root: &Path) -> Result<bool, AutoReason> {
+pub(super) fn auto_policy(root: &Path) -> Result<bool, AutoReason> {
     crate::issue_monitor::load_issue_monitor_prefs(
         &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(root),
     )
@@ -139,12 +139,15 @@ fn render_auto_result(
 ) -> Result<i32, gwt_github::SpecOpsError> {
     let id = record.snapshot.id();
     let receipt = store.path(&id).map_err(|_| safe_storage_error())?;
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "request_id": id, "mode": "auto", "state": record.state,
         "issue_number": record.issue_number,
         "issue_url": record.issue_number.map(|number| format!("https://github.com/akiojin/gwt/issues/{number}")),
         "receipt": receipt, "error": record.error,
     });
+    if let Some(owned) = &record.owned {
+        value["owned"] = serde_json::to_value(owned).map_err(|_| safe_storage_error())?;
+    }
     let _ = writeln!(out, "{value}");
     Ok(0)
 }
@@ -158,6 +161,11 @@ fn detach_auto<E: super::CliEnv>(
         return Ok(record);
     }
     if env.spawn_feedback_worker(&record.snapshot.id()).is_err() {
+        if record.owned.is_some() {
+            // Native failure can follow child creation or a lost acceptance
+            // acknowledgement. Preserve uncertainty rather than enabling retry.
+            return store.reconcile_owned_auto(&record.snapshot.id());
+        }
         // Do not overwrite a child that acquired the sender lock before a
         // parent's stdin/spawn failure was observed.
         if let Ok(_lock) = store.try_sender_lock(&record.snapshot.id()) {
@@ -181,6 +189,12 @@ fn run_auto_create<E: super::CliEnv>(
     out: &mut String,
 ) -> Result<i32, gwt_github::SpecOpsError> {
     let now = chrono::Utc::now();
+    #[cfg(windows)]
+    let submitted = match withheld {
+        Some(reason) => store.submit_owned_auto_withheld(report, now, reason),
+        None => store.submit_owned_auto(report, now),
+    };
+    #[cfg(not(windows))]
     let submitted = match withheld {
         Some(reason) => store.submit_auto_withheld(report, now, reason),
         None => store.submit_auto(report, now),
@@ -213,6 +227,26 @@ fn run_auto_existing<E: super::CliEnv>(
         )
         .map_err(|_| safe_storage_error())?,
         FeedbackCommand::Retry { id } => {
+            if store
+                .read_auto(&id)
+                .map_err(|_| safe_storage_error())?
+                .owned
+                .is_some()
+            {
+                #[cfg(not(windows))]
+                return Err(safe_storage_error());
+                #[cfg(windows)]
+                {
+                    let record = store
+                        .retry_owned_auto(&id, || {
+                            require_auto(&|| auto_policy(&root)).map_err(|_| owned_io_error())
+                        })
+                        .map_err(|_| safe_storage_error())?;
+                    let record =
+                        detach_auto(env, store, record).map_err(|_| safe_storage_error())?;
+                    return render_auto_result(store, &record, out);
+                }
+            }
             let record = {
                 let _lock = store
                     .try_sender_lock(&id)
@@ -250,13 +284,129 @@ fn require_auto(policy: &impl Fn() -> Result<bool, AutoReason>) -> Result<(), Au
     }
 }
 
+#[cfg(any(windows, test))]
+fn owned_io_error() -> io::Error {
+    io::Error::other("automatic feedback ownership unavailable")
+}
+
+#[cfg(windows)]
+pub(super) fn owned_store(root: &Path) -> FeedbackStore {
+    FeedbackStore::new(gwt_core::paths::gwt_project_dir_for_repo_path(root).join("feedback"))
+}
+
+#[cfg(windows)]
+fn owned_sender_gate(
+    store: &FeedbackStore,
+    root: &Path,
+    received: &super::feedback_owner_bootstrap::ReceivedBootstrap,
+    mutation: bool,
+) -> Result<(), AutoReason> {
+    let authorize = || {
+        received
+            .descriptor
+            .clock
+            .remaining_work()
+            .map_err(|_| AutoReason::PreSubmitFailed)?;
+        require_auto(&|| auto_policy(root))?;
+        if !received
+            .owner_alive()
+            .map_err(|_| AutoReason::SenderInterrupted)?
+        {
+            return Err(AutoReason::SenderInterrupted);
+        }
+        received
+            .descriptor
+            .clock
+            .remaining_work()
+            .map_err(|_| AutoReason::PreSubmitFailed)?;
+        Ok(())
+    };
+    owned_operation_gate(
+        store,
+        &received.descriptor.receipt_id.to_string(),
+        received.descriptor.attempt_id,
+        mutation,
+        &authorize,
+    )
+}
+
+#[cfg(any(windows, test))]
+fn owned_operation_gate(
+    store: &FeedbackStore,
+    id: &str,
+    attempt: uuid::Uuid,
+    mutation: bool,
+    authorize: &impl Fn() -> Result<(), AutoReason>,
+) -> Result<(), AutoReason> {
+    use std::cell::Cell;
+    let reason = Cell::new(AutoReason::SenderInterrupted);
+    let checked = || {
+        authorize().map_err(|error| {
+            reason.set(error);
+            owned_io_error()
+        })
+    };
+    let result = if mutation {
+        store.commit_owned_attempt(id, attempt, checked)
+    } else {
+        store.check_owned_attempt(id, attempt, checked)
+    };
+    result.map(|_| ()).map_err(|_| reason.get())
+}
+
+#[cfg(windows)]
+pub(super) fn run_owned_sender(
+    root: &Path,
+    received: &super::feedback_owner_bootstrap::ReceivedBootstrap,
+) -> io::Result<()> {
+    use gwt_core::feedback::auto_report::OwnedAutoReason;
+    use gwt_github::client::http::HttpIssueClient;
+    let store = owned_store(root);
+    let id = received.descriptor.receipt_id.to_string();
+    let attempt = received.descriptor.attempt_id;
+    let _sender = store.try_sender_lock(&id)?;
+    // One projection of the original D0, shared by auth/admission/GET/both POSTs.
+    let deadline = received.descriptor.clock.resolution_deadline()?;
+    let read = || owned_sender_gate(&store, root, received, false);
+    let commit = || owned_sender_gate(&store, root, received, true);
+    let outcome = (|| {
+        read()?;
+        let _ = received.acknowledge();
+        let client = HttpIssueClient::from_noninteractive_env("akiojin", "gwt")
+            .map_err(|_| AutoReason::AuthUnavailable)?;
+        let record = store
+            .read_auto(&id)
+            .map_err(|_| AutoReason::SenderInterrupted)?;
+        send_auto_to_upstream_checked(&client, &record.snapshot, &deadline, &read, &commit)
+    })();
+    if outcome.is_err() && deadline.remaining("automatic feedback work").is_err() {
+        // Use the actual shared deadline, rather than guessing from a process
+        // disappearing just before the driver's next QPC sample.
+        store.cancel_owned_attempt(&id, attempt, OwnedAutoReason::WorkDeadline)?;
+    }
+    store.finish_owned_attempt(&id, attempt, outcome)?;
+    Ok(())
+}
+
+fn file_lock_is_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn reconcile_auto_status(store: &FeedbackStore, id: &str) -> io::Result<AutoFeedbackRecord> {
+    if store.read_auto(id)?.owned.is_some() {
+        return store.reconcile_owned_auto(id);
+    }
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read_auto(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read_auto(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
+    if record.owned.is_some() {
+        drop(_lock);
+        return store.reconcile_owned_auto(id);
+    }
     if record.state == FeedbackState::Sending {
         record.state = FeedbackState::Uncertain;
         record.error = Some(AutoReason::SenderInterrupted);
@@ -273,10 +423,15 @@ fn process_auto_with(
 ) -> io::Result<AutoFeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read_auto(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read_auto(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
+    if record.owned.is_some() {
+        return Err(io::Error::other(
+            "owned feedback requires the private inherited sender",
+        ));
+    }
     if record.state == FeedbackState::Sending {
         record.state = FeedbackState::Uncertain;
         record.error = Some(AutoReason::SenderInterrupted);
@@ -393,6 +548,11 @@ fn submit<E: super::CliEnv>(
 }
 
 pub(super) fn spawn_worker(root: &Path, id: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    if matches!(owned_store(root).read_entry(id)?, StoredFeedback::Auto(record) if record.owned.is_some())
+    {
+        return super::feedback_supervisor::spawn_owner(root, id);
+    }
     let envelope = serde_json::to_vec(
         &serde_json::json!({"schema_version":1,"operation":"feedback.process","params":{"id":id}}),
     )?;
@@ -424,7 +584,7 @@ fn process_with(
 ) -> io::Result<FeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read(id)?;
@@ -514,9 +674,20 @@ pub(super) fn send_auto_to_upstream_with_deadline(
     root: &Path,
     deadline: &ResolutionDeadline,
 ) -> Result<u64, AutoReason> {
-    require_auto(&|| auto_policy(root))?;
+    let policy = || require_auto(&|| auto_policy(root));
+    send_auto_to_upstream_checked(client, snapshot, deadline, &policy, &policy)
+}
+
+fn send_auto_to_upstream_checked(
+    client: &impl OwnerRepositoryClient,
+    snapshot: &SafeAutoSnapshot,
+    deadline: &ResolutionDeadline,
+    before_read: &impl Fn() -> Result<(), AutoReason>,
+    before_mutation: &impl Fn() -> Result<(), AutoReason>,
+) -> Result<u64, AutoReason> {
+    before_read()?;
     let _lock = acquire_upstream_lock(deadline).map_err(auto_send_error)?;
-    require_auto(&|| auto_policy(root))?;
+    before_read()?;
     if !snapshot.report().sendable() {
         return Err(AutoReason::InsufficientInformation);
     }
@@ -539,6 +710,7 @@ pub(super) fn send_auto_to_upstream_with_deadline(
             && issue.title == title
             && issue.body.contains("\"safe_auto_v1\"")
     }) {
+        before_read()?;
         let comments = client
             .list_comments(&repository, issue.number, deadline)
             .map_err(|_| AutoReason::PreSubmitFailed)?;
@@ -549,14 +721,14 @@ pub(super) fn send_auto_to_upstream_with_deadline(
         {
             // Re-evaluate after auth, lock admission and remote reads, directly
             // before the mutation. A revoked Auto job never enters consent.
-            require_auto(&|| auto_policy(root))?;
+            before_mutation()?;
             client
                 .create_owner_comment(&repository, issue.number, &body, deadline)
                 .map_err(auto_send_error)?;
         }
         Ok(issue.number.0)
     } else {
-        require_auto(&|| auto_policy(root))?;
+        before_mutation()?;
         client
             .create_owner_issue(
                 &repository,
@@ -597,10 +769,7 @@ fn acquire_upstream_lock(
             .map_err(OwnerMutationError::PreSubmit)?;
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => return Ok(lock),
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
+            Err(error) if file_lock_is_busy(&error) => {
                 std::thread::sleep(remaining.min(Duration::from_millis(100)));
             }
             Err(error) => return Err(failure(error)),
@@ -754,6 +923,681 @@ mod tests {
         },
         FakeIssueClient, IssueNumber, IssueState, UpdatedAt,
     };
+
+    // PM0393 component proof: this entry exists only in the test executable.
+    // Production run_owned_sender still uses the fixed GitHub constructor.
+    mod loopback {
+        use super::*;
+        use gwt_core::feedback::auto_report::{
+            OwnedAutoPhase, OwnedAutoReason, OwnedCancelResult, OwnedCleanupObservation,
+            OwnedExitObservation,
+        };
+        use std::{
+            io::Read,
+            net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
+            process::{Child, ExitStatus},
+            time::Instant,
+        };
+
+        const CHILD_TEST: &str = "cli::feedback::tests::loopback::child";
+        const TOKEN: &str = "gwt-loopback-dummy-token";
+        const STAGE_FILE: &str = "loopback-stage";
+
+        fn mark_stage(home: &Path, stage: u8) {
+            std::fs::write(home.join(STAGE_FILE), [stage])
+                .expect("write the fixed loopback diagnostic stage");
+        }
+
+        fn read_stage(path: &Path) -> Option<u8> {
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .ok()?
+                .take(2)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            if bytes.len() == 1 && bytes[0] <= 7 {
+                Some(bytes[0])
+            } else {
+                None
+            }
+        }
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ChildInput {
+            home: std::path::PathBuf,
+            address: SocketAddrV4,
+            id: String,
+            attempt: String,
+        }
+
+        #[test]
+        fn child() {
+            let args: Vec<_> = std::env::args().collect();
+            if !args.iter().any(|arg| arg == "--exact") || !args.iter().any(|arg| arg == CHILD_TEST)
+            {
+                return;
+            }
+            // The parent closes this pipe immediately after writing <=4KiB.
+            let mut input = Vec::new();
+            std::io::stdin().take(4097).read_to_end(&mut input).unwrap();
+            if input.is_empty() {
+                return;
+            }
+            assert!(input.len() <= 4096);
+            let input: ChildInput = serde_json::from_slice(&input).unwrap();
+            assert_eq!(input.address.ip(), &Ipv4Addr::LOCALHOST);
+            assert_ne!(input.address.port(), 0);
+            assert!(input.home.is_absolute());
+            let attempt = uuid::Uuid::parse_str(&input.attempt).unwrap();
+            assert!(!attempt.is_nil());
+            assert!(!uuid::Uuid::parse_str(&input.id).unwrap().is_nil());
+            mark_stage(&input.home, 1);
+            let _home = gwt_core::test_support::ScopedGwtHome::set(&input.home);
+            mark_stage(&input.home, 2);
+            let store = FeedbackStore::new(input.home.join("feedback"));
+            let _sender = store.try_sender_lock(&input.id).unwrap();
+            let snapshot = store.read_auto(&input.id).unwrap().snapshot;
+            mark_stage(&input.home, 3);
+            let endpoint = format!("http://{}", input.address);
+            // Explicit dummy credentials and numeric loopback only. This does
+            // not attach the global budget or invoke environment authentication.
+            use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
+            let transport = ReqwestTransport::new().unwrap();
+            mark_stage(&input.home, 4);
+            let client = HttpIssueClient::with_transport(transport, TOKEN.into(), "akiojin", "gwt")
+                .with_test_endpoints(&endpoint, format!("{endpoint}/graphql"), true)
+                .unwrap();
+            mark_stage(&input.home, 5);
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &|| owned_operation_gate(&store, &input.id, attempt, false, &|| Ok(())),
+                &|| owned_operation_gate(&store, &input.id, attempt, true, &|| Ok(())),
+            );
+            mark_stage(&input.home, 6);
+            store
+                .finish_owned_attempt(&input.id, attempt, outcome)
+                .unwrap();
+            mark_stage(&input.home, 7);
+        }
+
+        struct ExactChild(Child);
+
+        fn wait_child(child: &mut Child) -> io::Result<ExitStatus> {
+            // test-hygiene: allow-wall-clock-deadline Bound a real test child; no application latency assertion.
+            let end = Instant::now() + Duration::from_secs(30);
+            loop {
+                if child.try_wait()?.is_some() {
+                    return child.wait();
+                }
+                // test-hygiene: allow-wall-clock-deadline Fail a hung OS child without renewing its original guard.
+                if Instant::now() >= end {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        impl Drop for ExactChild {
+            fn drop(&mut self) {
+                if self.0.try_wait().ok().flatten().is_none() {
+                    let _ = self.0.kill();
+                    let _ = wait_child(&mut self.0);
+                }
+            }
+        }
+
+        fn remaining(end: Instant) -> Duration {
+            end.checked_duration_since(Instant::now())
+                .filter(|value| !value.is_zero())
+                .expect("original loopback I/O deadline expired")
+        }
+
+        fn receive(
+            listener: &TcpListener,
+            child: &mut Child,
+            stage_path: &Path,
+        ) -> (TcpStream, String, serde_json::Value, Instant) {
+            // test-hygiene: allow-wall-clock-deadline Bound real loopback accept/header/body I/O with one original guard.
+            let end = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, peer)) => {
+                        assert!(peer.ip().is_loopback());
+                        break stream;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if let Some(status) = child.try_wait().unwrap() {
+                            panic!("test child exited before expected HTTP; success={} code={:?} native_u32={:?} stage={:?}", status.success(), status.code(), status.code().map(|value| value as u32), read_stage(stage_path));
+                        }
+                        // test-hygiene: allow-wall-clock-deadline Detect missing real HTTP without extending the socket guard.
+                        assert!(Instant::now() < end, "expected loopback request was absent");
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(_) => panic!("loopback accept failed"),
+                }
+            };
+            // Winsock can retain the nonblocking listener mode after accept.
+            stream.set_nonblocking(false).unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                stream.set_read_timeout(Some(remaining(end))).unwrap();
+                let mut part = [0; 1024];
+                let size = stream.read(&mut part).expect("bounded loopback header");
+                assert_ne!(size, 0, "incomplete loopback header");
+                bytes.extend_from_slice(&part[..size]);
+                if let Some(at) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    assert!(at <= 16 * 1024);
+                    break at + 4;
+                }
+                assert!(bytes.len() <= 16 * 1024, "loopback header exceeds bound");
+            };
+            let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
+            let mut lines = header.lines();
+            let request_line = lines.next().unwrap().to_string();
+            let headers: Vec<_> = lines
+                .filter_map(|line| line.split_once(':'))
+                .map(|(key, value)| (key.to_ascii_lowercase(), value.trim()))
+                .collect();
+            for singleton in ["authorization", "host", "content-length", "content-type"] {
+                assert_eq!(
+                    headers.iter().filter(|(key, _)| key == singleton).count(),
+                    1,
+                    "expected one fixed request header"
+                );
+            }
+            assert!(headers
+                .iter()
+                .any(|(key, value)| key == "authorization" && *value == format!("Bearer {TOKEN}")));
+            assert!(headers.iter().any(|(key, value)| key == "host"
+                && *value == listener.local_addr().unwrap().to_string()));
+            assert!(headers
+                .iter()
+                .any(|(key, value)| key == "content-type" && *value == "application/json"));
+            assert!(!headers.iter().any(|(key, _)| key == "transfer-encoding"));
+            let length: usize = headers
+                .iter()
+                .find(|(key, _)| key == "content-length")
+                .unwrap()
+                .1
+                .parse()
+                .unwrap();
+            assert!(length <= 16 * 1024);
+            while bytes.len() < header_end + length {
+                stream.set_read_timeout(Some(remaining(end))).unwrap();
+                let mut part = [0; 1024];
+                let size = stream.read(&mut part).expect("bounded loopback body");
+                assert_ne!(size, 0, "incomplete loopback body");
+                bytes.extend_from_slice(&part[..size]);
+            }
+            assert_eq!(bytes.len(), header_end + length);
+            remaining(end);
+            let body = serde_json::from_slice(&bytes[header_end..]).unwrap();
+            (stream, request_line, body, end)
+        }
+
+        fn respond(mut stream: TcpStream, status: u16, body: serde_json::Value, end: Instant) {
+            let body = body.to_string();
+            let response = format!("HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            let mut rest = response.as_bytes();
+            while !rest.is_empty() {
+                stream.set_write_timeout(Some(remaining(end))).unwrap();
+                let written = stream.write(rest).expect("bounded loopback response");
+                assert_ne!(written, 0);
+                rest = &rest[written..];
+            }
+        }
+
+        fn connection(nodes: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({"nodes":nodes,"pageInfo":{"hasNextPage":false,"endCursor":null}})
+        }
+
+        fn issue(snapshot: &SafeAutoSnapshot, submitted: bool) -> serde_json::Value {
+            serde_json::json!({"number":42,"title":snapshot.report().title(),"body":if submitted { snapshot.render_issue() } else { "\"safe_auto_v1\"".into() },"state":"OPEN","updatedAt":"2026-10-31T00:00:00Z","updated_at":"2026-10-31T00:00:00Z","labels":{"totalCount":0,"nodes":[]}})
+        }
+
+        #[test]
+        fn real_http_issue_and_comment_crash_cancel_and_success() {
+            for comment in [false, true] {
+                for outcome in ["crash", "cancel", "success"] {
+                    let home = tempfile::tempdir().unwrap();
+                    let stage_path = home.path().join(STAGE_FILE);
+                    mark_stage(home.path(), 0);
+                    let store = FeedbackStore::new(home.path().join("feedback"));
+                    let (record, _) = store
+                        .submit_owned_auto(
+                            SafeAutoReport::current(KnownOperation::VerifyRun),
+                            chrono::Utc::now(),
+                        )
+                        .unwrap();
+                    let id = record.snapshot.id();
+                    let attempt = uuid::Uuid::new_v4();
+                    let owner = store.try_owner_lock(&id).unwrap();
+                    store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+                    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+                    listener.set_nonblocking(true).unwrap();
+                    let std::net::SocketAddr::V4(address) = listener.local_addr().unwrap() else {
+                        unreachable!()
+                    };
+                    let mut command = gwt_core::process::resolved_command(
+                        gwt_core::process::ProcessPlanRequest::new(
+                            std::env::current_exe().unwrap(),
+                        )
+                        .inherit_env(false),
+                    )
+                    .unwrap();
+                    command
+                        .args(["--exact", CHILD_TEST, "--test-threads=1", "--nocapture"])
+                        .env_clear()
+                        .env("HOME", home.path())
+                        .env("USERPROFILE", home.path())
+                        .env("TMPDIR", home.path())
+                        .env("TMP", home.path())
+                        .env("TEMP", home.path())
+                        .env("NO_PROXY", "127.0.0.1")
+                        .env("no_proxy", "127.0.0.1")
+                        .current_dir(home.path())
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    let mut child = ExactChild(command.spawn().unwrap());
+                    let input = serde_json::to_vec(&ChildInput {
+                        home: home.path().to_path_buf(),
+                        address,
+                        id: id.clone(),
+                        attempt: attempt.to_string(),
+                    })
+                    .unwrap();
+                    assert!(input.len() <= 4096);
+                    child.0.stdin.take().unwrap().write_all(&input).unwrap();
+                    let (mut read_socket, line, query, mut read_end) =
+                        receive(&listener, &mut child.0, &stage_path);
+                    assert!(
+                        line == "POST /graphql HTTP/1.1",
+                        "unexpected discovery request line"
+                    );
+                    assert!(query["query"].as_str().unwrap().contains("issues(states:"));
+                    assert!(
+                        query["variables"]
+                            == serde_json::json!({"owner":"akiojin","repo":"gwt","after":null}),
+                        "unexpected Issue discovery variables"
+                    );
+                    let listing = serde_json::json!({"data":{"repository":{"issues":connection(if comment {serde_json::json!([issue(&record.snapshot,false)])} else {serde_json::json!([])})}}});
+                    let last_read = if comment {
+                        respond(read_socket, 200, listing.clone(), read_end);
+                        let (socket, line, query, end) =
+                            receive(&listener, &mut child.0, &stage_path);
+                        assert!(
+                            line == "POST /graphql HTTP/1.1",
+                            "unexpected discovery request line"
+                        );
+                        assert!(query["query"].as_str().unwrap().contains("comments(first:"));
+                        assert!(
+                            query["variables"]
+                                == serde_json::json!({"owner":"akiojin","repo":"gwt","number":42,"after":null}),
+                            "unexpected Comment discovery variables"
+                        );
+                        read_socket = socket;
+                        read_end = end;
+                        serde_json::json!({"data":{"repository":{"issue":{"comments":connection(serde_json::json!([]))}}}})
+                    } else {
+                        listing
+                    };
+                    if outcome == "cancel" {
+                        assert_eq!(
+                            store
+                                .cancel_owned_attempt(&id, attempt, OwnedAutoReason::Cancelled)
+                                .unwrap(),
+                            OwnedCancelResult::Accepted
+                        );
+                    }
+                    respond(read_socket, 200, last_read, read_end);
+                    if outcome == "cancel" {
+                        assert!(wait_child(&mut child.0).unwrap().success());
+                        assert_eq!(
+                            store
+                                .read_auto(&id)
+                                .unwrap()
+                                .owned
+                                .unwrap()
+                                .attempt
+                                .unwrap()
+                                .phase,
+                            OwnedAutoPhase::CancelAccepted
+                        );
+                    } else {
+                        let (socket, line, body, end) =
+                            receive(&listener, &mut child.0, &stage_path);
+                        assert!(
+                            line == if comment {
+                                "POST /repos/akiojin/gwt/issues/42/comments HTTP/1.1"
+                            } else {
+                                "POST /repos/akiojin/gwt/issues HTTP/1.1"
+                            },
+                            "unexpected mutation request line"
+                        );
+                        let expected = if comment {
+                            serde_json::json!({"body":record.snapshot.render_issue()})
+                        } else {
+                            serde_json::json!({"title":record.snapshot.report().title(),"body":record.snapshot.render_issue(),"labels":[]})
+                        };
+                        assert!(
+                            body == expected,
+                            "POST differs from the allowlisted snapshot"
+                        );
+                        let committed = store.read_auto(&id).unwrap();
+                        assert_eq!(committed.state, FeedbackState::Sending);
+                        assert_eq!(
+                            committed.owned.unwrap().attempt.unwrap().phase,
+                            OwnedAutoPhase::DispatchCommitted
+                        );
+                        if outcome == "crash" {
+                            // Complete expected POST observed; retain its socket without a response.
+                            child.0.kill().unwrap();
+                            assert!(!wait_child(&mut child.0).unwrap().success());
+                            drop(socket);
+                            // Voluntary fixture-owner release must not depend
+                            // on being the final descriptor (e.g. parallel fork).
+                            let owner_alias = owner.try_clone().unwrap();
+                            fs2::FileExt::unlock(&owner).unwrap();
+                            drop(owner);
+                            let recovered = store.reconcile_owned_auto(&id).unwrap();
+                            assert_eq!(recovered.state, FeedbackState::Uncertain);
+                            assert_eq!(recovered.snapshot, record.snapshot);
+                            let owned = recovered.owned.unwrap().attempt.unwrap();
+                            assert_eq!(owned.id, attempt);
+                            assert_eq!(owned.phase, OwnedAutoPhase::DispatchCommitted);
+                            assert_eq!(owned.exit, OwnedExitObservation::Unknown);
+                            assert_eq!(owned.cleanup, OwnedCleanupObservation::Unknown);
+                            assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+                            assert!(owned_operation_gate(&store, &id, attempt, true, &|| Ok(()))
+                                .is_err());
+                            assert_eq!(
+                                store.reconcile_owned_auto(&id).unwrap().state,
+                                FeedbackState::Uncertain
+                            );
+                            drop(owner_alias);
+                        } else {
+                            let comment_body = serde_json::json!({"id":7,"databaseId":7,"body":record.snapshot.render_issue(),"updated_at":"2026-10-31T00:00:00Z","updatedAt":"2026-10-31T00:00:00Z"});
+                            let mut created = issue(&record.snapshot, true);
+                            created["labels"] = serde_json::json!([]);
+                            respond(
+                                socket,
+                                201,
+                                if comment {
+                                    comment_body.clone()
+                                } else {
+                                    created
+                                },
+                                end,
+                            );
+                            let (socket, line, query, end) =
+                                receive(&listener, &mut child.0, &stage_path);
+                            assert!(
+                                line == "POST /graphql HTTP/1.1",
+                                "unexpected readback request line"
+                            );
+                            assert!(
+                                query["variables"]["number"] == 42,
+                                "unexpected readback Issue number"
+                            );
+                            respond(
+                                socket,
+                                200,
+                                if comment {
+                                    serde_json::json!({"data":{"repository":{"issue":{"comments":connection(serde_json::json!([comment_body]))}}}})
+                                } else {
+                                    serde_json::json!({"data":{"repository":{"issue":issue(&record.snapshot,true)}}})
+                                },
+                                end,
+                            );
+                            assert!(wait_child(&mut child.0).unwrap().success());
+                            let sent = store.read_auto(&id).unwrap();
+                            assert_eq!(sent.state, FeedbackState::Sent);
+                            assert_eq!(sent.issue_number, Some(42));
+                        }
+                    }
+                    assert!(
+                        matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+                        "unexpected second request after exact child exit/recovery"
+                    );
+                    eprintln!(
+                        "real-loopback component: {} {outcome}; REST mutation POSTs={}",
+                        if comment { "Comment" } else { "Issue" },
+                        if outcome == "cancel" { 0 } else { 1 }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owned_receipts_cannot_enter_the_public_direct_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FeedbackStore::new(dir.path().join("feedback"));
+        let (record, _) = store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::VerifyRun),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let path = store.path(&record.snapshot.id()).unwrap();
+        let mut owned = serde_json::to_value(&record).unwrap();
+        owned["owned"] = serde_json::json!({"version":"v1","attempt":null});
+        std::fs::write(&path, serde_json::to_vec(&owned).unwrap()).unwrap();
+        let pending = store.read_auto(&record.snapshot.id()).unwrap();
+        let result = process_auto_with(
+            &store,
+            &record.snapshot.id(),
+            || Ok(true),
+            |_| panic!("owned receipt requires the private inherited sender binding"),
+        );
+        assert!(result.is_err());
+        assert_eq!(store.read_auto(&record.snapshot.id()).unwrap(), pending);
+    }
+
+    #[test]
+    fn auto_mutation_gate_covers_issue_and_comment_but_not_verified_readback() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for comment in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let client = FakeIssueClient::new();
+            let issue = RepositoryIssue {
+                repository: RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(42),
+                title: record.snapshot.report().title(),
+                body: "\"safe_auto_v1\"".into(),
+                labels: vec![],
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+            };
+            if comment {
+                client.seed_repository_issue(issue.clone());
+            }
+            let deadline = ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30));
+            assert_eq!(
+                send_auto_to_upstream_checked(
+                    &client,
+                    &record.snapshot,
+                    &deadline,
+                    &|| Ok(()),
+                    &|| Err(AutoReason::SenderInterrupted),
+                ),
+                Err(AutoReason::SenderInterrupted)
+            );
+            assert_eq!(client.owner_mutation_count(), 0);
+            client.seed_repository_issue(RepositoryIssue {
+                body: record.snapshot.marker(),
+                ..issue
+            });
+            assert_eq!(
+                send_auto_to_upstream_checked(
+                    &client,
+                    &record.snapshot,
+                    &deadline,
+                    &|| Ok(()),
+                    &|| panic!("verified marker readback requires no new POST"),
+                )
+                .unwrap(),
+                42
+            );
+            assert_eq!(client.owner_mutation_count(), 0);
+        }
+    }
+
+    #[test]
+    fn late_read_return_cannot_bypass_cancellation_or_renew_the_original_budget() {
+        use super::super::feedback_owner_bootstrap::{Bootstrap, Clock, CreationIdentity};
+        use gwt_core::feedback::auto_report::{OwnedAutoPhase, OwnedAutoReason};
+        use std::cell::Cell;
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for cancel in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_owned_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let id = record.snapshot.id();
+            let attempt = uuid::Uuid::new_v4();
+            let descriptor = Bootstrap::supervisor(
+                uuid::Uuid::parse_str(&id).unwrap(),
+                attempt,
+                uuid::Uuid::new_v4(),
+                Clock {
+                    d0_ticks: 10_000,
+                    frequency: 1_000,
+                },
+            );
+            let sender = descriptor.sender(CreationIdentity { pid: 1, created: 1 });
+            assert_eq!(sender.clock, descriptor.clock);
+            let _owner = store.try_owner_lock(&id).unwrap();
+            store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+            let now = Cell::new(10_000);
+            let authorize = || {
+                sender
+                    .clock
+                    .remaining_work_at(now.get(), 1_000)
+                    .map(|_| ())
+                    .map_err(|_| AutoReason::PreSubmitFailed)
+            };
+            // Admission before auth and subsequent reads shares the same D0.
+            owned_operation_gate(&store, &id, attempt, false, &authorize).unwrap();
+            let read = || owned_operation_gate(&store, &id, attempt, false, &authorize);
+            let commit = || {
+                // The GET has returned; the cancellation/deadline wins before
+                // its late result is allowed to enter the mutation gate.
+                if cancel {
+                    store
+                        .cancel_owned_attempt(&id, attempt, OwnedAutoReason::Cancelled)
+                        .unwrap();
+                } else {
+                    now.set(125_000);
+                }
+                owned_operation_gate(&store, &id, attempt, true, &authorize)
+            };
+            let client = FakeIssueClient::new();
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &read,
+                &commit,
+            );
+            assert!(outcome.is_err());
+            assert_eq!(client.owner_mutation_count(), 0);
+            let finished = store.finish_owned_attempt(&id, attempt, outcome).unwrap();
+            assert_eq!(finished.snapshot, record.snapshot);
+            assert_eq!(
+                finished.owned.unwrap().attempt.unwrap().phase,
+                OwnedAutoPhase::CancelAccepted
+            );
+        }
+    }
+
+    #[test]
+    fn owned_issue_and_comment_after_submit_failures_keep_the_commit_uncertain() {
+        use gwt_core::feedback::auto_report::OwnedAutoPhase;
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for comment in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_owned_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyPlan),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let id = record.snapshot.id();
+            let attempt = uuid::Uuid::new_v4();
+            let owner = store.try_owner_lock(&id).unwrap();
+            store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+            let client = FakeIssueClient::new();
+            if comment {
+                client.seed_repository_issue(RepositoryIssue {
+                    repository: RepositoryIdentity::gwt_upstream(),
+                    number: IssueNumber(42),
+                    title: record.snapshot.report().title(),
+                    body: "\"safe_auto_v1\"".into(),
+                    labels: vec![],
+                    state: IssueState::Open,
+                    kind: RepositoryIssueKind::Plain,
+                    updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+                });
+            }
+            client.fail_next_owner_operation(
+                if comment {
+                    OwnerRepositoryOperation::CreateComment
+                } else {
+                    OwnerRepositoryOperation::CreateIssue
+                },
+                OwnerRepositoryFaultTiming::AfterSubmit,
+                ApiError::Unexpected("unmarked private remote failure".into()),
+            );
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &|| owned_operation_gate(&store, &id, attempt, false, &|| Ok(())),
+                &|| owned_operation_gate(&store, &id, attempt, true, &|| Ok(())),
+            );
+            assert_eq!(outcome, Err(AutoReason::RemoteOutcomeUnknown));
+            assert_eq!(client.owner_mutation_count(), 1);
+            let finished = store.finish_owned_attempt(&id, attempt, outcome).unwrap();
+            assert_eq!(finished.state, FeedbackState::Uncertain);
+            assert_eq!(finished.snapshot, record.snapshot);
+            assert_eq!(
+                finished.owned.unwrap().attempt.unwrap().phase,
+                OwnedAutoPhase::DispatchCommitted
+            );
+            drop(owner);
+            assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+        }
+    }
 
     #[test]
     fn auto_policy_revocation_and_unknown_authority_withhold_without_sending() {
@@ -994,25 +1838,28 @@ mod tests {
                 chrono::Utc::now(),
             )
             .unwrap();
-        let backup = storage.with_file_name("feedback-before-save-failure");
+        let receipt_path = store.path(&record.snapshot.id()).unwrap();
+        let backup = dir.path().join("feedback-before-save-failure.json");
+        let mut before_save_failure = None;
         assert!(process_auto_with(
             &store,
             &record.snapshot.id(),
             || Ok(true),
             |snapshot| {
-                assert_eq!(
-                    store.read_auto(&snapshot.id()).unwrap().state,
-                    FeedbackState::Sending
-                );
-                std::fs::rename(&storage, &backup).unwrap();
-                std::fs::write(&storage, "blocked storage").unwrap();
+                let sending = store.read_auto(&snapshot.id()).unwrap();
+                assert_eq!(sending.state, FeedbackState::Sending);
+                before_save_failure = Some(sending);
+                std::fs::rename(&receipt_path, &backup)
+                    .expect("back up the closed Sending receipt");
+                std::fs::create_dir(&receipt_path).expect("obstruct the post-remote local save");
                 Ok(42)
             },
         )
         .is_err());
-        std::fs::remove_file(&storage).unwrap();
-        std::fs::rename(&backup, &storage).unwrap();
+        std::fs::remove_dir(&receipt_path).unwrap();
+        std::fs::rename(&backup, &receipt_path).unwrap();
         let record = store.read_auto(&record.snapshot.id()).unwrap();
+        assert_eq!(Some(&record), before_save_failure.as_ref());
         assert_eq!(record.state, FeedbackState::Sending);
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();
@@ -1095,8 +1942,18 @@ mod tests {
         .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(receipt["mode"], "auto");
-        assert_eq!(receipt["state"], "failed");
-        assert_eq!(receipt["error"], "worker_unavailable");
+        assert_eq!(
+            receipt["state"],
+            if cfg!(windows) { "uncertain" } else { "failed" }
+        );
+        assert_eq!(
+            receipt["error"],
+            if cfg!(windows) {
+                "sender_interrupted"
+            } else {
+                "worker_unavailable"
+            }
+        );
         assert!(!output.contains(secret));
         assert!(
             !std::fs::read_to_string(receipt["receipt"].as_str().unwrap())
@@ -1126,13 +1983,19 @@ mod tests {
         .unwrap();
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();
+        // Existing legacy Auto receipts keep their direct-process contract on
+        // every OS; fresh Windows owned intake has separate native coverage.
+        let store = FeedbackStore::new(
+            gwt_core::paths::gwt_project_dir_for_repo_path(dir.path()).join("feedback"),
+        );
+        let (legacy, _) = store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
+                chrono::Utc::now(),
+            )
+            .unwrap();
         let mut created = String::new();
-        run(
-            &mut env,
-            FeedbackCommand::Create(Box::new(sample.input)),
-            &mut created,
-        )
-        .unwrap();
+        render_auto_result(&store, &legacy, &mut created).unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&created).unwrap();
         let id = receipt["request_id"].as_str().unwrap();
         let secret = "unmarked remote failure body 684672";
@@ -1268,12 +2131,17 @@ mod tests {
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();
         let mut output = String::new();
-        run(
-            &mut env,
-            FeedbackCommand::Create(Box::new(sample.input.clone())),
-            &mut output,
-        )
-        .unwrap();
+        let legacy_store = FeedbackStore::new(
+            gwt_core::paths::gwt_project_dir_for_repo_path(dir.path()).join("feedback"),
+        );
+        let (legacy, _) = legacy_store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let legacy = detach_auto(&mut env, &legacy_store, legacy).unwrap();
+        render_auto_result(&legacy_store, &legacy, &mut output).unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         let id = receipt["request_id"].as_str().unwrap();
         let store = FeedbackStore::new(
@@ -1324,14 +2192,21 @@ mod tests {
         .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(receipt["state"], "withheld");
-        run(
+        let retry = run(
             &mut env,
             FeedbackCommand::Retry {
                 id: receipt["request_id"].as_str().unwrap().into(),
             },
             &mut String::new(),
-        )
-        .unwrap();
+        );
+        if cfg!(windows) {
+            assert!(
+                retry.is_err(),
+                "owned unknown facts cannot mint a new attempt"
+            );
+        } else {
+            retry.unwrap();
+        }
         assert_eq!(
             env.feedback_worker_ids.len(),
             2,
