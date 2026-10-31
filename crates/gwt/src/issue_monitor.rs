@@ -23910,16 +23910,33 @@ impl IssueMonitorState {
             {
                 continue;
             }
+            let live_replacement = snapshot.windows.iter().find(|other| {
+                other.issue_number == Some(*issue_number)
+                    && self.verified_window_owner(
+                        &other.window_id,
+                        *issue_number,
+                        &snapshot.observed_at,
+                    )
+                    && follows_execution_holder(*issue_number, other)
+                    && issue_monitor_qualified_window_id(&other.window_id)
+                        .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
+                    && !other.review_dispatch
+                    && idle_window_is_alive(other.status)
+                    && !issue_monitor_window_ids_match(window_id, &other.window_id)
+            });
             let owned_here =
                 issue_monitor_qualified_window_id(window_id).is_some_and(|(tab, _)| {
                     self.window_snapshot_tabs.contains(tab)
-                    // A new GUI incarnation has new tab IDs. Reaper interruption
-                    // or exact host-death evidence for a settled holder proves
-                    // the old runtime is gone; live or unknown authority does not.
+                    // A new GUI incarnation has new tab IDs. The exact live
+                    // holder may already occupy an authenticated restored pane;
+                    // otherwise retain the reaper/host-death proof requirement.
                     || (self.window_snapshot_host.is_some()
                         && !self.window_snapshot_tabs.contains(tab)
                         && settlements.get(issue_number).is_some_and(|observation| {
-                            (observation.settlement == IssueMonitorExecutionSettlement::Interrupted
+                            (live_replacement.is_some()
+                                && observation.process_held
+                                && observation.held_holder_session_id.is_some())
+                                || (observation.settlement == IssueMonitorExecutionSettlement::Interrupted
                                 && !observation.process_held)
                                 || (observation.holder_host_dead
                                     && matches!(observation.settlement,
@@ -23998,24 +24015,7 @@ impl IssueMonitorState {
                 },
             };
             if idle_kind == IssueMonitorIdleKind::BindingDead {
-                rebind_to = snapshot
-                    .windows
-                    .iter()
-                    .find(|other| {
-                        other.issue_number == Some(*issue_number)
-                            && self.verified_window_owner(
-                                &other.window_id,
-                                *issue_number,
-                                &snapshot.observed_at,
-                            )
-                            && follows_execution_holder(*issue_number, other)
-                            && issue_monitor_qualified_window_id(&other.window_id)
-                                .is_some_and(|(tab, _)| self.window_snapshot_tabs.contains(tab))
-                            && !other.review_dispatch
-                            && idle_window_is_alive(other.status)
-                            && !issue_monitor_window_ids_match(window_id, &other.window_id)
-                    })
-                    .map(|other| other.window_id.clone());
+                rebind_to = live_replacement.map(|other| other.window_id.clone());
             }
             if (idle_kind == IssueMonitorIdleKind::BindingDead
                 || (idle_kind == IssueMonitorIdleKind::ExecutionSettled
@@ -39612,6 +39612,107 @@ mod tests {
                 monitor.launched_window_id(42).as_deref(),
                 Some("tab-1::holder")
             );
+        }
+    }
+
+    #[test]
+    fn issue_4131_restored_sessions_rebind_two_windows_after_restart() {
+        for old_tab in ["tab-1", "previous-tab"] {
+            let old_windows = [format!("{old_tab}::old-42"), format!("{old_tab}::old-43")];
+            let monitor = launched_cohort(&[(42, &old_windows[0]), (43, &old_windows[1])]);
+            let prefs =
+                serde_json::from_str(&serde_json::to_string(&monitor.prefs()).unwrap()).unwrap();
+            let mut restored = test_monitor_with_prefs(monitor.config.clone(), prefs);
+            let mut observed = settlements(&[
+                (42, IssueMonitorExecutionSettlement::Active),
+                (43, IssueMonitorExecutionSettlement::Active),
+            ]);
+            let mut windows = Vec::new();
+            let mut owners = BTreeMap::new();
+            for number in [42, 43] {
+                let session = format!("session-{number}");
+                let execution = observed.get_mut(&number).unwrap();
+                execution.process_held = true;
+                execution.held_holder_session_id = Some(session.clone());
+                let window_id = format!("tab-1::restored-{number}");
+                let mut window =
+                    idle_observation(&window_id, Some(number), WindowState::Running, false);
+                window.monitor_owned = true;
+                window.session_id = Some(session);
+                windows.push(window);
+                owners.insert(window_id, number);
+            }
+            restored.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, windows),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            restored.record_verified_live_launch_owners(&owners, IDLE_NOW);
+
+            let outcome = restored.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert_eq!(
+                outcome.rebound,
+                vec![
+                    (42, "tab-1::restored-42".into()),
+                    (43, "tab-1::restored-43".into()),
+                ],
+                "{old_tab}"
+            );
+            assert!(outcome.released.is_empty());
+            assert!(outcome.requeued.is_empty());
+            assert_eq!(restored.active_issue_numbers(), vec![42, 43]);
+            assert_eq!(restored.occupied_slot_count(), 2);
+            let reloaded = test_monitor_with_prefs(restored.config.clone(), restored.prefs());
+            for number in [42, 43] {
+                assert_eq!(
+                    reloaded.launched_window_id(number),
+                    Some(format!("tab-1::restored-{number}"))
+                );
+            }
+            assert_eq!(reloaded.active_issue_numbers(), vec![42, 43]);
+            assert_eq!(reloaded.occupied_slot_count(), 2);
+        }
+    }
+
+    #[test]
+    fn issue_4131_cross_tab_rebind_requires_verified_exact_holder() {
+        for (holder, verified) in [
+            (None, true),
+            (Some("other-session"), true),
+            (Some("holder"), false),
+        ] {
+            let mut monitor = launched_monitor(42, "previous-tab::gone");
+            let mut observed = settlements(&[(42, IssueMonitorExecutionSettlement::Active)]);
+            let execution = observed.get_mut(&42).unwrap();
+            execution.process_held = true;
+            execution.held_holder_session_id = holder.map(str::to_string);
+            let mut window =
+                idle_observation("tab-1::restored", Some(42), WindowState::Running, false);
+            window.session_id = Some("holder".into());
+            monitor.record_window_snapshot_from_host(
+                idle_snapshot(IDLE_NOW, vec![window]),
+                123,
+                1,
+                BTreeSet::new(),
+            );
+            if verified {
+                monitor.record_verified_live_launch_owners(
+                    &BTreeMap::from([("tab-1::restored".into(), 42)]),
+                    IDLE_NOW,
+                );
+            }
+            let before = monitor.prefs();
+
+            let outcome = monitor.reconcile_idle_windows(&observed, IDLE_NOW);
+
+            assert!(
+                outcome.rebound.is_empty(),
+                "{holder:?}, verified={verified}"
+            );
+            assert!(outcome.released.is_empty());
+            assert_eq!(monitor.prefs(), before);
         }
     }
 
