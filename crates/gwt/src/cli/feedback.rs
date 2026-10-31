@@ -413,7 +413,15 @@ fn process_auto_with(
 ) -> io::Result<AutoFeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if file_lock_is_busy(&error) => return store.read_auto(id),
+        Err(error) if file_lock_is_busy(&error) => {
+            let record = store.read_auto(id)?;
+            if record.owned.is_some() {
+                return Err(io::Error::other(
+                    "owned feedback requires the private inherited sender",
+                ));
+            }
+            return Ok(record);
+        }
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
@@ -574,7 +582,15 @@ fn process_with(
 ) -> io::Result<FeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if file_lock_is_busy(&error) => return store.read(id),
+        Err(error) if file_lock_is_busy(&error) => {
+            let record = store.read(id)?;
+            if record.context.project_root != root {
+                return Err(io::Error::other(
+                    "feedback source checkout does not match this receipt",
+                ));
+            }
+            return Ok(record);
+        }
         Err(error) => return Err(error),
     };
     let mut record = store.read(id)?;
@@ -1496,6 +1512,19 @@ mod tests {
             |_| panic!("owned receipt requires the private inherited sender binding"),
         );
         assert!(result.is_err());
+        assert_eq!(store.read_auto(&record.snapshot.id()).unwrap(), pending);
+
+        let _sender = store.try_sender_lock(&record.snapshot.id()).unwrap();
+        let busy = process_auto_with(
+            &store,
+            &record.snapshot.id(),
+            || panic!("owned receipt must be rejected before policy evaluation"),
+            |_| panic!("busy owned receipt must not enter the public sender"),
+        );
+        assert_eq!(
+            busy.err().map(|error| error.to_string()),
+            Some("owned feedback requires the private inherited sender".into())
+        );
         assert_eq!(store.read_auto(&record.snapshot.id()).unwrap(), pending);
     }
 
@@ -2480,6 +2509,32 @@ mod tests {
         record.input.body = "```rust\nfn private_business_logic() {}\n```".into();
         record.input.reproduction = "Open `private_business_logic()` in src/private.rs".into();
         store.save(&record).unwrap();
+        {
+            let _sender = store.try_sender_lock(&record.id).unwrap();
+            let foreign = tempfile::tempdir().unwrap();
+            let denied = process_with(
+                &store,
+                &record.id,
+                foreign.path(),
+                |_| panic!("foreign checkout must not request consent"),
+                |_| panic!("foreign checkout must not send"),
+            );
+            assert_eq!(
+                denied.err().map(|error| error.to_string()),
+                Some("feedback source checkout does not match this receipt".into())
+            );
+            assert_eq!(store.read(&record.id).unwrap(), record);
+            let busy = process_with(
+                &store,
+                &record.id,
+                dir.path(),
+                |_| panic!("busy receipt must not request consent"),
+                |_| panic!("busy receipt must not send"),
+            )
+            .unwrap();
+            assert_eq!(busy, record);
+            assert_eq!(store.read(&record.id).unwrap(), record);
+        }
         let preview = std::cell::RefCell::new(String::new());
         let client = FakeIssueClient::new();
         let result = process_with(
