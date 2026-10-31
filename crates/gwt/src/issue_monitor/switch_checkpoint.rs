@@ -58,7 +58,8 @@ pub fn observe_agent_switch_cwd(worktree: &Path) -> AgentSwitchCwdObservation {
 }
 
 /// Before checkpoint delivery or verified stop, the exact idle source may
-/// remain alive. Its cwd must still be readable, and no descendant is exempt.
+/// remain alive, including its Linux threads. Cwd must still be readable,
+/// and no child process or helper is exempt.
 /// The caller separately verifies Session, runtime, writer and input authority.
 pub fn observe_agent_switch_checkpoint_cwd(
     worktree: &Path,
@@ -80,6 +81,17 @@ fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObs
     // Missing records or an unsupported/failed census cannot prove quiescence.
     let supported_with_self =
         sysinfo::IS_SUPPORTED_SYSTEM && system.process(Pid::from_u32(std::process::id())).is_some();
+    // Linux exposes a process's own threads as additional census entries.
+    // Authenticate the root before using its same-snapshot task membership;
+    // children and unrelated threads must keep blocking the checkpoint.
+    let source_tasks = source.and_then(|(pid, started_at)| {
+        let process = system.process(Pid::from_u32(pid))?;
+        (pid != 0
+            && started_at != 0
+            && crate::process::snapshot_process_start_identity(pid, process) == started_at)
+            .then(|| process.tasks())
+            .flatten()
+    });
     collect_cwd_observation(
         worktree,
         system
@@ -90,6 +102,17 @@ fn observe_cwd(worktree: &Path, source: Option<(u32, u64)>) -> AgentSwitchCwdObs
                     process.status(),
                     ProcessStatus::Dead | ProcessStatus::Zombie
                 )
+            })
+            .filter(|(pid, process)| {
+                !source_tasks.is_some_and(|tasks| {
+                    tasks.contains(pid)
+                        && process.thread_kind() == Some(sysinfo::ThreadKind::Userland)
+                        && process.parent().map(Pid::as_u32) == source.map(|(pid, _)| pid)
+                        && process
+                            .cwd()
+                            .and_then(|cwd| dunce::canonicalize(cwd).ok())
+                            .is_some()
+                })
             })
             .map(|(pid, process)| {
                 let pid = pid.as_u32();
