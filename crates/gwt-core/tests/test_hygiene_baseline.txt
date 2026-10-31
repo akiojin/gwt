@@ -92,7 +92,6 @@ short-wall-clock|crates/gwt-terminal/tests/pty_start_gate_test.rs|start_gate_pol
 short-wall-clock|crates/gwt-terminal/tests/pty_start_gate_test.rs|wait_for_path
 short-wall-clock|crates/gwt/src/app_runtime/persist_dispatcher.rs|suppresses_identical_snapshot_while_pending
 short-wall-clock|crates/gwt/src/app_runtime/persist_dispatcher.rs|worker_waits_full_coalesce_window_before_writing
-short-wall-clock|crates/gwt/src/app_runtime/tests.rs|insert_exited_test_pane_runtime
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_prepare_completions
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_active_work_projection
 short-wall-clock|crates/gwt/src/app_runtime/tests.rs|wait_for_knowledge_view_dispatch
@@ -145,7 +144,6 @@ short-wall-clock|crates/gwt/src/daemon_runtime.rs|hook_live_status_retry_policy
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_resolver_picks_up_new_token_between_sessions
 short-wall-clock|crates/gwt/src/daemon_subscriber.rs|subscriber_with_resolver_picks_up_endpoint_after_initial_failure
 short-wall-clock|crates/gwt/src/embedded_server.rs|accepted_self_close_send_timeout_still_finalizes_exactly_once
-short-wall-clock|crates/gwt/src/embedded_server.rs|handle_frontend_message_falls_back_to_proxy_when_pty_writer_is_missing
 short-wall-clock|crates/gwt/src/index_search.rs|repair_spawn_failure_rolls_back_admission_and_notifies_waiters
 short-wall-clock|crates/gwt/src/index_worker.rs|aggregated_status_cache_recomputes_after_ttl_expires
 short-wall-clock|crates/gwt/src/index_worker.rs|project_index_git_context_does_not_fall_through_an_expired_deadline
@@ -217,8 +215,6 @@ unlocked-process-env|crates/gwt-github/src/client/http.rs|set
 unlocked-process-env|crates/gwt-github/tests/http_client_test.rs|cleared
 unlocked-process-env|crates/gwt-github/tests/http_client_test.rs|drop
 unlocked-process-env|crates/gwt-github/tests/http_client_test.rs|set
-unlocked-process-env|crates/gwt/src/app_runtime/launch.rs|drop
-unlocked-process-env|crates/gwt/src/app_runtime/launch.rs|set
 unlocked-process-env|crates/gwt/src/app_runtime/tests.rs|drop
 unlocked-process-env|crates/gwt/src/app_runtime/tests.rs|set
 unlocked-process-env|crates/gwt/src/app_runtime/tests.rs|unset

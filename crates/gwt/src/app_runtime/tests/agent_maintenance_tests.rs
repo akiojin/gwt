@@ -279,7 +279,7 @@ fn maintenance_refuses_live_idle_waiting_pm_agents_and_pending_launches() {
             "live {status:?} PM agent"
         );
     }
-    runtime.stop_window_runtime(&id);
+    close_test_owner_runtime(&mut runtime, &id);
     runtime
         .inflight_launches
         .insert("pending".into(), ("next-agent".into(), Instant::now()));

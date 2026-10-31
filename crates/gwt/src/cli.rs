@@ -154,7 +154,9 @@ pub enum CliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
     /// `daemon.start` — bootstrap and serve the runtime daemon.
-    Start,
+    Start {
+        startup_intent: gwt_core::daemon::DaemonStartIntent,
+    },
     /// `daemon.status` — print whether a daemon is registered for cwd scope.
     Status,
     /// `daemon.subscribe` — connect to the running daemon,

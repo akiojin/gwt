@@ -118,13 +118,26 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
-    let repo = temp.path().join("repo");
-    let (mut runtime, events, _window_id) = active_work_off_loop_setup(temp.path(), &repo);
-    // Seed the cache the cache-only acknowledgement reads from.
-    let _ = runtime.active_work_projection_for_tab("tab-1", &runtime.tabs[0]);
+    let _gwt_home = ScopedGwtHome::set(temp.path());
+    let (mut runtime, probe, _window_id) = owner_browser_input_fixture(temp.path());
+    let owner = runtime.test_project_owners.values().next().unwrap().clone();
+    let status = owner_runtime_status_event(&owner, &probe, "Error", "Stop");
+    let context = runtime.test_context();
+    let identity = owner.client().identity().unwrap().clone();
+    let AppEventProxy::Stub(events) = &runtime.proxy else {
+        panic!("recording fixture");
+    };
+    let events = events.clone();
+    // Resolve the actual owner's saved Work outside the callback under test.
+    let job = runtime
+        .active_work_projection_refresh_job(&context.project_root)
+        .unwrap();
+    let prepared = super::super::run_active_work_projection_refresh(job);
+    runtime.apply_active_work_projection_refresh(prepared);
+    events.lock().unwrap().clear();
 
     super::super::workspace_views::reset_full_active_work_projection_builds();
-    let hook_events = runtime.handle_runtime_hook_event(runtime_hook_state("Error", "session-1"));
+    let hook_events = runtime.handle_project_owner_event(&context, 1, &identity, status);
 
     assert_eq!(
         super::super::workspace_views::full_active_work_projection_builds(),
@@ -137,7 +150,10 @@ fn runtime_hook_terminal_state_refreshes_active_work_off_the_gui_event_loop() {
             .any(|event| matches!(event.event, BackendEvent::ActiveWorkProjectionPatch { .. })),
         "the hook still acknowledges the rail from cache: {hook_events:?}"
     );
-    assert_eq!(active_work_refresh_requests(&events, &repo), 1);
+    assert_eq!(
+        active_work_refresh_requests(&events, &context.project_root),
+        1
+    );
 }
 
 /// SPEC-2014 FR-PERF-003: ProjectTabRuntime caches `main_worktree_root`
@@ -1140,11 +1156,11 @@ fn host_codex_launch_writes_worktree_local_hooks_into_a_new_linked_worktree() {
 
 #[test]
 fn codex_hook_discovery_has_no_standalone_process_probe() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let discovery = source
-        .split("pub(super) fn codex_hook_discovery_mode_for_launch_config")
+        .split("pub fn codex_hook_discovery_mode_for_launch_config")
         .nth(1)
-        .and_then(|tail| tail.split("pub(super) fn maybe_register_codex").next())
+        .and_then(|tail| tail.split("pub fn maybe_register_codex").next())
         .expect("Codex hook discovery implementation");
 
     assert!(!discovery.contains("detect_installed_codex_hook_discovery_mode"));
@@ -2062,9 +2078,9 @@ fn issue_monitor_codex_trust_preflight_failure_keeps_actual_delivery_provenance(
 
 #[test]
 fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation() {
-    let source = include_str!("../launch.rs");
+    let source = include_str!("../../project_runtime/launch.rs");
     let worker = source
-        .split("fn spawn_agent_window_async_with_claim")
+        .split("fn prepare_agent_launch")
         .nth(1)
         .expect("launch worker source");
     let validate = worker
@@ -2083,8 +2099,18 @@ fn issue_monitor_codex_project_trust_precedes_runner_probe_and_session_creation(
         .find("resolve_host_runner_health_checked")
         .expect("host runner probe");
     let session = worker
-        .find("gwt_agent::Session::new")
+        .find("initialize_launch_session(")
         .expect("durable Session creation");
+    let initializer_source = include_str!("../../session_launch.rs");
+    let initializer = initializer_source
+        .split("pub fn initialize_launch_session(")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn apply_resume_identity_to_session(")
+                .next()
+        })
+        .expect("shared Session initializer");
+    assert!(initializer.contains("Session::new("));
 
     assert!(
         validate < register,

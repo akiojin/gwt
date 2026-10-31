@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gwt::{save_session_state, save_workspace_state, save_workspace_state_durable};
+use gwt::save_session_state;
 
 use super::BlockingTaskSpawner;
 
@@ -29,7 +29,13 @@ use super::BlockingTaskSpawner;
 pub(crate) struct PersistSnapshot {
     pub(crate) session_path: PathBuf,
     pub(crate) session: gwt::PersistedSessionState,
-    pub(crate) workspaces: Vec<(PathBuf, gwt::PersistedWindowRegistry)>,
+    pub(crate) workspaces: Vec<ProjectLayoutSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ProjectLayoutSnapshot {
+    pub(crate) project_root: PathBuf,
+    pub(crate) layout: gwt::PersistedWindowRegistry,
 }
 
 #[derive(Default)]
@@ -55,7 +61,7 @@ struct DispatcherState {
 
 struct DurableWorkspaceRequest {
     generation: u64,
-    path: PathBuf,
+    project_root: PathBuf,
     workspace: gwt::PersistedWindowRegistry,
     completion: mpsc::SyncSender<Result<(), String>>,
     ready: mpsc::Receiver<()>,
@@ -63,11 +69,13 @@ struct DurableWorkspaceRequest {
 
 /// Reserve FIFO ordering on the GUI thread; the ACK worker authorizes the
 /// write only after materialization. Dropping this handle cancels the gate.
+#[cfg(test)]
 pub(crate) struct DurableWorkspaceBarrier {
     ready: mpsc::Sender<()>,
     completed: mpsc::Receiver<Result<(), String>>,
 }
 
+#[cfg(test)]
 impl DurableWorkspaceBarrier {
     pub(crate) fn allow_and_wait(&self) -> std::io::Result<()> {
         self.ready.send(()).map_err(|_| {
@@ -76,6 +84,7 @@ impl DurableWorkspaceBarrier {
                 "persist dispatcher stopped before durable workspace authorization",
             )
         })?;
+        // test-hygiene: allow-wall-clock-deadline Bounds a real durable-writer ACK channel; the received commit result establishes completion.
         match self.completed.recv_timeout(DURABLE_BARRIER_TIMEOUT) {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(std::io::Error::other(error)),
@@ -104,8 +113,6 @@ struct DispatcherInner {
     cond: Condvar,
     #[cfg(test)]
     before_workspace_write: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
-    #[cfg(test)]
-    durable_writes: std::sync::atomic::AtomicU64,
 }
 
 /// Owner handle: enqueue snapshots and (in tests) wait until the worker drains.
@@ -127,6 +134,7 @@ const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// wait.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
+#[cfg(test)]
 const DURABLE_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl Drop for PersistDispatcher {
@@ -192,8 +200,6 @@ impl PersistDispatcher {
             cond: Condvar::new(),
             #[cfg(test)]
             before_workspace_write: Mutex::new(None),
-            #[cfg(test)]
-            durable_writes: std::sync::atomic::AtomicU64::new(0),
         });
         let worker_inner = inner.clone();
         spawner.spawn(move || worker_loop(worker_inner));
@@ -225,9 +231,10 @@ impl PersistDispatcher {
     /// Assign the exact snapshot's generation while the GUI owns it, before
     /// newer ordinary snapshots can enter the dispatcher. This does no disk I/O
     /// and does not wait; a worker must authorize the durability gate.
+    #[cfg(test)]
     pub(crate) fn reserve_workspace_durable(
         &self,
-        path: PathBuf,
+        project_root: PathBuf,
         workspace: gwt::PersistedWindowRegistry,
     ) -> std::io::Result<DurableWorkspaceBarrier> {
         let (completion, completed) = mpsc::sync_channel(1);
@@ -248,7 +255,7 @@ impl PersistDispatcher {
             let generation = state.enqueued;
             state.durable_workspaces.push_back(DurableWorkspaceRequest {
                 generation,
-                path,
+                project_root,
                 workspace,
                 completion,
                 ready,
@@ -269,13 +276,6 @@ impl PersistDispatcher {
     ) -> std::io::Result<()> {
         self.reserve_workspace_durable(path, workspace)?
             .allow_and_wait()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn durable_write_count(&self) -> u64 {
-        self.inner
-            .durable_writes
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -430,11 +430,7 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
                 if request.ready.recv().is_err() {
                     (request.generation, Ok(()), None, None)
                 } else {
-                    #[cfg(test)]
-                    inner
-                        .durable_writes
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let outcome = save_workspace_state_durable(&request.path, &request.workspace)
+                    let outcome = write_project_layout(&request.project_root, &request.workspace)
                         .map_err(|error| error.to_string());
                     (request.generation, outcome, None, Some(request.completion))
                 }
@@ -473,7 +469,7 @@ fn worker_loop(inner: Arc<DispatcherInner>) {
 
 fn write_snapshot(snap: &PersistSnapshot, _inner: &DispatcherInner) -> std::io::Result<()> {
     save_session_state(&snap.session_path, &snap.session)?;
-    for (path, ws) in &snap.workspaces {
+    for workspace in &snap.workspaces {
         #[cfg(test)]
         if let Some(hook) = _inner
             .before_workspace_write
@@ -483,9 +479,33 @@ fn write_snapshot(snap: &PersistSnapshot, _inner: &DispatcherInner) -> std::io::
         {
             hook();
         }
-        save_workspace_state(path, ws)?;
+        write_project_layout(&workspace.project_root, &workspace.layout)?;
     }
     Ok(())
+}
+
+fn write_project_layout(
+    project_root: &std::path::Path,
+    layout: &gwt::PersistedWindowRegistry,
+) -> std::io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let client = gwt::project_runtime::client::ProjectRuntimeClient::from_current_project(
+            project_root,
+            &gwt_core::paths::gwt_home(),
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        client
+            .command(gwt::project_runtime::events::OwnerCommand::UpdateLayout {
+                layout: layout.clone(),
+            })
+            .await
+            .map_err(std::io::Error::other)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -496,10 +516,16 @@ mod tests {
 
     use super::*;
     use crate::app_runtime::BlockingTaskSpawner;
-    use gwt::{
-        default_workspace_state, empty_workspace_state, load_session_state, load_workspace_state,
-        WindowPreset,
-    };
+    use gwt::{empty_workspace_state, load_session_state, load_workspace_state};
+
+    fn layout_owner(
+        root: &std::path::Path,
+    ) -> gwt::project_runtime::test_support::ProjectOwnerHarness {
+        crate::app_runtime::tests::owner_fixture_block_on(
+            gwt::project_runtime::test_support::ProjectOwnerHarness::start(root),
+        )
+        .expect("actual layout owner")
+    }
 
     fn sample_empty_session() -> gwt::PersistedSessionState {
         gwt::PersistedSessionState {
@@ -544,8 +570,6 @@ mod tests {
                 state: Mutex::new(DispatcherState::default()),
                 cond: Condvar::new(),
                 before_workspace_write: Mutex::new(None),
-                #[cfg(test)]
-                durable_writes: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -555,7 +579,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
-        let workspace_path = temp.path().join("workspace.json");
+        let _owner = layout_owner(temp.path());
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
         let (write_started_tx, write_started_rx) = mpsc::sync_channel(1);
         let (release_write_tx, release_write_rx) = mpsc::sync_channel(1);
@@ -573,7 +597,10 @@ mod tests {
         dispatcher.enqueue(PersistSnapshot {
             session_path: session_path.clone(),
             session: sample_session("blocking-write"),
-            workspaces: vec![(workspace_path, empty_workspace_state())],
+            workspaces: vec![ProjectLayoutSnapshot {
+                project_root: temp.path().into(),
+                layout: empty_workspace_state(),
+            }],
         });
         let write_started = write_started_rx.recv_timeout(Duration::from_secs(5));
         if write_started.is_err() {
@@ -860,13 +887,17 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
-        let workspace_path = temp.path().join("workspace.json");
+        let workspace_path = gwt::persistence::workspace_state_path(temp.path());
+        let _owner = layout_owner(temp.path());
         let dispatcher = PersistDispatcher::new(&BlockingTaskSpawner::thread());
 
         dispatcher.enqueue(PersistSnapshot {
             session_path: session_path.clone(),
             session: sample_empty_session(),
-            workspaces: vec![(workspace_path.clone(), empty_workspace_state())],
+            workspaces: vec![ProjectLayoutSnapshot {
+                project_root: temp.path().into(),
+                layout: empty_workspace_state(),
+            }],
         });
         assert!(dispatcher.wait_idle(Duration::from_secs(5)));
 
@@ -879,7 +910,8 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let _gwt_home = gwt_core::test_support::ScopedGwtHome::set(temp.path());
         let session_path = temp.path().join("session-state.json");
-        let workspace_path = temp.path().join("workspace.json");
+        let workspace_path = gwt::persistence::workspace_state_path(temp.path());
+        let owner = layout_owner(temp.path());
         let dispatcher = Arc::new(PersistDispatcher::new(&BlockingTaskSpawner::thread()));
 
         let (old_write_ready_tx, old_write_ready_rx) = std::sync::mpsc::sync_channel(1);
@@ -899,17 +931,32 @@ mod tests {
         dispatcher.enqueue(PersistSnapshot {
             session_path,
             session: sample_empty_session(),
-            workspaces: vec![(workspace_path.clone(), empty_workspace_state())],
+            workspaces: vec![ProjectLayoutSnapshot {
+                project_root: temp.path().into(),
+                layout: empty_workspace_state(),
+            }],
         });
         old_write_ready_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("old generation should pause before workspace write");
 
-        let mut exact_workspace = default_workspace_state();
-        exact_workspace.windows[0].id = "agent-delivery-exact".to_string();
-        exact_workspace.windows[0].preset = WindowPreset::Agent;
+        // The row is materialized by the actual owner before its durable
+        // layout barrier; a GUI proposal cannot manufacture a process row.
+        let (command, args) = crate::app_runtime::tests::long_running_test_command();
+        crate::app_runtime::tests::owner_fixture_block_on(owner.command(
+            gwt::project_runtime::events::OwnerCommand::LaunchShell {
+                id: owner.pane_id("agent-delivery-exact"),
+                command,
+                args,
+                cols: 80,
+                rows: 24,
+            },
+        ))
+        .expect("actual owner materialization");
+        let exact_workspace =
+            load_workspace_state(&workspace_path).expect("materialized owner row");
         let barrier_dispatcher = dispatcher.clone();
-        let barrier_workspace_path = workspace_path.clone();
+        let barrier_workspace_path = temp.path().to_path_buf();
         let barrier_workspace = exact_workspace.clone();
         let (barrier_done_tx, barrier_done_rx) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {

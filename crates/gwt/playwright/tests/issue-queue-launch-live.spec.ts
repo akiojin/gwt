@@ -176,7 +176,7 @@ test.describe("Issue queue real backend launch", () => {
       expect(unfinishedWork.status_category).not.toMatch(/done|blocked/);
       expect(fixture.executionStatus(source.cwd).ecr_status).toBe("active");
       await current.close();
-      await fixture.restart();
+      await fixture.restartRuntime(saved.runtime_stop.host_pid);
       current = await page.context().newPage();
       capture(current);
       await current.addInitScript(theme => localStorage.setItem("gwt:ui:theme", theme), theme);

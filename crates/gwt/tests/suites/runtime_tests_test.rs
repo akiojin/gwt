@@ -62,6 +62,8 @@ mod perf_regression_test;
 mod pm_planning_state_test;
 #[path = "../project_open_e2e_contract_test.rs"]
 mod project_open_e2e_contract_test;
+#[path = "../project_runtime_owner_test.rs"]
+mod project_runtime_owner_test;
 #[path = "../project_runtime_ownership_test.rs"]
 mod project_runtime_ownership_test;
 #[path = "../pty_start_gate_console_test.rs"]

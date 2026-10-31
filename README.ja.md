@@ -408,31 +408,27 @@ JSON object です。入力名、必須値、型、choice の選択肢を送信�
 1件平均2 KiBなら20件で約40 KiBです。固定バイト上限はなく、長文ほど増え、
 `all: true` では数百 KiB以上になる場合があります。
 
-managed hook と runtime 委譲は `gwtd` を使います。macOS と Linux では、
-ユーザーが JSON operation `daemon.start` を実行することでプロジェクトごとの
-runtime daemon（Unix ドメインソケット IPC）が起動します。daemon
-が live な間、同じリポジトリに繋がっている全 `gwt` インスタンスへ
-イベントが fan-out されます（例: 片方のウィンドウで Board に投稿
-した内容が、別インスタンスにも遅延なく届く）。Ctrl-C / SIGTERM で
-daemon を停止するまでバックグラウンドで動き続けます。診断用に
-JSON operation `daemon.status` で現在の endpoint を確認できます。
-JSON operation `daemon.start` を実行していない場合は multi-instance fan-out は
-無効ですが、ローカルのファイルベース state とファイル watcher は
-従来どおり動作します。
+managed hook とプロジェクト runtime の委譲は `gwtd` を使います。プロジェクトを
+開くと共有 daemon が起動、または既存 daemon に再接続します。daemon は agent pane
+と Issue Monitor を所有します。接続障害はそのプロジェクトだけに影響し、Hub と
+他のプロジェクトは引き続き利用できます。GUI が起動した daemon は最後の GUI が
+切断し、再接続の猶予期間を過ぎると終了処理へ進みます。GUI を一つ閉じても共有
+daemon を強制終了しません。明示的な JSON `daemon.start` は停止するまで常駐し、
+既存の GUI 管理 daemon に対しても常駐へ切り替えます。`daemon.status` で現在の
+endpoint を確認できます。
 
-Windows でも daemon は同じ形で動きます。GUI の Issue Monitor がユーザー
-セッションの子プロセスとして起動・監視し、JSON operation `daemon.start` で
-手動起動もできます。通信は named pipe（`\\.\pipe\gwtd-<scope>-<hash>`、
-ローカルクライアントのみ。auth token は `~/.gwt` 配下の endpoint file が
-持つ）です。`daemon.status` / `daemon.subscribe` / Issue Monitor control /
-複数インスタンス間の fan-out は macOS / Linux と同じように動作します。
-手動起動した daemon は Ctrl-C、Ctrl-Break、コンソールを閉じることで停止し、
-ログオフとシャットダウンでも同じ cleanup が走ります。GUI が終了させた
-daemon は次回起動時の liveness 判定で回収されます。gwt は Windows Service を
-インストールしません。daemon が行うのは scan と claim までで、エージェント
-pane の生成は GUI 側が担うため、Service 化してもヘッドレス自律実行には
-ならず、ユーザー単位の `~/.gwt` state とも噛み合わないためです。ヘッドレス
-自律実行は daemon の目標には含めていません。
+Hub の **終了待ちプロジェクト** には既知のプロジェクトの daemon 状態を表示します。
+**再確認** で更新し、**終了を再試行** で失敗した終了処理を再試行できます。対象は
+認証済みで終了処理中の GUI 管理 daemon に限り、GUI が接続していないことを確認します。
+所有者の変更やプロジェクトの再オープンで観測は無効になるため、再確認してください。
+常駐 daemon、接続中のプロジェクト、所有者を確認できない daemon はこの操作で
+終了できません。失敗理由は対象プロジェクトの `DaemonFault` に記録されます。
+
+macOS / Linux の daemon control は Unix ドメインソケット、Windows はローカル
+named pipe を使用します。private runtime 接続は認証され、認証情報は Rust と
+`~/.gwt` 配下の endpoint file 内に保持されます。Windows Service はインストール
+しません。手動起動した daemon は Ctrl-C、SIGTERM、または OS のコンソール終了
+signal で停止できます。
 
 ## Agent Workflow
 

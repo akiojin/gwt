@@ -11,7 +11,10 @@ use std::{
     fs::File,
     io::{self, Read},
     path::Path,
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Condvar, Mutex, RwLock,
+    },
 };
 
 use gwt_core::repo_hash::ProjectKey;
@@ -164,6 +167,10 @@ pub struct AuthenticatedSession {
 pub struct MobileConnection {
     authorization: Arc<RwLock<MobileAuthorization>>,
     session: Mutex<AuthenticatedSession>,
+    next_ticket: AtomicU64,
+    current_turn: Mutex<u64>,
+    turns_changed: Condvar,
+    order_failed: AtomicBool,
 }
 
 impl MobileConnection {
@@ -177,6 +184,10 @@ impl MobileConnection {
         Self {
             authorization,
             session: Mutex::new(session),
+            next_ticket: AtomicU64::new(0),
+            current_turn: Mutex::new(0),
+            turns_changed: Condvar::new(),
+            order_failed: AtomicBool::new(false),
         }
     }
 
@@ -203,6 +214,72 @@ impl MobileConnection {
             .read()
             .map_err(|_| AuthorizationError::Unavailable)?;
         authorization.dispatch(&mut session, project, sequence, now(), effect)
+    }
+}
+
+/// Internal scheduling order only, never accepted sequence or authorization.
+#[doc(hidden)]
+pub struct MobileInputTurn {
+    connection: Arc<MobileConnection>,
+    ticket: u64,
+    finished: bool,
+}
+
+impl MobileInputTurn {
+    pub fn wait(&self) -> Result<(), AuthorizationError> {
+        self.wait_with_observer(|| {})
+    }
+
+    #[doc(hidden)]
+    pub fn wait_with_observer(&self, on_wait: impl FnOnce()) -> Result<(), AuthorizationError> {
+        let mut turn = self
+            .connection
+            .current_turn
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        let mut on_wait = Some(on_wait);
+        loop {
+            if self.connection.order_failed.load(Ordering::Acquire) {
+                return Err(AuthorizationError::Unavailable);
+            }
+            if *turn == self.ticket {
+                return Ok(());
+            }
+            if let Some(on_wait) = on_wait.take() {
+                on_wait();
+            }
+            turn = self
+                .connection
+                .turns_changed
+                .wait(turn)
+                .map_err(|_| AuthorizationError::Unavailable)?;
+        }
+    }
+
+    pub fn finish(mut self) -> Result<(), AuthorizationError> {
+        let mut turn = self
+            .connection
+            .current_turn
+            .lock()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        if *turn != self.ticket {
+            return Err(AuthorizationError::Unavailable);
+        }
+        *turn = turn.checked_add(1).ok_or(AuthorizationError::Unavailable)?;
+        self.finished = true;
+        self.connection.turns_changed.notify_all();
+        Ok(())
+    }
+}
+
+impl Drop for MobileInputTurn {
+    fn drop(&mut self) {
+        if !self.finished {
+            // A dropped/failed worker must not strand a ticket gap or allow an
+            // out-of-order operation. A fresh authenticated connection is needed.
+            self.connection.order_failed.store(true, Ordering::Release);
+            self.connection.turns_changed.notify_all();
+        }
     }
 }
 
@@ -251,6 +328,42 @@ impl MobileInputRequest {
     }
     pub fn project(&self) -> &ProjectKey {
         &self.project
+    }
+
+    #[doc(hidden)]
+    pub fn book_turn(&self) -> Result<MobileInputTurn, AuthorizationError> {
+        if self.connection.order_failed.load(Ordering::Acquire) {
+            return Err(AuthorizationError::Unavailable);
+        }
+        let ticket = loop {
+            let current = self.connection.next_ticket.load(Ordering::Acquire);
+            let next = current
+                .checked_add(1)
+                .ok_or(AuthorizationError::Unavailable)?;
+            if self
+                .connection
+                .next_ticket
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break current;
+            }
+        };
+        Ok(MobileInputTurn {
+            connection: self.connection.clone(),
+            ticket,
+            finished: false,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn window_id(&self) -> &str {
+        &self.window_id
+    }
+
+    #[doc(hidden)]
+    pub fn data(&self) -> &str {
+        &self.data
     }
 
     /// Accept an operation at final synchronous dispatch, using current time

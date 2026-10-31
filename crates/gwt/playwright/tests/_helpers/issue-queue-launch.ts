@@ -140,6 +140,21 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
       if (daemon.exitCode === null && daemon.signalCode === null) throw new Error(`Owned fixture daemon ${daemon.pid} remained after shutdown`);
     }
   }
+  async function startDaemon(project: string, env: NodeJS.ProcessEnv) {
+    daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
+    let daemonErrors = "";
+    daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
+    daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
+    const until = Date.now() + 30_000;
+    while (Date.now() < until) {
+      if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`Fixture daemon exited: ${daemonErrors}`);
+      const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000, windowsHide: true,
+        input: JSON.stringify({ schema_version: 1, operation: "daemon.status", params: {} }) });
+      if (status.status === 0 && status.stdout.includes(String(daemon.pid))) return;
+      await delay(100);
+    }
+    throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
+  }
   let fixture;
   try {
     fixture = await startExactRelaunchFixture(info, {
@@ -157,19 +172,7 @@ export async function startIssueQueueLaunchFixture(info: TestInfo, options: {
           await writeFile(join(home, ".gwt/config.toml"), "[agent]\nterminal_close_grace_secs = 1\n");
         projectState = preferences;
         projectLogs = join(preferences, "..", "logs");
-        daemon = spawn(checkoutGwtd, [], { cwd: project, env, windowsHide: true, stdio: ["pipe", "ignore", "pipe"] });
-        let daemonErrors = "";
-        daemon.stderr?.on("data", chunk => { daemonErrors += chunk; });
-        daemon.stdin?.end(JSON.stringify({ schema_version: 1, operation: "daemon.start", params: {} }) + "\n");
-        const until = Date.now() + 30_000;
-        while (Date.now() < until) {
-          if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`Fixture daemon exited: ${daemonErrors}`);
-          const status = spawnSync(checkoutGwtd, [], { cwd: project, env, encoding: "utf8", timeout: 5_000, windowsHide: true,
-            input: JSON.stringify({ schema_version: 1, operation: "daemon.status", params: {} }) });
-          if (status.status === 0 && status.stdout.includes(String(daemon.pid))) return;
-          await delay(100);
-        }
-        throw new Error(`Fixture daemon readiness timed out: ${daemonErrors}`);
+        await startDaemon(project, env);
       },
       async prepare({ home, bin, project, env }) {
         auditEnv = env;
@@ -356,6 +359,20 @@ console.error('Unimplemented fixture gh: '+text);process.exit(64);
     return null;
   }
   return { ...active, get url() { return active.url; }, get ownedPid() { return active.ownedPid; },
+    async restartRuntime(ownerPid: number) {
+      if (daemon?.pid !== ownerPid) throw new Error("Saved switch host is not the owned fixture daemon");
+      // Quiet GUI reconnects before replacing the physical owner. Provider
+      // cleanup runs only after that owner has stopped driving the switch.
+      await active.stopGui();
+      await stopDaemon();
+      await active.stop();
+      await startDaemon(active.project, auditEnv);
+      if (daemon?.pid === ownerPid) throw new Error("Fixture runtime owner was not replaced");
+      await info.attach("runtime-owner-restart", {
+        body: JSON.stringify({ previous_owner_pid: ownerPid, new_owner_pid: daemon?.pid }), contentType: "application/json",
+      });
+      return active.start();
+    },
     issueNumber: issue.number, targetIssueNumber: options.targetIssueNumber, requests, comments, hookAudits, restoreSummary,
     actorEvents: async () => (await readFile(join(active.home, "switch-actor.jsonl"), "utf8").catch(() => ""))
       .split("\n").filter(Boolean).map(line => JSON.parse(line)),

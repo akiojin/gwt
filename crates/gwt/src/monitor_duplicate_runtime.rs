@@ -10,7 +10,7 @@ use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::Duration,
 };
 
@@ -141,43 +141,62 @@ pub fn capture_stop_request(
 
 /// The host owns the handles; this worker only retains exact captured references.
 /// No client connection, canvas snapshot or GUI event dispatch is needed.
+pub struct MonitorRuntimeReconciler {
+    stop: std::sync::mpsc::Sender<()>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for MonitorRuntimeReconciler {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::error!(target: "gwt.monitor.runtime", "Monitor runtime reconciliation worker failed during owner drain");
+            }
+        }
+    }
+}
+
 pub fn spawn(
-    open_projects: Arc<RwLock<BTreeMap<PathBuf, PathBuf>>>,
+    project_root: PathBuf,
+    sessions_dir: PathBuf,
     snapshot: impl Fn() -> Option<Vec<RegisteredMonitorRuntime>> + Send + 'static,
-) {
-    let result = std::thread::Builder::new()
+) -> io::Result<MonitorRuntimeReconciler> {
+    let (stop, stopped) = std::sync::mpsc::channel();
+    #[cfg(any(test, feature = "test-gh-guard"))]
+    let home = gwt_core::test_support::gwt_home_override();
+    let worker = std::thread::Builder::new()
         .name("gwt-monitor-runtime".into())
         .spawn(move || {
+            #[cfg(any(test, feature = "test-gh-guard"))]
+            let _home = home
+                .as_ref()
+                .map(gwt_core::test_support::ScopedGwtHome::set);
             let mut retained = BTreeMap::new();
-            let mut projects = BTreeMap::<PathBuf, PathBuf>::new();
+            let projects = BTreeMap::from([(project_root, sessions_dir)]);
             loop {
-                std::thread::sleep(Duration::from_secs(5));
-                // Remember projects independently of PTYs. In particular, a new
-                // host must purge old occupancy before it can admit its first PTY.
-                if let Ok(open) = open_projects.read() {
-                    projects.extend(
-                        open.iter()
-                            .map(|(root, sessions)| (root.clone(), sessions.clone())),
-                    );
+                let draining = match stopped.recv_timeout(Duration::from_secs(5)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+                };
+                if let Some(current) = snapshot() {
+                    for entry in current {
+                        let registration = &entry.registration;
+                        retained.insert(
+                            (registration.window_id.clone(), registration.incarnation),
+                            entry,
+                        );
+                    }
+                    reconcile_retained_projects(&projects, &mut retained);
                 }
-                let Some(current) = snapshot() else { continue };
-                for entry in current {
-                    let registration = &entry.registration;
-                    projects.insert(
-                        registration.project_root.clone(),
-                        registration.sessions_dir.clone(),
-                    );
-                    retained.insert(
-                        (registration.window_id.clone(), registration.incarnation),
-                        entry,
-                    );
+                if draining {
+                    break;
                 }
-                reconcile_retained_projects(&projects, &mut retained);
             }
-        });
-    if let Err(error) = result {
-        tracing::error!(target: "gwt.monitor.runtime", %error, "failed to start Monitor runtime reconciliation");
-    }
+        })?;
+    Ok(MonitorRuntimeReconciler {
+        stop,
+        worker: Some(worker),
+    })
 }
 
 fn reconcile_retained_projects(

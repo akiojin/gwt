@@ -135,6 +135,12 @@ fn summarize_ui_action_values<'a>(values: impl IntoIterator<Item = &'a str>) -> 
 
 pub(super) fn frontend_user_action_log(event: &FrontendEvent) -> Option<FrontendUserActionLog> {
     let log = match event {
+        FrontendEvent::RefreshOrphanDaemons => {
+            FrontendUserActionLog::new("refresh_orphan_daemons", "project")
+        }
+        FrontendEvent::ReapOrphanDaemon { .. } => {
+            FrontendUserActionLog::new("reap_orphan_daemon", "project")
+        }
         FrontendEvent::FrontendReady => FrontendUserActionLog::new("frontend_ready", "app"),
         FrontendEvent::RetryWorkspaceStateLoad => {
             FrontendUserActionLog::new("retry_workspace_state_load", "workspace")
