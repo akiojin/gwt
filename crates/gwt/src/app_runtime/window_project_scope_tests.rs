@@ -2,6 +2,9 @@
 fn project_window_list_and_stop_all_do_not_cross_project_owners() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
+    for name in ["a", "b"] {
+        fs::create_dir_all(temp.path().join(name)).unwrap();
+    }
     let tabs = vec![
         sample_project_tab(
             "tab-a",
@@ -30,6 +33,17 @@ fn project_window_list_and_stop_all_do_not_cross_project_owners() {
     );
     insert_test_pane_runtime(&mut runtime, &a_window);
     insert_test_pane_runtime(&mut runtime, &b_window);
+    let a_pane = owner_runtime_probe(&runtime, &a_window);
+    let b_pane = owner_runtime_probe(&runtime, &b_window);
+    let a_owner = project_owner_fixture(&mut runtime, &a_window);
+    let b_owner = project_owner_fixture(&mut runtime, &b_window);
+    for (tab_id, owner) in [("tab-a", &a_owner), ("tab-b", &b_owner)] {
+        let context = runtime.project_context(tab_id).unwrap();
+        let state = runtime.project_state_mut(&context).unwrap();
+        state.project_owner_connection_id = 1;
+        state.project_owner_identity = owner.client().identity().cloned();
+    }
+    runtime.blocking_tasks = BlockingTaskSpawner::queued().0;
 
     let listed = runtime.handle_frontend_event_for_project(
         &a,
@@ -51,11 +65,24 @@ fn project_window_list_and_stop_all_do_not_cross_project_owners() {
         "client-a".to_string(),
         FrontendEvent::StopAllWindows {},
     );
-    assert!(!runtime.runtimes.contains_key(&a_window));
+    drain_browser_owner_input(&mut runtime);
+    assert!(owner_fixture_block_on(a_owner.probe(&a_pane.id, a_pane.incarnation)).is_err());
+    assert!(a_pane.pty.try_wait().unwrap().is_some());
+    assert_eq!(runtime.window_status(&a_window), Some(WindowProcessStatus::Stopped));
+    let survivor = owner_fixture_block_on(b_owner.probe(&b_pane.id, b_pane.incarnation)).unwrap();
+    assert!(Arc::ptr_eq(&survivor.pty, &b_pane.pty));
+    assert!(survivor.pty.try_wait().unwrap().is_none());
+    owner_fixture_block_on(b_owner.command(gwt::project_runtime::events::OwnerCommand::Input {
+        id: survivor.id,
+        incarnation: survivor.incarnation,
+        data: b"still usable\n".to_vec(),
+    }))
+    .expect("B's actual owner still accepts input after stopping A");
     assert!(
         runtime.runtimes.contains_key(&b_window),
         "A's stop-all must leave B running"
     );
+    close_test_owner_runtime(&mut runtime, &b_window);
 }
 
 #[test]

@@ -886,3 +886,33 @@ test("Issue #3884 AC-3: RUNNING cell breaks out inline-terminal agents", async (
   applyTelemetryCounts(document, { running: 2 });
   assert.equal(inline()?.hidden, true);
 });
+
+// AC-5: the project owner lane is independent of the browser connection.
+test("project health renders its immutable latest frame without changing ONLINE", async () => {
+  const { subscribeProjectOwnerHealth } = await importOperatorShell();
+  const { document } = parseHTML(html);
+  const frames = new Set();
+  const model = createUiStateStore(null, {
+    scheduleFrame(callback) { frames.add(callback); return () => frames.delete(callback); },
+  });
+  const unsubscribe = subscribeProjectOwnerHealth(document, model);
+  const cell = document.querySelector("[data-project-owner-health]");
+  const initial = cell.dataset.state;
+  const health = { state: "degraded", detail: "Project connection lost" };
+  model.update(() => health);
+  health.state = "healthy";
+  assert.equal(cell.dataset.state, initial, "receive only commits immutable data until the display frame");
+  const flush = () => { const pending = [...frames]; frames.clear(); pending.forEach(callback => callback()); };
+  flush();
+  assert.equal(cell.dataset.state, "degraded");
+  assert.match(cell.textContent, /unavailable/i);
+  assert.equal(cell.title, "Project connection lost");
+  assert.equal(document.querySelector('[data-role="connection-label"]').textContent, "ONLINE");
+  model.update(() => ({ state: "healthy", detail: null }));
+  flush();
+  assert.equal(cell.dataset.state, "healthy");
+  assert.match(cell.textContent, /ready/i);
+  model.update(() => ({ state: "degraded" }));
+  unsubscribe();
+  assert.equal(frames.size, 0, "unmount cancels the pending frame");
+});

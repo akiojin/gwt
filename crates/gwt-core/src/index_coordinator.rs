@@ -2476,7 +2476,13 @@ impl HeavyLease {
 impl Drop for HeavyLease {
     fn drop(&mut self) {
         self.settle();
-        // Kernel heavy lock releases when `_lock_file` drops.
+        // Close alone can leave a forked/duplicated handle holding the lock.
+        // Retire our slot before its legacy compatibility barrier, while other
+        // holders and successors keep their independently opened locks.
+        let _ = fs2::FileExt::unlock(&self._lock_file);
+        if let Some(file) = &self._compatibility_file {
+            let _ = fs2::FileExt::unlock(file);
+        }
     }
 }
 
@@ -3491,6 +3497,82 @@ mod tests {
         if let Some(hook) = hook {
             hook();
         }
+    }
+
+    #[test]
+    fn verification_pool_drop_releases_locks_with_retained_handle_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = IndexCoordinator::open_verification(tmp.path(), 2).unwrap();
+        let first = own(
+            &coordinator,
+            &TargetKey::verification("repo", "first"),
+            JobPriority::ManualRebuild,
+        );
+        let second = own(
+            &coordinator,
+            &TargetKey::verification("repo", "second"),
+            JobPriority::ManualRebuild,
+        );
+        let first_lease = first.acquire_heavy(Duration::ZERO).unwrap();
+        let second_lease = second.acquire_heavy(Duration::ZERO).unwrap();
+        // Model a fork/duplicate retaining the same open file description.
+        let slot_alias = first_lease._lock_file.try_clone().unwrap();
+        let root_alias = first_lease
+            ._compatibility_file
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        let ticket = first_lease.ticket_path.clone();
+        let probe = open_lock_file(&first_lease.storage.join("heavy.lock")).unwrap();
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        drop(first_lease);
+        assert!(!ticket.exists());
+        let reduced = IndexCoordinator::open_verification(tmp.path(), 1).unwrap();
+        let status = reduced.heavy_pool_status().unwrap();
+        assert_eq!((status.used, status.available), (1, 0));
+        fs2::FileExt::try_lock_exclusive(&probe).expect("released slot is physically free");
+        fs2::FileExt::unlock(&probe).unwrap();
+        let root_probe = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&root_probe).unwrap_err()
+        ));
+        drop(second_lease);
+        fs2::FileExt::try_lock_exclusive(&root_probe)
+            .expect("retained compatibility alias must not block legacy holders");
+        fs2::FileExt::unlock(&root_probe).unwrap();
+        let successor = first.acquire_heavy(Duration::ZERO).unwrap();
+        drop((slot_alias, root_alias));
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        drop(successor);
+        fs2::FileExt::try_lock_exclusive(&probe).unwrap();
+    }
+
+    #[test]
+    fn exclusive_heavy_release_unlocks_a_retained_handle_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let coordinator = open(tmp.path());
+        let owner = own(
+            &coordinator,
+            &verification_key(),
+            JobPriority::ManualRebuild,
+        );
+        let lease = owner.acquire_heavy(Duration::ZERO).unwrap();
+        let alias = lease._lock_file.try_clone().unwrap();
+        lease.release().unwrap();
+        let probe = open_lock_file(&coordinator.heavy_lock_path()).unwrap();
+        fs2::FileExt::try_lock_exclusive(&probe).expect("explicit release unlocks the root lease");
+        fs2::FileExt::unlock(&probe).unwrap();
+        let successor = owner.acquire_heavy(Duration::ZERO).unwrap();
+        drop(alias);
+        assert!(is_contended(
+            &fs2::FileExt::try_lock_exclusive(&probe).unwrap_err()
+        ));
+        drop(successor);
     }
 
     #[test]

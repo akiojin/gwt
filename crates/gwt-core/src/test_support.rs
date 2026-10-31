@@ -686,6 +686,12 @@ impl WindowsRealGwtFixture {
         self.child.as_ref().expect("running gwt child").id()
     }
 
+    /// Borrow the fixture-owned process handle for exact Windows birth and lineage proof.
+    pub fn process_handle(&self) -> std::os::windows::io::BorrowedHandle<'_> {
+        use std::os::windows::io::AsHandle;
+        self.child.as_ref().expect("running gwt child").as_handle()
+    }
+
     pub fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path)
             .unwrap_or_else(|error| format!("<unreadable: {error}>"))

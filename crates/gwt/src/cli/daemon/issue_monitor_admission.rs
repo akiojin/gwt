@@ -11,11 +11,11 @@ pub(super) fn spawn(
     test_hooks: super::IssueMonitorWorkerTestHooks,
 ) -> tokio::task::JoinHandle<Result<IssueMonitorState, IssueMonitorScanFailure>> {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-gh-guard"))]
         if let Some(admission) = &test_hooks.admission_override {
             return admission(monitor);
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-gh-guard")))]
         let _ = test_hooks;
         // Leave time for the driver's durable proposal commit. A failed
         // observation defers only that row instead of exhausting this deadline.
