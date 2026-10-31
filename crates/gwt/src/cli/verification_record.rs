@@ -13727,6 +13727,13 @@ fn default_integration_test_builds_a_guarded_binary() {
         let home = tempfile::tempdir().expect("isolated gwt home");
         let _home = ScopedEnvVar::set("HOME", home.path());
         let _userprofile = ScopedEnvVar::set("USERPROFILE", home.path());
+        // This fixture verifies generation recovery, independently of host disk pressure.
+        fs::create_dir_all(home.path().join(".gwt")).unwrap();
+        fs::write(
+            gwt_config::Settings::global_config_path_for_home(home.path()),
+            "[verification]\ndisk_budget_bytes=0\n[build_artifact_gc]\nbelow_bytes=0\nbelow_percent=0\n",
+        )
+        .unwrap();
         let dir = tempfile::tempdir().expect("generation-scoped predecessor repository");
         crate::cli::trusted_store::init_git_repo_with_origin(dir.path());
         let owner = generation_scoped_owner();
@@ -13793,8 +13800,12 @@ fn default_integration_test_builds_a_guarded_binary() {
         .unwrap();
         assert_eq!(code, 0, "{output}");
         let completed = load(dir.path()).unwrap().unwrap();
-        assert_eq!(completed.execution_binding.as_ref(), Some(&successor));
-        assert!(completed.all_passed);
+        assert_eq!(
+            completed.execution_binding.as_ref(),
+            Some(&successor),
+            "{output}"
+        );
+        assert!(completed.all_passed, "{output}");
         assert_eq!(
             evaluate_evidence(dir.path(), "session-successor", Some(2359)),
             EvidenceStatus::Fresh
