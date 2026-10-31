@@ -548,6 +548,27 @@ fn fresh_execution_queued_session_start_rejects_foreign_identity() {
     fixture
         .owner
         .transport_event(gwt::project_transport::TransportEvent::RuntimeHook(early));
+    fixture.executor.block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the valid queued SessionStart's actual completion before a separate positive HTTP resend; no scheduler delay or elapsed-time assertion.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let active = fixture
+                    .owner
+                    .probe(&fixture.captured.id, fixture.captured.incarnation)
+                    .await
+                    .expect("the queued SessionStart's exact runtime");
+                if active.readiness_watch.is_none()
+                    && !active.readiness_inflight
+                    && active.pending_fresh_execution.is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the valid queued SessionStart must complete actual readiness");
+    });
     commit_owner_fresh_readiness(&fixture);
     assert_eq!(
         gwt::cli::execution_state::current_execution_binding(&fixture.repo, fixture.authority)
