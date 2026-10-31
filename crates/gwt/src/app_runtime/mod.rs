@@ -15536,6 +15536,32 @@ impl AppRuntime {
             } else {
                 detail.into()
             };
+            if let Some(delivery_id) = feedback.issue_monitor_delivery_id.as_ref() {
+                if matches!(
+                    self.issue_monitor_launch_deliveries.get(delivery_id),
+                    Some(IssueMonitorLaunchDeliveryState::Materializing { window_id: pending, .. })
+                        if pending == window_id
+                ) {
+                    // Keep the original failure out of placeholder recovery while
+                    // the physical owner retains its delivery/cleanup authority.
+                    let fresh_execution = self.failed_fresh_execution_monitor_candidate(
+                        Some(&context.project_root),
+                        issue_number,
+                        delivery_id,
+                    );
+                    self.issue_monitor_launch_deliveries.insert(
+                        delivery_id.clone(),
+                        IssueMonitorLaunchDeliveryState::LaunchFailed {
+                            message: message.clone(),
+                            session_mode: feedback
+                                .issue_monitor_session_mode
+                                .unwrap_or(gwt_agent::SessionMode::Normal),
+                            retryable: true,
+                            fresh_execution,
+                        },
+                    );
+                }
+            }
             events.push(OutboundEvent::project(
                 context.project_key.clone(),
                 BackendEvent::IssueMonitorLaunchFailed {

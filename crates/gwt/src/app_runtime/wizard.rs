@@ -4648,15 +4648,20 @@ impl AppRuntime {
         self.issue_monitor_launch_preparations
             .remove(&issue_monitor_launch_preparation_key(&context, &request));
         if let Some(delivery_id) = request.delivery_id {
-            self.issue_monitor_launch_deliveries.insert(
-                delivery_id,
-                super::IssueMonitorLaunchDeliveryState::LaunchFailed {
-                    message: error.clone(),
-                    session_mode: gwt_agent::SessionMode::Normal,
-                    retryable: true,
-                    fresh_execution: None,
-                },
-            );
+            if !matches!(
+                self.issue_monitor_launch_deliveries.get(&delivery_id),
+                Some(super::IssueMonitorLaunchDeliveryState::LaunchFailed { .. })
+            ) {
+                self.issue_monitor_launch_deliveries.insert(
+                    delivery_id,
+                    super::IssueMonitorLaunchDeliveryState::LaunchFailed {
+                        message: error.clone(),
+                        session_mode: gwt_agent::SessionMode::Normal,
+                        retryable: true,
+                        fresh_execution: None,
+                    },
+                );
+            }
         }
         vec![OutboundEvent::project(
             context.project_key,
