@@ -388,13 +388,18 @@ pub(super) fn run_owned_sender(
     Ok(())
 }
 
+fn file_lock_is_busy(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn reconcile_auto_status(store: &FeedbackStore, id: &str) -> io::Result<AutoFeedbackRecord> {
     if store.read_auto(id)?.owned.is_some() {
         return store.reconcile_owned_auto(id);
     }
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read_auto(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read_auto(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
@@ -418,7 +423,7 @@ fn process_auto_with(
 ) -> io::Result<AutoFeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read_auto(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read_auto(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
@@ -579,7 +584,7 @@ fn process_with(
 ) -> io::Result<FeedbackRecord> {
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read(id),
+        Err(error) if file_lock_is_busy(&error) => return store.read(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read(id)?;
@@ -764,10 +769,7 @@ fn acquire_upstream_lock(
             .map_err(OwnerMutationError::PreSubmit)?;
         match fs2::FileExt::try_lock_exclusive(&lock) {
             Ok(()) => return Ok(lock),
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-            {
+            Err(error) if file_lock_is_busy(&error) => {
                 std::thread::sleep(remaining.min(Duration::from_millis(100)));
             }
             Err(error) => return Err(failure(error)),
@@ -939,6 +941,26 @@ mod tests {
 
         const CHILD_TEST: &str = "cli::feedback::tests::loopback::child";
         const TOKEN: &str = "gwt-loopback-dummy-token";
+        const STAGE_FILE: &str = "loopback-stage";
+
+        fn mark_stage(home: &Path, stage: u8) {
+            std::fs::write(home.join(STAGE_FILE), [stage])
+                .expect("write the fixed loopback diagnostic stage");
+        }
+
+        fn read_stage(path: &Path) -> Option<u8> {
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .ok()?
+                .take(2)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            if bytes.len() == 1 && bytes[0] <= 7 {
+                Some(bytes[0])
+            } else {
+                None
+            }
+        }
 
         #[derive(serde::Serialize, serde::Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -970,22 +992,23 @@ mod tests {
             let attempt = uuid::Uuid::parse_str(&input.attempt).unwrap();
             assert!(!attempt.is_nil());
             assert!(!uuid::Uuid::parse_str(&input.id).unwrap().is_nil());
+            mark_stage(&input.home, 1);
             let _home = gwt_core::test_support::ScopedGwtHome::set(&input.home);
+            mark_stage(&input.home, 2);
             let store = FeedbackStore::new(input.home.join("feedback"));
             let _sender = store.try_sender_lock(&input.id).unwrap();
             let snapshot = store.read_auto(&input.id).unwrap().snapshot;
+            mark_stage(&input.home, 3);
             let endpoint = format!("http://{}", input.address);
             // Explicit dummy credentials and numeric loopback only. This does
             // not attach the global budget or invoke environment authentication.
             use gwt_github::client::http::{HttpIssueClient, ReqwestTransport};
-            let client = HttpIssueClient::with_transport(
-                ReqwestTransport::new().unwrap(),
-                TOKEN.into(),
-                "akiojin",
-                "gwt",
-            )
-            .with_test_endpoints(&endpoint, format!("{endpoint}/graphql"), true)
-            .unwrap();
+            let transport = ReqwestTransport::new().unwrap();
+            mark_stage(&input.home, 4);
+            let client = HttpIssueClient::with_transport(transport, TOKEN.into(), "akiojin", "gwt")
+                .with_test_endpoints(&endpoint, format!("{endpoint}/graphql"), true)
+                .unwrap();
+            mark_stage(&input.home, 5);
             let outcome = send_auto_to_upstream_checked(
                 &client,
                 &snapshot,
@@ -993,9 +1016,11 @@ mod tests {
                 &|| owned_operation_gate(&store, &input.id, attempt, false, &|| Ok(())),
                 &|| owned_operation_gate(&store, &input.id, attempt, true, &|| Ok(())),
             );
+            mark_stage(&input.home, 6);
             store
                 .finish_owned_attempt(&input.id, attempt, outcome)
                 .unwrap();
+            mark_stage(&input.home, 7);
         }
 
         struct ExactChild(Child);
@@ -1033,6 +1058,7 @@ mod tests {
         fn receive(
             listener: &TcpListener,
             child: &mut Child,
+            stage_path: &Path,
         ) -> (TcpStream, String, serde_json::Value, Instant) {
             // test-hygiene: allow-wall-clock-deadline Bound real loopback accept/header/body I/O with one original guard.
             let end = Instant::now() + Duration::from_secs(30);
@@ -1043,10 +1069,9 @@ mod tests {
                         break stream;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            child.try_wait().unwrap().is_none(),
-                            "test child exited before expected HTTP"
-                        );
+                        if let Some(status) = child.try_wait().unwrap() {
+                            panic!("test child exited before expected HTTP; success={} code={:?} native_u32={:?} stage={:?}", status.success(), status.code(), status.code().map(|value| value as u32), read_stage(stage_path));
+                        }
                         // test-hygiene: allow-wall-clock-deadline Detect missing real HTTP without extending the socket guard.
                         assert!(Instant::now() < end, "expected loopback request was absent");
                         std::thread::sleep(Duration::from_millis(100));
@@ -1138,6 +1163,8 @@ mod tests {
             for comment in [false, true] {
                 for outcome in ["crash", "cancel", "success"] {
                     let home = tempfile::tempdir().unwrap();
+                    let stage_path = home.path().join(STAGE_FILE);
+                    mark_stage(home.path(), 0);
                     let store = FeedbackStore::new(home.path().join("feedback"));
                     let (record, _) = store
                         .submit_owned_auto(
@@ -1186,7 +1213,7 @@ mod tests {
                     assert!(input.len() <= 4096);
                     child.0.stdin.take().unwrap().write_all(&input).unwrap();
                     let (mut read_socket, line, query, mut read_end) =
-                        receive(&listener, &mut child.0);
+                        receive(&listener, &mut child.0, &stage_path);
                     assert!(
                         line == "POST /graphql HTTP/1.1",
                         "unexpected discovery request line"
@@ -1200,7 +1227,8 @@ mod tests {
                     let listing = serde_json::json!({"data":{"repository":{"issues":connection(if comment {serde_json::json!([issue(&record.snapshot,false)])} else {serde_json::json!([])})}}});
                     let last_read = if comment {
                         respond(read_socket, 200, listing.clone(), read_end);
-                        let (socket, line, query, end) = receive(&listener, &mut child.0);
+                        let (socket, line, query, end) =
+                            receive(&listener, &mut child.0, &stage_path);
                         assert!(
                             line == "POST /graphql HTTP/1.1",
                             "unexpected discovery request line"
@@ -1240,7 +1268,8 @@ mod tests {
                             OwnedAutoPhase::CancelAccepted
                         );
                     } else {
-                        let (socket, line, body, end) = receive(&listener, &mut child.0);
+                        let (socket, line, body, end) =
+                            receive(&listener, &mut child.0, &stage_path);
                         assert!(
                             line == if comment {
                                 "POST /repos/akiojin/gwt/issues/42/comments HTTP/1.1"
@@ -1269,6 +1298,10 @@ mod tests {
                             child.0.kill().unwrap();
                             assert!(!wait_child(&mut child.0).unwrap().success());
                             drop(socket);
+                            // Voluntary fixture-owner release must not depend
+                            // on being the final descriptor (e.g. parallel fork).
+                            let owner_alias = owner.try_clone().unwrap();
+                            fs2::FileExt::unlock(&owner).unwrap();
                             drop(owner);
                             let recovered = store.reconcile_owned_auto(&id).unwrap();
                             assert_eq!(recovered.state, FeedbackState::Uncertain);
@@ -1285,6 +1318,7 @@ mod tests {
                                 store.reconcile_owned_auto(&id).unwrap().state,
                                 FeedbackState::Uncertain
                             );
+                            drop(owner_alias);
                         } else {
                             let comment_body = serde_json::json!({"id":7,"databaseId":7,"body":record.snapshot.render_issue(),"updated_at":"2026-10-31T00:00:00Z","updatedAt":"2026-10-31T00:00:00Z"});
                             let mut created = issue(&record.snapshot, true);
@@ -1299,7 +1333,8 @@ mod tests {
                                 },
                                 end,
                             );
-                            let (socket, line, query, end) = receive(&listener, &mut child.0);
+                            let (socket, line, query, end) =
+                                receive(&listener, &mut child.0, &stage_path);
                             assert!(
                                 line == "POST /graphql HTTP/1.1",
                                 "unexpected readback request line"
@@ -1803,25 +1838,28 @@ mod tests {
                 chrono::Utc::now(),
             )
             .unwrap();
-        let backup = storage.with_file_name("feedback-before-save-failure");
+        let receipt_path = store.path(&record.snapshot.id()).unwrap();
+        let backup = dir.path().join("feedback-before-save-failure.json");
+        let mut before_save_failure = None;
         assert!(process_auto_with(
             &store,
             &record.snapshot.id(),
             || Ok(true),
             |snapshot| {
-                assert_eq!(
-                    store.read_auto(&snapshot.id()).unwrap().state,
-                    FeedbackState::Sending
-                );
-                std::fs::rename(&storage, &backup).unwrap();
-                std::fs::write(&storage, "blocked storage").unwrap();
+                let sending = store.read_auto(&snapshot.id()).unwrap();
+                assert_eq!(sending.state, FeedbackState::Sending);
+                before_save_failure = Some(sending);
+                std::fs::rename(&receipt_path, &backup)
+                    .expect("back up the closed Sending receipt");
+                std::fs::create_dir(&receipt_path).expect("obstruct the post-remote local save");
                 Ok(42)
             },
         )
         .is_err());
-        std::fs::remove_file(&storage).unwrap();
-        std::fs::rename(&backup, &storage).unwrap();
+        std::fs::remove_dir(&receipt_path).unwrap();
+        std::fs::rename(&backup, &receipt_path).unwrap();
         let record = store.read_auto(&record.snapshot.id()).unwrap();
+        assert_eq!(Some(&record), before_save_failure.as_ref());
         assert_eq!(record.state, FeedbackState::Sending);
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();

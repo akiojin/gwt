@@ -191,36 +191,28 @@ fn owned_commit_is_durable_and_remote_success_survives_unknown_cleanup() {
     let id = record.snapshot.id();
     let attempt = uuid::Uuid::new_v4();
     let _owner = store.try_owner_lock(&id).unwrap();
-    let backup = dir.path().join("feedback-backup");
+    let receipt = store.path(&id).unwrap();
+    let backup = dir.path().join("receipt-backup.json");
     let block_save = || {
-        fs::rename(&storage, &backup)?;
-        fs::write(&storage, "blocked storage")
+        // Keep the live owner/sender/dispatch lock files in their directory.
+        // A failed setup must not masquerade as a publication failure.
+        fs::rename(&receipt, &backup).expect("back up the closed receipt");
+        fs::create_dir(&receipt).expect("obstruct the receipt publication target");
+        Ok(())
     };
     assert!(store.begin_owned_attempt(&id, attempt, block_save).is_err());
-    fs::remove_file(&storage).unwrap();
-    fs::rename(&backup, &storage).unwrap();
+    fs::remove_dir(&receipt).unwrap();
+    fs::rename(&backup, &receipt).unwrap();
     assert_eq!(store.read_auto(&id).unwrap(), record);
     store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
     store.check_owned_attempt(&id, attempt, || Ok(())).unwrap();
+    let pre_dispatch = store.read_auto(&id).unwrap();
     assert!(store
-        .commit_owned_attempt(&id, attempt, || {
-            fs::rename(&storage, &backup)?;
-            fs::write(&storage, "blocked storage")
-        })
+        .commit_owned_attempt(&id, attempt, block_save)
         .is_err());
-    fs::remove_file(&storage).unwrap();
-    fs::rename(&backup, &storage).unwrap();
-    assert_eq!(
-        store
-            .read_auto(&id)
-            .unwrap()
-            .owned
-            .unwrap()
-            .attempt
-            .unwrap()
-            .phase,
-        OwnedAutoPhase::PreDispatch
-    );
+    fs::remove_dir(&receipt).unwrap();
+    fs::rename(&backup, &receipt).unwrap();
+    assert_eq!(store.read_auto(&id).unwrap(), pre_dispatch);
     store.commit_owned_attempt(&id, attempt, || Ok(())).unwrap();
     assert_eq!(
         store
