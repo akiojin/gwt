@@ -116,7 +116,7 @@ pub fn run<E: super::CliEnv>(
     Ok(0)
 }
 
-fn auto_policy(root: &Path) -> Result<bool, AutoReason> {
+pub(super) fn auto_policy(root: &Path) -> Result<bool, AutoReason> {
     crate::issue_monitor::load_issue_monitor_prefs(
         &crate::issue_monitor::issue_monitor_prefs_path_for_repo_path(root),
     )
@@ -139,12 +139,15 @@ fn render_auto_result(
 ) -> Result<i32, gwt_github::SpecOpsError> {
     let id = record.snapshot.id();
     let receipt = store.path(&id).map_err(|_| safe_storage_error())?;
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "request_id": id, "mode": "auto", "state": record.state,
         "issue_number": record.issue_number,
         "issue_url": record.issue_number.map(|number| format!("https://github.com/akiojin/gwt/issues/{number}")),
         "receipt": receipt, "error": record.error,
     });
+    if let Some(owned) = &record.owned {
+        value["owned"] = serde_json::to_value(owned).map_err(|_| safe_storage_error())?;
+    }
     let _ = writeln!(out, "{value}");
     Ok(0)
 }
@@ -158,6 +161,11 @@ fn detach_auto<E: super::CliEnv>(
         return Ok(record);
     }
     if env.spawn_feedback_worker(&record.snapshot.id()).is_err() {
+        if record.owned.is_some() {
+            // Native failure can follow child creation or a lost acceptance
+            // acknowledgement. Preserve uncertainty rather than enabling retry.
+            return store.reconcile_owned_auto(&record.snapshot.id());
+        }
         // Do not overwrite a child that acquired the sender lock before a
         // parent's stdin/spawn failure was observed.
         if let Ok(_lock) = store.try_sender_lock(&record.snapshot.id()) {
@@ -181,6 +189,12 @@ fn run_auto_create<E: super::CliEnv>(
     out: &mut String,
 ) -> Result<i32, gwt_github::SpecOpsError> {
     let now = chrono::Utc::now();
+    #[cfg(windows)]
+    let submitted = match withheld {
+        Some(reason) => store.submit_owned_auto_withheld(report, now, reason),
+        None => store.submit_owned_auto(report, now),
+    };
+    #[cfg(not(windows))]
     let submitted = match withheld {
         Some(reason) => store.submit_auto_withheld(report, now, reason),
         None => store.submit_auto(report, now),
@@ -213,6 +227,26 @@ fn run_auto_existing<E: super::CliEnv>(
         )
         .map_err(|_| safe_storage_error())?,
         FeedbackCommand::Retry { id } => {
+            if store
+                .read_auto(&id)
+                .map_err(|_| safe_storage_error())?
+                .owned
+                .is_some()
+            {
+                #[cfg(not(windows))]
+                return Err(safe_storage_error());
+                #[cfg(windows)]
+                {
+                    let record = store
+                        .retry_owned_auto(&id, || {
+                            require_auto(&|| auto_policy(&root)).map_err(|_| owned_io_error())
+                        })
+                        .map_err(|_| safe_storage_error())?;
+                    let record =
+                        detach_auto(env, store, record).map_err(|_| safe_storage_error())?;
+                    return render_auto_result(store, &record, out);
+                }
+            }
             let record = {
                 let _lock = store
                     .try_sender_lock(&id)
@@ -250,13 +284,124 @@ fn require_auto(policy: &impl Fn() -> Result<bool, AutoReason>) -> Result<(), Au
     }
 }
 
+#[cfg(any(windows, test))]
+fn owned_io_error() -> io::Error {
+    io::Error::other("automatic feedback ownership unavailable")
+}
+
+#[cfg(windows)]
+pub(super) fn owned_store(root: &Path) -> FeedbackStore {
+    FeedbackStore::new(gwt_core::paths::gwt_project_dir_for_repo_path(root).join("feedback"))
+}
+
+#[cfg(windows)]
+fn owned_sender_gate(
+    store: &FeedbackStore,
+    root: &Path,
+    received: &super::feedback_owner_bootstrap::ReceivedBootstrap,
+    mutation: bool,
+) -> Result<(), AutoReason> {
+    let authorize = || {
+        received
+            .descriptor
+            .clock
+            .remaining_work()
+            .map_err(|_| AutoReason::PreSubmitFailed)?;
+        require_auto(&|| auto_policy(root))?;
+        if !received
+            .owner_alive()
+            .map_err(|_| AutoReason::SenderInterrupted)?
+        {
+            return Err(AutoReason::SenderInterrupted);
+        }
+        received
+            .descriptor
+            .clock
+            .remaining_work()
+            .map_err(|_| AutoReason::PreSubmitFailed)?;
+        Ok(())
+    };
+    owned_operation_gate(
+        store,
+        &received.descriptor.receipt_id.to_string(),
+        received.descriptor.attempt_id,
+        mutation,
+        &authorize,
+    )
+}
+
+#[cfg(any(windows, test))]
+fn owned_operation_gate(
+    store: &FeedbackStore,
+    id: &str,
+    attempt: uuid::Uuid,
+    mutation: bool,
+    authorize: &impl Fn() -> Result<(), AutoReason>,
+) -> Result<(), AutoReason> {
+    use std::cell::Cell;
+    let reason = Cell::new(AutoReason::SenderInterrupted);
+    let checked = || {
+        authorize().map_err(|error| {
+            reason.set(error);
+            owned_io_error()
+        })
+    };
+    let result = if mutation {
+        store.commit_owned_attempt(id, attempt, checked)
+    } else {
+        store.check_owned_attempt(id, attempt, checked)
+    };
+    result.map(|_| ()).map_err(|_| reason.get())
+}
+
+#[cfg(windows)]
+pub(super) fn run_owned_sender(
+    root: &Path,
+    received: &super::feedback_owner_bootstrap::ReceivedBootstrap,
+) -> io::Result<()> {
+    use gwt_core::feedback::auto_report::OwnedAutoReason;
+    use gwt_github::client::http::HttpIssueClient;
+    let store = owned_store(root);
+    let id = received.descriptor.receipt_id.to_string();
+    let attempt = received.descriptor.attempt_id;
+    let _sender = store.try_sender_lock(&id)?;
+    // One projection of the original D0, shared by auth/admission/GET/both POSTs.
+    let deadline = received.descriptor.clock.resolution_deadline()?;
+    let read = || owned_sender_gate(&store, root, received, false);
+    let commit = || owned_sender_gate(&store, root, received, true);
+    let outcome = (|| {
+        read()?;
+        let _ = received.acknowledge();
+        let client = HttpIssueClient::from_noninteractive_env("akiojin", "gwt")
+            .map_err(|_| AutoReason::AuthUnavailable)?;
+        let record = store
+            .read_auto(&id)
+            .map_err(|_| AutoReason::SenderInterrupted)?;
+        send_auto_to_upstream_checked(&client, &record.snapshot, &deadline, &read, &commit)
+    })();
+    if outcome.is_err() && deadline.remaining("automatic feedback work").is_err() {
+        // Use the actual shared deadline, rather than guessing from a process
+        // disappearing just before the driver's next QPC sample.
+        store.cancel_owned_attempt(&id, attempt, OwnedAutoReason::WorkDeadline)?;
+    }
+    store.finish_owned_attempt(&id, attempt, outcome)?;
+    Ok(())
+}
+
 fn reconcile_auto_status(store: &FeedbackStore, id: &str) -> io::Result<AutoFeedbackRecord> {
+    if store.read_auto(id)?.owned.is_some() {
+        return store.reconcile_owned_auto(id);
+    }
     let _lock = match store.try_sender_lock(id) {
         Ok(lock) => lock,
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => return store.read_auto(id),
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
+    if record.owned.is_some() {
+        drop(_lock);
+        return store.reconcile_owned_auto(id);
+    }
     if record.state == FeedbackState::Sending {
         record.state = FeedbackState::Uncertain;
         record.error = Some(AutoReason::SenderInterrupted);
@@ -277,6 +422,11 @@ fn process_auto_with(
         Err(error) => return Err(error),
     };
     let mut record = store.read_auto(id)?;
+    if record.owned.is_some() {
+        return Err(io::Error::other(
+            "owned feedback requires the private inherited sender",
+        ));
+    }
     if record.state == FeedbackState::Sending {
         record.state = FeedbackState::Uncertain;
         record.error = Some(AutoReason::SenderInterrupted);
@@ -393,6 +543,11 @@ fn submit<E: super::CliEnv>(
 }
 
 pub(super) fn spawn_worker(root: &Path, id: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    if matches!(owned_store(root).read_entry(id)?, StoredFeedback::Auto(record) if record.owned.is_some())
+    {
+        return super::feedback_supervisor::spawn_owner(root, id);
+    }
     let envelope = serde_json::to_vec(
         &serde_json::json!({"schema_version":1,"operation":"feedback.process","params":{"id":id}}),
     )?;
@@ -514,9 +669,20 @@ pub(super) fn send_auto_to_upstream_with_deadline(
     root: &Path,
     deadline: &ResolutionDeadline,
 ) -> Result<u64, AutoReason> {
-    require_auto(&|| auto_policy(root))?;
+    let policy = || require_auto(&|| auto_policy(root));
+    send_auto_to_upstream_checked(client, snapshot, deadline, &policy, &policy)
+}
+
+fn send_auto_to_upstream_checked(
+    client: &impl OwnerRepositoryClient,
+    snapshot: &SafeAutoSnapshot,
+    deadline: &ResolutionDeadline,
+    before_read: &impl Fn() -> Result<(), AutoReason>,
+    before_mutation: &impl Fn() -> Result<(), AutoReason>,
+) -> Result<u64, AutoReason> {
+    before_read()?;
     let _lock = acquire_upstream_lock(deadline).map_err(auto_send_error)?;
-    require_auto(&|| auto_policy(root))?;
+    before_read()?;
     if !snapshot.report().sendable() {
         return Err(AutoReason::InsufficientInformation);
     }
@@ -539,6 +705,7 @@ pub(super) fn send_auto_to_upstream_with_deadline(
             && issue.title == title
             && issue.body.contains("\"safe_auto_v1\"")
     }) {
+        before_read()?;
         let comments = client
             .list_comments(&repository, issue.number, deadline)
             .map_err(|_| AutoReason::PreSubmitFailed)?;
@@ -549,14 +716,14 @@ pub(super) fn send_auto_to_upstream_with_deadline(
         {
             // Re-evaluate after auth, lock admission and remote reads, directly
             // before the mutation. A revoked Auto job never enters consent.
-            require_auto(&|| auto_policy(root))?;
+            before_mutation()?;
             client
                 .create_owner_comment(&repository, issue.number, &body, deadline)
                 .map_err(auto_send_error)?;
         }
         Ok(issue.number.0)
     } else {
-        require_auto(&|| auto_policy(root))?;
+        before_mutation()?;
         client
             .create_owner_issue(
                 &repository,
@@ -754,6 +921,232 @@ mod tests {
         },
         FakeIssueClient, IssueNumber, IssueState, UpdatedAt,
     };
+
+    #[test]
+    fn owned_receipts_cannot_enter_the_public_direct_sender() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FeedbackStore::new(dir.path().join("feedback"));
+        let (record, _) = store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::VerifyRun),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let path = store.path(&record.snapshot.id()).unwrap();
+        let mut owned = serde_json::to_value(&record).unwrap();
+        owned["owned"] = serde_json::json!({"version":"v1","attempt":null});
+        std::fs::write(&path, serde_json::to_vec(&owned).unwrap()).unwrap();
+        let pending = store.read_auto(&record.snapshot.id()).unwrap();
+        let result = process_auto_with(
+            &store,
+            &record.snapshot.id(),
+            || Ok(true),
+            |_| panic!("owned receipt requires the private inherited sender binding"),
+        );
+        assert!(result.is_err());
+        assert_eq!(store.read_auto(&record.snapshot.id()).unwrap(), pending);
+    }
+
+    #[test]
+    fn auto_mutation_gate_covers_issue_and_comment_but_not_verified_readback() {
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for comment in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let client = FakeIssueClient::new();
+            let issue = RepositoryIssue {
+                repository: RepositoryIdentity::gwt_upstream(),
+                number: IssueNumber(42),
+                title: record.snapshot.report().title(),
+                body: "\"safe_auto_v1\"".into(),
+                labels: vec![],
+                state: IssueState::Open,
+                kind: RepositoryIssueKind::Plain,
+                updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+            };
+            if comment {
+                client.seed_repository_issue(issue.clone());
+            }
+            let deadline = ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30));
+            assert_eq!(
+                send_auto_to_upstream_checked(
+                    &client,
+                    &record.snapshot,
+                    &deadline,
+                    &|| Ok(()),
+                    &|| Err(AutoReason::SenderInterrupted),
+                ),
+                Err(AutoReason::SenderInterrupted)
+            );
+            assert_eq!(client.owner_mutation_count(), 0);
+            client.seed_repository_issue(RepositoryIssue {
+                body: record.snapshot.marker(),
+                ..issue
+            });
+            assert_eq!(
+                send_auto_to_upstream_checked(
+                    &client,
+                    &record.snapshot,
+                    &deadline,
+                    &|| Ok(()),
+                    &|| panic!("verified marker readback requires no new POST"),
+                )
+                .unwrap(),
+                42
+            );
+            assert_eq!(client.owner_mutation_count(), 0);
+        }
+    }
+
+    #[test]
+    fn late_read_return_cannot_bypass_cancellation_or_renew_the_original_budget() {
+        use super::super::feedback_owner_bootstrap::{Bootstrap, Clock, CreationIdentity};
+        use gwt_core::feedback::auto_report::{OwnedAutoPhase, OwnedAutoReason};
+        use std::cell::Cell;
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for cancel in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_owned_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyRun),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let id = record.snapshot.id();
+            let attempt = uuid::Uuid::new_v4();
+            let descriptor = Bootstrap::supervisor(
+                uuid::Uuid::parse_str(&id).unwrap(),
+                attempt,
+                uuid::Uuid::new_v4(),
+                Clock {
+                    d0_ticks: 10_000,
+                    frequency: 1_000,
+                },
+            );
+            let sender = descriptor.sender(CreationIdentity { pid: 1, created: 1 });
+            assert_eq!(sender.clock, descriptor.clock);
+            let _owner = store.try_owner_lock(&id).unwrap();
+            store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+            let now = Cell::new(10_000);
+            let authorize = || {
+                sender
+                    .clock
+                    .remaining_work_at(now.get(), 1_000)
+                    .map(|_| ())
+                    .map_err(|_| AutoReason::PreSubmitFailed)
+            };
+            // Admission before auth and subsequent reads shares the same D0.
+            owned_operation_gate(&store, &id, attempt, false, &authorize).unwrap();
+            let read = || owned_operation_gate(&store, &id, attempt, false, &authorize);
+            let commit = || {
+                // The GET has returned; the cancellation/deadline wins before
+                // its late result is allowed to enter the mutation gate.
+                if cancel {
+                    store
+                        .cancel_owned_attempt(&id, attempt, OwnedAutoReason::Cancelled)
+                        .unwrap();
+                } else {
+                    now.set(125_000);
+                }
+                owned_operation_gate(&store, &id, attempt, true, &authorize)
+            };
+            let client = FakeIssueClient::new();
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &read,
+                &commit,
+            );
+            assert!(outcome.is_err());
+            assert_eq!(client.owner_mutation_count(), 0);
+            let finished = store.finish_owned_attempt(&id, attempt, outcome).unwrap();
+            assert_eq!(finished.snapshot, record.snapshot);
+            assert_eq!(
+                finished.owned.unwrap().attempt.unwrap().phase,
+                OwnedAutoPhase::CancelAccepted
+            );
+        }
+    }
+
+    #[test]
+    fn owned_issue_and_comment_after_submit_failures_keep_the_commit_uncertain() {
+        use gwt_core::feedback::auto_report::OwnedAutoPhase;
+        let _guard = gwt_core::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().unwrap();
+        let _home = gwt_core::test_support::ScopedGwtHome::set(home.path());
+        for comment in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = FeedbackStore::new(dir.path().join("feedback"));
+            let (record, _) = store
+                .submit_owned_auto(
+                    SafeAutoReport::current(KnownOperation::VerifyPlan),
+                    chrono::Utc::now(),
+                )
+                .unwrap();
+            let id = record.snapshot.id();
+            let attempt = uuid::Uuid::new_v4();
+            let owner = store.try_owner_lock(&id).unwrap();
+            store.begin_owned_attempt(&id, attempt, || Ok(())).unwrap();
+            let client = FakeIssueClient::new();
+            if comment {
+                client.seed_repository_issue(RepositoryIssue {
+                    repository: RepositoryIdentity::gwt_upstream(),
+                    number: IssueNumber(42),
+                    title: record.snapshot.report().title(),
+                    body: "\"safe_auto_v1\"".into(),
+                    labels: vec![],
+                    state: IssueState::Open,
+                    kind: RepositoryIssueKind::Plain,
+                    updated_at: UpdatedAt(chrono::Utc::now().to_rfc3339()),
+                });
+            }
+            client.fail_next_owner_operation(
+                if comment {
+                    OwnerRepositoryOperation::CreateComment
+                } else {
+                    OwnerRepositoryOperation::CreateIssue
+                },
+                OwnerRepositoryFaultTiming::AfterSubmit,
+                ApiError::Unexpected("unmarked private remote failure".into()),
+            );
+            let outcome = send_auto_to_upstream_checked(
+                &client,
+                &record.snapshot,
+                &ResolutionDeadline::new(Duration::from_secs(5), Duration::from_secs(30)),
+                &|| owned_operation_gate(&store, &id, attempt, false, &|| Ok(())),
+                &|| owned_operation_gate(&store, &id, attempt, true, &|| Ok(())),
+            );
+            assert_eq!(outcome, Err(AutoReason::RemoteOutcomeUnknown));
+            assert_eq!(client.owner_mutation_count(), 1);
+            let finished = store.finish_owned_attempt(&id, attempt, outcome).unwrap();
+            assert_eq!(finished.state, FeedbackState::Uncertain);
+            assert_eq!(finished.snapshot, record.snapshot);
+            assert_eq!(
+                finished.owned.unwrap().attempt.unwrap().phase,
+                OwnedAutoPhase::DispatchCommitted
+            );
+            drop(owner);
+            assert!(store.retry_owned_auto(&id, || Ok(())).is_err());
+        }
+    }
 
     #[test]
     fn auto_policy_revocation_and_unknown_authority_withhold_without_sending() {
@@ -1095,8 +1488,18 @@ mod tests {
         .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(receipt["mode"], "auto");
-        assert_eq!(receipt["state"], "failed");
-        assert_eq!(receipt["error"], "worker_unavailable");
+        assert_eq!(
+            receipt["state"],
+            if cfg!(windows) { "uncertain" } else { "failed" }
+        );
+        assert_eq!(
+            receipt["error"],
+            if cfg!(windows) {
+                "sender_interrupted"
+            } else {
+                "worker_unavailable"
+            }
+        );
         assert!(!output.contains(secret));
         assert!(
             !std::fs::read_to_string(receipt["receipt"].as_str().unwrap())
@@ -1126,13 +1529,19 @@ mod tests {
         .unwrap();
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();
+        // Existing legacy Auto receipts keep their direct-process contract on
+        // every OS; fresh Windows owned intake has separate native coverage.
+        let store = FeedbackStore::new(
+            gwt_core::paths::gwt_project_dir_for_repo_path(dir.path()).join("feedback"),
+        );
+        let (legacy, _) = store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
+                chrono::Utc::now(),
+            )
+            .unwrap();
         let mut created = String::new();
-        run(
-            &mut env,
-            FeedbackCommand::Create(Box::new(sample.input)),
-            &mut created,
-        )
-        .unwrap();
+        render_auto_result(&store, &legacy, &mut created).unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&created).unwrap();
         let id = receipt["request_id"].as_str().unwrap();
         let secret = "unmarked remote failure body 684672";
@@ -1268,12 +1677,17 @@ mod tests {
         let mut env = super::super::TestEnv::new(dir.path().join("cache"));
         env.repo_path = dir.path().to_path_buf();
         let mut output = String::new();
-        run(
-            &mut env,
-            FeedbackCommand::Create(Box::new(sample.input.clone())),
-            &mut output,
-        )
-        .unwrap();
+        let legacy_store = FeedbackStore::new(
+            gwt_core::paths::gwt_project_dir_for_repo_path(dir.path()).join("feedback"),
+        );
+        let (legacy, _) = legacy_store
+            .submit_auto(
+                SafeAutoReport::current(KnownOperation::classify(&sample.input.operation)),
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        let legacy = detach_auto(&mut env, &legacy_store, legacy).unwrap();
+        render_auto_result(&legacy_store, &legacy, &mut output).unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         let id = receipt["request_id"].as_str().unwrap();
         let store = FeedbackStore::new(
@@ -1324,14 +1738,21 @@ mod tests {
         .unwrap();
         let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(receipt["state"], "withheld");
-        run(
+        let retry = run(
             &mut env,
             FeedbackCommand::Retry {
                 id: receipt["request_id"].as_str().unwrap().into(),
             },
             &mut String::new(),
-        )
-        .unwrap();
+        );
+        if cfg!(windows) {
+            assert!(
+                retry.is_err(),
+                "owned unknown facts cannot mint a new attempt"
+            );
+        } else {
+            retry.unwrap();
+        }
         assert_eq!(
             env.feedback_worker_ids.len(),
             2,
