@@ -564,7 +564,7 @@ fn windows_regression_slices_build_each_harness_once_and_gate_all_filters() {
             assert!(feedback["continue-on-error"].is_null());
             let feedback_run = feedback["run"].as_str().unwrap();
             assert!(feedback_run.contains("node scripts/ci-windows-tests.mjs run-lib gwt lib gwt cli::feedback -- --test-threads=1 --nocapture | tee \"$RUNNER_TEMP/feedback-ownership.log\""));
-            assert!(feedback_run.contains("grep -Fq 'test result: ok. 36 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
+            assert!(feedback_run.contains("grep -Fq 'test result: ok. 38 passed; 0 failed; 0 ignored;' \"$RUNNER_TEMP/feedback-ownership.log\""));
             assert_eq!(
                 steps[build + 3]["name"].as_str(),
                 Some("Run native fleet orphan process handle contracts"),
