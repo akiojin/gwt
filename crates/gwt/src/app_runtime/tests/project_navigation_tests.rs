@@ -4,16 +4,7 @@ use super::*;
 fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast() {
     let temp = tempdir().expect("tempdir");
     let _gwt_home = ScopedGwtHome::set(temp.path());
-    let tab = sample_project_tab(
-        "tab-1",
-        "Repo",
-        temp.path().to_path_buf(),
-        ProjectKind::Git,
-        &[WindowPreset::Agent],
-    );
-    let mut runtime = sample_runtime(temp.path(), vec![tab], Some("tab-1"));
-    let agent_id = combined_window_id("tab-1", "agent-1");
-    insert_test_pane_runtime(&mut runtime, &agent_id);
+    let (mut runtime, owner_probe, agent_id) = owner_browser_input_fixture(temp.path());
 
     let events = runtime.handle_frontend_event(
         "client-1".to_string(),
@@ -30,13 +21,14 @@ fn app_runtime_update_terminal_grid_resizes_runtime_without_workspace_broadcast(
             .all(|event| !matches!(event.event, BackendEvent::WorkspaceState { .. })),
         "embedded terminal grid resize must not broadcast window metadata"
     );
-    let pane = runtime
-        .runtimes
-        .get(&agent_id)
-        .expect("runtime")
-        .pane
-        .lock()
-        .expect("pane");
+    let acknowledgements = drain_browser_owner_input(&mut runtime);
+    assert!(
+        acknowledgements
+            .iter()
+            .all(|event| !matches!(event.event, BackendEvent::WorkspaceState { .. })),
+        "the exact owner resize acknowledgement does not broadcast layout"
+    );
+    let pane = owner_probe.pane.lock().expect("pane");
     assert_eq!(pane.screen().size(), (34, 112));
 }
 
@@ -64,10 +56,7 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
 
     // Simulate the frontend's real xterm fit having sized each PTY.
     for window_id in [&shell_id, &claude_id] {
-        runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
+        owner_runtime_probe(&runtime, window_id)
             .pane
             .lock()
             .expect("pane")
@@ -83,13 +72,8 @@ fn app_runtime_cycle_focus_preserves_real_fit_pty_size() {
     );
 
     for window_id in [&shell_id, &claude_id] {
-        let pane = runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane");
+        let owner_probe = owner_runtime_probe(&runtime, window_id);
+        let pane = owner_probe.pane.lock().expect("pane");
         assert_eq!(
             pane.screen().size(),
             (REAL_ROWS, REAL_COLS),
@@ -124,10 +108,7 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
     const REAL_ROWS: u16 = 31;
 
     for window_id in [&shell_id, &claude_id] {
-        runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
+        owner_runtime_probe(&runtime, window_id)
             .pane
             .lock()
             .expect("pane")
@@ -144,13 +125,8 @@ fn app_runtime_activate_window_tab_preserves_real_fit_pty_size() {
             > workspace.window("shell-1").expect("shell").z_index
     );
     for window_id in [&shell_id, &claude_id] {
-        let pane = runtime
-            .runtimes
-            .get(window_id)
-            .expect("runtime")
-            .pane
-            .lock()
-            .expect("pane");
+        let owner_probe = owner_runtime_probe(&runtime, window_id);
+        let pane = owner_probe.pane.lock().expect("pane");
         assert_eq!(
             pane.screen().size(),
             (REAL_ROWS, REAL_COLS),

@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    pty::{PendingPty, PtyHandle, SpawnConfig},
+    pty::{CursorPositionReport, PendingPty, PtyHandle, SpawnConfig},
     TerminalError,
 };
 
@@ -37,6 +37,35 @@ const MAX_INCOMPLETE_ESCAPE_TAIL: usize = 1_024;
 /// never mistakes a restarted pane's first chunks for chunks an older
 /// snapshot of the same window already covered.
 static NEXT_OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+#[derive(Default)]
+struct TerminalCallbacks {
+    cursor_report: Option<CursorPositionReport>,
+}
+
+impl vt100::Callbacks for TerminalCallbacks {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        i1: Option<u8>,
+        i2: Option<u8>,
+        params: &[&[u16]],
+        c: char,
+    ) {
+        if i1.is_none() && i2.is_none() && params == [&[6][..]] && c == 'n' {
+            let (row, col) = screen.cursor_position();
+            self.cursor_report = Some(CursorPositionReport::from_screen_position(row, col));
+        }
+    }
+}
+
+/// Display bytes and protocol replies from one bounded PTY read.
+pub struct PaneOutput {
+    pub data: Vec<u8>,
+    pub cursor_reports: Vec<CursorPositionReport>,
+}
 
 /// Trailing screen rows folded into the logged PTY exit record, and the
 /// character budget that keeps one log line readable (Issue #3341).
@@ -124,7 +153,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 pub struct Pane {
     id: String,
     pty: Arc<PtyHandle>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalCallbacks>,
     status: PaneStatus,
     /// Direct child pid captured at spawn. Kept separately because the pid is
     /// no longer reliably readable from the handle once the child is reaped,
@@ -145,6 +174,9 @@ pub struct Pane {
     /// so a client that resets to the snapshot continues the sequence with
     /// the next chunk exactly like the pane's own parser does.
     incomplete_escape_tail: Vec<u8>,
+    // At most the three-byte prefix of the one query answered by this pane.
+    // Keep it off the public stream until the parser confirms the final byte.
+    cursor_query_prefix: Vec<u8>,
     /// Reconnects frequently request the same idle screen. Serialize it once
     /// until output or a successful resize changes the parser state.
     snapshot_cache: OnceLock<Vec<u8>>,
@@ -174,12 +206,18 @@ impl PendingPane {
         Ok(Pane {
             id: self.id,
             pty,
-            parser: vt100::Parser::new(self.rows, self.cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT),
+            parser: vt100::Parser::new_with_callbacks(
+                self.rows,
+                self.cols,
+                SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+                TerminalCallbacks::default(),
+            ),
             status: PaneStatus::Running,
             child_pid,
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            cursor_query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -194,7 +232,11 @@ impl PendingPane {
     }
 }
 
-fn resize_parser_preserving_state(parser: &mut vt100::Parser, rows: u16, cols: u16) {
+fn resize_parser_preserving_state<CB: vt100::Callbacks>(
+    parser: &mut vt100::Parser<CB>,
+    rows: u16,
+    cols: u16,
+) {
     parser.screen_mut().set_size(rows, cols);
 }
 
@@ -250,11 +292,25 @@ impl Pane {
 
     /// Create a new pane from a fully resolved PTY spawn configuration.
     pub fn new_with_spawn_config(id: String, config: SpawnConfig) -> Result<Self, TerminalError> {
+        Self::new_with_spawn_config_and_attempt_observer(id, config, || {})
+    }
+
+    /// Observe the OS child-spawn attempt while constructing this pane.
+    pub fn new_with_spawn_config_and_attempt_observer(
+        id: String,
+        config: SpawnConfig,
+        on_attempt: impl FnOnce(),
+    ) -> Result<Self, TerminalError> {
         let rows = config.rows;
         let cols = config.cols;
-        let pty = Arc::new(PtyHandle::spawn(config)?);
+        let pty = Arc::new(PtyHandle::spawn_with_attempt_observer(config, on_attempt)?);
         let child_pid = pty.process_id();
-        let parser = vt100::Parser::new(rows, cols, SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
+        let parser = vt100::Parser::new_with_callbacks(
+            rows,
+            cols,
+            SNAPSHOT_SCROLLBACK_REPLAY_LIMIT,
+            TerminalCallbacks::default(),
+        );
 
         Ok(Self {
             id,
@@ -265,6 +321,7 @@ impl Pane {
             last_exit: None,
             output_seq: 0,
             incomplete_escape_tail: Vec::new(),
+            cursor_query_prefix: Vec::new(),
             snapshot_cache: OnceLock::new(),
         })
     }
@@ -278,9 +335,34 @@ impl Pane {
         gate_args_prefix: Vec<String>,
         nonce: impl Into<String>,
     ) -> Result<PendingPane, TerminalError> {
+        Self::new_pending_with_spawn_config_and_attempt_observer(
+            id,
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            || {},
+        )
+    }
+
+    /// Observe the pending gate's actual OS child-spawn attempt.
+    pub fn new_pending_with_spawn_config_and_attempt_observer(
+        id: String,
+        config: SpawnConfig,
+        gate_program: PathBuf,
+        gate_args_prefix: Vec<String>,
+        nonce: impl Into<String>,
+        on_attempt: impl FnOnce(),
+    ) -> Result<PendingPane, TerminalError> {
         let rows = config.rows;
         let cols = config.cols;
-        let pty = PtyHandle::spawn_pending(config, gate_program, gate_args_prefix, nonce)?;
+        let pty = PtyHandle::spawn_pending_with_attempt_observer(
+            config,
+            gate_program,
+            gate_args_prefix,
+            nonce,
+            on_attempt,
+        )?;
         Ok(PendingPane {
             id,
             rows,
@@ -317,8 +399,77 @@ impl Pane {
     /// without bound on output that never reached a `\n`).
     pub fn process_bytes(&mut self, data: &[u8]) {
         self.snapshot_cache.take();
-        // Update vt100 screen state
         self.parser.process(data);
+        self.parser.callbacks_mut().cursor_report.take();
+        self.record_parsed_output(data);
+    }
+
+    /// Parse physical output and consume only canonical DSRs this parser handled.
+    /// Their public CAN placeholder also cancels an earlier incomplete escape,
+    /// preserving parser state without replaying a query to another responder.
+    /// The caller writes the typed replies after releasing the pane mutex.
+    pub fn process_owner_output(&mut self, data: &[u8]) -> PaneOutput {
+        self.snapshot_cache.take();
+        let mut output = PaneOutput {
+            data: Vec::with_capacity(data.len() + self.cursor_query_prefix.len()),
+            cursor_reports: Vec::new(),
+        };
+        let mut prefix = std::mem::take(&mut self.cursor_query_prefix);
+        let mut offset = 0;
+        while offset < data.len() {
+            if prefix.is_empty() {
+                let plain = data[offset..]
+                    .iter()
+                    .position(|byte| *byte == 0x1b)
+                    .unwrap_or(data.len() - offset);
+                if plain != 0 {
+                    let bytes = &data[offset..offset + plain];
+                    self.parser.process(bytes);
+                    self.parser.callbacks_mut().cursor_report.take();
+                    if output.cursor_reports.is_empty() {
+                        self.pty.discard_startup_cursor_preanswer();
+                    }
+                    output.data.extend_from_slice(bytes);
+                    offset += plain;
+                    continue;
+                }
+            }
+            let byte = data[offset];
+            offset += 1;
+            self.parser.process(std::slice::from_ref(&byte));
+            let report = self.parser.callbacks_mut().cursor_report.take();
+            prefix.push(byte);
+            if prefix == CURSOR_POSITION_QUERY {
+                if let Some(report) = report {
+                    output.cursor_reports.push(report);
+                    output.data.push(0x18);
+                } else {
+                    output.data.extend_from_slice(&prefix);
+                }
+                prefix.clear();
+            } else if !CURSOR_POSITION_QUERY.starts_with(&prefix) {
+                let trailing_escape = prefix.last() == Some(&0x1b);
+                let public_len = prefix.len() - usize::from(trailing_escape);
+                output.data.extend_from_slice(&prefix[..public_len]);
+                prefix.clear();
+                if trailing_escape {
+                    prefix.push(0x1b);
+                }
+            }
+            // The native query precedes public child output. Once output
+            // progressed, even a later query back at 1;1 needs its own reply.
+            // Output after a query in this same read must not discard that
+            // query's preanswer before the caller writes its captured reports.
+            if !output.data.is_empty() && output.cursor_reports.is_empty() {
+                self.pty.discard_startup_cursor_preanswer();
+            }
+        }
+        self.cursor_query_prefix = prefix;
+        self.record_parsed_output(data);
+        output
+    }
+
+    fn record_parsed_output(&mut self, data: &[u8]) {
         // Issue #4909: publish the child's bracketed-paste mode on the shared
         // PTY handle, where prompt injection reads it without the pane lock.
         self.pty
@@ -352,6 +503,18 @@ impl Pane {
             // as abandoned rather than letting the tail grow unbounded.
             self.incomplete_escape_tail.clear();
         }
+    }
+
+    /// At physical EOF an unfinished candidate cannot become a handled query.
+    /// Publish its original bytes once, with a fresh stream position.
+    pub fn finish_owner_output(&mut self) -> Vec<u8> {
+        if self.cursor_query_prefix.is_empty() {
+            return Vec::new();
+        }
+        self.pty.discard_startup_cursor_preanswer();
+        self.snapshot_cache.take();
+        self.output_seq = NEXT_OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        std::mem::take(&mut self.cursor_query_prefix)
     }
 
     /// Get the current vt100 screen.
@@ -397,7 +560,14 @@ impl Pane {
                     .parser
                     .screen()
                     .snapshot_formatted(SNAPSHOT_SCROLLBACK_REPLAY_LIMIT);
-                snapshot.extend_from_slice(&self.incomplete_escape_tail);
+                // A withheld DSR prefix belongs to the physical terminal, not
+                // a reconnecting frontend. Other unfinished escapes retain
+                // their existing snapshot continuation contract.
+                if self.cursor_query_prefix.is_empty()
+                    || self.incomplete_escape_tail != self.cursor_query_prefix
+                {
+                    snapshot.extend_from_slice(&self.incomplete_escape_tail);
+                }
                 snapshot
             })
             .clone()
@@ -1591,6 +1761,99 @@ mod tests {
         assert!(first.output_seq() > second.output_seq());
         let _ = first.kill();
         let _ = second.kill();
+    }
+
+    #[test]
+    fn owner_output_consumes_each_split_cursor_query_at_its_actual_cursor() {
+        let _pty_guard = lock_pty_test();
+        let mut pane = test_pane_with_rows("owner-cursor-query", 6, sleep_command("60"));
+        for split in 0..=CURSOR_POSITION_QUERY.len() {
+            pane.process_owner_output(b"\x1b[4;8H");
+            let first = pane.process_owner_output(&CURSOR_POSITION_QUERY[..split]);
+            if split < CURSOR_POSITION_QUERY.len() {
+                assert!(first.data.is_empty());
+            }
+            if (1..CURSOR_POSITION_QUERY.len()).contains(&split) {
+                assert!(first.cursor_reports.is_empty());
+                assert!(!pane
+                    .snapshot_bytes()
+                    .ends_with(&CURSOR_POSITION_QUERY[..split]));
+            }
+            let second = pane.process_owner_output(&CURSOR_POSITION_QUERY[split..]);
+            let displayed: Vec<_> = first.data.into_iter().chain(second.data).collect();
+            assert_eq!(displayed, b"\x18");
+            let reports: Vec<_> = first
+                .cursor_reports
+                .into_iter()
+                .chain(second.cursor_reports)
+                .collect();
+            assert_eq!(
+                reports,
+                vec![CursorPositionReport::from_screen_position(3, 7)]
+            );
+            let following = pane.process_owner_output(b"x");
+            assert_eq!(following.data, b"x");
+            assert!(
+                following.cursor_reports.is_empty(),
+                "a query is consumed once"
+            );
+        }
+
+        let output = pane.process_owner_output(b"\x1b[2;3H\x1b[6nabc\x1b[6n");
+        assert_eq!(output.data, b"\x1b[2;3H\x18abc\x18");
+        assert_eq!(
+            output.cursor_reports,
+            vec![
+                CursorPositionReport::from_screen_position(1, 2),
+                CursorPositionReport::from_screen_position(1, 5),
+            ]
+        );
+        assert!(pane.process_owner_output(b"").cursor_reports.is_empty());
+
+        // A new ESC aborts a preceding incomplete escape. Consuming its DSR
+        // must also leave the public parser ready for the following text.
+        for (original, expected) in [
+            (b"\x1b\x1b[6nX".as_slice(), b"\x1b\x18X".as_slice()),
+            (b"\x1b[\x1b[6nX".as_slice(), b"\x1b[\x18X".as_slice()),
+        ] {
+            pane.process_bytes(b"\x1bc");
+            let output = pane.process_owner_output(original);
+            assert_eq!(
+                output.cursor_reports.len(),
+                1,
+                "the interrupted query remains owned"
+            );
+            assert_eq!(output.data, expected);
+            let mut public = vt100::Parser::new(6, 80, 0);
+            public.process(&output.data);
+            assert_eq!(public.screen().contents(), "X");
+            assert_eq!(public.screen().contents(), pane.screen().contents());
+            assert_eq!(
+                public.screen().cursor_position(),
+                pane.screen().cursor_position()
+            );
+        }
+
+        // Ordinary ANSI, UTF-8, OSC and queries not owned by this handler keep
+        // their exact bytes, including arbitrary read boundaries.
+        let original =
+            "\x1b]0;title [6n\x07通常\x1b[31mred\x1b[0m\x1b[06n\x1b[?6n\x1b[6K".as_bytes();
+        let mut displayed = Vec::new();
+        for byte in original {
+            let output = pane.process_owner_output(std::slice::from_ref(byte));
+            displayed.extend(output.data);
+            assert!(output.cursor_reports.is_empty());
+            assert!(pane.cursor_query_prefix.len() < CURSOR_POSITION_QUERY.len());
+        }
+        assert_eq!(displayed, original);
+        let partial = pane.process_owner_output(b"\x1b[6");
+        assert!(partial.data.is_empty());
+        assert!(partial.cursor_reports.is_empty());
+        let before_eof = pane.output_seq();
+        assert_eq!(pane.finish_owner_output(), b"\x1b[6");
+        assert!(pane.output_seq() > before_eof);
+        assert!(pane.finish_owner_output().is_empty());
+        let _ = pane.kill();
     }
 
     #[test]

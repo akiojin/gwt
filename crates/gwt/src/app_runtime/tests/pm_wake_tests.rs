@@ -199,7 +199,25 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
     let context = runtime.project_context_for_root(&repo).unwrap();
     runtime.pm_agent_idle_wake_events(&context);
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    let pm = owner_runtime_probe(&runtime, &pm_id);
+    pm.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("PreToolUse", "{}")
+            .expect("the actual PM starts a managed turn before delivery");
+    });
+    assert_eq!(
+        gwt_agent::SessionRuntimeState::load(&gwt_agent::runtime_state_path(
+            &runtime.sessions_dir,
+            &registered_pm_session_id(&repo),
+        ))
+        .unwrap()
+        .status,
+        gwt_agent::AgentStatus::Running,
+        "the native PM is busy before its queued idle notification is delivered"
+    );
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
         gwt::pm_registry::load_pm_loop_state(&gwt::pm_registry::pm_loop_state_path_for_repo_path(
@@ -210,7 +228,11 @@ fn agent_idle_wake_rechecks_a_pm_turn_started_before_physical_delivery() {
         .is_none(),
         "a new PM turn must retain the queued edge instead of submitting it"
     );
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    pm.with_agent_environment(|| {
+        gwt::daemon_runtime::handle_runtime_state("Stop", "{}")
+            .expect("the actual PM completes its managed turn");
+    });
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(
         runtime
             .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
@@ -300,7 +322,20 @@ fn agent_idle_wake_completion_ignores_a_replaced_pm_pane() {
     };
     assert_eq!(tasks.lock().unwrap().len(), 1);
     let tasks = Arc::clone(tasks);
+    let previous = owner_runtime_probe(&runtime, &pm_id);
+    let owner = project_owner_fixture(&mut runtime, &pm_id);
+    owner_fixture_block_on(
+        owner.command(gwt::project_runtime::events::OwnerCommand::Close {
+            id: previous.id.clone(),
+            incarnation: previous.incarnation,
+        }),
+    )
+    .expect("retire the actual PM before replacing it at the same GUI id");
+    assert!(previous.pty.tree_exit_confirmed());
     let _replacement = attach_live_pm_pane(&mut runtime, &pm_id);
+    let successor = owner_runtime_probe(&runtime, &pm_id);
+    assert_ne!(successor.incarnation, previous.incarnation);
+    assert!(!Arc::ptr_eq(&successor.pty, &previous.pty));
     runtime.blocking_tasks = BlockingTaskSpawner::Queued(tasks);
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(gwt::pm_registry::load_pm_loop_state(
@@ -355,8 +390,11 @@ fn agent_idle_wake_is_immediate_and_rearms_only_after_running() {
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T02:00:00Z")
         .is_some());
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T03:00:00Z")
         .is_none());
@@ -430,12 +468,15 @@ fn codex_capacity_wake_waits_for_pm_but_drops_a_recovered_pane() {
     let id = "tab-1::other-window";
     let screen = "■ Selected model is at capacity";
     runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     runtime.observe_provider_api_error(id, Some(screen));
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:00Z")
         .is_none());
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     write_pm_pause_fixture(&repo, true);
     assert!(runtime
         .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:01:00Z")
@@ -543,7 +584,10 @@ fn agent_idle_wake_survives_busy_pm_and_recent_loop_clock() {
         },
     )
     .unwrap();
-    runtime.handle_runtime_hook_event(runtime_hook_state("running", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state(
+        "running",
+        &registered_pm_session_id(&repo),
+    ));
     runtime.handle_runtime_hook_event(runtime_hook_state("running", "other-session"));
     runtime.handle_runtime_hook_event(runtime_hook_state("idle", "other-session"));
     assert!(
@@ -556,7 +600,7 @@ fn agent_idle_wake_survives_busy_pm_and_recent_loop_clock() {
         .unwrap()
         .last_wake_at
         .is_none());
-    runtime.handle_runtime_hook_event(runtime_hook_state("idle", "pm-session-live"));
+    runtime.handle_runtime_hook_event(runtime_hook_state("idle", &registered_pm_session_id(&repo)));
     assert!(
         runtime
             .pm_agent_idle_wake_decision_at(&repo, "2026-08-10T01:00:30Z")
@@ -890,8 +934,21 @@ fn pm_wake_busy_deferral_is_bounded_for_running_but_not_for_waiting() {
 
     seed_quiet_standing_supervision(&repo);
     let _pane = attach_live_pm_pane(&mut runtime, &pm_window_id);
-    let runtime_path = gwt_agent::runtime_state_path(&runtime.sessions_dir, "pm-session-live");
-    let mut observed = gwt_agent::SessionRuntimeState::new(gwt_agent::AgentStatus::Running);
+    let physical = owner_runtime_probe(&runtime, &pm_window_id);
+    let owner = project_owner_fixture(&mut runtime, &pm_window_id);
+    let running = owner_runtime_status_event(&owner, &physical, "Running", "PreToolUse");
+    runtime.handle_project_owner_event(
+        &runtime.test_context(),
+        1,
+        owner.client().identity().unwrap(),
+        running,
+    );
+    runtime.window_last_output_at.remove(&pm_window_id);
+    let runtime_path =
+        gwt_agent::runtime_state_path(&runtime.sessions_dir, &registered_pm_session_id(&repo));
+    let mut observed = gwt_agent::SessionRuntimeState::load(&runtime_path)
+        .expect("the actual registered PM's physical runtime record");
+    observed.status = gwt_agent::AgentStatus::Running;
     observed.runtime_incarnation = Some(runtime.runtimes[&pm_window_id].incarnation);
     observed.source_event = Some("Stop".into());
     observed.last_activity_at = "2026-08-10T00:00:00Z".parse().unwrap();
@@ -1026,7 +1083,8 @@ fn pm_wake_never_fires_without_a_live_registered_pm_or_with_monitor_off() {
 
     // No registration at all: nothing to wake.
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister");
+    gwt::pm_registry::deregister_pm(&prefs_path, &registered_pm_session_id(&repo))
+        .expect("deregister");
     let escalated_again = [
         pm_wake_inbox_item(42, gwt::MonitorInboxState::NeedsHuman),
         pm_wake_inbox_item(43, gwt::MonitorInboxState::NeedsHuman),
@@ -1187,7 +1245,6 @@ fn malformed_or_old_quiet_timestamps_can_select_a_prompt_but_never_refresh_head(
     )
     .expect("monitor prefs for stable remote identity");
     let prefs_path = gwt::pm_registry::pm_prefs_path_for_repo_path(&repo);
-    gwt::pm_registry::deregister_pm(&prefs_path, "pm-session-live").expect("deregister old PM");
     gwt::pm_registry::try_register_pm(
         &prefs_path,
         pm_registration_fixture("pm-session-live", &pm_worktree),
@@ -1779,7 +1836,7 @@ fn live_pm_pane_fixture_drains_input_and_reaps_its_child_at_scope_exit() {
     let (_repo, mut runtime, window_id) = pm_wake_fixture(&temp);
     let pty = {
         let _fixture = attach_live_pm_pane(&mut runtime, &window_id);
-        let pty = runtime.runtimes[&window_id].pty.clone();
+        let pty = owner_runtime_probe(&runtime, &window_id).pty.clone();
         // Cross the macOS canonical queue limit without submitting a line.
         pty.write_input(&[b'x'; 4096]).expect("drain unsent input");
         pty
@@ -1809,11 +1866,9 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
 
     let compose = runtime.terminal_input_events(&pm_window_id, "ちゃんとbunx/npxで実行されてい");
     assert!(compose.is_empty());
+    drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
-        runtime
-            .runtimes
-            .get(&pm_window_id)
-            .expect("live PM pane")
+        owner_runtime_probe(&runtime, &pm_window_id)
             .pane
             .lock()
             .expect("pane lock")
@@ -1824,10 +1879,7 @@ fn periodic_wake_does_not_inject_while_pm_pane_has_unsent_input() {
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
     assert_pm_pane_is_not_in_protected_inject(&runtime, &pm_window_id);
     assert!(
-        runtime
-            .runtimes
-            .get(&pm_window_id)
-            .expect("live PM pane")
+        owner_runtime_probe(&runtime, &pm_window_id)
             .pane
             .lock()
             .expect("pane lock")
@@ -1877,10 +1929,7 @@ fn periodic_wake_injects_immediately_when_the_pm_composer_is_empty() {
 
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
     drain_pm_wake_delivery_tasks(&mut runtime);
-    let pty = runtime
-        .runtimes
-        .get(&pm_window_id)
-        .expect("live PM pane")
+    let pty = owner_runtime_probe(&runtime, &pm_window_id)
         .pane
         .lock()
         .expect("pane lock")
@@ -1904,6 +1953,8 @@ fn held_supervision_tick_is_discarded_until_a_full_interval_after_submit() {
     // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; all quiet boundaries advance that clock rather than waiting.
     let start = Instant::now() - Duration::from_secs(1000);
     let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+    let owner = runtime.test_project_owners[&repo].clone();
+    owner_fixture_block_on(owner.set_operation_clock(Some(start))).unwrap();
 
     let _ = runtime.terminal_input_events(&pm_window_id, "実行されてい");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
@@ -1918,10 +1969,14 @@ fn held_supervision_tick_is_discarded_until_a_full_interval_after_submit() {
 
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(59));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(59))))
+        .unwrap();
     runtime.terminal_input_events(&pm_window_id, "ますか？");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:05:00Z");
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(60));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(60))))
+        .unwrap();
     runtime.terminal_input_events(&pm_window_id, "\r");
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
@@ -1934,17 +1989,28 @@ fn held_supervision_tick_is_discarded_until_a_full_interval_after_submit() {
     );
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(119));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(119))))
+        .unwrap();
     assert!(runtime
         .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
         .is_none());
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(120));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(120))))
+        .unwrap();
     assert!(
         runtime
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
             .is_some(),
         "a new tick becomes eligible exactly one full interval after submit"
     );
+    let pty = owner_runtime_probe(&runtime, &pm_window_id)
+        .pane
+        .lock()
+        .expect("pane lock")
+        .shared_pty();
+    pty.reserve_input_transaction()
+        .expect("the held tick completes its physical submit before its worker returns");
 }
 
 /// SPEC-3431: clear starts the current full interval, excluding protected machine input.
@@ -1962,6 +2028,8 @@ fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
     // test-hygiene: allow-wall-clock-deadline Epoch for the injected ScopedOperationClock only; all quiet boundaries advance that clock rather than waiting.
     let start = Instant::now() - Duration::from_secs(1000);
     let _clock = gwt_core::operation_deadline::ScopedOperationClock::set(start);
+    let owner = runtime.test_project_owners[&repo].clone();
+    owner_fixture_block_on(owner.set_operation_clock(Some(start))).unwrap();
 
     let _ = runtime.terminal_input_events(&pm_window_id, "途中の入力");
     let _ = runtime.pm_periodic_wake_events_at(&repo, "2026-08-10T01:00:00Z");
@@ -1976,6 +2044,8 @@ fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
 
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(30));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(30))))
+        .unwrap();
     let _ = runtime.terminal_input_events(&pm_window_id, "\u{0003}");
     drain_pm_wake_delivery_tasks(&mut runtime);
     assert!(
@@ -1993,6 +2063,8 @@ fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
     fs::write(prefs_path, serde_json::to_vec(&prefs).unwrap()).unwrap();
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(29));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(29))))
+        .unwrap();
     assert!(
         runtime
             .pm_periodic_wake_decision_at(&repo, "2026-08-10T01:10:00Z")
@@ -2001,12 +2073,19 @@ fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
     );
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(149));
-    let pty = runtime.runtimes[&pm_window_id].pty.clone();
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(149))))
+        .unwrap();
+    let probe = owner_runtime_probe(&runtime, &pm_window_id);
+    let pty = probe.pty.clone();
     pty.write_machine_input(b"automated prompt\r").unwrap();
     pty.write_input(b"\x1b[1;1R").unwrap();
-    let pane = &runtime.runtimes[&pm_window_id].pane;
-    crate::app_runtime::pty_io::write_pane_input_then_submit(pane, "\u{0003}").unwrap();
-    crate::app_runtime::pty_io::write_pane_input_and_submit_blocking(pane, "\u{0015}").unwrap();
+    gwt::project_runtime::agent_dispatch::write_pane_input_then_submit(&probe.pane, "\u{0003}")
+        .unwrap();
+    gwt::project_runtime::agent_dispatch::write_pane_input_and_submit_blocking(
+        &probe.pane,
+        "\u{0015}",
+    )
+    .unwrap();
     let reservation = pty.reserve_input_transaction().unwrap();
     reservation.write_input(b"machine prompt\r").unwrap();
     let revision = pty.ordinary_input_revision().unwrap();
@@ -2018,6 +2097,8 @@ fn held_supervision_tick_is_discarded_until_the_current_interval_after_clear() {
         .is_none());
     let _clock =
         gwt_core::operation_deadline::ScopedOperationClock::set(start + Duration::from_secs(150));
+    owner_fixture_block_on(owner.set_operation_clock(Some(start + Duration::from_secs(150))))
+        .unwrap();
     reservation
         .with_quiet_ordinary_input(revision, Duration::from_secs(120), || Ok(()))
         .expect("physical commit is allowed at the exact full boundary");

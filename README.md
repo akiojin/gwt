@@ -431,31 +431,28 @@ Response cost is roughly the entry count times serialized entry size, plus
 metadata: 20 entries averaging 2 KiB are about 40 KiB. There is no fixed byte cap;
 long posts increase the size, and `all: true` can return hundreds of KiB or more.
 
-Managed hooks and runtime delegation use `gwtd`. On macOS and Linux,
-running JSON operation `daemon.start` brings up a per-project runtime daemon
-(Unix-domain socket IPC) that multi-instance event fan-out depends on
-— for example, with the daemon running, Board posts you make in one
-`gwt` window appear in another instance opened on the same repo
-without a polling delay. The daemon keeps running in the background
-until you stop it (Ctrl-C or SIGTERM). JSON operation `daemon.status` prints
-the live endpoint for diagnostics. Without JSON operation `daemon.start`,
-multi-instance fan-out is inactive but local file-based state and
-the file watcher continue to work as before.
+Managed hooks and project runtime delegation use `gwtd`. Opening a project
+starts or reconnects to its shared daemon, which owns agent panes and the Issue
+Monitor. A connection failure affects that project; the Hub and other projects
+remain available. GUI-managed daemons drain after the last GUI disconnects and
+a reconnect grace period expires. Closing one GUI does not kill a shared daemon.
+An explicit JSON `daemon.start` keeps the daemon resident until it is stopped;
+it also makes an already GUI-managed daemon resident. `daemon.status` reports
+the current endpoint for diagnostics.
 
-On Windows the daemon runs the same way: the GUI's Issue Monitor starts
-and supervises it as a user-session child process, and JSON operation
-`daemon.start` starts one by hand. The transport is a named pipe
-(`\\.\pipe\gwtd-<scope>-<hash>`, local clients only; the endpoint file
-under `~/.gwt` carries the auth token). `daemon.status`,
-`daemon.subscribe`, Issue Monitor controls, and multi-instance fan-out
-behave as on macOS / Linux. A hand-started daemon stops on Ctrl-C,
-Ctrl-Break, or console close; logoff and shutdown run the same cleanup,
-and a daemon terminated by the GUI is reclaimed by the liveness checks on
-the next start. gwt does not install a Windows Service: the daemon only
-scans and claims — agent panes are still created by the GUI — so a
-service would not enable headless autonomous runs and would fight the
-per-user `~/.gwt` state. Headless autonomous execution is not a goal of
-the daemon.
+The Hub's **終了待ちプロジェクト** section observes daemons for known projects.
+Choose **再確認** to refresh their status. **終了を再試行** retries an exact failed
+shutdown only after verifying that the GUI-managed owner is draining and no GUI
+is connected. A changed owner or reopened project invalidates the observation;
+refresh before retrying. Resident daemons, connected projects, and owners whose
+identity cannot be verified cannot be terminated through this action. Failures
+are recorded against the affected project as `DaemonFault`.
+
+On macOS and Linux, daemon control uses Unix-domain sockets; on Windows it uses
+local named pipes. Private runtime connections are authenticated, and daemon
+credentials remain in Rust and the endpoint file under `~/.gwt`. gwt does not
+install a Windows Service. A hand-started daemon stops on Ctrl-C, SIGTERM, or the
+platform's console shutdown signal.
 
 ## Agent Workflow
 

@@ -11,6 +11,7 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
         subscribeIssueMonitorStatus,
         applyProviderUsage,
         subscribeRuntimeHealth,
+        subscribeProjectOwnerHealth,
       } from "/operator-shell.js";
       import { createFocusTrap } from "/focus-trap.js";
       import {
@@ -188,6 +189,8 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           palette: null,
         };
       }
+      const projectOwnerHealthModel = createUiStateStore(null);
+      subscribeProjectOwnerHealth(document, projectOwnerHealthModel);
       const runtimeHealthModel = createUiStateStore(null);
       subscribeRuntimeHealth(document, runtimeHealthModel, {
         focusWindow: (windowId) => requestWindowFrame(windowId),
@@ -4984,6 +4987,10 @@ import { createAgentActivityModel, createAgentRosterModel, createAgentScheduleMo
           }
           case "project_not_found": {
             if (event.project_key === routeProjectKey) projectRouteNotFoundModel.update(() => true);
+            break;
+          }
+          case "project_owner_health": {
+            if (event.health?.project_key === routeProjectKey) projectOwnerHealthModel.update(() => event.health);
             break;
           }
           case "project_agent_aggregate": {

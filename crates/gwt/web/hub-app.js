@@ -9,6 +9,7 @@ import { createUiStateStore } from "./ui-state-store.js";
 
 const HUB_RESULT_KINDS = new Set([
   "hub_state",
+  "orphan_daemon_result",
   "project_open_error",
   "project_opened",
   "clone_project_parent_selected",
@@ -93,6 +94,13 @@ function createHubApp({ document: doc, window: win }) {
   };
   const openSection = section("gwt-hub-open-title", "Open");
   openSection.list.dataset.hubList = "open";
+  const orphanSection = section("gwt-hub-orphans-title", "Projects awaiting shutdown");
+  orphanSection.list.dataset.hubList = "orphans";
+  const refreshOrphans = node("button", "text-button", "Refresh");
+  refreshOrphans.type = "button";
+  refreshOrphans.dataset.hubAction = "refresh-orphans";
+  refreshOrphans.addEventListener("click", () => send({ kind: "refresh_orphan_daemons" }));
+  orphanSection.element.append(refreshOrphans);
   const recentSection = section("gwt-hub-recent-title", "Recent");
   recentSection.list.dataset.hubList = "recent";
 
@@ -123,7 +131,7 @@ function createHubApp({ document: doc, window: win }) {
     },
   });
 
-  root.append(header, actions, notice, error, openSection.element, recentSection.element);
+  root.append(header, actions, notice, error, openSection.element, recentSection.element, orphanSection.element);
 
   function projectLink(project, className = "gwt-hub__project") {
     const link = node("a", className, project.title || project.project_key);
@@ -164,7 +172,33 @@ function createHubApp({ document: doc, window: win }) {
       close.type = "button";
       close.dataset.closeProject = project.project_key;
       close.addEventListener("click", () => closeController.request(project.project_key));
-      row.append(projectLink(project), close);
+      row.append(projectLink(project));
+      if (project.owner_health) {
+        const health = project.owner_health;
+        const badge = node("span", "project-owner-health", health.state === "healthy" ? "Ready" : health.state === "degraded" ? "Unavailable" : "Connecting");
+        badge.dataset.projectHealth = project.project_key;
+        badge.dataset.state = health.state;
+        badge.title = health.detail || "";
+        badge.setAttribute("role", "status");
+        row.append(badge);
+      }
+      row.append(close);
+      return row;
+    });
+    renderList(orphanSection.list, catalog.orphan_daemons || [], "No projects awaiting shutdown", (project) => {
+      const row = node("div", "gwt-hub__orphan");
+      row.append(node("span", "gwt-hub__project", project.title || project.project_key));
+      row.append(node("span", "gwt-hub__orphan-detail", project.detail));
+      const retry = node("button", "text-button", "Retry shutdown");
+      retry.type = "button";
+      retry.dataset.orphanRetry = "";
+      retry.disabled = !project.observation_token;
+      retry.addEventListener("click", () => {
+        if (retry.disabled) return;
+        retry.disabled = true;
+        send({ kind: "reap_orphan_daemon", observation_token: project.observation_token });
+      });
+      row.append(retry);
       return row;
     });
     renderList(recentSection.list, catalog.recent_projects, "No recent projects", (project) => {
@@ -194,6 +228,7 @@ function createHubApp({ document: doc, window: win }) {
       app_version: hub?.app_version || "",
       projects: Array.isArray(hub?.projects) ? hub.projects : [],
       recent_projects: Array.isArray(hub?.recent_projects) ? hub.recent_projects : [],
+      orphan_daemons: Array.isArray(hub?.orphan_daemons) ? hub.orphan_daemons : [],
     };
     render();
   }
@@ -334,6 +369,7 @@ function createHubApp({ document: doc, window: win }) {
   openResults.subscribe(state => state, result => {
     if (!result) return;
     if (result.kind === "project_opened") showNotice(result);
+    else if (result.kind === "orphan_daemon_result") showError(result.message);
     else showError(result.message || "Could not open the project.");
   });
 
@@ -341,7 +377,9 @@ function createHubApp({ document: doc, window: win }) {
     if (event && picker.receive(event)) return;
     if (event && closeController.receive(event)) return;
     if (!event || !HUB_RESULT_KINDS.has(event.kind)) return;
-    if (event.kind === "hub_state") {
+    if (event.kind === "orphan_daemon_result") {
+      openResults.update(() => ({ ...event }));
+    } else if (event.kind === "hub_state") {
       catalogResults.update(() => ({ ...event.hub }));
     } else if (event.kind === "project_opened") {
       openResults.update(() => ({ ...event }));
