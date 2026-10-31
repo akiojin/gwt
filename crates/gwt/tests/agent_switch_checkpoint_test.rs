@@ -128,6 +128,17 @@ fn switch_cwd_observation_counts_the_provider_in_a_worktree_subdirectory() {
         !reused.complete,
         "a changed source identity never proves clear"
     );
+    let parent_pid = std::process::id();
+    let parent_started_at = gwt::process::host_process_start_time(parent_pid).unwrap();
+    let with_child = gwt::issue_monitor::observe_agent_switch_checkpoint_cwd(
+        temp.path(),
+        parent_pid,
+        parent_started_at,
+    );
+    assert!(
+        with_child.matching_pids.contains(&child.0.id()),
+        "a live child/helper process is not one of the source's own threads"
+    );
 }
 
 #[test]
