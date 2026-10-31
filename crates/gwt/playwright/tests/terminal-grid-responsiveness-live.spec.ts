@@ -226,6 +226,13 @@ test.describe("terminal-grid responsiveness (#5117)", () => {
         await expect.poll(bufferText).toContain("osc: complete 🦀");
         expect(await bufferText()).not.toContain("osc: 🦀");
         expect(await bufferText()).not.toContain("\uFFFD");
+        // APC ignores BEL and keeps its payload hidden until ST.
+        await emit("terminal_snapshot", [...Buffer.from("\x1b[2J\x1b[Hapc: \x1b_"), 0xf0, 0x9f, 0xa6]);
+        await emit("terminal_output", [0x80, 0x07, ...Buffer.from("hidden\x1b\\complete 🦀\r\n")]);
+        await expect.poll(bufferText).toContain("apc: complete 🦀");
+        expect(await bufferText()).not.toContain("hidden");
+        expect(await bufferText()).not.toContain("apc: 🦀");
+        expect(await bufferText()).not.toContain("\uFFFD");
         const screenshot = info.outputPath(`utf8-snapshot-${theme}.png`);
         await page.locator(`.workspace-window[data-id="${id}"]`).screenshot({ path: screenshot });
         await info.attach("UTF-8 snapshot continuation", { path: screenshot, contentType: "image/png" });
