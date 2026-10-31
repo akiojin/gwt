@@ -40,12 +40,9 @@ pub fn run<E: super::CliEnv>(
     // Project caller text into the closed vocabulary before ledger/context,
     // fingerprinting, persistence or any network/consent side effect.
     if let FeedbackCommand::Create(input) = &command {
-        match auto_policy(&root) {
-            Ok(false) => {}
-            policy => {
-                let report = SafeAutoReport::current(KnownOperation::classify(&input.operation));
-                return run_auto_create(env, &store, report, policy.err(), out);
-            }
+        if matches!(auto_policy(&root), Ok(true)) {
+            let report = SafeAutoReport::current(KnownOperation::classify(&input.operation));
+            return run_auto_create(env, &store, report, out);
         }
     } else {
         let id = match &command {
@@ -185,20 +182,13 @@ fn run_auto_create<E: super::CliEnv>(
     env: &mut E,
     store: &FeedbackStore,
     report: SafeAutoReport,
-    withheld: Option<AutoReason>,
     out: &mut String,
 ) -> Result<i32, gwt_github::SpecOpsError> {
     let now = chrono::Utc::now();
     #[cfg(windows)]
-    let submitted = match withheld {
-        Some(reason) => store.submit_owned_auto_withheld(report, now, reason),
-        None => store.submit_owned_auto(report, now),
-    };
+    let submitted = store.submit_owned_auto(report, now);
     #[cfg(not(windows))]
-    let submitted = match withheld {
-        Some(reason) => store.submit_auto_withheld(report, now, reason),
-        None => store.submit_auto(report, now),
-    };
+    let submitted = store.submit_auto(report, now);
     let (record, fresh) = submitted.map_err(|_| safe_storage_error())?;
     let record = if fresh {
         detach_auto(env, store, record).map_err(|_| safe_storage_error())?
@@ -2181,6 +2171,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.state, FeedbackState::Declined);
+
+        // Unknown fresh mode retains Manual origin/preview semantics. It is
+        // distinct from a known Auto job losing policy while being processed.
+        for origin in [
+            "https://github.com/akiojin/gwt.git",
+            "https://github.com/acme/private.git",
+        ] {
+            let case_home = tempfile::tempdir().unwrap();
+            let _case_home = gwt_core::test_support::ScopedGwtHome::set(case_home.path());
+            let (dir, _, sample) = report(origin);
+            let prefs = crate::issue_monitor_prefs_path_for_repo_path(dir.path());
+            std::fs::create_dir_all(&prefs).unwrap();
+            assert_eq!(auto_policy(dir.path()), Err(AutoReason::PolicyUnavailable));
+            let original = sample.input;
+            let mut env = super::super::TestEnv::new(dir.path().join("cache"));
+            env.repo_path = dir.path().to_path_buf();
+            let mut output = String::new();
+            run(
+                &mut env,
+                FeedbackCommand::Create(Box::new(original.clone())),
+                &mut output,
+            )
+            .unwrap();
+            let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert!(
+                receipt.get("mode").is_none(),
+                "unknown fresh mode must retain a Manual receipt"
+            );
+            let store = FeedbackStore::new(
+                gwt_core::paths::gwt_project_dir_for_repo_path(dir.path()).join("feedback"),
+            );
+            let manual = store.read(receipt["request_id"].as_str().unwrap()).unwrap();
+            assert!(manual.input == original, "Manual keeps its original input");
+            let needs_approval = gwt_core::feedback::requires_approval(dir.path());
+            assert_eq!(
+                manual.state,
+                if needs_approval {
+                    FeedbackState::PendingApproval
+                } else {
+                    FeedbackState::Sent
+                }
+            );
+            assert_eq!(env.feedback_worker_ids.len(), usize::from(needs_approval));
+            assert_eq!(
+                env.client.owner_mutation_count(),
+                usize::from(!needs_approval)
+            );
+        }
     }
 
     #[test]

@@ -457,13 +457,30 @@ fn auto_feedback_real_worker_has_no_consent_auth_process_or_raw_sinks() {
         drop(upstream_lock);
         command.env_remove("GH_TOKEN");
     }
+    // Only a known Auto job with unavailable policy must remain noninteractive.
+    // Fresh unknown-mode intake retains the existing Manual origin policy.
+    let known_auto_store = gwt_core::feedback::FeedbackStore::new(
+        gwt_core::paths::gwt_project_dir_for_repo_path(repo.path()).join("feedback"),
+    );
+    let (known_auto, fresh) = known_auto_store
+        .submit_auto(
+            gwt_core::feedback::auto_report::SafeAutoReport::current(
+                gwt_core::feedback::auto_report::KnownOperation::HookHealth,
+            ),
+            Utc::now(),
+        )
+        .unwrap();
+    assert!(fresh);
+    assert!(known_auto.owned.is_none());
     fs::write(
         gwt::issue_monitor::issue_monitor_prefs_path_for_repo_path(repo.path()),
         "{unreadable native prefs",
     )
     .unwrap();
-    input["params"]["operation"] = serde_json::json!("hook.health");
-    let (unavailable, _) = intake(&mut command, &input, secret, "withheld");
+    let unavailable_input = serde_json::json!({"schema_version":1,"operation":"feedback.process","params":{
+        "id":known_auto.snapshot.id(),
+    }});
+    let (unavailable, _) = intake(&mut command, &unavailable_input, secret, "withheld");
     assert_eq!(unavailable["error"], "policy_unavailable");
     let mut malformed = command.spawn().unwrap();
     malformed
