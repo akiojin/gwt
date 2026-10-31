@@ -440,8 +440,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     if (result.status !== 0 && (windows || result.status !== 1)) throw new Error(`Cannot inspect owned fixture PID ${pid}: ${result.stderr}`);
     return result.stdout.trim();
   }
-  async function stop() {
-    const ownedPid = child?.pid;
+  async function stopGui() {
     if (child?.pid && child.exitCode === null && child.signalCode === null) {
       const current = child;
       current.kill("SIGTERM");
@@ -453,6 +452,13 @@ readline.createInterface({input:process.stdin}).on('line', line => {
         while (current.exitCode === null && current.signalCode === null && Date.now() < forcedDeadline) await delay(100);
       }
     }
+    if (child?.pid && processCommand(child.pid)) {
+      throw new Error(`Fixture gwt process ${child.pid} remained after shutdown`);
+    }
+  }
+  async function stop() {
+    const ownedPid = child?.pid;
+    await stopGui();
     // PTYs can create their own process groups; clean only recorded fixture
     // providers still carrying our unique argv-recorder path in their command.
     const providerPaths = [join(bin, windows ? "codex.cjs" : "codex"), join(bin, windows ? "claude.cjs" : "claude")];
@@ -531,6 +537,6 @@ readline.createInterface({input:process.stdin}).on('line', line => {
     }
   }
   await start();
-  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, stop,
+  return { get url() { return url; }, get ownedPid() { return child?.pid; }, home, project, branch, argvLog, launches, start, stopGui, stop,
     async restart() { await stop(); return start(); } };
 }
