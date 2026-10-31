@@ -1339,7 +1339,21 @@ entrypoints are:
 - `gwt-agent` — running agent-pane inspection and control
 - `gwt-feedback` — report a gwt problem from any project
 
-For a gwt bug or workflow problem, PM and implementation agents can use
+With **Autonomous ON** in Project Settings, `feedback.create` returns immediately
+and a hidden worker sends safe structured feedback to `akiojin/gwt` without
+consent, preview, authentication or failure dialogs, browsers or a worker console.
+This uses the existing setting, requires no extra opt-in and is separate from
+Auto capacity. Only fixed schema/template, known operation/error enums, bounded
+numeric package versions and OS/architecture are stored and sent. Free text,
+source, credentials, URLs/paths, project identifiers and agent counts are excluded
+before storage, fingerprinting and logging. Unknown operations are `withheld`.
+Missing authentication or revoked/unreadable policy yields a static failed/withheld
+receipt and never opens a consent fallback. Auto uses only existing
+process-provided `GH_TOKEN` / `GITHUB_TOKEN`; it never unlocks a credential store. A GitHub CLI login alone leaves Auto feedback
+unsent. Agent JSON/env/repository flags cannot
+grant Auto authority. Existing raw receipts never become Auto reports.
+
+With missing/false preferences (Manual mode), PM and implementation agents can use
 `gwt-feedback` to collect the affected operation, original refusal,
 reproduction steps, and workaround. The `feedback.create` JSON operation always
 targets `akiojin/gwt` and collects local diagnostic context.
@@ -1349,7 +1363,7 @@ feedback** action in a native dialog. Cancellation or an unavailable desktop
 keeps the report locally. The actual gwt repository sends synchronously without
 that prompt and returns the Issue number and URL.
 
-The local receipt keeps the complete original. Public reports automatically mask
+The Manual local receipt keeps the complete original. Public reports automatically mask
 known credentials, environment assignment values, source identifiers, paths
 (including URLs), and source code. Public metadata includes only gwt/gwtd
 versions and OS/architecture; source-project metadata and arbitrary context are
@@ -1360,8 +1374,12 @@ Unmasked refusal text is preserved without truncation. Masks are conservative
 and cannot detect every arbitrary secret; do not publish the raw receipt.
 
 Use `feedback.status` with the returned request id to obtain the Issue number
-and URL; a similar existing Issue may receive a comment. `feedback.retry`
-accepts declined or failed receipts and asks for fresh external-project consent.
+and URL; a similar existing Issue may receive a comment. Auto status changes an
+orphaned `sending` receipt to `uncertain` under the sender lock and never resends it. `feedback.retry`
+accepts declined or failed Manual receipts and asks for fresh external-project consent.
+Auto retry accepts failed/withheld safe snapshots and rechecks the canonical
+setting. Restore policy or report a recognized operation to recover a withheld
+report; never add raw details to bypass the safe schema.
 An uncertain delivery is retained for inspection and is not automatically resent.
 
 Reports are evidence for PM triage. A confirmed bug is linked to a separate,

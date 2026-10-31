@@ -6,6 +6,61 @@ use gwt_core::feedback::{
 };
 use gwt_core::test_support::ScopedEnvVar;
 
+#[test]
+fn auto_receipts_contain_only_safe_snapshots_and_dedupe_uncertain_indefinitely() {
+    use gwt_core::feedback::auto_report::{AutoReason, KnownOperation, SafeAutoReport};
+    let dir = tempfile::tempdir().unwrap();
+    let store = FeedbackStore::new(dir.path().join("feedback"));
+    let report = SafeAutoReport::current(KnownOperation::WorkspaceUpdate);
+    let now = Utc::now();
+    let (mut record, fresh) = store.submit_auto(report.clone(), now).unwrap();
+    assert!(fresh);
+    assert_eq!(record.state, FeedbackState::Queued);
+    let original_snapshot = record.snapshot.clone();
+    record.state = FeedbackState::Uncertain;
+    record.error = Some(AutoReason::RemoteOutcomeUnknown);
+    store.save_auto(&record).unwrap();
+    let (repeated, fresh) = store.submit_auto(report, now + TimeDelta::days(2)).unwrap();
+    assert!(!fresh);
+    assert_eq!(repeated, record);
+    assert_eq!(repeated.snapshot, original_snapshot);
+    let (unavailable, fresh) = store
+        .submit_auto_withheld(
+            original_snapshot.report().clone(),
+            now,
+            AutoReason::PolicyUnavailable,
+        )
+        .unwrap();
+    assert!(!fresh);
+    assert_eq!(
+        unavailable, record,
+        "unavailable intake cannot overwrite an uncertain receipt"
+    );
+    assert!(
+        store.read(&record.snapshot.id()).is_err(),
+        "Auto is never a legacy raw record"
+    );
+    let bytes = fs::read(store.path(&record.snapshot.id()).unwrap()).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(value["mode"], "auto");
+    assert!(value.get("input").is_none());
+    assert!(value.get("context").is_none());
+    let mut corrupted = value;
+    corrupted["snapshot"]["report"]["operation"] = serde_json::json!("plain private content");
+    fs::write(
+        store.path(&record.snapshot.id()).unwrap(),
+        serde_json::to_vec(&corrupted).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .read_auto(&record.snapshot.id())
+            .unwrap_err()
+            .to_string(),
+        "invalid feedback receipt"
+    );
+}
+
 fn repo(path: &Path, origin: &str) {
     fs::create_dir_all(path.join(".git")).unwrap();
     fs::write(

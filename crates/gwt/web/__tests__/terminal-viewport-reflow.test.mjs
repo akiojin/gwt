@@ -43,6 +43,42 @@ const projectShellSurfaceSource = readFileSync(
 );
 const appCssSource = readFileSync(resolve(here, "../styles/app.css"), "utf8");
 
+test("initial fit runs once without frames and can be cancelled on runtime removal", (t) => {
+  const frames = new Map(), timers = new Map();
+  let nextId = 0, fits = 0;
+  for (const [key, value] of Object.entries({
+    requestAnimationFrame: callback => { frames.set(++nextId, callback); return nextId; },
+    cancelAnimationFrame: id => frames.delete(id),
+  })) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Object.defineProperty(globalThis, key, { configurable: true, value });
+    t.after(() => {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+      else delete globalThis[key];
+    });
+  }
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    assert.equal(delay, 100);
+    timers.set(++nextId, callback);
+    return nextId;
+  });
+  t.mock.method(globalThis, "clearTimeout", id => timers.delete(id));
+  for (const winner of ["timer", "frame", "cancel"]) {
+    const before = fits;
+    const cancel = terminalViewportReflow.scheduleTerminalInitialFit(() => { fits += 1; });
+    assert.equal(frames.size, 1);
+    assert.equal(timers.size, 1);
+    const frame = frames.values().next().value;
+    const timer = timers.values().next().value;
+    ({ timer, frame, cancel })[winner]();
+    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
+    frame();
+    timer();
+    assert.equal(fits - before, winner === "cancel" ? 0 : 1, "stale callbacks cannot fit a removed or already fitted runtime");
+  }
+});
+
 function fixtureWindow() {
   const { document } = parseHTML(`<!doctype html><body></body>`);
   return document.defaultView;
@@ -242,6 +278,12 @@ test("decodeTerminalSnapshotBoundary isolates snapshot and subsequent live UTF-8
     "後続ライブ",
     "post-snapshot live output must decode through a fresh streaming decoder",
   );
+
+  const partial = decodeTerminalSnapshotBoundary(Uint8Array.of(
+    ...new TextEncoder().encode("snapshot: "), 0xf0, 0x9f, 0xa6,
+  ));
+  assert.equal(partial.snapshotText, "snapshot: ", "a snapshot must retain its own incomplete UTF-8 prefix");
+  assert.equal(partial.nextLiveDecoder.decode(Uint8Array.of(0x80), { stream: true }), "🦀");
 });
 
 test("clearTerminalOutputBeforeSnapshot drops only output before the latest snapshot boundary", () => {
