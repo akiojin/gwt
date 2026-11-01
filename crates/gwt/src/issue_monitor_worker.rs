@@ -1075,10 +1075,14 @@ pub fn refresh_issue_monitor_child_activity(
         let Some((issue, identity, observed, tools)) = owner else {
             continue;
         };
-        if !tools
-            .as_ref()
-            .map_or_else(|| advancing.contains(root), |calls| !calls.is_empty())
-        {
+        if !tools.as_ref().map_or_else(
+            || {
+                advancing
+                    .as_ref()
+                    .is_some_and(|observed| observed.contains(root))
+            },
+            |calls| !calls.is_empty(),
+        ) {
             continue;
         }
         let Some(session) = load_current_activity_session(identity) else {
