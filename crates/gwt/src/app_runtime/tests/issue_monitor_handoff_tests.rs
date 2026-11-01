@@ -2660,6 +2660,16 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
                 .handle_project_owner_event(&context, 1, &identity, changed);
             holder_pane = Some(pane);
         }
+        // This direct fixture has no normal pending-Issue projection.
+        // Keep the producing RPC behind the actual holder cleanup below.
+        let queued_successor =
+            if holder == MonitorNativeHolderFixture::MaterializingSameConversation {
+                let (spawner, queued) = BlockingTaskSpawner::queued();
+                fixture.runtime.blocking_tasks = spawner;
+                Some(queued)
+            } else {
+                None
+            };
         let events = fixture.runtime.auto_launch_issue_monitor_delivery_events(
             &fixture.runtime.test_context(),
             3165,
@@ -2747,6 +2757,8 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
             continue;
         }
         let (pause, evidence) = held.unwrap();
+        let queued_successor = queued_successor.unwrap();
+        run_queued_monitor_gui_diagnostics(&queued_successor, &[1]);
         let client = owner.client();
         let cancelled_id = evidence.id.clone();
         let cancel = thread::spawn(move || {
@@ -2775,9 +2787,11 @@ fn app_runtime_monitor_resume_if_safe_uses_exact_native_writer_identity() {
             &fixture.recorded_events,
             Some(&holder_window),
         );
+        fixture.runtime.blocking_tasks = previous_spawner;
         fixture
             .runtime
             .handle_remote_owner_launch_complete(holder_completion);
+        drain_queued_blocking_tasks(&queued_successor);
         let (window_id, pane, _) = finish_monitor_relaunch_owner(&mut fixture, events);
         let pane = pane.unwrap();
         assert_owner_monitor_fresh_successor(&pane, &fixture);
@@ -4851,6 +4865,27 @@ fn app_runtime_monitor_launch_preflight_refuses_unauthenticated_provider() {
         .as_ref()
         .expect("first facts refusal captured its delivery");
     let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&fixture.project_root);
+    let census_host_pid = std::process::id();
+    let census_host_started_at = gwt::process::host_process_start_time(census_host_pid)
+        .expect("the actual census host process start time");
+    let census_host_key = format!("{census_host_pid}:{census_host_started_at}");
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Observe the real initial census publication before comparing complete preference bytes; no scheduler delay authorizes the baseline.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if gwt::load_issue_monitor_prefs(&prefs_path)
+                    .unwrap()
+                    .monitor_runtime_counts
+                    .contains_key(&census_host_key)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real initial host census must precede preference baselines");
+    });
     let source_path = fixture
         .sessions_dir
         .join(format!("{}.toml", fixture.source_session_id));
