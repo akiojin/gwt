@@ -54,6 +54,7 @@ pub(crate) fn current_hook_context(
     worktree: &Path,
 ) -> Result<(CurrentHookContext, SessionRuntimeState), HookContextError> {
     use HookContextError::{Foreign, Missing, Unreadable};
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env().ok_or(Missing)?;
     gwt_agent::validate_session_id_path_component(id.as_str()).map_err(|_| Foreign)?;
     let sessions = gwt_core::paths::gwt_sessions_dir();
@@ -67,7 +68,7 @@ pub(crate) fn current_hook_context(
         })?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).map_err(|_| Unreadable)?
-            != std::fs::canonicalize(worktree).map_err(|_| Unreadable)?
+            != std::fs::canonicalize(&worktree).map_err(|_| Unreadable)?
     {
         return Err(Foreign);
     }
@@ -288,6 +289,7 @@ pub(crate) struct HookCompletionContext {
 }
 
 pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionContext> {
+    let worktree = gwt_core::paths::resolve_current_worktree_root(worktree);
     let id = GwtSessionId::from_env()?;
     gwt_agent::validate_session_id_path_component(id.as_str()).ok()?;
     let path = PathBuf::from(std::env::var_os(gwt_agent::GWT_SESSION_RUNTIME_PATH_ENV)?);
@@ -299,12 +301,12 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
     let session = Session::load(&sessions.join(format!("{}.toml", id.as_str()))).ok()?;
     if session.id != id.as_str()
         || std::fs::canonicalize(&session.worktree_path).ok()?
-            != std::fs::canonicalize(worktree).ok()?
+            != std::fs::canonicalize(&worktree).ok()?
     {
         return None;
     }
     let exact = match SessionExecutionIdentity::from_session(&session).ok()? {
-        Some(_) => Some(current_hook_context(worktree).ok()?.0),
+        Some(_) => Some(current_hook_context(&worktree).ok()?.0),
         None => {
             // Preserve #3541 for known legacy Sessions. Missing or corrupt bound
             // identity is never downgraded to this compatibility path.
@@ -321,7 +323,7 @@ pub(crate) fn capture_hook_completion(worktree: &Path) -> Option<HookCompletionC
         sessions_dir: sessions,
         session_id: id.as_str().to_string(),
         runtime_path: path,
-        worktree: worktree.to_path_buf(),
+        worktree,
         exact,
     })
 }
