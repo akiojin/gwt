@@ -415,7 +415,7 @@ fn control_fleet_request(
 }
 
 // Retry only the production fleet.close refusal that precedes any close effect.
-// All three callers retain their original inventory and authoritative outcome checks.
+// All callers retain their original inventory and authoritative outcome checks.
 fn control_fleet_request_after_prefs_contention(
     owner: &gwt::project_runtime::test_support::ProjectOwnerHarness,
     caller: &gwt::project_runtime::test_support::OwnerRuntimeProbe,
@@ -1113,7 +1113,73 @@ fn fleet_pane_close_preserves_successors_and_requires_registered_pm() {
         "runtime changed",
     );
     assert!(owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).is_ok());
-    let closed = control_request_settled(&owner, &pm, control_fleet_request(&target));
+    let request = control_fleet_request(&target);
+    let expected_claims = {
+        let prefs_path = gwt::issue_monitor_prefs_path_for_repo_path(&project);
+        // test-hygiene: allow-wall-clock-deadline Bound only the private fixture lock using the existing fleet hang guard.
+        let _deadline = gwt_core::operation_deadline::ScopedOperationDeadline::enter(
+            gwt_core::operation_deadline::now() + gwt_core::deadline_budget::HANG_GUARD,
+        );
+        let _writer = gwt_core::operation_deadline::NamedFileLock::acquire(
+            &prefs_path.with_extension("lock"),
+            "fleet fixture pre-effect refusal control",
+        )
+        .unwrap();
+        let before = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        let refused = control_request(&owner, &pm, request.clone());
+        let AgentFrontendRequest::CloseFleetPane {
+            request_id,
+            child_pid,
+            child_started_at,
+            ..
+        } = &request
+        else {
+            unreachable!("the frozen request is an exact fleet close");
+        };
+        assert_eq!(refused.close, None);
+        let prefix = format!(
+            "fleet close retained target: {}; operation=fleet.close; ",
+            fs2::lock_contended_error()
+        );
+        assert!(
+            refused.events.iter().any(|event| {
+                event["kind"] == "fleet_pane_close_result"
+                    && event["request_id"] == request_id.as_str()
+                    && event["window_id"] == target.id
+                    && event["ok"] == false
+                    && event["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.starts_with(&prefix))
+            }),
+            "the owned private prefs lock must cause the exact pre-effect refusal: {:?}",
+            refused.events
+        );
+        let current = owner_fixture_block_on(owner.probe(&target.id, target.incarnation)).unwrap();
+        assert!(current.current.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            current.session.as_ref().unwrap().id,
+            target.session.as_ref().unwrap().id
+        );
+        assert!(Arc::ptr_eq(&current.pty, &target.pty));
+        assert_eq!(current.pty.process_id(), *child_pid);
+        assert_eq!(
+            child_pid.and_then(gwt::process::host_process_start_time),
+            *child_started_at
+        );
+        assert!(current.pty.try_wait().unwrap().is_none());
+        let after = gwt::load_issue_monitor_prefs(&prefs_path).unwrap();
+        assert_eq!(after.launched_issues, before.launched_issues);
+        assert_eq!(after.launched_claims, before.launched_claims);
+        assert_eq!(after.launch_confirmations, before.launch_confirmations);
+        before.launched_issues
+    };
+    let closed = control_fleet_request_after_prefs_contention(
+        &owner,
+        &pm,
+        &target,
+        request,
+        &expected_claims,
+    );
     assert!(
         closed
             .events
