@@ -54,20 +54,17 @@ function normalizeMaxTerminalRefreshesPerFrame(value) {
  * Decode a replacement snapshot independently from the live streaming UTF-8
  * decoder and return a fresh decoder for subsequent live output.
  *
- * A live decoder may hold an incomplete multi-byte prefix because output is
- * decoded with `{ stream: true }`. Reusing it for a snapshot can inject a
- * replacement character into the snapshot and can also contaminate the first
- * live chunk after replacement. Snapshot replacement is an explicit stream
- * boundary, so both sides receive fresh decoder state.
+ * Discard the old live decoder's incomplete prefix. A snapshot can carry its
+ * own unfinished UTF-8 scalar from the backend parser, so retain that fresh
+ * decoder's streaming state for the following live bytes.
  */
 export function decodeTerminalSnapshotBoundary(
   snapshotBytes,
   createDecoder = () => new TextDecoder(),
 ) {
-  const snapshotDecoder = createDecoder();
   const nextLiveDecoder = createDecoder();
   return {
-    snapshotText: snapshotDecoder.decode(snapshotBytes),
+    snapshotText: nextLiveDecoder.decode(snapshotBytes, { stream: true }),
     nextLiveDecoder,
   };
 }

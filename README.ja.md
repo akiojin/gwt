@@ -1210,7 +1210,20 @@ Bundled workflow skills は active worktree の `.claude/skills`、
 - `gwt-agent` — running agent pane の確認と操作
 - `gwt-feedback` — 任意のプロジェクトから gwt の問題を報告する
 
-gwt の不具合や workflow の問題は、PM と実装 agent のどちらも
+Project Settings の **Autonomous ON** では、`feedback.create` は即座に返り、
+hidden worker が安全な構造化報告を `akiojin/gwt` へ送信します。同意・preview・
+認証・失敗 dialog/browser/worker console は開きません。既存設定を使用し、
+追加 opt-in は不要です。容量計算の Auto とは別です。保存・送信する情報は固定
+schema/template、既知 operation/error enum、数値に制限した版数、OS/architecture
+だけです。自由文、source、機密情報、URL/path、project 識別情報、agent 数は
+保存・fingerprint・log の前に除外します。未知 operation は withheld となります。
+認証不足や設定失効・読取不能も静的な failed/withheld receipt に残し、同意画面へ
+fallback しません。Auto の認証は既存プロセスの `GH_TOKEN` / `GITHUB_TOKEN` のみを
+使い、credential store の解錠は起動しません。GitHub CLI へのログインだけでは
+Auto feedback は未送信のままです。agent の JSON/env/repository flag では Auto 権限を付与できず、
+既存の原文 receipt が Auto に昇格することもありません。
+
+設定が存在しない場合や false の場合（Manual）では、PM と実装 agent のどちらも
 `gwt-feedback` で対象 operation、拒否文の原文、再現手順、回避策を集めて
 報告できます。JSON operation `feedback.create` の宛先は常に
 `akiojin/gwt` で、診断コンテキストをローカルで自動収集します。
@@ -1220,7 +1233,7 @@ dialog でユーザーが **Send feedback** を選ぶ必要があります。取
 不在でも内容はローカルに残ります。gwt 自体の開発では承認を求めず同期送信し、
 Issue 番号と URL を返します。
 
-ローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
+Manual のローカル receipt は完全な原文を保持します。公開内容では既知の認証情報、
 環境変数の代入値、プロジェクト識別情報、URL を含むパス、ソースコードを自動で伏せます。
 公開する環境情報は gwt/gwtd 版数と OS・アーキテクチャのみとし、報告元のメタデータと
 任意の追加本文は含めません。スクロールできる承認画面は両方の選択肢を常に表示し、
@@ -1230,8 +1243,11 @@ preview と送信に同じ内容を使い、伏せ字以外の拒否文は切り
 
 返された request id を `feedback.status` に渡すと、送信先 Issue の番号と
 URL を確認できます。類似する既存 Issue があればコメントを追記します。
-`feedback.retry` は declined / failed の receipt だけ再試行し、外部プロジェクト
-では改めて承認を求めます。送信結果が uncertain の場合は内容を保全し、
+Auto status は sender lock の取得により孤立した `sending` を `uncertain` へ直し、再送はしません。
+`feedback.retry` は Manual の declined / failed を再試行し、外部プロジェクト
+では改めて承認を求めます。Auto の failed / withheld は正本の設定を再確認します。
+withheld からの回復では設定を戻すか既知 operation を報告し、原文追加で制約を
+回避しないでください。送信結果が uncertain の場合は内容を保全し、
 自動再送しません。
 
 報告は PM が分類するための証拠として扱います。確認できた不具合は、要件を整理した
