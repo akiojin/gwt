@@ -54,6 +54,14 @@ use crate::runtime_daemon_events::{
 /// [`publish_event_with_timeout`].
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
 
+/// Durable controls wait for the daemon's actual commit. Outcome fixtures pin
+/// this incidental budget explicitly; production still gets five seconds.
+pub const DURABLE_ISSUE_MONITOR_CONTROL_BUDGET: gwt_core::deadline_budget::DeadlineBudget =
+    gwt_core::deadline_budget::DeadlineBudget::new(
+        "DURABLE_ISSUE_MONITOR_CONTROL",
+        Duration::from_secs(5),
+    );
+
 const ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CACHED_PROJECT_ROOTS: usize = 32;
 
@@ -186,7 +194,11 @@ pub fn publish_durable_issue_monitor_control(
     project_root: &Path,
     payload: Value,
 ) -> Result<(), IssueMonitorControlPublishError> {
-    publish_issue_monitor_control_with_timeout(project_root, payload, Duration::from_secs(5))
+    publish_issue_monitor_control_with_timeout(
+        project_root,
+        payload,
+        DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
+    )
 }
 
 /// Use a bounded custom budget for controls outside the GUI hot path.

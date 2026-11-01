@@ -2840,6 +2840,7 @@ fn native_grok_answer_holder(
         "cwd":session.worktree_path,
     })
     .to_string();
+    let mut readiness = owner.subscribe();
     pane.with_agent_environment(|| {
         let _ready_nonce = pane.pending_fresh_execution.as_ref().map(|pending| {
             ScopedEnvVar::set(
@@ -2850,9 +2851,23 @@ fn native_grok_answer_holder(
         gwt::daemon_runtime::handle_runtime_state("SessionStart", &hook).unwrap();
         gwt::daemon_runtime::handle_forward_for_event("SessionStart", &hook).unwrap();
     });
-    if pane.pending_fresh_execution.is_some() {
-        authenticate_monitor_owner_readiness(&owner, &pane);
-    }
+    // SessionStart already submitted readiness. A second Prepared-capability
+    // request races the hook worker's promotion to Active before activation.
+    // Observe that same worker's committed owner state instead.
+    owner_fixture_block_on(async {
+        // test-hygiene: allow-wall-clock-deadline Bounds an actual SessionStart worker hang; exact owner state establishes readiness.
+        tokio::time::timeout(gwt_core::deadline_budget::HANG_GUARD, async {
+            loop {
+                let current = owner.probe(&pane.id, pane.incarnation).await.unwrap();
+                if current.pending_fresh_execution.is_none() {
+                    break;
+                }
+                readiness.recv().await.expect("owner readiness progress");
+            }
+        })
+        .await
+        .expect("SessionStart committed the exact native holder");
+    });
     owner_fixture_block_on(owner.command(gwt::project_runtime::events::OwnerCommand::Health))
         .unwrap();
     let pane = owner_fixture_block_on(owner.probe(&pane.id, pane.incarnation)).unwrap();
@@ -2919,6 +2934,12 @@ fn app_runtime_answered_handoff_continues_the_exact_live_holder() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());
@@ -3183,6 +3204,12 @@ fn app_runtime_failed_live_handoff_delivery_keeps_the_answer_pending() {
     let _env_lock = env_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _control_budget = ScopedEnvVar::set(
+        "GWT_TEST_BUDGET_DURABLE_ISSUE_MONITOR_CONTROL_MS",
+        gwt_core::deadline_budget::HANG_GUARD
+            .as_millis()
+            .to_string(),
+    );
     let temp = tempdir().expect("tempdir");
     let _home = ScopedEnvVar::set("HOME", temp.path());
     let _userprofile = ScopedEnvVar::set("USERPROFILE", temp.path());

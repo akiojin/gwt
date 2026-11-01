@@ -2247,7 +2247,7 @@ impl IssueMonitorLaunchClaimInput {
                     &self.project_root,
                     snapshot,
                     tabs,
-                    std::time::Duration::from_secs(5),
+                    crate::daemon_publisher::DURABLE_ISSUE_MONITOR_CONTROL_BUDGET.resolve(),
                 )
             },
             |payload| {
